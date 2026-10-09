@@ -30,9 +30,9 @@
 #include <ghoti.io/defiant-core/macros.h>
 #include <ghoti.io/defiant-core/sched.h>
 
+#include <limits.h>
 #include <pthread.h>
 #include <stdatomic.h>
-#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -100,6 +100,8 @@ struct GDEFCORE_Sched {
   size_t named_n;
   size_t named_cap;
   uint64_t recorded_gen;
+  GDEFCORE_Slot * stranded;
+  GDEFCORE_Result run_error;
 };
 
 static uint64_t mono_ms(void) {
@@ -123,12 +125,17 @@ static int deadline_passed(const GDEFCORE_Request * request) {
 }
 
 static void abort_write(GDEFCORE_Request * request) {
-  GDEFSTOR_Write * write = gdefcore_request_write(request);
-  if (write == NULL) {
+  if (gdefcore_request_write(request) == NULL) {
     return;
   }
-  gdefstor_write_abort(write);
   gdefcore_request_set_write(request, NULL);
+  gdefcore_request_set_status(request, GDEFCORE_ERR_INVALID);
+}
+
+static void strand_slot(GDEFCORE_Sched * sched, GDEFCORE_Slot * slot) {
+  slot->park_next = sched->stranded;
+  sched->stranded = slot;
+  sched->run_error = GDEFCORE_ERR_OOM;
 }
 
 static void free_slot(GDEFCORE_Sched * sched, GDEFCORE_Slot * slot) {
@@ -268,13 +275,15 @@ static void offload_complete(GCU_Loop_Op * op, void * user) {
   GDEFCORE_Sched * sched = offload->sched;
   (void)op;
   unpark(sched, slot);
-  if (slot->phase == GDEFCORE_SCHED_PHASE_DEAD) {
-    slot->offload = NULL;
-    gcu_allocator_free(sched->allocator, offload);
-    gcu_allocator_free(sched->allocator, slot);
+  if (slot->phase == GDEFCORE_SCHED_PHASE_DEAD ||
+      deadline_passed(slot->request)) {
+    gdefcore_request_set_status(slot->request, GDEFCORE_ERR_LIMIT);
+    free_slot(sched, slot);
     return;
   }
-  enqueue_slot(sched, slot);
+  if (enqueue_slot(sched, slot) != GDEFCORE_OK) {
+    strand_slot(sched, slot);
+  }
 }
 
 static int pool_task(void * ctx) {
@@ -301,21 +310,28 @@ static void trampoline(void * arg) {
     if (turn == GDEFCORE_TURN_DONE) {
       return;
     }
+    if (gdefcore_request_write(slot->request) != NULL) {
+      abort_write(slot->request);
+      return;
+    }
     slot->phase = GDEFCORE_SCHED_PHASE_TURN;
     gcu_fiber_yield();
   }
 }
 
 static void arm_slice(GDEFCORE_Sched * sched, GDEFCORE_Slot * slot) {
-  uint64_t gen = atomic_fetch_add_explicit(
-      &sched->slice_gen, 1, memory_order_relaxed) + 1;
+  uint64_t gen = atomic_load_explicit(
+      &sched->slice_gen, memory_order_relaxed) + 1;
+  if (gen == 0) {
+    gen = 1;
+  }
   atomic_store_explicit(&sched->slice_bound,
       gdefcore_request_yield_bound_ms(slot->request), memory_order_relaxed);
   atomic_store_explicit(
       &sched->slice_start, mono_ms(), memory_order_relaxed);
-  atomic_store_explicit(&sched->slice_gen, gen, memory_order_relaxed);
   atomic_store_explicit(&sched->running_id,
-      gdefcore_request_id(slot->request), memory_order_release);
+      gdefcore_request_id(slot->request), memory_order_relaxed);
+  atomic_store_explicit(&sched->slice_gen, gen, memory_order_release);
 }
 
 static void disarm_slice(GDEFCORE_Sched * sched) {
@@ -331,7 +347,8 @@ static void record_name(GDEFCORE_Sched * sched, uint64_t id, uint64_t gen) {
   }
   if (sched->named_n == sched->named_cap) {
     size_t cap = sched->named_cap == 0 ? 4 : sched->named_cap * 2;
-    grown = (uint64_t *)realloc(sched->named, cap * sizeof *grown);
+    grown = (uint64_t *)gcu_allocator_realloc(
+        sched->allocator, sched->named, cap * sizeof *grown);
     if (grown == NULL) {
       pthread_mutex_unlock(&sched->named_mu);
       return;
@@ -357,14 +374,14 @@ watch_main(GCU_THREAD_FUNC_ARG_T arg) {
     delay.tv_sec = 0;
     delay.tv_nsec = 5000000L;
     nanosleep(&delay, NULL);
-    id = atomic_load_explicit(&sched->running_id, memory_order_acquire);
-    if (id == 0) {
-      continue;
-    }
+    gen = atomic_load_explicit(&sched->slice_gen, memory_order_acquire);
+    id = atomic_load_explicit(&sched->running_id, memory_order_relaxed);
     bound = atomic_load_explicit(&sched->slice_bound, memory_order_relaxed);
     start = atomic_load_explicit(&sched->slice_start, memory_order_relaxed);
-    gen = atomic_load_explicit(&sched->slice_gen, memory_order_relaxed);
-    if (bound == 0 || start == 0 || mono_ms() - start < bound) {
+    if (gen != atomic_load_explicit(&sched->slice_gen, memory_order_acquire)) {
+      continue;
+    }
+    if (id == 0 || bound == 0 || start == 0 || mono_ms() - start < bound) {
       continue;
     }
     record_name(sched, id, gen);
@@ -406,7 +423,9 @@ static void run_slot(GDEFCORE_Sched * sched, GDEFCORE_Slot * slot) {
     sched->parked = slot;
     return;
   }
-  enqueue_slot(sched, slot);
+  if (enqueue_slot(sched, slot) != GDEFCORE_OK) {
+    strand_slot(sched, slot);
+  }
 }
 
 static void cancel_expired(GDEFCORE_Sched * sched) {
@@ -420,18 +439,17 @@ static void cancel_expired(GDEFCORE_Sched * sched) {
     }
     gdefcore_request_set_status(slot->request, GDEFCORE_ERR_LIMIT);
     slot->phase = GDEFCORE_SCHED_PHASE_DEAD;
-    if (slot->fiber != NULL) {
-      gcu_fiber_destroy(slot->fiber);
-      gdefcore_request_attach_fiber(slot->request, NULL);
-      slot->fiber = NULL;
-    }
   }
 }
 
 static int has_live_offload(const GDEFCORE_Sched * sched) {
   const GDEFCORE_Slot * slot;
   for (slot = sched->parked; slot != NULL; slot = slot->park_next) {
-    if (slot->phase == GDEFCORE_SCHED_PHASE_OFFLOAD) {
+    if (slot->offload == NULL) {
+      continue;
+    }
+    if (slot->phase == GDEFCORE_SCHED_PHASE_OFFLOAD ||
+        slot->phase == GDEFCORE_SCHED_PHASE_DEAD) {
       return 1;
     }
   }
@@ -455,7 +473,11 @@ static long next_timeout(const GDEFCORE_Sched * sched) {
     if (now >= deadline) {
       return 0;
     }
-    remaining = (long)(deadline - now);
+    if (deadline - now > (uint64_t)LONG_MAX) {
+      remaining = LONG_MAX;
+    } else {
+      remaining = (long)(deadline - now);
+    }
     if (timeout < 0 || remaining < timeout) {
       timeout = remaining;
     }
@@ -468,10 +490,17 @@ static void promote_failed_posts(GDEFCORE_Sched * sched) {
   while (*link != NULL) {
     GDEFCORE_Slot * slot = *link;
     if (slot->offload != NULL && slot->offload->post_failed &&
-        slot->phase == GDEFCORE_SCHED_PHASE_OFFLOAD) {
+        (slot->phase == GDEFCORE_SCHED_PHASE_OFFLOAD ||
+            slot->phase == GDEFCORE_SCHED_PHASE_DEAD)) {
       *link = slot->park_next;
       slot->park_next = NULL;
-      enqueue_slot(sched, slot);
+      if (slot->phase == GDEFCORE_SCHED_PHASE_DEAD ||
+          deadline_passed(slot->request)) {
+        gdefcore_request_set_status(slot->request, GDEFCORE_ERR_LIMIT);
+        free_slot(sched, slot);
+      } else if (enqueue_slot(sched, slot) != GDEFCORE_OK) {
+        strand_slot(sched, slot);
+      }
       continue;
     }
     link = &slot->park_next;
@@ -503,9 +532,13 @@ GDEFCORE_Result gdefcore_sched_create(const GDEFCORE_Allocator * allocator,
   if (loop_result != GCU_LOOP_OK) {
     pthread_mutex_destroy(&sched->named_mu);
     gcu_allocator_free(allocator, sched);
-    return loop_result == GCU_LOOP_ERR_UNSUPPORTED
-        ? GDEFCORE_ERR_UNSUPPORTED
-        : GDEFCORE_ERR_OOM;
+    if (loop_result == GCU_LOOP_ERR_UNSUPPORTED) {
+      return GDEFCORE_ERR_UNSUPPORTED;
+    }
+    if (loop_result == GCU_LOOP_ERR_OOM) {
+      return GDEFCORE_ERR_OOM;
+    }
+    return GDEFCORE_ERR_INTERNAL;
   }
   memset(&config, 0, sizeof config);
   config.thread_count = pool_threads == 0 ? 1 : pool_threads;
@@ -533,7 +566,9 @@ GDEFCORE_Result gdefcore_sched_create(const GDEFCORE_Allocator * allocator,
 
 static void drain_loop(GDEFCORE_Sched * sched) {
   while (gcu_loop_pending(sched->loop) > 0) {
-    gcu_loop_run_once(sched->loop, 0);
+    if (gcu_loop_run_once(sched->loop, 0) != GCU_LOOP_OK) {
+      return;
+    }
   }
 }
 
@@ -542,7 +577,7 @@ void gdefcore_sched_destroy(GDEFCORE_Sched * sched) {
   if (sched == NULL) {
     return;
   }
-  if (!same_thread(sched)) {
+  if (!same_thread(sched) || sched->current != NULL) {
     return;
   }
   atomic_store_explicit(&sched->stop_watch, 1, memory_order_release);
@@ -574,8 +609,13 @@ void gdefcore_sched_destroy(GDEFCORE_Sched * sched) {
   if (sched->loop != NULL) {
     gcu_loop_destroy(sched->loop);
   }
+  while (sched->stranded != NULL) {
+    GDEFCORE_Slot * slot = sched->stranded;
+    sched->stranded = slot->park_next;
+    free_slot(sched, slot);
+  }
   pthread_mutex_destroy(&sched->named_mu);
-  free(sched->named);
+  gcu_allocator_free(sched->allocator, sched->named);
   gcu_allocator_free(sched->allocator, sched);
 }
 
@@ -628,18 +668,31 @@ GDEFCORE_Result gdefcore_sched_spawn(GDEFCORE_Sched * sched,
   return GDEFCORE_OK;
 }
 
+static GDEFCORE_Result take_run_error(GDEFCORE_Sched * sched) {
+  GDEFCORE_Result err = sched->run_error;
+  sched->run_error = GDEFCORE_OK;
+  return err;
+}
+
 GDEFCORE_Result gdefcore_sched_run(GDEFCORE_Sched * sched) {
   if (sched == NULL || !same_thread(sched) || sched->current != NULL) {
     return GDEFCORE_ERR_INVALID;
   }
   for (;;) {
-    GDEFCORE_Slot * slot = pick_ready(sched);
+    GDEFCORE_Slot * slot;
+    if (sched->run_error != GDEFCORE_OK) {
+      return take_run_error(sched);
+    }
+    slot = pick_ready(sched);
     if (slot != NULL) {
       run_slot(sched, slot);
       continue;
     }
     cancel_expired(sched);
     promote_failed_posts(sched);
+    if (sched->run_error != GDEFCORE_OK) {
+      return take_run_error(sched);
+    }
     slot = pick_ready(sched);
     if (slot != NULL) {
       run_slot(sched, slot);
@@ -648,9 +701,14 @@ GDEFCORE_Result gdefcore_sched_run(GDEFCORE_Sched * sched) {
     if (!has_live_offload(sched)) {
       break;
     }
-    gcu_loop_run_once(sched->loop, next_timeout(sched));
+    if (gcu_loop_run_once(sched->loop, next_timeout(sched)) != GCU_LOOP_OK) {
+      return GDEFCORE_ERR_INTERNAL;
+    }
     cancel_expired(sched);
     promote_failed_posts(sched);
+  }
+  if (sched->run_error != GDEFCORE_OK) {
+    return take_run_error(sched);
   }
   return GDEFCORE_OK;
 }

@@ -416,10 +416,10 @@ endif
 endif
 INCLUDE += $(STOR_CFLAGS)
 
-# A private PREFIX does not hold cutil or defiant-storage. Their -L directories
-# belong on the runtime path, or a test binary cannot load them.
+# A private PREFIX does not hold cutil or defiant-storage. Test binaries need
+# those -L directories at run time. They stay off LDFLAGS: an rpath there is
+# recorded in the installed library and names this build machine.
 DEP_LIB_DIRS := $(sort $(patsubst -L%,%,$(filter -L%,$(CUTIL_LIBS) $(STOR_LIBS))))
-LDFLAGS += $(foreach dir,$(DEP_LIB_DIRS),-Wl,-rpath,$(dir))
 
 # Automatically collect all .c source files under the src directory.
 SOURCES := $(shell find src -type f -name '*.c')
@@ -465,6 +465,7 @@ TEST_LDFLAGS := -Wl,--wrap=__mingw_fprintf
 else
 TEST_LDFLAGS :=
 endif
+TEST_LDFLAGS += $(foreach dir,$(DEP_LIB_DIRS),-Wl,-rpath,$(dir))
 
 # Discover test sources and compute an executable name for each, as
 # "path|name" pairs. test_foo.cpp -> testFoo.

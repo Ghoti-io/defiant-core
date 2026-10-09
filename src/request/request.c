@@ -134,7 +134,7 @@ GCU_Fiber * gdefcore_request_fiber(const GDEFCORE_Request * request) {
 
 GDEFCORE_Result gdefcore_request_attach_fiber(
     GDEFCORE_Request * request, GCU_Fiber * fiber) {
-  if (request == NULL) {
+  if (request == NULL || (fiber != NULL && request->fiber != NULL)) {
     return GDEFCORE_ERR_INVALID;
   }
   request->fiber = fiber;
@@ -145,6 +145,9 @@ GDEFCORE_Result gdefcore_request_set_write(
     GDEFCORE_Request * request, GDEFSTOR_Write * write) {
   if (request == NULL) {
     return GDEFCORE_ERR_INVALID;
+  }
+  if (request->write != NULL && request->write != write) {
+    gdefstor_write_abort(request->write);
   }
   request->write = write;
   return GDEFCORE_OK;

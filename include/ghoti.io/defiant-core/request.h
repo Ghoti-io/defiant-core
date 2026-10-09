@@ -152,7 +152,8 @@ GDEFCORE_API GCU_Fiber * gdefcore_request_fiber(
  *
  * @param request The request.
  * @param fiber The fiber, or NULL.
- * @return ::GDEFCORE_OK, or ::GDEFCORE_ERR_INVALID when @p request is NULL.
+ * @return ::GDEFCORE_OK, or ::GDEFCORE_ERR_INVALID when @p request is NULL
+ *   or it already has a fiber and @p fiber is not NULL.
  */
 GDEFCORE_API GDEFCORE_Result gdefcore_request_attach_fiber(
     GDEFCORE_Request * request, GCU_Fiber * fiber);
@@ -160,8 +161,8 @@ GDEFCORE_API GDEFCORE_Result gdefcore_request_attach_fiber(
 /**
  * @brief Record the storage write this request holds, or NULL to clear it.
  *
- * Clearing does not abort. Aborting is the scheduler's when a wait other
- * than the write is attempted, and destroy's when a write is still held.
+ * A different pointer aborts the write already held, including a clear.
+ * Destroy aborts a write that is still held.
  *
  * @param request The request.
  * @param write The port write, or NULL.

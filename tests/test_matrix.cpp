@@ -299,7 +299,7 @@ extern "C" GDEFCORE_Turn BusyC(GDEFCORE_Request * request, void * user) {
 
 struct DeadlineState {
   GDEFCORE_Sched * sched;
-  std::atomic<int> release;
+  uint64_t until;
   int after;
   int slow_ran;
 };
@@ -307,7 +307,7 @@ struct DeadlineState {
 extern "C" int DeadlineSlow(void * user) {
   DeadlineState * state = (DeadlineState *)user;
   state->slow_ran = 1;
-  while (state->release.load() == 0) {
+  while (MonoMs() < state->until) {
     usleep(1000);
   }
   return 9;
@@ -359,6 +359,55 @@ extern "C" GDEFCORE_Turn WriteBody(GDEFCORE_Request * request, void * user) {
       state->sched, WriteOffload, state, NULL);
   state->after = 1;
   return GDEFCORE_TURN_DONE;
+}
+
+struct YieldState {
+  GDEFCORE_Sched * sched;
+  GDEFSTOR_Store * store;
+  const char * tenant;
+  int after;
+  GDEFCORE_Result rc;
+};
+
+extern "C" GDEFCORE_Turn YieldApiBody(
+    GDEFCORE_Request * request, void * user) {
+  YieldState * state = (YieldState *)user;
+  GDEFSTOR_Write * write = NULL;
+  const uint8_t bytes[] = {'y'};
+  if (gdefstor_write_begin(state->store, state->tenant, strlen(state->tenant),
+          NULL, &write) != GDEFSTOR_OK) {
+    state->rc = GDEFCORE_ERR_INTERNAL;
+    return GDEFCORE_TURN_DONE;
+  }
+  if (gdefstor_blob_put(write, "y", 1, bytes, sizeof bytes) != GDEFSTOR_OK) {
+    gdefstor_write_abort(write);
+    state->rc = GDEFCORE_ERR_INTERNAL;
+    return GDEFCORE_TURN_DONE;
+  }
+  gdefcore_request_set_write(request, write);
+  state->rc = gdefcore_sched_yield(state->sched);
+  state->after = 1;
+  return GDEFCORE_TURN_DONE;
+}
+
+extern "C" GDEFCORE_Turn YieldTurnBody(
+    GDEFCORE_Request * request, void * user) {
+  YieldState * state = (YieldState *)user;
+  GDEFSTOR_Write * write = NULL;
+  const uint8_t bytes[] = {'t'};
+  if (gdefstor_write_begin(state->store, state->tenant, strlen(state->tenant),
+          NULL, &write) != GDEFSTOR_OK) {
+    state->rc = GDEFCORE_ERR_INTERNAL;
+    return GDEFCORE_TURN_DONE;
+  }
+  if (gdefstor_blob_put(write, "t", 1, bytes, sizeof bytes) != GDEFSTOR_OK) {
+    gdefstor_write_abort(write);
+    state->rc = GDEFCORE_ERR_INTERNAL;
+    return GDEFCORE_TURN_DONE;
+  }
+  gdefcore_request_set_write(request, write);
+  state->rc = GDEFCORE_ERR_INVALID;
+  return GDEFCORE_TURN_AGAIN;
 }
 
 struct WatchState {
@@ -501,7 +550,7 @@ TEST(Deadline, WaitIsCancelledAtTheRequestBoundary) {
   DeadlineState state;
   uint64_t deadline = MonoMs() + 40;
   state.sched = NULL;
-  state.release.store(0);
+  state.until = deadline + 80;
   state.after = 0;
   state.slow_ran = 0;
   ASSERT_EQ(gdefcore_sched_create(NULL, 1, 0, &sched), GDEFCORE_OK);
@@ -513,9 +562,9 @@ TEST(Deadline, WaitIsCancelledAtTheRequestBoundary) {
       GDEFCORE_OK);
   ASSERT_EQ(gdefcore_sched_run(sched), GDEFCORE_OK);
   EXPECT_EQ(state.after, 0);
+  EXPECT_EQ(state.slow_ran, 1);
   EXPECT_EQ(gdefcore_request_status(request), GDEFCORE_ERR_LIMIT);
   EXPECT_EQ(gdefcore_request_fiber(request), nullptr);
-  state.release.store(1);
   gdefcore_sched_destroy(sched);
   gdefcore_request_destroy(request);
 }
@@ -544,14 +593,103 @@ TEST(Write, OtherWaitAbortsThePortWrite) {
   EXPECT_EQ(state.after, 1);
   EXPECT_EQ(state.rc, GDEFCORE_ERR_INVALID);
   EXPECT_EQ(state.offload_ran, 0);
+  EXPECT_EQ(gdefcore_request_status(request), GDEFCORE_ERR_INVALID);
   EXPECT_EQ(gdefcore_request_write(request), nullptr);
   EXPECT_EQ(gdefstor_blob_get(store, tenant, strlen(tenant), "h", 1, &got,
                 &got_len),
       GDEFSTOR_ERR_INVALID);
   EXPECT_EQ(got, nullptr);
+  {
+    GDEFSTOR_Write * again = NULL;
+    EXPECT_EQ(gdefstor_write_begin(
+                  store, tenant, strlen(tenant), NULL, &again),
+        GDEFSTOR_OK);
+    gdefstor_write_abort(again);
+  }
   gdefcore_sched_destroy(sched);
   gdefcore_request_destroy(request);
   gdefstor_store_destroy(store);
+}
+
+TEST(Write, YieldWhileHoldingAbortsThePortWrite) {
+  const char * tenant = "tenant-y";
+  GDEFCORE_Sched * sched = NULL;
+  GDEFCORE_Request * request = NULL;
+  GDEFSTOR_Store * store = NULL;
+  Mem mem;
+  GDEFSTOR_Write * again = NULL;
+  YieldState state;
+  memset(&state, 0, sizeof state);
+  store = OpenStore(&mem);
+  ASSERT_NE(store, nullptr);
+  ASSERT_EQ(gdefcore_sched_create(NULL, 1, 0, &sched), GDEFCORE_OK);
+  state.sched = sched;
+  state.store = store;
+  state.tenant = tenant;
+  ASSERT_EQ(gdefcore_request_create((const uint8_t *)tenant, strlen(tenant), 0,
+                0, NULL, &request),
+      GDEFCORE_OK);
+  ASSERT_EQ(
+      gdefcore_sched_spawn(sched, request, YieldApiBody, &state), GDEFCORE_OK);
+  ASSERT_EQ(gdefcore_sched_run(sched), GDEFCORE_OK);
+  EXPECT_EQ(state.after, 1);
+  EXPECT_EQ(state.rc, GDEFCORE_ERR_INVALID);
+  EXPECT_EQ(gdefcore_request_status(request), GDEFCORE_ERR_INVALID);
+  EXPECT_EQ(gdefcore_request_write(request), nullptr);
+  EXPECT_EQ(gdefstor_write_begin(store, tenant, strlen(tenant), NULL, &again),
+      GDEFSTOR_OK);
+  gdefstor_write_abort(again);
+  gdefcore_sched_destroy(sched);
+  gdefcore_request_destroy(request);
+  gdefstor_store_destroy(store);
+}
+
+TEST(Write, TurnAgainWhileHoldingAbortsThePortWrite) {
+  const char * tenant = "tenant-t";
+  GDEFCORE_Sched * sched = NULL;
+  GDEFCORE_Request * request = NULL;
+  GDEFSTOR_Store * store = NULL;
+  Mem mem;
+  GDEFSTOR_Write * again = NULL;
+  YieldState state;
+  memset(&state, 0, sizeof state);
+  store = OpenStore(&mem);
+  ASSERT_NE(store, nullptr);
+  ASSERT_EQ(gdefcore_sched_create(NULL, 1, 0, &sched), GDEFCORE_OK);
+  state.sched = sched;
+  state.store = store;
+  state.tenant = tenant;
+  ASSERT_EQ(gdefcore_request_create((const uint8_t *)tenant, strlen(tenant), 0,
+                0, NULL, &request),
+      GDEFCORE_OK);
+  ASSERT_EQ(
+      gdefcore_sched_spawn(sched, request, YieldTurnBody, &state), GDEFCORE_OK);
+  ASSERT_EQ(gdefcore_sched_run(sched), GDEFCORE_OK);
+  EXPECT_EQ(gdefcore_request_status(request), GDEFCORE_ERR_INVALID);
+  EXPECT_EQ(gdefcore_request_write(request), nullptr);
+  EXPECT_EQ(gdefstor_write_begin(store, tenant, strlen(tenant), NULL, &again),
+      GDEFSTOR_OK);
+  gdefstor_write_abort(again);
+  gdefcore_sched_destroy(sched);
+  gdefcore_request_destroy(request);
+  gdefstor_store_destroy(store);
+}
+
+TEST(Watchdog, ZeroBoundNamesNothing) {
+  const uint8_t tenant[] = {'z'};
+  GDEFCORE_Sched * sched = NULL;
+  GDEFCORE_Request * request = NULL;
+  WatchState state;
+  state.bound_ms = 40;
+  state.start = MonoMs();
+  ASSERT_EQ(gdefcore_sched_create(NULL, 1, 0, &sched), GDEFCORE_OK);
+  ASSERT_EQ(gdefcore_request_create(tenant, 1, 0, 0, NULL, &request),
+      GDEFCORE_OK);
+  ASSERT_EQ(gdefcore_sched_spawn(sched, request, WatchBody, &state), GDEFCORE_OK);
+  ASSERT_EQ(gdefcore_sched_run(sched), GDEFCORE_OK);
+  EXPECT_EQ(gdefcore_sched_watchdog_count(sched), 0u);
+  gdefcore_sched_destroy(sched);
+  gdefcore_request_destroy(request);
 }
 
 TEST(Watchdog, NamesAFiberThatRunsPastItsYieldBound) {
@@ -566,7 +704,7 @@ TEST(Watchdog, NamesAFiberThatRunsPastItsYieldBound) {
       GDEFCORE_OK);
   ASSERT_EQ(gdefcore_sched_spawn(sched, request, WatchBody, &state), GDEFCORE_OK);
   ASSERT_EQ(gdefcore_sched_run(sched), GDEFCORE_OK);
-  EXPECT_GE(gdefcore_sched_watchdog_count(sched), 1u);
+  EXPECT_EQ(gdefcore_sched_watchdog_count(sched), 1u);
   EXPECT_EQ(gdefcore_sched_watchdog_id_at(sched, 0), gdefcore_request_id(request));
   gdefcore_sched_destroy(sched);
   gdefcore_request_destroy(request);

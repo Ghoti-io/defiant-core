@@ -55,7 +55,9 @@ typedef struct GDEFCORE_Sched GDEFCORE_Sched;
  *
  * ::GDEFCORE_TURN_AGAIN means the body has more work and did not call
  * gdefcore_sched_yield. The scheduler runs another ready tenant before
- * calling the body again.
+ * calling the body again. A body that still holds a write does not get
+ * that turn: the write is aborted, the status is ::GDEFCORE_ERR_INVALID,
+ * and the body is not called again.
  */
 typedef enum GDEFCORE_Turn {
   GDEFCORE_TURN_DONE = 0, ///< The request body is finished.
@@ -139,8 +141,8 @@ GDEFCORE_API GDEFCORE_Result gdefcore_sched_run(GDEFCORE_Sched * sched);
  * @brief Suspend the running fiber so another tenant can run.
  *
  * If the request holds a storage write, the write is aborted, nothing it
- * put is committed, and this returns ::GDEFCORE_ERR_INVALID without
- * suspending.
+ * put is committed, the request status is ::GDEFCORE_ERR_INVALID, and this
+ * returns ::GDEFCORE_ERR_INVALID without suspending.
  *
  * @param sched The scheduler the fiber was spawned on.
  * @return ::GDEFCORE_OK once resumed, ::GDEFCORE_ERR_INVALID when the call
