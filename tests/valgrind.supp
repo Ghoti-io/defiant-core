@@ -1,0 +1,4 @@
+# Valgrind suppressions for defiant-core.
+# Empty on purpose: a leak of ours must fail the run. Add an entry only for
+# an allocation that is demonstrably not this library's, with frames narrow
+# enough that a leak of ours cannot match.
