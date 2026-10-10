@@ -1,0 +1,400 @@
+/*
+ * SPDX-License-Identifier: LGPL-3.0-only
+ *
+ * Copyright (C) 2026 Corey Pennycuff
+ *
+ * This file is part of Ghoti.io Defiant Core.
+ *
+ * Ghoti.io Defiant Core is free software: you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public License version
+ * 3 as published by the Free Software Foundation.
+ *
+ * Ghoti.io Defiant Core is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU Lesser
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+/**
+ * @file entity.h
+ * @brief Types, public ids, revisions and changesets.
+ * @stability free
+ *
+ * One subsystem. A type is content or configuration. A field is text, one
+ * value or many, under a caller-supplied language. The integer row id is the
+ * storage key and is not an argument a later call accepts. The document's
+ * `entity` string is the public id. Saves stage a changeset. Apply is one
+ * port write.
+ */
+
+#ifndef GHOTI_IO_GDEFCORE_ENTITY_H
+#define GHOTI_IO_GDEFCORE_ENTITY_H
+
+#include <ghoti.io/defiant-core/macros.h>
+#include <ghoti.io/defiant-core/allocator.h>
+#include <ghoti.io/defiant-core/core.h>
+#include <ghoti.io/defiant-storage/store.h>
+#include <stddef.h>
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/** Canonical public id length, not counting a trailing NUL. */
+#define GDEFCORE_PUBLIC_ID_LEN 28
+
+/** The type holds content. */
+#define GDEFCORE_TYPE_CONTENT 1
+/** The type holds configuration. */
+#define GDEFCORE_TYPE_CONFIG 2
+
+/** A changeset that only changes content field values. */
+#define GDEFCORE_RISK_LOW 1
+/** A changeset that defines a type or touches configuration. */
+#define GDEFCORE_RISK_HIGH 2
+
+/** Read the published projection. */
+#define GDEFCORE_VIEW_PUBLISHED 1
+/** Read the draft projection. */
+#define GDEFCORE_VIEW_DRAFT 2
+
+/** Caps for the changeset parser and for field values. */
+typedef struct GDEFCORE_Limits {
+  size_t max_patch_files;   ///< How many patch files one parse accepts.
+  size_t max_patch_path;    ///< Bytes in one relative path.
+  size_t max_patch_file;    ///< Bytes in one file.
+  size_t max_patch_total;   ///< Bytes across every file.
+  size_t max_fields;        ///< Fields on one type.
+  size_t max_values;        ///< Values of one field in one save.
+  size_t max_value_bytes;   ///< Bytes in one field value.
+  size_t max_languages;     ///< Languages in one staged document.
+} GDEFCORE_Limits;
+
+/**
+ * @brief Fill @p limits with the defaults. NULL is ignored.
+ *
+ * @param limits The struct to fill.
+ */
+GDEFCORE_API void gdefcore_limits_default(GDEFCORE_Limits * limits);
+
+/** A catalog bound to one store and one tenant. Opaque. */
+typedef struct GDEFCORE_Catalog GDEFCORE_Catalog;
+
+/** A prepared changeset. Opaque. */
+typedef struct GDEFCORE_Changeset GDEFCORE_Changeset;
+
+/**
+ * @brief A field declaration. The caller owns the name for the call.
+ *
+ * @ref size is `sizeof(GDEFCORE_Field)`. A smaller value is
+ * ::GDEFCORE_ERR_INVALID.
+ */
+typedef struct GDEFCORE_Field {
+  size_t size;         ///< Must be `sizeof(GDEFCORE_Field)`.
+  const char * name;   ///< Required. ASCII letters, digits, underscore.
+  size_t name_len;     ///< Length of @ref name.
+  int required;        ///< Non-zero when a save must supply the field.
+  int many;            ///< Non-zero when the field holds more than one value.
+} GDEFCORE_Field;
+
+/**
+ * @brief Field values for one save. The caller owns the bytes for the call.
+ *
+ * @ref size is `sizeof(GDEFCORE_Value)`.
+ */
+typedef struct GDEFCORE_Value {
+  size_t size;                 ///< Must be `sizeof(GDEFCORE_Value)`.
+  const char * field;          ///< Field machine name.
+  size_t field_len;            ///< Length of @ref field.
+  const char * const * texts;  ///< The values. NULL only when @ref count is 0.
+  const size_t * text_lens;    ///< One length per value.
+  size_t count;                ///< How many values.
+} GDEFCORE_Value;
+
+/**
+ * @brief One file of a `defiant-changeset/1` tree.
+ *
+ * @ref size is `sizeof(GDEFCORE_Patch)`. Paths are relative. Bytes are UTF-8.
+ */
+typedef struct GDEFCORE_Patch {
+  size_t size;     ///< Must be `sizeof(GDEFCORE_Patch)`.
+  char * path;     ///< Relative path. No leading slash.
+  size_t path_len; ///< Length of @ref path.
+  uint8_t * bytes; ///< File bytes.
+  size_t len;      ///< Length of @ref bytes.
+} GDEFCORE_Patch;
+
+/**
+ * @brief Open a catalog. The store is borrowed.
+ *
+ * @param store The port. Required.
+ * @param tenant Tenant bytes. Required, non-empty.
+ * @param tenant_len Length of @p tenant.
+ * @param limits NULL uses gdefcore_limits_default().
+ * @param allocator NULL uses the default.
+ * @param out_catalog Receives the catalog on success.
+ * @return ::GDEFCORE_OK, ::GDEFCORE_ERR_INVALID, or ::GDEFCORE_ERR_OOM.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_catalog_open(GDEFSTOR_Store * store,
+    const uint8_t * tenant, size_t tenant_len, const GDEFCORE_Limits * limits,
+    const GDEFCORE_Allocator * allocator, GDEFCORE_Catalog ** out_catalog);
+
+/** @brief Close a catalog. NULL is ignored. The store stays open. */
+GDEFCORE_API void gdefcore_catalog_destroy(GDEFCORE_Catalog * catalog);
+
+/**
+ * @brief Encode 16 bytes as a canonical public id.
+ *
+ * @param raw Exactly 16 bytes, most significant first.
+ * @param out Receives 28 symbols and a NUL.
+ * @return ::GDEFCORE_OK or ::GDEFCORE_ERR_INVALID.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_id_encode(const uint8_t raw[16],
+    char out[GDEFCORE_PUBLIC_ID_LEN + 1]);
+
+/**
+ * @brief Draw 16 bytes from `gsec_random_bytes` and encode them.
+ *
+ * @param out Receives 28 symbols and a NUL.
+ * @return ::GDEFCORE_OK, ::GDEFCORE_ERR_INVALID, ::GDEFCORE_ERR_IO, or
+ *   ::GDEFCORE_ERR_LIMIT.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_id_generate(
+    char out[GDEFCORE_PUBLIC_ID_LEN + 1]);
+
+/**
+ * @brief Canonicalise a public id. A failed check is malformed.
+ *
+ * Case is folded, hyphens are removed, `I` and `L` become `1`, and `O`
+ * becomes `0`. This function does not look anything up.
+ *
+ * @param text The caller's bytes.
+ * @param len Their length.
+ * @param out Receives the canonical id and a NUL.
+ * @return ::GDEFCORE_OK or ::GDEFCORE_ERR_INVALID.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_id_canonical(const char * text,
+    size_t len, char out[GDEFCORE_PUBLIC_ID_LEN + 1]);
+
+/**
+ * @brief Define a type now. A second define of the same name is refused.
+ *
+ * The write does not change the config epoch. A changeset that defines a
+ * type is gdefcore_changeset_define() and is high risk.
+ *
+ * @param catalog The catalog.
+ * @param name Machine name: `core.<name>`, `site.<name>`, or `<module>.<name>`.
+ * @param name_len Its length.
+ * @param kind ::GDEFCORE_TYPE_CONTENT or ::GDEFCORE_TYPE_CONFIG.
+ * @param fields Field declarations. NULL only when @p field_count is 0.
+ * @param field_count How many.
+ * @return ::GDEFCORE_OK or an error. Nothing is written on failure.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_type_define(GDEFCORE_Catalog * catalog,
+    const char * name, size_t name_len, int kind, const GDEFCORE_Field * fields,
+    size_t field_count);
+
+/**
+ * @brief The stored kind of a type.
+ *
+ * @param catalog The catalog.
+ * @param name Machine name.
+ * @param name_len Its length.
+ * @param out_kind Receives the kind.
+ * @return ::GDEFCORE_OK or ::GDEFCORE_ERR_INVALID when the type is absent.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_type_kind(GDEFCORE_Catalog * catalog,
+    const char * name, size_t name_len, int * out_kind);
+
+/** @brief How many fields the type declares. */
+GDEFCORE_API GDEFCORE_Result gdefcore_type_field_count(
+    GDEFCORE_Catalog * catalog, const char * name, size_t name_len,
+    size_t * out_count);
+
+/**
+ * @brief Copy one field declaration. @p out_name is allocated.
+ *
+ * Free @p out_name with gdefcore_text_free().
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_type_field(GDEFCORE_Catalog * catalog,
+    const char * name, size_t name_len, size_t index, char ** out_name,
+    size_t * out_name_len, int * out_required, int * out_many);
+
+/**
+ * @brief Mint a public id and a row id for an entity of @p type_name.
+ *
+ * The row id is returned for inspection. Later calls take the public id.
+ * A never-published entity has no published row.
+ *
+ * @param catalog The catalog.
+ * @param type_name A type that is already readable.
+ * @param type_len Its length.
+ * @param out_id Receives the canonical id and a NUL.
+ * @param out_row Receives the row id. May be NULL.
+ * @return ::GDEFCORE_OK or an error.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_entity_create(GDEFCORE_Catalog * catalog,
+    const char * type_name, size_t type_len,
+    char out_id[GDEFCORE_PUBLIC_ID_LEN + 1], uint64_t * out_row);
+
+/** @brief The tenant config epoch. An unseen epoch is 0. */
+GDEFCORE_API GDEFCORE_Result gdefcore_epoch(GDEFCORE_Catalog * catalog,
+    uint64_t * out_epoch);
+
+/**
+ * @brief Start a changeset at the current epoch.
+ *
+ * @param actor Optional public id. Not checked against an account. NULL
+ *   means none.
+ * @param actor_len Length of @p actor.
+ * @param out_changeset Receives the changeset.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_changeset_prepare(
+    GDEFCORE_Catalog * catalog, const char * actor, size_t actor_len,
+    GDEFCORE_Changeset ** out_changeset);
+
+/** @brief Free a changeset. NULL is ignored. */
+GDEFCORE_API void gdefcore_changeset_destroy(GDEFCORE_Changeset * changeset);
+
+/**
+ * @brief Stage a type definition. Apply is what publishes it.
+ *
+ * Defining or changing a type makes the changeset high risk.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_changeset_define(
+    GDEFCORE_Changeset * changeset, const char * name, size_t name_len,
+    int kind, const GDEFCORE_Field * fields, size_t field_count);
+
+/**
+ * @brief Stage field values. A rejected save leaves the changeset unchanged.
+ *
+ * @p lang is required: non-empty, at most 35 bytes, ASCII letters, digits
+ * and hyphens. An undeclared field or a missing required field stages
+ * nothing.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_entity_save(GDEFCORE_Changeset * changeset,
+    const char * id, size_t id_len, const char * lang, size_t lang_len,
+    const GDEFCORE_Value * values, size_t value_count);
+
+/**
+ * @brief Read field values.
+ *
+ * When @p changeset touches the entity, the staged fields are returned and
+ * @p view is ignored. Otherwise @p view selects the published or draft
+ * projection. A miss is ::GDEFCORE_ERR_INVALID.
+ *
+ * Free the texts with gdefcore_values_free().
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_entity_values(GDEFCORE_Catalog * catalog,
+    const GDEFCORE_Changeset * changeset, int view, const char * id,
+    size_t id_len, const char * lang, size_t lang_len, const char * field,
+    size_t field_len, char *** out_texts, size_t ** out_lens,
+    size_t * out_count);
+
+/** @brief Free texts from gdefcore_entity_values(). */
+GDEFCORE_API void gdefcore_values_free(GDEFCORE_Catalog * catalog,
+    char ** texts, size_t * lens, size_t count);
+
+/** @brief Free one text allocated by the catalog. NULL is ignored. */
+GDEFCORE_API void gdefcore_text_free(GDEFCORE_Catalog * catalog, char * text);
+
+/**
+ * @brief One line per changed language and field: `en title: Hello -> Bonjour`.
+ *
+ * Free @p out_text with gdefcore_text_free().
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_changeset_diff(
+    const GDEFCORE_Changeset * changeset, char ** out_text, size_t * out_len);
+
+/**
+ * @brief Rate the changeset. The caller cannot supply the rating.
+ *
+ * @param out_risk Receives ::GDEFCORE_RISK_LOW or ::GDEFCORE_RISK_HIGH.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_changeset_rate(
+    const GDEFCORE_Changeset * changeset, int * out_risk);
+
+/**
+ * @brief Commit the changeset in one port write.
+ *
+ * High risk requires @p confirmation equal to the touched machine names,
+ * sorted, one per line, with no extra newline. Low risk ignores
+ * @p confirmation. A stale epoch or sequence writes nothing; the touched
+ * names are then available from gdefcore_changeset_conflict().
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_changeset_apply(
+    GDEFCORE_Changeset * changeset, const char * confirmation,
+    size_t confirmation_len);
+
+/**
+ * @brief Names from the last conflicting apply, or NULL.
+ *
+ * One name per line. Valid until the next apply, rebase, or destroy.
+ */
+GDEFCORE_API const char * gdefcore_changeset_conflict(
+    const GDEFCORE_Changeset * changeset, size_t * out_len);
+
+/**
+ * @brief Retarget the changeset at the current epoch and sequences.
+ *
+ * Does not apply it.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_changeset_rebase(
+    GDEFCORE_Changeset * changeset);
+
+/** @brief The epoch the changeset was prepared against. */
+GDEFCORE_API uint64_t gdefcore_changeset_epoch(
+    const GDEFCORE_Changeset * changeset);
+
+/**
+ * @brief The sequence the changeset holds for @p id.
+ *
+ * @return ::GDEFCORE_ERR_INVALID when @p id is not in the changeset.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_changeset_base_seq(
+    const GDEFCORE_Changeset * changeset, const char * id, size_t id_len,
+    uint64_t * out_seq);
+
+/**
+ * @brief A new changeset that restores the previous revision.
+ *
+ * Sequence 1 clears the published row and the current draft fields. The
+ * document stays readable. The caller applies the result.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_changeset_revert(
+    GDEFCORE_Catalog * catalog, const char * id, size_t id_len,
+    const char * actor, size_t actor_len, GDEFCORE_Changeset ** out_changeset);
+
+/**
+ * @brief Ordered relative paths and UTF-8 bytes, `defiant-changeset/1`.
+ *
+ * Free the list with gdefcore_patch_free().
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_changeset_serialize(
+    const GDEFCORE_Changeset * changeset, GDEFCORE_Patch ** out_files,
+    size_t * out_count);
+
+/** @brief Free a patch list. NULL is ignored. */
+GDEFCORE_API void gdefcore_patch_free(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Patch * files, size_t count);
+
+/**
+ * @brief Parse a patch. Untrusted.
+ *
+ * `..`, an absolute path, a byte that is not UTF-8, and a public id that
+ * fails its check are refused. A failing check is not looked up. Nothing
+ * is written to the store.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_changeset_parse(
+    GDEFCORE_Catalog * catalog, const GDEFCORE_Patch * files, size_t count,
+    const GDEFCORE_Limits * limits, GDEFCORE_Changeset ** out_changeset);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* GHOTI_IO_GDEFCORE_ENTITY_H */
