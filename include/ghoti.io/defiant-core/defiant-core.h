@@ -37,5 +37,6 @@
 #include <ghoti.io/defiant-core/module.h>
 #include <ghoti.io/defiant-core/request.h>
 #include <ghoti.io/defiant-core/sched.h>
+#include <ghoti.io/defiant-core/subject.h>
 
 #endif /* GHOTI_IO_GDEFCORE_DEFIANT_CORE_H */

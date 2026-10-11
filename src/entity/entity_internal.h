@@ -64,6 +64,7 @@ typedef struct GDEFCORE_Decl {
   GDEFCORE_Text name;
   int required;
   int many;
+  int personal;
 } GDEFCORE_Decl;
 
 typedef struct GDEFCORE_Op {

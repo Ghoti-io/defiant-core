@@ -362,10 +362,10 @@ static GDEFCORE_Result unwrap(const GDEFCORE_Keyring * keyring,
   return from_gsec(rc);
 }
 
-static GDEFCORE_Result derive(const uint8_t raw[kKey], const char * info,
-    uint8_t out[kKey]) {
+static GDEFCORE_Result derive(const uint8_t raw[kKey], const void * info,
+    size_t info_len, uint8_t out[kKey]) {
   return from_gsec(gsec_hkdf(GSEC_HKDF_SHA256, NULL, 0, raw, kKey, info,
-      strlen(info), out, kKey));
+      info_len, out, kKey));
 }
 
 static GDEFCORE_Result purpose_key(const GDEFCORE_Keyring * keyring,
@@ -377,7 +377,7 @@ static GDEFCORE_Result purpose_key(const GDEFCORE_Keyring * keyring,
     wipe(raw, sizeof raw);
     return rc;
   }
-  rc = derive(raw, info, out);
+  rc = derive(raw, info, strlen(info), out);
   wipe(raw, sizeof raw);
   return rc;
 }
@@ -833,6 +833,68 @@ void gdefcore_keyring_destroy(GDEFCORE_Keyring * keyring) {
   alloc = keyring->alloc;
   wipe(keyring, sizeof *keyring);
   gcu_allocator_free(alloc, keyring);
+}
+
+GDEFCORE_Result gdefcore_keyring_export(const GDEFCORE_Keyring * keyring,
+    uint8_t * out, size_t out_len) {
+  if (keyring == NULL || out == NULL || out_len != kWrapLen) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  memcpy(out, keyring->blob, kWrapLen);
+  return GDEFCORE_OK;
+}
+
+GDEFCORE_Result gdefcore_keyring_adopt(const uint8_t * root, size_t root_len,
+    const uint8_t * wrapped, size_t wrapped_len,
+    const GDEFCORE_Allocator * allocator, GDEFCORE_Keyring ** out_keyring) {
+  const GDEFCORE_Allocator * alloc;
+  GDEFCORE_Keyring * keyring;
+  uint8_t raw[kKey];
+  GDEFCORE_Result rc;
+  if (!root_ok(root, root_len) || wrapped == NULL || wrapped_len != kWrapLen ||
+      out_keyring == NULL || wrapped[0] != kVersion || wrapped[1] != kAlg ||
+      wrapped[2] != kKeyId) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  alloc = allocator == NULL ? gdefcore_allocator_default() : allocator;
+  keyring = (GDEFCORE_Keyring *)gcu_allocator_malloc(alloc, sizeof *keyring);
+  if (keyring == NULL) {
+    return GDEFCORE_ERR_OOM;
+  }
+  memset(keyring, 0, sizeof *keyring);
+  keyring->alloc = alloc;
+  memcpy(keyring->blob, wrapped, kWrapLen);
+  rc = unwrap(keyring, root, root_len, raw);
+  wipe(raw, sizeof raw);
+  if (rc != GDEFCORE_OK) {
+    wipe(keyring, sizeof *keyring);
+    gcu_allocator_free(alloc, keyring);
+    return rc;
+  }
+  *out_keyring = keyring;
+  return GDEFCORE_OK;
+}
+
+GDEFCORE_Result gdefcore_keyring_derive(const GDEFCORE_Keyring * keyring,
+    const uint8_t * root, size_t root_len, const void * info, size_t info_len,
+    uint8_t * out, size_t out_len) {
+  uint8_t raw[kKey];
+  GDEFCORE_Result rc;
+  if (keyring == NULL || out == NULL || out_len != kKey ||
+      (info == NULL && info_len != 0)) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  rc = unwrap(keyring, root, root_len, raw);
+  if (rc != GDEFCORE_OK) {
+    wipe(raw, sizeof raw);
+    return rc;
+  }
+  rc = derive(raw, info, info_len, out);
+  wipe(raw, sizeof raw);
+  if (rc != GDEFCORE_OK) {
+    wipe(out, out_len);
+  }
+  return rc;
 }
 
 GDEFCORE_Result gdefcore_account_bind(GDEFCORE_Catalog * catalog,

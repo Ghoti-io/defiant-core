@@ -46,6 +46,12 @@ extern "C" {
 /** Root key length. AES-256 wraps the keyring with these bytes. */
 #define GDEFCORE_ACCOUNT_ROOT_LEN 32
 
+/** Wrapped tenant keyring length. The layout is not changed. */
+#define GDEFCORE_KEYRING_WRAP_LEN 63
+
+/** A purpose key derived from the tenant keyring. */
+#define GDEFCORE_KEYRING_KEY_LEN 32
+
 /** Longest password this story accepts, in bytes. Empty is refused. */
 #define GDEFCORE_ACCOUNT_PASSWORD_MAX 1024u
 
@@ -85,6 +91,37 @@ GDEFCORE_API GDEFCORE_Result gdefcore_keyring_create(const uint8_t * root,
 
 /** @brief Free a keyring. NULL is ignored. The catalog is not touched. */
 GDEFCORE_API void gdefcore_keyring_destroy(GDEFCORE_Keyring * keyring);
+
+/**
+ * @brief Copy the wrapped keyring bytes.
+ *
+ * @p out receives ::GDEFCORE_KEYRING_WRAP_LEN bytes. The raw key is not
+ * copied. @p out is not written on failure.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_keyring_export(
+    const GDEFCORE_Keyring * keyring, uint8_t * out, size_t out_len);
+
+/**
+ * @brief Build a keyring from wrapped bytes.
+ *
+ * The bytes must be the layout gdefcore_keyring_create() writes, and they
+ * must unwrap under @p root. A different root is an error and @p out_keyring
+ * is not written. The wrap layout is not changed.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_keyring_adopt(const uint8_t * root,
+    size_t root_len, const uint8_t * wrapped, size_t wrapped_len,
+    const GDEFCORE_Allocator * allocator, GDEFCORE_Keyring ** out_keyring);
+
+/**
+ * @brief Derive one purpose key.
+ *
+ * HKDF-SHA-256, with @p info as the info string. `subject-wrap` and
+ * `blind-index:<field>` are info strings. @p out is
+ * ::GDEFCORE_KEYRING_KEY_LEN bytes and is not written on failure.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_keyring_derive(
+    const GDEFCORE_Keyring * keyring, const uint8_t * root, size_t root_len,
+    const void * info, size_t info_len, uint8_t * out, size_t out_len);
 
 /**
  * @brief Attach a username and a password to an existing principal.

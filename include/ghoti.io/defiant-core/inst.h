@@ -132,6 +132,18 @@ GDEFCORE_API GDEFCORE_Result gdefcore_inst_open(GDEFSTOR_Store * registry,
     const char * placement, size_t placement_len,
     const GDEFCORE_Allocator * allocator, GDEFCORE_Inst ** out_inst);
 
+/**
+ * @brief Open an installation that keeps tenant keyrings in @p side.
+ *
+ * The first open copies each tenant keyring's wrapped bytes into @p side.
+ * A later open adopts those bytes instead of drawing a new key. @p side is
+ * borrowed and is not the site store. The raw key is not written there.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_inst_open_side(GDEFSTOR_Store * registry,
+    GDEFSTOR_Store * site, GDEFSTOR_Store * side, const uint8_t * root,
+    size_t root_len, const char * placement, size_t placement_len,
+    const GDEFCORE_Allocator * allocator, GDEFCORE_Inst ** out_inst);
+
 /** @brief Close an installation. NULL is ignored. The stores stay open. */
 GDEFCORE_API void gdefcore_inst_destroy(GDEFCORE_Inst * inst);
 

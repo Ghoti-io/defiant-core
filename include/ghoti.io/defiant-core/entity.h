@@ -90,8 +90,9 @@ typedef struct GDEFCORE_Changeset GDEFCORE_Changeset;
 /**
  * @brief A field declaration. The caller owns the name for the call.
  *
- * @ref size is `sizeof(GDEFCORE_Field)`. A smaller value is
- * ::GDEFCORE_ERR_INVALID.
+ * @ref size is `sizeof(GDEFCORE_Field)`. A value that stops before
+ * @ref many is ::GDEFCORE_ERR_INVALID. @ref personal is 0 when @ref size
+ * stops before it.
  */
 typedef struct GDEFCORE_Field {
   size_t size;         ///< Must be `sizeof(GDEFCORE_Field)`.
@@ -99,6 +100,7 @@ typedef struct GDEFCORE_Field {
   size_t name_len;     ///< Length of @ref name.
   int required;        ///< Non-zero when a save must supply the field.
   int many;            ///< Non-zero when the field holds more than one value.
+  int personal;        ///< Non-zero when the value is encrypted for a subject.
 } GDEFCORE_Field;
 
 /**
@@ -223,6 +225,16 @@ GDEFCORE_API GDEFCORE_Result gdefcore_type_field_count(
 GDEFCORE_API GDEFCORE_Result gdefcore_type_field(GDEFCORE_Catalog * catalog,
     const char * name, size_t name_len, size_t index, char ** out_name,
     size_t * out_name_len, int * out_required, int * out_many);
+
+/**
+ * @brief Whether the field at @p index is personal.
+ *
+ * A field declared before @ref GDEFCORE_Field::personal existed is not
+ * personal. @p out_personal is not written on failure.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_type_field_personal(
+    GDEFCORE_Catalog * catalog, const char * name, size_t name_len,
+    size_t index, int * out_personal);
 
 /**
  * @brief Mint a public id and a row id for an entity of @p type_name.

@@ -24,12 +24,15 @@
  * The installation registry lives on the caller's registry store. Site
  * tenant catalogs live on the other store, each under its own 16-byte
  * storage key. The keyring is wrapped by the root and is not a field.
+ * When a side store is passed, that wrap is copied there the first time
+ * and adopted on a later open.
  */
 
 #define _POSIX_C_SOURCE 200809L
 
 #include <ghoti.io/defiant-core/macros.h>
 #include <ghoti.io/defiant-core/inst.h>
+#include <ghoti.io/defiant-core/subject.h>
 
 #include "inst_internal.h"
 
@@ -136,6 +139,7 @@ struct GDEFCORE_Inst {
   const GDEFCORE_Allocator * alloc;
   GDEFSTOR_Store * registry;
   GDEFSTOR_Store * site;
+  GDEFSTOR_Store * side;
   GDEFCORE_Catalog * catalog;
   GDEFCORE_Keyring * keyring;
   uint8_t root[GDEFCORE_ACCOUNT_ROOT_LEN];
@@ -864,8 +868,22 @@ static GDEFCORE_Result adopt(GDEFCORE_Inst * inst, const char * entity,
     slot_clear(inst->alloc, slot);
     return GDEFCORE_ERR_OOM;
   }
-  rc = gdefcore_keyring_create(root, GDEFCORE_ACCOUNT_ROOT_LEN, inst->alloc,
-      &slot->keyring);
+  slot->keyring = NULL;
+  if (inst->side != NULL) {
+    rc = gdefcore_subject_bind_keyring(inst->side, slot->storage, kKeyBytes, root,
+        GDEFCORE_ACCOUNT_ROOT_LEN, inst->alloc, &slot->keyring);
+    if (rc == GDEFCORE_ERR_INVALID) {
+      rc = gdefcore_keyring_create(root, GDEFCORE_ACCOUNT_ROOT_LEN, inst->alloc,
+          &slot->keyring);
+      if (rc == GDEFCORE_OK) {
+        rc = gdefcore_subject_bind_keyring(inst->side, slot->storage, kKeyBytes,
+            root, GDEFCORE_ACCOUNT_ROOT_LEN, inst->alloc, &slot->keyring);
+      }
+    }
+  } else {
+    rc = gdefcore_keyring_create(root, GDEFCORE_ACCOUNT_ROOT_LEN, inst->alloc,
+        &slot->keyring);
+  }
   if (rc != GDEFCORE_OK) {
     slot_clear(inst->alloc, slot);
     return rc;
@@ -1055,9 +1073,9 @@ static char * dup_out(const GDEFCORE_Allocator * alloc, const char * s, size_t n
   return dup_n(alloc, s == NULL ? "" : s, n);
 }
 
-GDEFCORE_Result gdefcore_inst_open(GDEFSTOR_Store * registry,
-    GDEFSTOR_Store * site, const uint8_t * root, size_t root_len,
-    const char * placement, size_t placement_len,
+static GDEFCORE_Result open_inst(GDEFSTOR_Store * registry,
+    GDEFSTOR_Store * site, GDEFSTOR_Store * side, const uint8_t * root,
+    size_t root_len, const char * placement, size_t placement_len,
     const GDEFCORE_Allocator * allocator, GDEFCORE_Inst ** out_inst) {
   GDEFCORE_Inst * inst;
   GDEFCORE_Result rc;
@@ -1083,6 +1101,7 @@ GDEFCORE_Result gdefcore_inst_open(GDEFSTOR_Store * registry,
   inst->alloc = allocator;
   inst->registry = registry;
   inst->site = site;
+  inst->side = side;
   memcpy(inst->root, root, sizeof inst->root);
   rc = gdefcore_catalog_open(registry, kRegistryTenant, sizeof kRegistryTenant,
       NULL, allocator, &inst->catalog);
@@ -1114,6 +1133,25 @@ GDEFCORE_Result gdefcore_inst_open(GDEFSTOR_Store * registry,
   }
   *out_inst = inst;
   return GDEFCORE_OK;
+}
+
+GDEFCORE_Result gdefcore_inst_open(GDEFSTOR_Store * registry,
+    GDEFSTOR_Store * site, const uint8_t * root, size_t root_len,
+    const char * placement, size_t placement_len,
+    const GDEFCORE_Allocator * allocator, GDEFCORE_Inst ** out_inst) {
+  return open_inst(registry, site, NULL, root, root_len, placement,
+      placement_len, allocator, out_inst);
+}
+
+GDEFCORE_Result gdefcore_inst_open_side(GDEFSTOR_Store * registry,
+    GDEFSTOR_Store * site, GDEFSTOR_Store * side, const uint8_t * root,
+    size_t root_len, const char * placement, size_t placement_len,
+    const GDEFCORE_Allocator * allocator, GDEFCORE_Inst ** out_inst) {
+  if (side == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  return open_inst(registry, site, side, root, root_len, placement,
+      placement_len, allocator, out_inst);
 }
 
 void gdefcore_inst_destroy(GDEFCORE_Inst * inst) {

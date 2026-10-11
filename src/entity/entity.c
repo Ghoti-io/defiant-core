@@ -516,6 +516,7 @@ static GDEFCORE_Result decls_copy(const GDEFCORE_Allocator * alloc,
     }
     copy[i].required = in[i].required;
     copy[i].many = in[i].many;
+    copy[i].personal = in[i].personal;
   }
   *out = copy;
   return GDEFCORE_OK;
@@ -1236,6 +1237,7 @@ static GDEFCORE_Result parse_decls(const GDEFCORE_Allocator * alloc,
     GDEFCORE_Decl * next;
     int required;
     int many;
+    int personal;
     while (i < n && text[i] != '\n') {
       i += 1;
     }
@@ -1243,6 +1245,7 @@ static GDEFCORE_Result parse_decls(const GDEFCORE_Allocator * alloc,
       i += 1;
       continue;
     }
+    personal = 0;
     name_len = 0;
     while (line + name_len < i && text[line + name_len] != ' ') {
       name_len += 1;
@@ -1252,18 +1255,15 @@ static GDEFCORE_Result parse_decls(const GDEFCORE_Allocator * alloc,
       return GDEFCORE_ERR_CORRUPT;
     }
     sp = line + name_len;
-    if (i - sp == 4 && memcmp(text + sp, " 1 0", 4) == 0) {
-      required = 1;
-      many = 0;
-    } else if (i - sp == 4 && memcmp(text + sp, " 1 1", 4) == 0) {
-      required = 1;
-      many = 1;
-    } else if (i - sp == 4 && memcmp(text + sp, " 0 0", 4) == 0) {
-      required = 0;
-      many = 0;
-    } else if (i - sp == 4 && memcmp(text + sp, " 0 1", 4) == 0) {
-      required = 0;
-      many = 1;
+    if ((i - sp == 4 || i - sp == 6) && text[sp] == ' ' && text[sp + 2] == ' ' &&
+        (text[sp + 1] == '0' || text[sp + 1] == '1') &&
+        (text[sp + 3] == '0' || text[sp + 3] == '1') &&
+        (i - sp == 4 ||
+            (text[sp + 4] == ' ' &&
+                (text[sp + 5] == '0' || text[sp + 5] == '1')))) {
+      required = text[sp + 1] == '1';
+      many = text[sp + 3] == '1';
+      personal = i - sp == 6 && text[sp + 5] == '1';
     } else {
       decls_free(alloc, decls, count);
       return GDEFCORE_ERR_CORRUPT;
@@ -1287,6 +1287,7 @@ static GDEFCORE_Result parse_decls(const GDEFCORE_Allocator * alloc,
     }
     decls[count].required = required;
     decls[count].many = many;
+    decls[count].personal = personal;
     count += 1;
     if (i < n && text[i] == '\n') {
       i += 1;
@@ -1304,9 +1305,10 @@ static GDEFCORE_Result decls_text(const GDEFCORE_Allocator * alloc,
   memset(&g, 0, sizeof g);
   g.alloc = alloc;
   for (i = 0; i < n; i++) {
-    char flag[8];
-    int kn = snprintf(flag, sizeof flag, " %d %d\n", decls[i].required ? 1 : 0,
-        decls[i].many ? 1 : 0);
+    char flag[16];
+    int kn = snprintf(flag, sizeof flag, " %d %d %d\n",
+        decls[i].required ? 1 : 0, decls[i].many ? 1 : 0,
+        decls[i].personal ? 1 : 0);
     grow_add(&g, decls[i].name.p, decls[i].name.n);
     if (kn > 0) {
       grow_add(&g, flag, (size_t)kn);
@@ -1401,6 +1403,13 @@ static GDEFCORE_Result load_type(GDEFCORE_Catalog * cat, const char * name,
   return GDEFCORE_OK;
 }
 
+static int field_personal(const GDEFCORE_Field * field) {
+  if (field->size < offsetof(GDEFCORE_Field, personal) + sizeof(int)) {
+    return 0;
+  }
+  return field->personal ? 1 : 0;
+}
+
 static GDEFCORE_Result check_fields(const GDEFCORE_Field * fields,
     size_t count, const GDEFCORE_Limits * limits) {
   size_t i;
@@ -1444,6 +1453,7 @@ static GDEFCORE_Result fields_to_decls(const GDEFCORE_Allocator * alloc,
     }
     decls[i].required = fields[i].required ? 1 : 0;
     decls[i].many = fields[i].many ? 1 : 0;
+    decls[i].personal = field_personal(&fields[i]);
   }
   *out = decls;
   return GDEFCORE_OK;
@@ -1957,6 +1967,27 @@ GDEFCORE_Result gdefcore_type_field(GDEFCORE_Catalog * catalog, const char * nam
   *out_name_len = decls[index].name.n;
   *out_required = decls[index].required;
   *out_many = decls[index].many;
+  decls_free(catalog->alloc, decls, n);
+  return GDEFCORE_OK;
+}
+
+GDEFCORE_Result gdefcore_type_field_personal(GDEFCORE_Catalog * catalog,
+    const char * name, size_t name_len, size_t index, int * out_personal) {
+  GDEFCORE_Decl * decls = NULL;
+  size_t n = 0;
+  GDEFCORE_Result rc;
+  if (catalog == NULL || out_personal == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  rc = load_type(catalog, name, name_len, NULL, &decls, &n, NULL, NULL, NULL);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  if (index >= n) {
+    decls_free(catalog->alloc, decls, n);
+    return GDEFCORE_ERR_INVALID;
+  }
+  *out_personal = decls[index].personal ? 1 : 0;
   decls_free(catalog->alloc, decls, n);
   return GDEFCORE_OK;
 }
@@ -3567,11 +3598,18 @@ GDEFCORE_Result gdefcore_changeset_serialize(const GDEFCORE_Changeset * changese
       }
       rc = patch_add(alloc, &files, &count, path, kind, strlen(kind));
       for (f = 0; rc == GDEFCORE_OK && f < op->ndecls; f++) {
-        const char * flag = op->decls[f].required
+        const char * word = op->decls[f].required
                                 ? (op->decls[f].many ? "required many"
                                                      : "required one")
                                 : (op->decls[f].many ? "optional many"
                                                      : "optional one");
+        char flag[32];
+        int fn = snprintf(flag, sizeof flag, "%s%s", word,
+            op->decls[f].personal ? " personal" : "");
+        if (fn <= 0 || (size_t)fn >= sizeof flag) {
+          rc = GDEFCORE_ERR_LIMIT;
+          break;
+        }
         kn = snprintf(path, sizeof path, "type/%.*s/field/%.*s",
             (int)op->machine.n, op->machine.p, (int)op->decls[f].name.n,
             op->decls[f].name.p);
@@ -3579,7 +3617,7 @@ GDEFCORE_Result gdefcore_changeset_serialize(const GDEFCORE_Changeset * changese
           rc = GDEFCORE_ERR_LIMIT;
           break;
         }
-        rc = patch_add(alloc, &files, &count, path, flag, strlen(flag));
+        rc = patch_add(alloc, &files, &count, path, flag, (size_t)fn);
       }
       continue;
     }
@@ -4088,22 +4126,27 @@ GDEFCORE_Result gdefcore_changeset_parse(GDEFCORE_Catalog * catalog,
           size_t flen = files[f].path_len - (size_t)kn;
           int required = 0;
           int many = 0;
+          int personal = 0;
+          const uint8_t * body = files[f].bytes;
+          size_t body_len = files[f].len;
           if (!field_name_ok(fname, flen) || nfields >= cap.max_fields ||
               nfields >= 64) {
             gdefcore_changeset_destroy(cs);
             return GDEFCORE_ERR_CORRUPT;
           }
-          if (span_eq((const char *)files[f].bytes, files[f].len, "required one",
-                  12)) {
+          if (body_len >= 9 && memcmp(body + body_len - 9, " personal", 9) == 0) {
+            personal = 1;
+            body_len -= 9;
+          }
+          if (span_eq((const char *)body, body_len, "required one", 12)) {
             required = 1;
-          } else if (span_eq((const char *)files[f].bytes, files[f].len,
-                         "required many", 13)) {
+          } else if (span_eq((const char *)body, body_len, "required many",
+                         13)) {
             required = 1;
             many = 1;
-          } else if (span_eq((const char *)files[f].bytes, files[f].len,
-                         "optional one", 12)) {
-          } else if (span_eq((const char *)files[f].bytes, files[f].len,
-                         "optional many", 13)) {
+          } else if (span_eq((const char *)body, body_len, "optional one", 12)) {
+          } else if (span_eq((const char *)body, body_len, "optional many",
+                         13)) {
             many = 1;
           } else {
             gdefcore_changeset_destroy(cs);
@@ -4115,6 +4158,7 @@ GDEFCORE_Result gdefcore_changeset_parse(GDEFCORE_Catalog * catalog,
           stack[nfields].name_len = flen;
           stack[nfields].required = required;
           stack[nfields].many = many;
+          stack[nfields].personal = personal;
           nfields += 1;
         }
       }
