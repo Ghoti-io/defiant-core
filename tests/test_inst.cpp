@@ -363,6 +363,27 @@ TEST_F(Inst, SecondTenant) {
   gdefcore_inst_text_free(inst, status);
   gdefcore_catalog_destroy(catalog);
   gdefcore_inst_destroy(inst);
+  inst = NULL;
+  placement = NULL;
+  edition = NULL;
+  status = NULL;
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_inst_open(registry_, site_, root_, sizeof root_, "", 0, NULL,
+          &inst));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_inst_resolve(inst, "acme", 4, resolved, &placement, &placement_n,
+          &edition, &edition_n, &status, &status_n, &limits));
+  EXPECT_STREQ(id_b, resolved);
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_inst_storage_key(inst, resolved, strlen(resolved), key_after));
+  EXPECT_EQ(0, memcmp(key_b, key_after, sizeof key_b));
+  EXPECT_EQ(where, std::string(placement, placement_n));
+  EXPECT_EQ(std::string("active"), std::string(status, status_n));
+  EXPECT_EQ(7u, limits.max_revisions);
+  gdefcore_inst_text_free(inst, placement);
+  gdefcore_inst_text_free(inst, edition);
+  gdefcore_inst_text_free(inst, status);
+  gdefcore_inst_destroy(inst);
 }
 
 TEST_F(Inst, Isolation) {
@@ -477,7 +498,7 @@ TEST_F(Inst, OtherRoot) {
       gdefcore_inst_open(registry_, site_, file_root, sizeof file_root, "", 0,
           NULL, &inst));
   ASSERT_EQ(GDEFCORE_OK, gdefcore_inst_default(inst, id));
-  ring = gdefcore_inst_tenant_keyring(inst, id, strlen(id));
+  ring = gdefcore_inst_keyring(inst);
   ASSERT_NE(ring, nullptr);
   ASSERT_EQ(GDEFCORE_OK, gdefcore_inst_catalog_open(inst, id, strlen(id), &catalog));
   token = Login(catalog, ring);
@@ -503,16 +524,39 @@ TEST_F(Inst, SecretEnv) {
   GDEFCORE_Inst_Config * config = NULL;
   uint8_t want[GDEFCORE_ACCOUNT_ROOT_LEN];
   uint8_t loaded[GDEFCORE_ACCOUNT_ROOT_LEN];
+  char * held = NULL;
+  char * text = NULL;
+  size_t held_n = 0;
+  size_t n = 0;
+  size_t i;
   std::string hex;
+  std::string body;
   memset(want, 0x3c, sizeof want);
   hex = HexEncode(want, sizeof want);
   ASSERT_EQ(64u, hex.size());
   ASSERT_EQ(0, setenv("DEFIANT_SECRET", hex.c_str(), 1));
   ASSERT_EQ(0, setenv("DEFIANT_SECRET_FILE", "/no/such/defiant-secret-file", 1));
+  held = getenv("DEFIANT_SECRET");
+  ASSERT_NE(held, nullptr);
+  held_n = strlen(held);
   ASSERT_EQ(GDEFCORE_OK, gdefcore_inst_config_load(NULL, &config));
   EXPECT_EQ(getenv("DEFIANT_SECRET"), nullptr);
+  for (i = 0; i < held_n; i++) {
+    EXPECT_EQ('\0', held[i]);
+  }
   ASSERT_EQ(GDEFCORE_OK, gdefcore_inst_config_root(config, loaded));
   EXPECT_EQ(0, memcmp(loaded, want, sizeof want));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_inst_config_format(config, &text, &n));
+  body.assign(text, n);
+  EXPECT_EQ(std::string(
+      "DEFIANT_ROLES= source=default\n"
+      "DEFIANT_STORE= source=default\n"
+      "DEFIANT_LISTEN= source=default\n"
+      "DEFIANT_TRUSTED_PROXIES= source=default\n"
+      "DEFIANT_SECRET= source=env\n"
+      "DEFIANT_SECRET_FILE=/no/such/defiant-secret-file source=env\n"),
+      body);
+  gdefcore_inst_config_free(config, text);
   gdefcore_inst_config_destroy(config);
 }
 
@@ -539,9 +583,14 @@ TEST_F(Inst, Effective) {
   }
   envp[nenv] = NULL;
   out = RunConfig(GDEFCORE_EFFECTIVE_CONFIG, envp);
-  EXPECT_NE(out.find("DEFIANT_LISTEN=10.1.2.3:4242 source=env\n"),
-      std::string::npos);
-  EXPECT_NE(out.find("DEFIANT_SECRET= source=file\n"), std::string::npos);
+  EXPECT_EQ(std::string(
+                "DEFIANT_ROLES= source=default\n"
+                "DEFIANT_STORE= source=default\n"
+                "DEFIANT_LISTEN=10.1.2.3:4242 source=env\n"
+                "DEFIANT_TRUSTED_PROXIES= source=default\n"
+                "DEFIANT_SECRET= source=file\n"
+                "DEFIANT_SECRET_FILE=" + path + " source=env\n"),
+      out);
   EXPECT_EQ(out.find(hex), std::string::npos);
   EXPECT_EQ(out.find("\xab"), std::string::npos);
 }
@@ -558,10 +607,14 @@ TEST_F(Inst, FileWins) {
   ASSERT_EQ(GDEFCORE_OK, gdefcore_inst_config_load(NULL, &config));
   ASSERT_EQ(GDEFCORE_OK, gdefcore_inst_config_format(config, &text, &n));
   body.assign(text, n);
-  EXPECT_NE(body.find("DEFIANT_STORE=/srv/defiant source=file\n"),
-      std::string::npos);
-  EXPECT_NE(body.find("DEFIANT_LISTEN=127.0.0.1:7 source=file\n"),
-      std::string::npos);
+  EXPECT_EQ(std::string(
+                "DEFIANT_ROLES= source=default\n"
+                "DEFIANT_STORE=/srv/defiant source=file\n"
+                "DEFIANT_LISTEN=127.0.0.1:7 source=file\n"
+                "DEFIANT_TRUSTED_PROXIES= source=default\n"
+                "DEFIANT_SECRET= source=default\n"
+                "DEFIANT_SECRET_FILE= source=default\n"),
+      body);
   gdefcore_inst_config_free(config, text);
   gdefcore_inst_config_destroy(config);
   config = NULL;
@@ -570,9 +623,45 @@ TEST_F(Inst, FileWins) {
   ASSERT_EQ(GDEFCORE_OK, gdefcore_inst_config_load(NULL, &config));
   ASSERT_EQ(GDEFCORE_OK, gdefcore_inst_config_format(config, &text, &n));
   body.assign(text, n);
-  EXPECT_NE(body.find("DEFIANT_STORE=/from-env source=env\n"), std::string::npos);
-  EXPECT_NE(body.find("DEFIANT_LISTEN=127.0.0.1:7 source=file\n"),
-      std::string::npos);
+  EXPECT_EQ(std::string(
+                "DEFIANT_ROLES= source=default\n"
+                "DEFIANT_STORE=/from-env source=env\n"
+                "DEFIANT_LISTEN=127.0.0.1:7 source=file\n"
+                "DEFIANT_TRUSTED_PROXIES= source=default\n"
+                "DEFIANT_SECRET= source=default\n"
+                "DEFIANT_SECRET_FILE= source=default\n"),
+      body);
+  gdefcore_inst_config_free(config, text);
+  gdefcore_inst_config_destroy(config);
+}
+
+TEST_F(Inst, TomlSecret) {
+  GDEFCORE_Inst_Config * config = NULL;
+  uint8_t want[GDEFCORE_ACCOUNT_ROOT_LEN];
+  uint8_t loaded[GDEFCORE_ACCOUNT_ROOT_LEN];
+  char * text = NULL;
+  size_t n = 0;
+  std::string hex;
+  std::string body;
+  std::string path = Tmp("secret.toml");
+  memset(want, 0x5a, sizeof want);
+  hex = HexEncode(want, sizeof want);
+  ASSERT_TRUE(WriteText(path, "SECRET = \"" + hex + "\"\n"));
+  ASSERT_EQ(0, setenv("DEFIANT_CONFIG", path.c_str(), 1));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_inst_config_load(NULL, &config));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_inst_config_root(config, loaded));
+  EXPECT_EQ(0, memcmp(loaded, want, sizeof want));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_inst_config_format(config, &text, &n));
+  body.assign(text, n);
+  EXPECT_EQ(std::string(
+                "DEFIANT_ROLES= source=default\n"
+                "DEFIANT_STORE= source=default\n"
+                "DEFIANT_LISTEN= source=default\n"
+                "DEFIANT_TRUSTED_PROXIES= source=default\n"
+                "DEFIANT_SECRET= source=file\n"
+                "DEFIANT_SECRET_FILE= source=default\n"),
+      body);
+  EXPECT_EQ(body.find(hex), std::string::npos);
   gdefcore_inst_config_free(config, text);
   gdefcore_inst_config_destroy(config);
 }

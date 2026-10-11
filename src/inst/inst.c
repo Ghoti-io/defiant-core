@@ -408,6 +408,16 @@ static GDEFCORE_Result take_value(GDEFCORE_Inst_Config * config, int index,
   return GDEFCORE_OK;
 }
 
+static GDEFCORE_Result toml_status(GTEXT_TOML_Status code) {
+  if (code == GTEXT_TOML_E_LIMIT || code == GTEXT_TOML_E_DEPTH) {
+    return GDEFCORE_ERR_LIMIT;
+  }
+  if (code == GTEXT_TOML_E_OOM) {
+    return GDEFCORE_ERR_OOM;
+  }
+  return GDEFCORE_ERR_FORMAT;
+}
+
 static GDEFCORE_Result load_toml(GDEFCORE_Inst_Config * config,
     const char * path) {
   GTEXT_TOML_Parse_Options opts = gtext_toml_parse_options_default();
@@ -420,7 +430,9 @@ static GDEFCORE_Result load_toml(GDEFCORE_Inst_Config * config,
   memset(&err, 0, sizeof err);
   root = gtext_toml_parse_file(path, &opts, &err);
   if (root == NULL) {
-    return GDEFCORE_ERR_FORMAT;
+    rc = toml_status(err.code);
+    gtext_toml_error_free(&err);
+    return rc;
   }
   if (gtext_toml_value_type(root) != GTEXT_TOML_TABLE) {
     gtext_toml_free(root);
@@ -438,7 +450,8 @@ static GDEFCORE_Result load_toml(GDEFCORE_Inst_Config * config,
       rc = GDEFCORE_ERR_INVALID;
       break;
     }
-    if (config->sources[index] == kSrcEnv) {
+    if (config->sources[index] == kSrcEnv ||
+        (index == kSecret && config->sources[kSecretFile] == kSrcEnv)) {
       continue;
     }
     if (gtext_toml_value_type(val) != GTEXT_TOML_STRING) {
@@ -472,6 +485,8 @@ GDEFCORE_Result gdefcore_inst_config_load(const GDEFCORE_Allocator * allocator,
     GDEFCORE_Inst_Config ** out_config) {
   GDEFCORE_Inst_Config * config;
   const char * config_path;
+  char * secret_env = NULL;
+  size_t secret_len = 0;
   int i;
   int values_ok;
   GDEFCORE_Result rc;
@@ -511,12 +526,12 @@ GDEFCORE_Result gdefcore_inst_config_load(const GDEFCORE_Allocator * allocator,
         gdefcore_inst_config_destroy(config);
         return rc;
       }
-      memset(env, 0, n);
-      unsetenv(kEnvNames[i]);
       memcpy(config->root, root, sizeof root);
       wipe(root, sizeof root);
       config->has_root = 1;
       config->sources[i] = kSrcEnv;
+      secret_env = env;
+      secret_len = n;
       continue;
     }
     rc = take_value(config, i, env, n, kSrcEnv);
@@ -541,6 +556,10 @@ GDEFCORE_Result gdefcore_inst_config_load(const GDEFCORE_Allocator * allocator,
     }
     config->has_root = 1;
     config->sources[kSecret] = kSrcFile;
+  }
+  if (secret_env != NULL) {
+    wipe(secret_env, secret_len);
+    unsetenv(kEnvNames[kSecret]);
   }
   *out_config = config;
   return GDEFCORE_OK;
