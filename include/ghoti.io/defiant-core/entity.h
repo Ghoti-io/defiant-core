@@ -465,6 +465,58 @@ GDEFCORE_API GDEFCORE_Result gdefcore_changeset_module_at(
     const GDEFCORE_Changeset * changeset, size_t index, const char ** out_name,
     size_t * out_len, int * out_enable);
 
+/**
+ * @brief Public ids of entities of @p type_name, in creation order.
+ *
+ * This is the unfiltered index. A principal's list is
+ * gdefcore_access_list(). An unknown type is an empty list.
+ * Free @p out_ids with gdefcore_ids_free().
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_entity_ids(GDEFCORE_Catalog * catalog,
+    const char * type_name, size_t type_name_len, char *** out_ids,
+    size_t * out_count);
+
+/** @brief Free ids from gdefcore_entity_ids(). NULL is ignored. */
+GDEFCORE_API void gdefcore_ids_free(GDEFCORE_Catalog * catalog, char ** ids,
+    size_t count);
+
+/**
+ * @brief The entity's type name. Free @p out_type with gdefcore_text_free().
+ *
+ * A missing id is ::GDEFCORE_ERR_INVALID.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_entity_type(GDEFCORE_Catalog * catalog,
+    const char * id, size_t id_len, char ** out_type, size_t * out_len);
+
+/**
+ * @brief The actor stored on the published revision, or NULL when there is none.
+ *
+ * An entity with no actor is not anyone's own. A missing id is
+ * ::GDEFCORE_ERR_INVALID. Free @p out_actor with gdefcore_text_free().
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_entity_actor(GDEFCORE_Catalog * catalog,
+    const char * id, size_t id_len, char ** out_actor, size_t * out_len);
+
+/**
+ * @brief Copy bytes with the catalog allocator.
+ *
+ * Free @p out with gdefcore_text_free().
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_text_dup(GDEFCORE_Catalog * catalog,
+    const char * text, size_t len, char ** out);
+
+/** @brief The catalog a changeset was prepared on, or NULL. */
+GDEFCORE_API GDEFCORE_Catalog * gdefcore_changeset_catalog(
+    const GDEFCORE_Changeset * changeset);
+
+/**
+ * @brief Add a confirmation line. Apply sorts these after the machine names.
+ *
+ * A line break is refused. Enabling a module uses this for permission labels.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_changeset_add_confirm_line(
+    GDEFCORE_Changeset * changeset, const char * line, size_t len);
+
 #ifdef __cplusplus
 }
 #endif

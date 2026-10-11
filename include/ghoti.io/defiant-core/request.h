@@ -24,8 +24,10 @@
  * @stability free
  *
  * A request carries its tenant as caller-supplied bytes, its fiber, its
- * deadline and its yield bound, and a storage write when it holds one.
- * There is no current request, tenant or user on the thread or in a global.
+ * deadline and its yield bound, a storage write when it holds one, and an
+ * optional principal and acting principal. No principal is the anonymous
+ * state. There is no current request, tenant or user on the thread or in
+ * a global.
  */
 
 #ifndef GHOTI_IO_GDEFCORE_REQUEST_H
@@ -180,6 +182,42 @@ GDEFCORE_API GDEFCORE_Result gdefcore_request_set_write(
  */
 GDEFCORE_API GDEFSTOR_Write * gdefcore_request_write(
     const GDEFCORE_Request * request);
+
+/**
+ * @brief Set the principal, or clear it.
+ *
+ * NULL or a zero length clears the principal, which is the anonymous state.
+ * A public id is stored in canonical form. A bad id leaves the previous
+ * value in place.
+ *
+ * @return ::GDEFCORE_OK, ::GDEFCORE_ERR_INVALID, or ::GDEFCORE_ERR_OOM.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_request_set_principal(
+    GDEFCORE_Request * request, const char * id, size_t id_len);
+
+/**
+ * @brief The principal, or NULL when the request is anonymous.
+ *
+ * The bytes stay valid until the next set or until the request is destroyed.
+ *
+ * @param out_len Receives the length. May be NULL.
+ */
+GDEFCORE_API const char * gdefcore_request_principal(
+    const GDEFCORE_Request * request, size_t * out_len);
+
+/**
+ * @brief Set the acting principal, or clear it. Same rules as the principal.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_request_set_acting_principal(
+    GDEFCORE_Request * request, const char * id, size_t id_len);
+
+/**
+ * @brief The acting principal, or NULL when there is none.
+ *
+ * @param out_len Receives the length. May be NULL.
+ */
+GDEFCORE_API const char * gdefcore_request_acting_principal(
+    const GDEFCORE_Request * request, size_t * out_len);
 
 #ifdef __cplusplus
 }

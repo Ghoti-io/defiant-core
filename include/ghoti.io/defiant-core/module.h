@@ -171,6 +171,26 @@ typedef struct GDEFCORE_Module_Service {
 } GDEFCORE_Module_Service;
 
 /**
+ * @brief A permission the module declares. Begins with @ref size.
+ *
+ * Enabling the module does not grant it. The condition is 1 for any entity
+ * of @ref type_name, or 2 for the principal's own. @ref field NULL covers
+ * the entity.
+ */
+typedef struct GDEFCORE_Module_Perm {
+  size_t size;              ///< `sizeof(GDEFCORE_Module_Perm)` for this build.
+  const char * label;       ///< Plain-language label. Borrowed.
+  size_t label_len;         ///< Length of @ref label.
+  const char * action;      ///< Action name. Borrowed.
+  size_t action_len;        ///< Length of @ref action.
+  int condition;            ///< 1 any, or 2 own.
+  const char * type_name;   ///< Entity type. Borrowed.
+  size_t type_name_len;     ///< Length of @ref type_name.
+  const char * field;       ///< Field, or NULL.
+  size_t field_len;         ///< Length of @ref field.
+} GDEFCORE_Module_Perm;
+
+/**
  * @brief What `gdefcore_module_manifest` returns. Begins with @ref size.
  *
  * @ref core_token is the namespace token the module was built against. The
@@ -191,6 +211,8 @@ typedef struct GDEFCORE_Module_Manifest {
   size_t nsubs;                             ///< How many subscriptions.
   const GDEFCORE_Module_Service * services; ///< Optional tables. May be NULL.
   size_t nservices;                         ///< How many services.
+  const GDEFCORE_Module_Perm * perms;       ///< Declared permissions. May be NULL.
+  size_t nperms;                            ///< How many permissions.
 } GDEFCORE_Module_Manifest;
 
 /** The entry a native module exports and a guest hands to the host. */

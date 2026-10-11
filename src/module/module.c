@@ -27,6 +27,7 @@
  */
 
 #include <ghoti.io/defiant-core/macros.h>
+#include <ghoti.io/defiant-core/access.h>
 
 #include "module_internal.h"
 
@@ -49,6 +50,7 @@ enum {
   kRelMax = 8,
   kSubMax = 16,
   kSvcMax = 4,
+  kPermMax = 8,
   kChainMax = 32,
   kNodeMax = 64,
   kNoticeMax = 1024,
@@ -97,6 +99,18 @@ typedef struct Svc {
   const void * table;
 } Svc;
 
+typedef struct Perm {
+  char label[kNameMax + 1];
+  size_t label_len;
+  char action[kNameMax + 1];
+  size_t action_len;
+  int condition;
+  char type_name[kNameMax + 1];
+  size_t type_len;
+  char field[kNameMax + 1];
+  size_t field_len;
+} Perm;
+
 typedef struct Mod {
   int used;
   char name[kNameMax + 1];
@@ -120,6 +134,8 @@ typedef struct Mod {
   size_t nsubs;
   Svc services[kSvcMax];
   size_t nservices;
+  Perm perms[kPermMax];
+  size_t nperms;
 } Mod;
 
 typedef struct ChainNode {
@@ -738,6 +754,48 @@ static GDEFCORE_Result copy_manifest(GDEFCORE_Host * host, Mod * mod,
     mod->services[mod->nservices].table = svc.table;
     mod->nservices += 1;
   }
+  mod->nperms = 0;
+  if (man.nperms > kPermMax) {
+    return GDEFCORE_ERR_LIMIT;
+  }
+  if (man.nperms > 0 && man.perms == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  for (i = 0; i < man.nperms; i++) {
+    GDEFCORE_Module_Perm perm;
+    take_prefix(&perm, sizeof perm, &man.perms[i]);
+    if (perm.label == NULL || perm.label_len == 0 || perm.action == NULL ||
+        perm.action_len == 0 || perm.type_name == NULL ||
+        perm.type_name_len == 0 ||
+        (perm.condition != GDEFCORE_ACCESS_ANY &&
+            perm.condition != GDEFCORE_ACCESS_OWN)) {
+      return GDEFCORE_ERR_INVALID;
+    }
+    memset(&mod->perms[mod->nperms], 0, sizeof mod->perms[mod->nperms]);
+    if (!copy_span(mod->perms[mod->nperms].label,
+            sizeof mod->perms[mod->nperms].label,
+            &mod->perms[mod->nperms].label_len, perm.label, perm.label_len) ||
+        !copy_span(mod->perms[mod->nperms].action,
+            sizeof mod->perms[mod->nperms].action,
+            &mod->perms[mod->nperms].action_len, perm.action,
+            perm.action_len) ||
+        !copy_span(mod->perms[mod->nperms].type_name,
+            sizeof mod->perms[mod->nperms].type_name,
+            &mod->perms[mod->nperms].type_len, perm.type_name,
+            perm.type_name_len)) {
+      return GDEFCORE_ERR_LIMIT;
+    }
+    if (perm.field != NULL && perm.field_len > 0) {
+      if (!copy_span(mod->perms[mod->nperms].field,
+              sizeof mod->perms[mod->nperms].field,
+              &mod->perms[mod->nperms].field_len, perm.field,
+              perm.field_len)) {
+        return GDEFCORE_ERR_LIMIT;
+      }
+    }
+    mod->perms[mod->nperms].condition = perm.condition;
+    mod->nperms += 1;
+  }
   mod->loaded = 1;
   return GDEFCORE_OK;
 }
@@ -789,6 +847,7 @@ static GDEFCORE_Result call_entry(GDEFCORE_Host * host, Mod * mod) {
     mod->nsubs = 0;
     mod->nrels = 0;
     mod->nservices = 0;
+    mod->nperms = 0;
     return rc;
   }
   if (clear_rc != GDEFCORE_OK) {
@@ -1052,7 +1111,28 @@ static GDEFCORE_Result stage_named(GDEFCORE_Host * host,
 
 GDEFCORE_Result gdefcore_module_enable(GDEFCORE_Host * host,
     GDEFCORE_Changeset * changeset, const char * name, size_t name_len) {
-  return stage_named(host, changeset, name, name_len, 1);
+  Mod * mod;
+  size_t i;
+  GDEFCORE_Result rc = stage_named(host, changeset, name, name_len, 1);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  mod = find_mod(host, name, name_len);
+  if (mod == NULL) {
+    return GDEFCORE_OK;
+  }
+  for (i = 0; i < mod->nperms; i++) {
+    rc = gdefcore_access_stage_module_permission(changeset, name, name_len,
+        mod->perms[i].label, mod->perms[i].label_len, mod->perms[i].action,
+        mod->perms[i].action_len, mod->perms[i].condition,
+        mod->perms[i].type_name, mod->perms[i].type_len,
+        mod->perms[i].field_len == 0 ? NULL : mod->perms[i].field,
+        mod->perms[i].field_len);
+    if (rc != GDEFCORE_OK) {
+      return rc;
+    }
+  }
+  return GDEFCORE_OK;
 }
 
 GDEFCORE_Result gdefcore_module_disable(GDEFCORE_Host * host,

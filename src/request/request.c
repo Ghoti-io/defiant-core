@@ -26,6 +26,7 @@
  */
 
 #include <ghoti.io/defiant-core/macros.h>
+#include <ghoti.io/defiant-core/entity.h>
 #include <ghoti.io/defiant-core/request.h>
 
 #include <stdatomic.h>
@@ -87,6 +88,8 @@ void gdefcore_request_destroy(GDEFCORE_Request * request) {
     request->fiber = NULL;
   }
   allocator = request->allocator;
+  gcu_allocator_free(allocator, request->principal);
+  gcu_allocator_free(allocator, request->acting);
   gcu_allocator_free(allocator, request->tenant);
   gcu_allocator_free(allocator, request);
 }
@@ -155,4 +158,81 @@ GDEFCORE_Result gdefcore_request_set_write(
 
 GDEFSTOR_Write * gdefcore_request_write(const GDEFCORE_Request * request) {
   return request == NULL ? NULL : request->write;
+}
+
+static GDEFCORE_Result set_public_id(GDEFCORE_Request * request, char ** slot,
+    size_t * slot_len, const char * id, size_t id_len) {
+  char canon[GDEFCORE_PUBLIC_ID_LEN + 1];
+  char * copy;
+  if (request == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  if (id == NULL || id_len == 0) {
+    gcu_allocator_free(request->allocator, *slot);
+    *slot = NULL;
+    *slot_len = 0;
+    return GDEFCORE_OK;
+  }
+  if (gdefcore_id_canonical(id, id_len, canon) != GDEFCORE_OK) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  copy = (char *)gcu_allocator_malloc(
+      request->allocator, GDEFCORE_PUBLIC_ID_LEN + 1);
+  if (copy == NULL) {
+    return GDEFCORE_ERR_OOM;
+  }
+  memcpy(copy, canon, GDEFCORE_PUBLIC_ID_LEN + 1);
+  gcu_allocator_free(request->allocator, *slot);
+  *slot = copy;
+  *slot_len = GDEFCORE_PUBLIC_ID_LEN;
+  return GDEFCORE_OK;
+}
+
+static const char * get_public_id(const GDEFCORE_Request * request,
+    const char * slot, size_t slot_len, size_t * out_len) {
+  if (request == NULL || slot == NULL) {
+    if (out_len != NULL) {
+      *out_len = 0;
+    }
+    return NULL;
+  }
+  if (out_len != NULL) {
+    *out_len = slot_len;
+  }
+  return slot;
+}
+
+GDEFCORE_Result gdefcore_request_set_principal(
+    GDEFCORE_Request * request, const char * id, size_t id_len) {
+  if (request == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  return set_public_id(
+      request, &request->principal, &request->principal_len, id, id_len);
+}
+
+const char * gdefcore_request_principal(
+    const GDEFCORE_Request * request, size_t * out_len) {
+  if (request == NULL) {
+    return get_public_id(NULL, NULL, 0, out_len);
+  }
+  return get_public_id(
+      request, request->principal, request->principal_len, out_len);
+}
+
+GDEFCORE_Result gdefcore_request_set_acting_principal(
+    GDEFCORE_Request * request, const char * id, size_t id_len) {
+  if (request == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  return set_public_id(request, &request->acting, &request->acting_len, id,
+      id_len);
+}
+
+const char * gdefcore_request_acting_principal(
+    const GDEFCORE_Request * request, size_t * out_len) {
+  if (request == NULL) {
+    return get_public_id(NULL, NULL, 0, out_len);
+  }
+  return get_public_id(request, request->acting, request->acting_len, out_len);
 }

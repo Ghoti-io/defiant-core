@@ -27,6 +27,7 @@
 #ifndef GHOTI_IO_GDEFCORE_DEFIANT_CORE_H
 #define GHOTI_IO_GDEFCORE_DEFIANT_CORE_H
 
+#include <ghoti.io/defiant-core/access.h>
 #include <ghoti.io/defiant-core/allocator.h>
 #include <ghoti.io/defiant-core/core.h>
 #include <ghoti.io/defiant-core/entity.h>

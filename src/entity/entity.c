@@ -26,6 +26,7 @@
  */
 
 #include <ghoti.io/defiant-core/macros.h>
+#include <ghoti.io/defiant-core/access.h>
 #include <ghoti.io/defiant-core/entity.h>
 #include <ghoti.io/defiant-core/module.h>
 
@@ -1960,6 +1961,52 @@ GDEFCORE_Result gdefcore_type_field(GDEFCORE_Catalog * catalog, const char * nam
   return GDEFCORE_OK;
 }
 
+static const char kIdsType[] = "core.ids";
+
+static GDEFCORE_Result ids_add(GDEFCORE_Catalog * cat, GDEFSTOR_Write * write,
+    const char * type, size_t type_len, const char * id) {
+  GDEFSTOR_Projection * proj = NULL;
+  const uint8_t * val = NULL;
+  size_t vlen = 0;
+  char * buf;
+  size_t n = 0;
+  GDEFSTOR_Column column;
+  GDEFCORE_Result rc = proj_get(cat, kIdsType, sizeof kIdsType - 1, type,
+      type_len, &proj);
+  if (rc == GDEFCORE_OK) {
+    if (!col_find(proj, "ids", 3, &val, &vlen)) {
+      val = NULL;
+      vlen = 0;
+    }
+  } else if (rc != GDEFCORE_ERR_INVALID) {
+    return rc;
+  }
+  buf = (char *)mem(cat->alloc, vlen + GDEFCORE_PUBLIC_ID_LEN + 2);
+  if (buf == NULL) {
+    gdefstor_projection_free(proj);
+    return GDEFCORE_ERR_OOM;
+  }
+  if (val != NULL && vlen > 0) {
+    memcpy(buf, val, vlen);
+    n = vlen;
+  }
+  gdefstor_projection_free(proj);
+  if (n > 0) {
+    buf[n++] = '\n';
+  }
+  memcpy(buf + n, id, GDEFCORE_PUBLIC_ID_LEN);
+  n += GDEFCORE_PUBLIC_ID_LEN;
+  memset(&column, 0, sizeof column);
+  column.name = "ids";
+  column.name_len = 3;
+  column.value = (const uint8_t *)buf;
+  column.value_len = n;
+  rc = map_stor(gdefstor_projection_put(write, kIdsType, sizeof kIdsType - 1,
+      type, type_len, &column, 1));
+  gcu_allocator_free(cat->alloc, buf);
+  return rc;
+}
+
 GDEFCORE_Result gdefcore_entity_create(GDEFCORE_Catalog * catalog,
     const char * type_name, size_t type_len,
     char out_id[GDEFCORE_PUBLIC_ID_LEN + 1], uint64_t * out_row) {
@@ -2000,6 +2047,9 @@ GDEFCORE_Result gdefcore_entity_create(GDEFCORE_Catalog * catalog,
         NULL, 0);
   }
   if (rc == GDEFCORE_OK) {
+    rc = ids_add(catalog, write, type_name, type_len, id);
+  }
+  if (rc == GDEFCORE_OK) {
     if (!u64_put(row, row_text, sizeof row_text, &rn)) {
       rc = GDEFCORE_ERR_LIMIT;
     } else {
@@ -2030,6 +2080,12 @@ static void changeset_free_ops(GDEFCORE_Changeset * cs) {
   gcu_allocator_free(cs->catalog->alloc, cs->ops);
   cs->ops = NULL;
   cs->nops = 0;
+  for (i = 0; i < cs->nlines; i++) {
+    text_clear(cs->catalog->alloc, &cs->lines[i]);
+  }
+  gcu_allocator_free(cs->catalog->alloc, cs->lines);
+  cs->lines = NULL;
+  cs->nlines = 0;
   text_clear(cs->catalog->alloc, &cs->conflict);
   text_clear(cs->catalog->alloc, &cs->actor);
 }
@@ -2038,6 +2094,7 @@ void gdefcore_changeset_destroy(GDEFCORE_Changeset * changeset) {
   if (changeset == NULL) {
     return;
   }
+  gdefcore_access_clear_staged(changeset);
   changeset_free_ops(changeset);
   gcu_allocator_free(changeset->catalog->alloc, changeset);
 }
@@ -2675,6 +2732,51 @@ GDEFCORE_Result gdefcore_changeset_rate(const GDEFCORE_Changeset * changeset,
   return GDEFCORE_OK;
 }
 
+static GDEFCORE_Result append_confirm_lines(Grow * g,
+    const GDEFCORE_Changeset * cs) {
+  char ** lines;
+  size_t i;
+  size_t n = 0;
+  char * prev = NULL;
+  const GDEFCORE_Allocator * alloc = cs->catalog->alloc;
+  if (cs->nlines == 0) {
+    return GDEFCORE_OK;
+  }
+  lines = (char **)mem0(alloc, cs->nlines * sizeof *lines);
+  if (lines == NULL) {
+    return GDEFCORE_ERR_OOM;
+  }
+  for (i = 0; i < cs->nlines; i++) {
+    lines[n] = dup_span(alloc, cs->lines[i].p, cs->lines[i].n);
+    if (lines[n] == NULL) {
+      free_cstrs(alloc, lines, n);
+      return GDEFCORE_ERR_OOM;
+    }
+    n += 1;
+  }
+  if (n > 1) {
+    qsort(lines, n, sizeof *lines, cmp_cstr);
+  }
+  for (i = 0; i < n; i++) {
+    if (prev != NULL && strcmp(lines[i], prev) == 0) {
+      gcu_allocator_free(alloc, lines[i]);
+      continue;
+    }
+    if (g->n > 0) {
+      grow_add(g, "\n", 1);
+    }
+    grow_add(g, lines[i], strlen(lines[i]));
+    gcu_allocator_free(alloc, prev);
+    prev = lines[i];
+  }
+  gcu_allocator_free(alloc, prev);
+  gcu_allocator_free(alloc, lines);
+  if (g->oom) {
+    return GDEFCORE_ERR_OOM;
+  }
+  return GDEFCORE_OK;
+}
+
 static GDEFCORE_Result confirm_text(const GDEFCORE_Changeset * cs, char ** out,
     size_t * out_len) {
   char ** names = NULL;
@@ -2735,6 +2837,10 @@ static GDEFCORE_Result confirm_text(const GDEFCORE_Changeset * cs, char ** out,
   }
   gcu_allocator_free(alloc, names);
   if (g.oom) {
+    gcu_allocator_free(alloc, g.p);
+    return GDEFCORE_ERR_OOM;
+  }
+  if (append_confirm_lines(&g, cs) != GDEFCORE_OK) {
     gcu_allocator_free(alloc, g.p);
     return GDEFCORE_ERR_OOM;
   }
@@ -3131,20 +3237,26 @@ GDEFCORE_Result gdefcore_changeset_apply(GDEFCORE_Changeset * changeset,
   }
   changeset->applied = 1;
   changeset->epoch = epoch + 1;
-  if (changeset->catalog->host != NULL) {
-    GDEFCORE_Result hook_rc = GDEFCORE_OK;
-    GDEFCORE_Result first = GDEFCORE_OK;
-    if (gdefcore_changeset_module_count(changeset) > 0) {
-      first = gdefcore_module_after_apply(changeset->catalog->host,
-          changeset->catalog->tenant, changeset->catalog->tenant_len,
-          changeset);
-    }
-    for (i = 0; i < changeset->nops; i++) {
-      GDEFCORE_Op * op = &changeset->ops[i];
-      if (op->kind == GDEFCORE_OP_SAVE || op->kind == GDEFCORE_OP_CLEAR) {
-        hook_rc = fire_named(changeset, op, GDEFCORE_HOOK_AFTER_COMMIT);
+  {
+    GDEFCORE_Result grant_rc = gdefcore_access_commit_staged(changeset);
+    GDEFCORE_Result first = grant_rc;
+    if (changeset->catalog->host != NULL) {
+      GDEFCORE_Result hook_rc = GDEFCORE_OK;
+      if (gdefcore_changeset_module_count(changeset) > 0) {
+        hook_rc = gdefcore_module_after_apply(changeset->catalog->host,
+            changeset->catalog->tenant, changeset->catalog->tenant_len,
+            changeset);
         if (hook_rc != GDEFCORE_OK && first == GDEFCORE_OK) {
           first = hook_rc;
+        }
+      }
+      for (i = 0; i < changeset->nops; i++) {
+        GDEFCORE_Op * op = &changeset->ops[i];
+        if (op->kind == GDEFCORE_OP_SAVE || op->kind == GDEFCORE_OP_CLEAR) {
+          hook_rc = fire_named(changeset, op, GDEFCORE_HOOK_AFTER_COMMIT);
+          if (hook_rc != GDEFCORE_OK && first == GDEFCORE_OK) {
+            first = hook_rc;
+          }
         }
       }
     }
@@ -4157,5 +4269,219 @@ GDEFCORE_Result gdefcore_changeset_parse(GDEFCORE_Catalog * catalog,
     }
   }
   *out_changeset = cs;
+  return GDEFCORE_OK;
+}
+
+GDEFCORE_Result gdefcore_entity_ids(GDEFCORE_Catalog * catalog,
+    const char * type_name, size_t type_name_len, char *** out_ids,
+    size_t * out_count) {
+  GDEFSTOR_Projection * proj = NULL;
+  const uint8_t * val = NULL;
+  size_t vlen = 0;
+  char * copy = NULL;
+  char ** ids = NULL;
+  size_t count = 0;
+  size_t filled = 0;
+  size_t i;
+  GDEFCORE_Result rc;
+  if (catalog == NULL || type_name == NULL || type_name_len == 0 ||
+      out_ids == NULL || out_count == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  *out_ids = NULL;
+  *out_count = 0;
+  rc = proj_get(catalog, kIdsType, sizeof kIdsType - 1, type_name,
+      type_name_len, &proj);
+  if (rc == GDEFCORE_ERR_INVALID) {
+    return GDEFCORE_OK;
+  }
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  if (!col_find(proj, "ids", 3, &val, &vlen) || vlen == 0) {
+    gdefstor_projection_free(proj);
+    return GDEFCORE_OK;
+  }
+  copy = (char *)mem(catalog->alloc, vlen + 1);
+  if (copy == NULL) {
+    gdefstor_projection_free(proj);
+    return GDEFCORE_ERR_OOM;
+  }
+  memcpy(copy, val, vlen);
+  copy[vlen] = '\0';
+  gdefstor_projection_free(proj);
+  count = 1;
+  for (i = 0; i < vlen; i++) {
+    if (copy[i] == '\n') {
+      count += 1;
+    }
+  }
+  ids = (char **)mem0(catalog->alloc, count * sizeof *ids);
+  if (ids == NULL) {
+    gcu_allocator_free(catalog->alloc, copy);
+    return GDEFCORE_ERR_OOM;
+  }
+  {
+    size_t start = 0;
+    for (i = 0; i <= vlen; i++) {
+      if (i == vlen || copy[i] == '\n') {
+        size_t n = i - start;
+        if (n > 0) {
+          ids[filled] = dup_span(catalog->alloc, copy + start, n);
+          if (ids[filled] == NULL) {
+            gdefcore_ids_free(catalog, ids, filled);
+            gcu_allocator_free(catalog->alloc, copy);
+            return GDEFCORE_ERR_OOM;
+          }
+          filled += 1;
+        }
+        start = i + 1;
+      }
+    }
+  }
+  gcu_allocator_free(catalog->alloc, copy);
+  *out_ids = ids;
+  *out_count = filled;
+  return GDEFCORE_OK;
+}
+
+void gdefcore_ids_free(GDEFCORE_Catalog * catalog, char ** ids, size_t count) {
+  size_t i;
+  if (catalog == NULL || ids == NULL) {
+    return;
+  }
+  for (i = 0; i < count; i++) {
+    gcu_allocator_free(catalog->alloc, ids[i]);
+  }
+  gcu_allocator_free(catalog->alloc, ids);
+}
+
+GDEFCORE_Result gdefcore_entity_type(GDEFCORE_Catalog * catalog,
+    const char * id, size_t id_len, char ** out_type, size_t * out_len) {
+  char canon[GDEFCORE_PUBLIC_ID_LEN + 1];
+  uint64_t row = 0;
+  char * type_name = NULL;
+  size_t type_len = 0;
+  GDEFCORE_Result rc;
+  if (catalog == NULL || out_type == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  if (gdefcore_id_canonical(id, id_len, canon) != GDEFCORE_OK) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  rc = lookup_id(catalog, canon, GDEFCORE_PUBLIC_ID_LEN, &row, &type_name,
+      &type_len, NULL, NULL);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  *out_type = type_name;
+  if (out_len != NULL) {
+    *out_len = type_len;
+  }
+  return GDEFCORE_OK;
+}
+
+GDEFCORE_Result gdefcore_entity_actor(GDEFCORE_Catalog * catalog,
+    const char * id, size_t id_len, char ** out_actor, size_t * out_len) {
+  char canon[GDEFCORE_PUBLIC_ID_LEN + 1];
+  char type_buf[160];
+  char row_text[32];
+  size_t rn = 0;
+  uint64_t row = 0;
+  char * type_name = NULL;
+  size_t type_len = 0;
+  int kn;
+  GDEFSTOR_Projection * proj = NULL;
+  const uint8_t * val = NULL;
+  size_t vlen = 0;
+  GDEFCORE_Result rc;
+  if (catalog == NULL || out_actor == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  *out_actor = NULL;
+  if (out_len != NULL) {
+    *out_len = 0;
+  }
+  if (gdefcore_id_canonical(id, id_len, canon) != GDEFCORE_OK) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  rc = lookup_id(catalog, canon, GDEFCORE_PUBLIC_ID_LEN, &row, &type_name,
+      &type_len, NULL, NULL);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  if (!u64_put(row, row_text, sizeof row_text, &rn)) {
+    gcu_allocator_free(catalog->alloc, type_name);
+    return GDEFCORE_ERR_LIMIT;
+  }
+  kn = snprintf(type_buf, sizeof type_buf, "p:%.*s", (int)type_len, type_name);
+  gcu_allocator_free(catalog->alloc, type_name);
+  if (kn <= 0 || (size_t)kn >= sizeof type_buf) {
+    return GDEFCORE_ERR_LIMIT;
+  }
+  rc = proj_get(catalog, type_buf, (size_t)kn, row_text, rn, &proj);
+  if (rc == GDEFCORE_ERR_INVALID) {
+    return GDEFCORE_OK;
+  }
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  if (col_find(proj, "actor", 5, &val, &vlen) && vlen > 0) {
+    *out_actor = dup_span(catalog->alloc, (const char *)val, vlen);
+    if (*out_actor == NULL) {
+      gdefstor_projection_free(proj);
+      return GDEFCORE_ERR_OOM;
+    }
+    if (out_len != NULL) {
+      *out_len = vlen;
+    }
+  }
+  gdefstor_projection_free(proj);
+  return GDEFCORE_OK;
+}
+
+GDEFCORE_Result gdefcore_text_dup(GDEFCORE_Catalog * catalog, const char * text,
+    size_t len, char ** out) {
+  char * copy;
+  if (catalog == NULL || out == NULL || (text == NULL && len != 0)) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  copy = dup_span(catalog->alloc, text == NULL ? "" : text, len);
+  if (copy == NULL) {
+    return GDEFCORE_ERR_OOM;
+  }
+  *out = copy;
+  return GDEFCORE_OK;
+}
+
+GDEFCORE_Catalog * gdefcore_changeset_catalog(
+    const GDEFCORE_Changeset * changeset) {
+  return changeset == NULL ? NULL : changeset->catalog;
+}
+
+GDEFCORE_Result gdefcore_changeset_add_confirm_line(
+    GDEFCORE_Changeset * changeset, const char * line, size_t len) {
+  GDEFCORE_Text * next;
+  size_t i;
+  if (changeset == NULL || changeset->applied || line == NULL || len == 0) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  for (i = 0; i < len; i++) {
+    if (line[i] == '\n' || line[i] == '\r') {
+      return GDEFCORE_ERR_INVALID;
+    }
+  }
+  next = (GDEFCORE_Text *)gcu_allocator_realloc(changeset->catalog->alloc,
+      changeset->lines, (changeset->nlines + 1) * sizeof *next);
+  if (next == NULL) {
+    return GDEFCORE_ERR_OOM;
+  }
+  changeset->lines = next;
+  memset(&next[changeset->nlines], 0, sizeof next[changeset->nlines]);
+  if (text_set(changeset->catalog->alloc, &next[changeset->nlines], line,
+          len) != GDEFCORE_OK) {
+    return GDEFCORE_ERR_OOM;
+  }
+  changeset->nlines += 1;
   return GDEFCORE_OK;
 }

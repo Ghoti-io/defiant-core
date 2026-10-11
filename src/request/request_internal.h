@@ -39,6 +39,10 @@ struct GDEFCORE_Request {
   GDEFCORE_Result status;
   GCU_Fiber * fiber;
   GDEFSTOR_Write * write;
+  char * principal;
+  size_t principal_len;
+  char * acting;
+  size_t acting_len;
   const GDEFCORE_Allocator * allocator;
 };
 
