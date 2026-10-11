@@ -458,7 +458,7 @@ GDEFCORE_Result gdefcore_subject_bind_keyring(GDEFSTOR_Store * side,
     rc = adopt_wrap(root, root_len, wrapped, allocator, &adopted);
     wipe(wrapped, sizeof wrapped);
     if (rc != GDEFCORE_OK) {
-      return GDEFCORE_ERR_CORRUPT;
+      return rc;
     }
     gdefcore_keyring_destroy(*inout);
     *inout = adopted;
@@ -702,6 +702,13 @@ static int loc_match(const char * line, size_t len, const char * entity,
 
 static int loc_match_any(const char * text, size_t n, const char * entity,
     const char * field, size_t field_len, const char * lang, size_t lang_len);
+
+static void blind_entity(char out[GDEFCORE_PUBLIC_ID_LEN + 64 + 1],
+    const char * subject, const char * hex) {
+  memcpy(out, subject, GDEFCORE_PUBLIC_ID_LEN);
+  memcpy(out + GDEFCORE_PUBLIC_ID_LEN, hex, kMac * 2);
+  out[GDEFCORE_PUBLIC_ID_LEN + kMac * 2] = '\0';
+}
 
 static GDEFCORE_Result drop_blind_line(const GDEFCORE_Allocator * alloc,
     char ** text, size_t * n, const char * entity, const char * field,
@@ -1139,10 +1146,14 @@ static GDEFCORE_Result remember(GDEFCORE_Subjects * subjects, const char * subje
     return rc;
   }
   if (old_len == kMac * 2) {
+    char old_id[GDEFCORE_PUBLIC_ID_LEN + 64 + 1];
+    blind_entity(old_id, subject, old_hex);
     rc = from_stor(gdefstor_projection_delete(write, kBlindType,
-        strlen(kBlindType), old_hex, old_len));
+        strlen(kBlindType), old_id, GDEFCORE_PUBLIC_ID_LEN + old_len));
   }
   if (rc == GDEFCORE_OK) {
+    char row_id[GDEFCORE_PUBLIC_ID_LEN + 64 + 1];
+    blind_entity(row_id, subject, hex);
     memset(blind_cols, 0, sizeof blind_cols);
     blind_cols[0].name = "mac";
     blind_cols[0].name_len = 3;
@@ -1157,7 +1168,7 @@ static GDEFCORE_Result remember(GDEFCORE_Subjects * subjects, const char * subje
     blind_cols[2].value = (const uint8_t *)subject;
     blind_cols[2].value_len = GDEFCORE_PUBLIC_ID_LEN;
     rc = from_stor(gdefstor_projection_put(write, kBlindType, strlen(kBlindType),
-        hex, hex_len, blind_cols, 3));
+        row_id, GDEFCORE_PUBLIC_ID_LEN + hex_len, blind_cols, 3));
   }
   if (rc == GDEFCORE_OK) {
     memset(subject_cols, 0, sizeof subject_cols);
@@ -1375,21 +1386,23 @@ GDEFCORE_Result gdefcore_subject_read(GDEFCORE_Subjects * subjects,
   return rc;
 }
 
-static GDEFCORE_Result delete_blinds(GDEFSTOR_Write * write, const char * text,
-    size_t n) {
+static GDEFCORE_Result delete_blinds(GDEFSTOR_Write * write, const char * subject,
+    const char * text, size_t n) {
   size_t at = 0;
   while (at < n) {
     size_t line = 0;
     size_t len = 0;
+    char id[GDEFCORE_PUBLIC_ID_LEN + 64 + 1];
     GDEFCORE_Result rc;
     if (!line_span(text, n, &at, &line, &len)) {
       continue;
     }
-    if (len < kMac * 2 || text[line + kMac * 2] != ' ') {
+    if (len < kMac * 2 + 1 || text[line + kMac * 2] != ' ') {
       return GDEFCORE_ERR_CORRUPT;
     }
+    blind_entity(id, subject, text + line);
     rc = from_stor(gdefstor_projection_delete(write, kBlindType,
-        strlen(kBlindType), text + line, kMac * 2));
+        strlen(kBlindType), id, GDEFCORE_PUBLIC_ID_LEN + kMac * 2));
     if (rc != GDEFCORE_OK) {
       return rc;
     }
@@ -1453,7 +1466,7 @@ GDEFCORE_Result gdefcore_subject_erase(GDEFCORE_Subjects * subjects,
     row_clear(subjects->alloc, &row);
     return rc;
   }
-  rc = delete_blinds(write, row.blinds, row.blinds_len);
+  rc = delete_blinds(write, sid, row.blinds, row.blinds_len);
   if (rc == GDEFCORE_OK) {
     memset(columns, 0, sizeof columns);
     columns[0].name = "blinds";
@@ -1801,7 +1814,7 @@ static GDEFCORE_Result replay_ids(GDEFCORE_Subjects * subjects, const char * tex
       return rc;
     }
     if (row.present) {
-      rc = delete_blinds(write, row.blinds, row.blinds_len);
+      rc = delete_blinds(write, id, row.blinds, row.blinds_len);
       if (rc == GDEFCORE_OK) {
         memset(columns, 0, sizeof columns);
         columns[0].name = "blinds";

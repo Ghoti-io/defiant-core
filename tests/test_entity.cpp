@@ -167,6 +167,72 @@ TEST(EntityId, Vector) {
   EXPECT_STREQ("00041061050R3GG28A1C60T3GFGB", out);
 }
 
+TEST_F(Entity, OldFieldLine) {
+  GDEFSTOR_Write * write = NULL;
+  GDEFSTOR_Column columns[4];
+  char * name = NULL;
+  size_t name_len = 0;
+  int required = 0;
+  int many = 0;
+  int personal = 1;
+  const char * fields = "title 1 0\n";
+  ASSERT_EQ(GDEFSTOR_OK, gdefstor_write_begin(store_, kTenant, 1, NULL, &write));
+  memset(columns, 0, sizeof columns);
+  columns[0].name = "kind";
+  columns[0].name_len = 4;
+  columns[0].value = (const uint8_t *)"content";
+  columns[0].value_len = 7;
+  columns[1].name = "fields";
+  columns[1].name_len = 6;
+  columns[1].value = (const uint8_t *)fields;
+  columns[1].value_len = strlen(fields);
+  columns[2].name = "id";
+  columns[2].name_len = 2;
+  columns[2].value = (const uint8_t *)"x";
+  columns[2].value_len = 1;
+  columns[3].name = "row";
+  columns[3].name_len = 3;
+  columns[3].value = (const uint8_t *)"1";
+  columns[3].value_len = 1;
+  ASSERT_EQ(GDEFSTOR_OK,
+      gdefstor_projection_put(write, "m", 1, "site.old", 8, columns, 4));
+  ASSERT_EQ(GDEFSTOR_OK, gdefstor_write_commit(write));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_type_field(catalog_, "site.old", 8, 0, &name, &name_len, &required,
+          &many));
+  EXPECT_EQ(std::string("title"), std::string(name, name_len));
+  EXPECT_EQ(1, required);
+  EXPECT_EQ(0, many);
+  gdefcore_text_free(catalog_, name);
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_type_field_personal(catalog_, "site.old", 8, 0, &personal));
+  EXPECT_EQ(0, personal);
+}
+
+TEST_F(Entity, PersonalChangeset) {
+  GDEFCORE_Field field = TitleField();
+  GDEFCORE_Changeset * changeset = NULL;
+  GDEFCORE_Changeset * parsed = NULL;
+  GDEFCORE_Patch * files = NULL;
+  size_t count = 0;
+  int personal = 0;
+  field.personal = 1;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &changeset));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_changeset_define(changeset, "site.person", 11, GDEFCORE_TYPE_CONTENT,
+          &field, 1));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_serialize(changeset, &files, &count));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_changeset_parse(catalog_, files, count, NULL, &parsed));
+  gdefcore_changeset_destroy(changeset);
+  gdefcore_patch_free(catalog_, files, count);
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(parsed, "site.person", 11));
+  gdefcore_changeset_destroy(parsed);
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_type_field_personal(catalog_, "site.person", 11, 0, &personal));
+  EXPECT_EQ(1, personal);
+}
+
 TEST_F(Entity, Define) {
   int kind = 0;
   char * name = NULL;

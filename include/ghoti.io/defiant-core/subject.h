@@ -86,8 +86,8 @@ GDEFCORE_API void gdefcore_subject_destroy(GDEFCORE_Subjects * subjects);
  *
  * When @p side already holds wrapped bytes, those bytes replace @p inout
  * and the previous object is destroyed. When it does not, @p inout is
- * required and its wrapped bytes are copied in. A wrap that does not
- * unwrap is ::GDEFCORE_ERR_CORRUPT and @p inout is left as it was.
+ * required and its wrapped bytes are copied in. A failed adopt is
+ * returned as that result and @p inout is left as it was.
  * ::GDEFCORE_ERR_INVALID with @p inout still NULL means the side store has
  * no wrap yet.
  */

@@ -180,6 +180,28 @@ class Subject : public ::testing::Test {
         gdefcore_subject_snapshot(subjects_, site_, out, out_len));
   }
 
+  bool BlindRow(const char * subject, const uint8_t mac[32]) {
+    static const char kHex[] = "0123456789abcdef";
+    char id[GDEFCORE_PUBLIC_ID_LEN + 64];
+    char hex[65];
+    GDEFSTOR_Projection * row = NULL;
+    GDEFSTOR_Result rc;
+    int i;
+    for (i = 0; i < 32; i++) {
+      hex[i * 2] = kHex[mac[i] >> 4];
+      hex[i * 2 + 1] = kHex[mac[i] & 0x0f];
+    }
+    memcpy(id, subject, GDEFCORE_PUBLIC_ID_LEN);
+    memcpy(id + GDEFCORE_PUBLIC_ID_LEN, hex, 64);
+    rc = gdefstor_projection_get(side_, (const char *)storage_, sizeof storage_,
+        "core.blind", 10, id, GDEFCORE_PUBLIC_ID_LEN + 64, &row);
+    if (rc == GDEFSTOR_OK) {
+      gdefstor_projection_free(row);
+      return true;
+    }
+    return false;
+  }
+
   void PlantLedger(const uint8_t * zip, size_t zip_len) {
     uint8_t * ledger = NULL;
     size_t ledger_len = 0;
@@ -224,14 +246,25 @@ TEST_F(Subject, Ciphertext) {
 TEST_F(Subject, Read) {
   char subject[GDEFCORE_PUBLIC_ID_LEN + 1];
   char entity[GDEFCORE_PUBLIC_ID_LEN + 1];
+  uint8_t wrap[GDEFCORE_KEYRING_WRAP_LEN];
+  uint8_t again[GDEFCORE_KEYRING_WRAP_LEN];
   std::string stored;
   Open();
   DefinePerson();
   ASSERT_EQ(GDEFCORE_OK, gdefcore_subject_create(subjects_, subject));
   MakeEntity(entity);
   Save(subject, entity);
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_keyring_export(
+          gdefcore_inst_tenant_keyring(inst_, tenant_, strlen(tenant_)), wrap,
+          sizeof wrap));
   CloseHandles();
   Open();
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_keyring_export(
+          gdefcore_inst_tenant_keyring(inst_, tenant_, strlen(tenant_)), again,
+          sizeof again));
+  EXPECT_EQ(0, memcmp(wrap, again, sizeof wrap));
   stored = Stored(entity);
   EXPECT_EQ(std::string::npos, stored.find(kPlain));
   EXPECT_EQ(0, stored.compare(0, 3, "s1:"));
@@ -240,27 +273,44 @@ TEST_F(Subject, Read) {
 
 TEST_F(Subject, BlindIndex) {
   char subject[GDEFCORE_PUBLIC_ID_LEN + 1];
+  char other[GDEFCORE_PUBLIC_ID_LEN + 1];
   char entity[GDEFCORE_PUBLIC_ID_LEN + 1];
+  char other_entity[GDEFCORE_PUBLIC_ID_LEN + 1];
   uint8_t mac[32];
+  uint8_t other_mac[32];
   size_t count = 0;
   Open();
   DefinePerson();
   ASSERT_EQ(GDEFCORE_OK, gdefcore_subject_create(subjects_, subject));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_subject_create(subjects_, other));
   MakeEntity(entity);
+  MakeEntity(other_entity);
   Save(subject, entity);
+  Save(other, other_entity);
   ASSERT_EQ(GDEFCORE_OK,
       gdefcore_subject_blind_count(subjects_, subject, strlen(subject), &count));
   EXPECT_EQ(1u, count);
   memset(mac, 0, sizeof mac);
+  memset(other_mac, 0, sizeof other_mac);
   ASSERT_EQ(GDEFCORE_OK,
       gdefcore_subject_blind(subjects_, subject, strlen(subject), 0, mac));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_subject_blind(subjects_, other, strlen(other), 0, other_mac));
   EXPECT_FALSE(HasBytes(mac, sizeof mac, kPlain, strlen(kPlain)));
+  EXPECT_EQ(0, memcmp(mac, other_mac, sizeof mac));
+  EXPECT_TRUE(BlindRow(subject, mac));
+  EXPECT_TRUE(BlindRow(other, other_mac));
   ASSERT_EQ(GDEFCORE_OK,
       gdefcore_subject_erase(subjects_, subject, strlen(subject), subject,
           strlen(subject)));
   ASSERT_EQ(GDEFCORE_OK,
       gdefcore_subject_blind_count(subjects_, subject, strlen(subject), &count));
   EXPECT_EQ(0u, count);
+  EXPECT_FALSE(BlindRow(subject, mac));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_subject_blind_count(subjects_, other, strlen(other), &count));
+  EXPECT_EQ(1u, count);
+  EXPECT_TRUE(BlindRow(other, other_mac));
 }
 
 TEST_F(Subject, OtherKey) {
@@ -310,6 +360,47 @@ TEST_F(Subject, Erase) {
   stored = Stored(entity);
   EXPECT_EQ(0, stored.compare(0, 3, "s1:"));
   EXPECT_EQ(std::string::npos, stored.find(kPlain));
+}
+
+TEST_F(Subject, NotPersonal) {
+  GDEFCORE_Field field;
+  char subject[GDEFCORE_PUBLIC_ID_LEN + 1];
+  char entity[GDEFCORE_PUBLIC_ID_LEN + 1];
+  const char * texts[1];
+  size_t lens[1];
+  GDEFCORE_Value value;
+  GDEFCORE_Changeset * changeset = NULL;
+  Open();
+  memset(&field, 0, sizeof field);
+  field.size = sizeof field;
+  field.name = kField;
+  field.name_len = strlen(kField);
+  field.required = 1;
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_type_define(catalog_, "site.plain", 10, GDEFCORE_TYPE_CONTENT,
+          &field, 1));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_subject_create(subjects_, subject));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_entity_create(catalog_, "site.plain", 10, entity, NULL));
+  texts[0] = "kept";
+  lens[0] = 4;
+  memset(&value, 0, sizeof value);
+  value.size = sizeof value;
+  value.field = kField;
+  value.field_len = strlen(kField);
+  value.texts = texts;
+  value.text_lens = lens;
+  value.count = 1;
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_changeset_prepare(catalog_, NULL, 0, &changeset));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_entity_save(changeset, entity, strlen(entity), "en", 2, &value, 1));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(changeset, NULL, 0));
+  gdefcore_changeset_destroy(changeset);
+  EXPECT_EQ(GDEFCORE_ERR_INVALID,
+      gdefcore_subject_save(subjects_, catalog_, subject, strlen(subject), entity,
+          strlen(entity), kField, strlen(kField), "en", 2, kPlain, strlen(kPlain)));
+  EXPECT_EQ(std::string("kept"), Stored(entity));
 }
 
 TEST_F(Subject, Export) {
@@ -366,6 +457,48 @@ TEST_F(Subject, Restore) {
       gdefcore_catalog_open(empty, storage_, sizeof storage_, NULL, NULL,
           &restored));
   EXPECT_TRUE(ReadIs(restored, subject, entity, GDEFCORE_SUBJECT_ERASED));
+  gdefcore_catalog_destroy(restored);
+  gdefstor_store_destroy(empty);
+  gdefstor_bytes_free(NULL, zip);
+}
+
+TEST_F(Subject, SnapshotLedger) {
+  char subject[GDEFCORE_PUBLIC_ID_LEN + 1];
+  char entity[GDEFCORE_PUBLIC_ID_LEN + 1];
+  char line[64];
+  uint8_t raw[GDEFCORE_SUBJECT_KEY_LEN];
+  uint8_t * zip = NULL;
+  size_t zip_len = 0;
+  size_t count = 99;
+  int kn;
+  GDEFSTOR_Store * empty = NULL;
+  GDEFCORE_Catalog * restored = NULL;
+  Open();
+  DefinePerson();
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_subject_create(subjects_, subject));
+  MakeEntity(entity);
+  Save(subject, entity);
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_subject_key(subjects_, subject, strlen(subject), raw));
+  memset(raw, 0, sizeof raw);
+  kn = snprintf(line, sizeof line, "%s 1\n", subject);
+  ASSERT_GT(kn, 0);
+  ASSERT_LT((size_t)kn, sizeof line);
+  ASSERT_EQ(GDEFSTOR_OK,
+      gdefstor_snapshot_export_ledger(site_, (const char *)storage_,
+          sizeof storage_, NULL, (const uint8_t *)line, (size_t)kn, &zip,
+          &zip_len));
+  ASSERT_EQ(GDEFSMEMORY_OK, gdefsmemory_store_create(NULL, NULL, &empty));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_subject_import(subjects_, empty, zip, zip_len));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_catalog_open(empty, storage_, sizeof storage_, NULL, NULL,
+          &restored));
+  EXPECT_TRUE(ReadIs(restored, subject, entity, GDEFCORE_SUBJECT_ERASED));
+  EXPECT_EQ(GDEFCORE_ERR_INVALID,
+      gdefcore_subject_key(subjects_, subject, strlen(subject), raw));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_subject_blind_count(subjects_, subject, strlen(subject), &count));
+  EXPECT_EQ(0u, count);
   gdefcore_catalog_destroy(restored);
   gdefstor_store_destroy(empty);
   gdefstor_bytes_free(NULL, zip);
