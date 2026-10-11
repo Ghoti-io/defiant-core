@@ -35,7 +35,9 @@ enum {
   GDEFCORE_OP_CLEAR = 2,
   GDEFCORE_OP_DEFINE = 3,
   GDEFCORE_OP_ENABLE = 4,
-  GDEFCORE_OP_DISABLE = 5
+  GDEFCORE_OP_DISABLE = 5,
+  GDEFCORE_OP_DRAFT = 6,
+  GDEFCORE_OP_PUBLISH = 7
 };
 
 typedef struct GDEFCORE_Text {
@@ -65,6 +67,12 @@ typedef struct GDEFCORE_Decl {
   int required;
   int many;
   int personal;
+  size_t min_len;
+  size_t max_len;
+  int has_range;
+  int64_t range_min;
+  int64_t range_max;
+  GDEFCORE_Text pattern;
 } GDEFCORE_Decl;
 
 typedef struct GDEFCORE_Op {

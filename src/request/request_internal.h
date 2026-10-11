@@ -30,6 +30,13 @@
 #include <ghoti.io/defiant-core/macros.h>
 #include <ghoti.io/defiant-core/request.h>
 
+typedef struct GDEFCORE_Note {
+  char * name;
+  size_t name_len;
+  char * value;
+  size_t value_len;
+} GDEFCORE_Note;
+
 struct GDEFCORE_Request {
   uint8_t * tenant;
   size_t tenant_len;
@@ -43,6 +50,10 @@ struct GDEFCORE_Request {
   size_t principal_len;
   char * acting;
   size_t acting_len;
+  GDEFCORE_Note * notes;
+  size_t nnotes;
+  char * resolution;
+  size_t resolution_len;
   const GDEFCORE_Allocator * allocator;
 };
 

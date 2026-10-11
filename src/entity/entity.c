@@ -33,8 +33,10 @@
 #include <ghoti.io/cutil/allocator.h>
 #include <ghoti.io/defiant-storage/projection.h>
 #include <ghoti.io/defiant-storage/revision.h>
+#include <ghoti.io/regex/compile.h>
 #include <ghoti.io/security/random.h>
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -481,6 +483,7 @@ static void decls_free(const GDEFCORE_Allocator * alloc, GDEFCORE_Decl * decls,
   size_t i;
   for (i = 0; i < n; i++) {
     text_clear(alloc, &decls[i].name);
+    text_clear(alloc, &decls[i].pattern);
   }
   gcu_allocator_free(alloc, decls);
 }
@@ -517,6 +520,17 @@ static GDEFCORE_Result decls_copy(const GDEFCORE_Allocator * alloc,
     copy[i].required = in[i].required;
     copy[i].many = in[i].many;
     copy[i].personal = in[i].personal;
+    copy[i].min_len = in[i].min_len;
+    copy[i].max_len = in[i].max_len;
+    copy[i].has_range = in[i].has_range;
+    copy[i].range_min = in[i].range_min;
+    copy[i].range_max = in[i].range_max;
+    if (in[i].pattern.n > 0 &&
+        text_set(alloc, &copy[i].pattern, in[i].pattern.p, in[i].pattern.n) !=
+            GDEFCORE_OK) {
+      decls_free(alloc, copy, i + 1);
+      return GDEFCORE_ERR_OOM;
+    }
   }
   *out = copy;
   return GDEFCORE_OK;
@@ -1222,6 +1236,180 @@ static GDEFCORE_Result cursor_store(GDEFSTOR_Write * write, RowCursor * cur) {
   return put_u64_col(write, "c", 1, "next", 4, "n", cur->next);
 }
 
+static int hex_nibble(char c) {
+  if (c >= '0' && c <= '9') {
+    return c - '0';
+  }
+  if (c >= 'a' && c <= 'f') {
+    return c - 'a' + 10;
+  }
+  return -1;
+}
+
+static char * hex_encode(const GDEFCORE_Allocator * alloc, const char * bytes,
+    size_t n) {
+  static const char kHex[] = "0123456789abcdef";
+  char * out;
+  size_t i;
+  out = (char *)gcu_allocator_malloc(alloc, n * 2 + 1);
+  if (out == NULL) {
+    return NULL;
+  }
+  for (i = 0; i < n; i++) {
+    unsigned char c = (unsigned char)bytes[i];
+    out[i * 2] = kHex[c >> 4];
+    out[i * 2 + 1] = kHex[c & 0x0f];
+  }
+  out[n * 2] = '\0';
+  return out;
+}
+
+static int decl_constrained(const GDEFCORE_Decl * decl) {
+  return decl->min_len != 0 || decl->max_len != 0 || decl->has_range ||
+         decl->pattern.n > 0;
+}
+
+static GDEFCORE_Result constraint_suffix(const GDEFCORE_Allocator * alloc,
+    const GDEFCORE_Decl * decl, char ** out, size_t * out_len) {
+  char * hex;
+  char * text;
+  int kn;
+  *out = NULL;
+  *out_len = 0;
+  if (!decl_constrained(decl)) {
+    return GDEFCORE_OK;
+  }
+  hex = hex_encode(alloc, decl->pattern.p == NULL ? "" : decl->pattern.p,
+      decl->pattern.n);
+  if (hex == NULL) {
+    return GDEFCORE_ERR_OOM;
+  }
+  kn = snprintf(NULL, 0, "|%zu|%zu|%d|%lld|%lld|%s", decl->min_len,
+      decl->max_len, decl->has_range ? 1 : 0, (long long)decl->range_min,
+      (long long)decl->range_max, hex);
+  if (kn < 0) {
+    gcu_allocator_free(alloc, hex);
+    return GDEFCORE_ERR_LIMIT;
+  }
+  text = (char *)gcu_allocator_malloc(alloc, (size_t)kn + 1);
+  if (text == NULL) {
+    gcu_allocator_free(alloc, hex);
+    return GDEFCORE_ERR_OOM;
+  }
+  snprintf(text, (size_t)kn + 1, "|%zu|%zu|%d|%lld|%lld|%s", decl->min_len,
+      decl->max_len, decl->has_range ? 1 : 0, (long long)decl->range_min,
+      (long long)decl->range_max, hex);
+  gcu_allocator_free(alloc, hex);
+  *out = text;
+  *out_len = (size_t)kn;
+  return GDEFCORE_OK;
+}
+
+static int parse_u64_span(const char * text, size_t n, uint64_t * out) {
+  char buf[32];
+  char * end = NULL;
+  unsigned long long v;
+  if (n == 0 || n >= sizeof buf) {
+    return 0;
+  }
+  memcpy(buf, text, n);
+  buf[n] = '\0';
+  errno = 0;
+  v = strtoull(buf, &end, 10);
+  if (end != buf + n || errno == ERANGE) {
+    return 0;
+  }
+  *out = (uint64_t)v;
+  return 1;
+}
+
+static int parse_i64_span(const char * text, size_t n, int64_t * out) {
+  char buf[32];
+  char * end = NULL;
+  long long v;
+  if (n == 0 || n >= sizeof buf) {
+    return 0;
+  }
+  memcpy(buf, text, n);
+  buf[n] = '\0';
+  errno = 0;
+  v = strtoll(buf, &end, 10);
+  if (end != buf + n || errno == ERANGE) {
+    return 0;
+  }
+  *out = (int64_t)v;
+  return 1;
+}
+
+static int split_pipe(const char * text, size_t n, const char ** parts,
+    size_t * lens, size_t expect) {
+  size_t i;
+  size_t start = 0;
+  size_t found = 0;
+  for (i = 0; i <= n; i++) {
+    if (i == n || text[i] == '|') {
+      if (found >= expect) {
+        return 0;
+      }
+      parts[found] = text + start;
+      lens[found] = i - start;
+      found += 1;
+      start = i + 1;
+    }
+  }
+  return found == expect;
+}
+
+static GDEFCORE_Result fill_constraints(const GDEFCORE_Allocator * alloc,
+    const char * text, size_t n, GDEFCORE_Decl * decl) {
+  const char * parts[6];
+  size_t lens[6];
+  uint64_t min_len = 0;
+  uint64_t max_len = 0;
+  uint64_t has = 0;
+  int64_t lo = 0;
+  int64_t hi = 0;
+  char * pattern = NULL;
+  size_t i;
+  if (!split_pipe(text, n, parts, lens, 6) ||
+      !parse_u64_span(parts[0], lens[0], &min_len) ||
+      !parse_u64_span(parts[1], lens[1], &max_len) ||
+      !parse_u64_span(parts[2], lens[2], &has) || (has != 0 && has != 1) ||
+      !parse_i64_span(parts[3], lens[3], &lo) ||
+      !parse_i64_span(parts[4], lens[4], &hi)) {
+    return GDEFCORE_ERR_CORRUPT;
+  }
+  if ((lens[5] % 2) != 0) {
+    return GDEFCORE_ERR_CORRUPT;
+  }
+  if (lens[5] > 0) {
+    pattern = (char *)gcu_allocator_malloc(alloc, lens[5] / 2);
+    if (pattern == NULL) {
+      return GDEFCORE_ERR_OOM;
+    }
+    for (i = 0; i < lens[5]; i += 2) {
+      int hi_n = hex_nibble(parts[5][i]);
+      int lo_n = hex_nibble(parts[5][i + 1]);
+      if (hi_n < 0 || lo_n < 0) {
+        gcu_allocator_free(alloc, pattern);
+        return GDEFCORE_ERR_CORRUPT;
+      }
+      pattern[i / 2] = (char)((hi_n << 4) | lo_n);
+    }
+    if (text_set(alloc, &decl->pattern, pattern, lens[5] / 2) != GDEFCORE_OK) {
+      gcu_allocator_free(alloc, pattern);
+      return GDEFCORE_ERR_OOM;
+    }
+    gcu_allocator_free(alloc, pattern);
+  }
+  decl->min_len = (size_t)min_len;
+  decl->max_len = (size_t)max_len;
+  decl->has_range = has ? 1 : 0;
+  decl->range_min = lo;
+  decl->range_max = hi;
+  return GDEFCORE_OK;
+}
+
 static GDEFCORE_Result parse_decls(const GDEFCORE_Allocator * alloc,
     const char * text, size_t n, const GDEFCORE_Limits * limits,
     GDEFCORE_Decl ** out, size_t * out_n) {
@@ -1255,18 +1443,78 @@ static GDEFCORE_Result parse_decls(const GDEFCORE_Allocator * alloc,
       return GDEFCORE_ERR_CORRUPT;
     }
     sp = line + name_len;
-    if ((i - sp == 4 || i - sp == 6) && text[sp] == ' ' && text[sp + 2] == ' ' &&
-        (text[sp + 1] == '0' || text[sp + 1] == '1') &&
-        (text[sp + 3] == '0' || text[sp + 3] == '1') &&
-        (i - sp == 4 ||
-            (text[sp + 4] == ' ' &&
-                (text[sp + 5] == '0' || text[sp + 5] == '1')))) {
-      required = text[sp + 1] == '1';
-      many = text[sp + 3] == '1';
-      personal = i - sp == 6 && text[sp + 5] == '1';
-    } else {
-      decls_free(alloc, decls, count);
-      return GDEFCORE_ERR_CORRUPT;
+    {
+      size_t flag_n = i - sp;
+      size_t pi;
+      const char * pipe = NULL;
+      for (pi = 0; pi < flag_n; pi++) {
+        if (text[sp + pi] == '|') {
+          pipe = text + sp + pi;
+          flag_n = pi;
+          break;
+        }
+      }
+      if ((flag_n == 4 || flag_n == 6) && text[sp] == ' ' &&
+          text[sp + 2] == ' ' &&
+          (text[sp + 1] == '0' || text[sp + 1] == '1') &&
+          (text[sp + 3] == '0' || text[sp + 3] == '1') &&
+          (flag_n == 4 ||
+              (text[sp + 4] == ' ' &&
+                  (text[sp + 5] == '0' || text[sp + 5] == '1')))) {
+        required = text[sp + 1] == '1';
+        many = text[sp + 3] == '1';
+        personal = flag_n == 6 && text[sp + 5] == '1';
+      } else {
+        decls_free(alloc, decls, count);
+        return GDEFCORE_ERR_CORRUPT;
+      }
+      if (pipe != NULL) {
+        GDEFCORE_Decl extra;
+        GDEFCORE_Result crc;
+        memset(&extra, 0, sizeof extra);
+        crc = fill_constraints(alloc, pipe + 1,
+            (size_t)((text + i) - (pipe + 1)), &extra);
+        if (crc != GDEFCORE_OK) {
+          text_clear(alloc, &extra.pattern);
+          decls_free(alloc, decls, count);
+          return crc;
+        }
+        /* Stashed on the stack until the decl slot exists. */
+        if (count >= limits->max_fields) {
+          text_clear(alloc, &extra.pattern);
+          decls_free(alloc, decls, count);
+          return GDEFCORE_ERR_LIMIT;
+        }
+        next = (GDEFCORE_Decl *)gcu_allocator_realloc(
+            alloc, decls, (count + 1) * sizeof *next);
+        if (next == NULL) {
+          text_clear(alloc, &extra.pattern);
+          decls_free(alloc, decls, count);
+          return GDEFCORE_ERR_OOM;
+        }
+        decls = next;
+        memset(&decls[count], 0, sizeof decls[count]);
+        if (text_set(alloc, &decls[count].name, text + line, name_len) !=
+            GDEFCORE_OK) {
+          text_clear(alloc, &extra.pattern);
+          decls_free(alloc, decls, count + 1);
+          return GDEFCORE_ERR_OOM;
+        }
+        decls[count].required = required;
+        decls[count].many = many;
+        decls[count].personal = personal;
+        decls[count].min_len = extra.min_len;
+        decls[count].max_len = extra.max_len;
+        decls[count].has_range = extra.has_range;
+        decls[count].range_min = extra.range_min;
+        decls[count].range_max = extra.range_max;
+        decls[count].pattern = extra.pattern;
+        count += 1;
+        if (i < n && text[i] == '\n') {
+          i += 1;
+        }
+        continue;
+      }
     }
     if (count >= limits->max_fields) {
       decls_free(alloc, decls, count);
@@ -1306,13 +1554,25 @@ static GDEFCORE_Result decls_text(const GDEFCORE_Allocator * alloc,
   g.alloc = alloc;
   for (i = 0; i < n; i++) {
     char flag[16];
-    int kn = snprintf(flag, sizeof flag, " %d %d %d\n",
+    char * suffix = NULL;
+    size_t suffix_len = 0;
+    int kn = snprintf(flag, sizeof flag, " %d %d %d",
         decls[i].required ? 1 : 0, decls[i].many ? 1 : 0,
         decls[i].personal ? 1 : 0);
+    if (constraint_suffix(alloc, &decls[i], &suffix, &suffix_len) !=
+        GDEFCORE_OK) {
+      gcu_allocator_free(alloc, g.p);
+      return GDEFCORE_ERR_OOM;
+    }
     grow_add(&g, decls[i].name.p, decls[i].name.n);
     if (kn > 0) {
       grow_add(&g, flag, (size_t)kn);
     }
+    if (suffix_len > 0) {
+      grow_add(&g, suffix, suffix_len);
+    }
+    grow_add(&g, "\n", 1);
+    gcu_allocator_free(alloc, suffix);
   }
   if (g.oom) {
     gcu_allocator_free(alloc, g.p);
@@ -1410,6 +1670,70 @@ static int field_personal(const GDEFCORE_Field * field) {
   return field->personal ? 1 : 0;
 }
 
+static int field_covers(const GDEFCORE_Field * field, size_t end) {
+  return field->size >= end;
+}
+
+static GDEFCORE_Result copy_constraints(const GDEFCORE_Allocator * alloc,
+    const GDEFCORE_Field * field, GDEFCORE_Decl * decl) {
+  size_t min_end = offsetof(GDEFCORE_Field, min_len) + sizeof(size_t);
+  size_t max_end = offsetof(GDEFCORE_Field, max_len) + sizeof(size_t);
+  size_t range_end = offsetof(GDEFCORE_Field, range_max) + sizeof(int64_t);
+  size_t pat_end = offsetof(GDEFCORE_Field, pattern_len) + sizeof(size_t);
+  decl->min_len = 0;
+  decl->max_len = 0;
+  decl->has_range = 0;
+  decl->range_min = 0;
+  decl->range_max = 0;
+  decl->pattern.p = NULL;
+  decl->pattern.n = 0;
+  if (!field_covers(field, min_end)) {
+    return GDEFCORE_OK;
+  }
+  decl->min_len = field->min_len;
+  if (!field_covers(field, max_end)) {
+    return GDEFCORE_OK;
+  }
+  decl->max_len = field->max_len;
+  if (!field_covers(field, range_end)) {
+    return GDEFCORE_OK;
+  }
+  decl->has_range = field->has_range ? 1 : 0;
+  decl->range_min = field->range_min;
+  decl->range_max = field->range_max;
+  if (!field_covers(field, pat_end)) {
+    return GDEFCORE_OK;
+  }
+  if (field->pattern_len == 0) {
+    return GDEFCORE_OK;
+  }
+  if (field->pattern == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  return text_set(alloc, &decl->pattern, field->pattern, field->pattern_len);
+}
+
+static GDEFCORE_Result pattern_compiles(const char * pattern, size_t len) {
+  GRX_Regex * re = NULL;
+  GRX_Result rr;
+  if (len == 0) {
+    return GDEFCORE_OK;
+  }
+  rr = grx_regex_compile_with_allocator(pattern, len, GRX_SYNTAX_ECMASCRIPT,
+      GRX_OPT_NONE, NULL, NULL, NULL, &re);
+  if (rr == GRX_OK) {
+    grx_regex_free(re);
+    return GDEFCORE_OK;
+  }
+  if (rr == GRX_ERR_OOM) {
+    return GDEFCORE_ERR_OOM;
+  }
+  if (rr == GRX_ERR_LIMIT) {
+    return GDEFCORE_ERR_LIMIT;
+  }
+  return GDEFCORE_ERR_INVALID;
+}
+
 static GDEFCORE_Result check_fields(const GDEFCORE_Field * fields,
     size_t count, const GDEFCORE_Limits * limits) {
   size_t i;
@@ -1422,6 +1746,21 @@ static GDEFCORE_Result check_fields(const GDEFCORE_Field * fields,
     if (fields[i].size < offsetof(GDEFCORE_Field, many) + sizeof(int) ||
         !field_name_ok(fields[i].name, fields[i].name_len)) {
       return GDEFCORE_ERR_INVALID;
+    }
+    if (field_covers(&fields[i],
+            offsetof(GDEFCORE_Field, pattern_len) + sizeof(size_t)) &&
+        fields[i].pattern_len > 0) {
+      GDEFCORE_Result pr;
+      if (fields[i].pattern == NULL ||
+          fields[i].pattern_len > limits->max_value_bytes) {
+        return fields[i].pattern_len > limits->max_value_bytes
+                   ? GDEFCORE_ERR_LIMIT
+                   : GDEFCORE_ERR_INVALID;
+      }
+      pr = pattern_compiles(fields[i].pattern, fields[i].pattern_len);
+      if (pr != GDEFCORE_OK) {
+        return pr;
+      }
     }
     for (j = 0; j < i; j++) {
       if (span_eq(fields[i].name, fields[i].name_len, fields[j].name,
@@ -1454,6 +1793,13 @@ static GDEFCORE_Result fields_to_decls(const GDEFCORE_Allocator * alloc,
     decls[i].required = fields[i].required ? 1 : 0;
     decls[i].many = fields[i].many ? 1 : 0;
     decls[i].personal = field_personal(&fields[i]);
+    {
+      GDEFCORE_Result cr = copy_constraints(alloc, &fields[i], &decls[i]);
+      if (cr != GDEFCORE_OK) {
+        decls_free(alloc, decls, i + 1);
+        return cr;
+      }
+    }
   }
   *out = decls;
   return GDEFCORE_OK;
@@ -1992,6 +2338,50 @@ GDEFCORE_Result gdefcore_type_field_personal(GDEFCORE_Catalog * catalog,
   return GDEFCORE_OK;
 }
 
+GDEFCORE_Result gdefcore_type_field_constraints(GDEFCORE_Catalog * catalog,
+    const char * name, size_t name_len, size_t index, size_t * out_min_len,
+    size_t * out_max_len, int * out_has_range, int64_t * out_range_min,
+    int64_t * out_range_max, char ** out_pattern, size_t * out_pattern_len) {
+  GDEFCORE_Decl * decls = NULL;
+  size_t n = 0;
+  GDEFCORE_Result rc;
+  if (catalog == NULL || out_min_len == NULL || out_max_len == NULL ||
+      out_has_range == NULL || out_range_min == NULL || out_range_max == NULL ||
+      out_pattern == NULL || out_pattern_len == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  rc = load_type(catalog, name, name_len, NULL, &decls, &n, NULL, NULL, NULL);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  if (index >= n) {
+    decls_free(catalog->alloc, decls, n);
+    return GDEFCORE_ERR_INVALID;
+  }
+  {
+    char * pattern = NULL;
+    size_t pattern_len = 0;
+    if (decls[index].pattern.n > 0) {
+      pattern = dup_span(catalog->alloc, decls[index].pattern.p,
+          decls[index].pattern.n);
+      if (pattern == NULL) {
+        decls_free(catalog->alloc, decls, n);
+        return GDEFCORE_ERR_OOM;
+      }
+      pattern_len = decls[index].pattern.n;
+    }
+    *out_min_len = decls[index].min_len;
+    *out_max_len = decls[index].max_len;
+    *out_has_range = decls[index].has_range ? 1 : 0;
+    *out_range_min = decls[index].range_min;
+    *out_range_max = decls[index].range_max;
+    *out_pattern = pattern;
+    *out_pattern_len = pattern_len;
+  }
+  decls_free(catalog->alloc, decls, n);
+  return GDEFCORE_OK;
+}
+
 static const char kIdsType[] = "core.ids";
 
 static GDEFCORE_Result ids_add(GDEFCORE_Catalog * cat, GDEFSTOR_Write * write,
@@ -2289,9 +2679,9 @@ static const GDEFCORE_Decl * decl_named(const GDEFCORE_Decl * decls, size_t n,
   return NULL;
 }
 
-GDEFCORE_Result gdefcore_entity_save(GDEFCORE_Changeset * changeset,
+static GDEFCORE_Result stage_values(GDEFCORE_Changeset * changeset,
     const char * id, size_t id_len, const char * lang, size_t lang_len,
-    const GDEFCORE_Value * values, size_t value_count) {
+    const GDEFCORE_Value * values, size_t value_count, int draft) {
   char canon[GDEFCORE_PUBLIC_ID_LEN + 1];
   GDEFCORE_Catalog * cat;
   GDEFCORE_Op * op;
@@ -2366,7 +2756,15 @@ GDEFCORE_Result gdefcore_entity_save(GDEFCORE_Changeset * changeset,
   if (op != NULL && op->kind != GDEFCORE_OP_CLEAR) {
     rc = doc_clone(cat->alloc, &op->staged, &tentative);
   } else if (op == NULL) {
-    rc = read_proj_doc(cat, "p:", type_name, type_len, row, &tentative, NULL);
+    if (draft) {
+      rc = read_proj_doc(cat, "d:", type_name, type_len, row, &tentative, NULL);
+      if (rc == GDEFCORE_ERR_INVALID) {
+        rc = read_proj_doc(cat, "p:", type_name, type_len, row, &tentative,
+            NULL);
+      }
+    } else {
+      rc = read_proj_doc(cat, "p:", type_name, type_len, row, &tentative, NULL);
+    }
     if (rc == GDEFCORE_ERR_INVALID) {
       rc = GDEFCORE_OK;
     }
@@ -2437,7 +2835,7 @@ GDEFCORE_Result gdefcore_entity_save(GDEFCORE_Changeset * changeset,
   }
   doc_free(cat->alloc, &op->staged);
   op->staged = tentative;
-  op->kind = GDEFCORE_OP_SAVE;
+  op->kind = draft ? GDEFCORE_OP_DRAFT : GDEFCORE_OP_SAVE;
   rc = GDEFCORE_OK;
 done:
   if (rc != GDEFCORE_OK && created && op != NULL) {
@@ -2448,6 +2846,128 @@ done:
   gcu_allocator_free(cat->alloc, type_name);
   gcu_allocator_free(cat->alloc, machine);
   return rc;
+}
+
+GDEFCORE_Result gdefcore_entity_save(GDEFCORE_Changeset * changeset,
+    const char * id, size_t id_len, const char * lang, size_t lang_len,
+    const GDEFCORE_Value * values, size_t value_count) {
+  return stage_values(changeset, id, id_len, lang, lang_len, values,
+      value_count, 0);
+}
+
+GDEFCORE_Result gdefcore_entity_save_draft(GDEFCORE_Changeset * changeset,
+    const char * id, size_t id_len, const char * lang, size_t lang_len,
+    const GDEFCORE_Value * values, size_t value_count) {
+  return stage_values(changeset, id, id_len, lang, lang_len, values,
+      value_count, 1);
+}
+
+GDEFCORE_Result gdefcore_entity_publish(GDEFCORE_Changeset * changeset,
+    const char * id, size_t id_len) {
+  char canon[GDEFCORE_PUBLIC_ID_LEN + 1];
+  GDEFCORE_Catalog * cat;
+  GDEFCORE_Op * op;
+  GDEFCORE_Doc staged;
+  char * type_name = NULL;
+  size_t type_len = 0;
+  char * machine = NULL;
+  size_t machine_len = 0;
+  uint64_t row = 0;
+  uint64_t seq = 0;
+  uint64_t high = 0;
+  int kind = 0;
+  GDEFCORE_Result rc;
+  if (changeset == NULL || changeset->applied) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  if (gdefcore_id_canonical(id, id_len, canon) != GDEFCORE_OK) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  if (find_op_id(changeset, canon, GDEFCORE_PUBLIC_ID_LEN) != NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  cat = changeset->catalog;
+  rc = lookup_id(cat, canon, GDEFCORE_PUBLIC_ID_LEN, &row, &type_name,
+      &type_len, &machine, &machine_len);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  rc = load_type(cat, type_name, type_len, &kind, NULL, NULL, NULL, NULL, NULL);
+  if (rc != GDEFCORE_OK) {
+    gcu_allocator_free(cat->alloc, type_name);
+    gcu_allocator_free(cat->alloc, machine);
+    return rc;
+  }
+  memset(&staged, 0, sizeof staged);
+  rc = read_proj_doc(cat, "d:", type_name, type_len, row, &staged, &seq);
+  if (rc != GDEFCORE_OK) {
+    gcu_allocator_free(cat->alloc, type_name);
+    gcu_allocator_free(cat->alloc, machine);
+    return rc;
+  }
+  rc = read_high(cat, row, &high);
+  if (rc != GDEFCORE_OK || high != seq) {
+    doc_free(cat->alloc, &staged);
+    gcu_allocator_free(cat->alloc, type_name);
+    gcu_allocator_free(cat->alloc, machine);
+    return rc != GDEFCORE_OK ? rc : GDEFCORE_ERR_CORRUPT;
+  }
+  rc = add_op(changeset, &op);
+  if (rc != GDEFCORE_OK) {
+    doc_free(cat->alloc, &staged);
+    gcu_allocator_free(cat->alloc, type_name);
+    gcu_allocator_free(cat->alloc, machine);
+    return rc;
+  }
+  op->kind = GDEFCORE_OP_PUBLISH;
+  op->staged = staged;
+  op->row = row;
+  op->have_row = 1;
+  op->base_seq = seq;
+  op->type_kind = kind;
+  if (text_set(cat->alloc, &op->id, canon, GDEFCORE_PUBLIC_ID_LEN) !=
+          GDEFCORE_OK ||
+      text_set(cat->alloc, &op->type_name, type_name, type_len) !=
+          GDEFCORE_OK ||
+      (machine != NULL &&
+          text_set(cat->alloc, &op->machine, machine, machine_len) !=
+              GDEFCORE_OK)) {
+    op_free(cat->alloc, op);
+    changeset->nops -= 1;
+    gcu_allocator_free(cat->alloc, type_name);
+    gcu_allocator_free(cat->alloc, machine);
+    return GDEFCORE_ERR_OOM;
+  }
+  rc = read_proj_doc(cat, "p:", type_name, type_len, row, &op->base, NULL);
+  gcu_allocator_free(cat->alloc, type_name);
+  gcu_allocator_free(cat->alloc, machine);
+  if (rc == GDEFCORE_ERR_INVALID) {
+    return GDEFCORE_OK;
+  }
+  if (rc != GDEFCORE_OK) {
+    op_free(cat->alloc, op);
+    changeset->nops -= 1;
+  }
+  return rc;
+}
+
+GDEFCORE_Result gdefcore_entity_revision(GDEFCORE_Catalog * catalog,
+    const char * id, size_t id_len, uint64_t * out_seq) {
+  char canon[GDEFCORE_PUBLIC_ID_LEN + 1];
+  uint64_t row = 0;
+  GDEFCORE_Result rc;
+  if (catalog == NULL || out_seq == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  if (gdefcore_id_canonical(id, id_len, canon) != GDEFCORE_OK) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  rc = lookup_id(catalog, canon, GDEFCORE_PUBLIC_ID_LEN, &row, NULL, NULL, NULL,
+      NULL);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  return read_high(catalog, row, out_seq);
 }
 
 static GDEFCORE_Result values_from(GDEFCORE_Catalog * cat, const GDEFCORE_Doc * doc,
@@ -2985,6 +3505,18 @@ static GDEFCORE_Result apply_op(GDEFCORE_Catalog * cat, GDEFSTOR_Write * write,
     gcu_allocator_free(cat->alloc, existing_id);
     return rc;
   }
+  if (op->kind == GDEFCORE_OP_PUBLISH) {
+    char * lang = NULL;
+    size_t lang_len = 0;
+    rc = doc_json(cat->alloc, &op->staged, &lang, &lang_len);
+    if (rc == GDEFCORE_OK) {
+      rc = put_entity_proj(write, "p:", op->type_name.p, op->type_name.n,
+          op->row, op->base_seq, op->id.p, op->id.n, lang, lang_len, actor,
+          actor_len);
+    }
+    gcu_allocator_free(cat->alloc, lang);
+    return rc;
+  }
   if (op->kind == GDEFCORE_OP_CLEAR) {
     rc = delete_entity_proj(write, "p:", op->type_name.p, op->type_name.n,
         op->row);
@@ -3004,7 +3536,7 @@ static GDEFCORE_Result apply_op(GDEFCORE_Catalog * cat, GDEFSTOR_Write * write,
   }
   rc = append_rev(write, seq, op->row, op->id.p, op->id.n, op->type_name.p,
       op->type_name.n, lang, lang_len);
-  if (rc == GDEFCORE_OK) {
+  if (rc == GDEFCORE_OK && op->kind != GDEFCORE_OP_DRAFT) {
     rc = put_entity_proj(write, "p:", op->type_name.p, op->type_name.n, op->row,
         seq, op->id.p, op->id.n, lang, lang_len, actor, actor_len);
   }
@@ -3217,7 +3749,8 @@ GDEFCORE_Result gdefcore_changeset_apply(GDEFCORE_Changeset * changeset,
     if (module_op_kind(op->kind)) {
       continue;
     }
-    if (op->kind == GDEFCORE_OP_SAVE || op->kind == GDEFCORE_OP_CLEAR) {
+    if (op->kind == GDEFCORE_OP_SAVE || op->kind == GDEFCORE_OP_CLEAR ||
+        op->kind == GDEFCORE_OP_DRAFT || op->kind == GDEFCORE_OP_PUBLISH) {
       rc = fire_named(changeset, op, GDEFCORE_HOOK_PRESAVE);
       if (rc == GDEFCORE_OK) {
         rc = fire_named(changeset, op, GDEFCORE_HOOK_VALIDATE);
@@ -3227,7 +3760,8 @@ GDEFCORE_Result gdefcore_changeset_apply(GDEFCORE_Changeset * changeset,
       rc = apply_op(changeset->catalog, write, &cursor, op, changeset->actor.p,
           changeset->actor.n);
     }
-    if (rc == GDEFCORE_OK && op->kind == GDEFCORE_OP_SAVE) {
+    if (rc == GDEFCORE_OK &&
+        (op->kind == GDEFCORE_OP_SAVE || op->kind == GDEFCORE_OP_DRAFT)) {
       rc = fire_named(changeset, op, GDEFCORE_HOOK_SAVE);
       if (rc == GDEFCORE_OK) {
         rc = fire_named(changeset, op, GDEFCORE_HOOK_REVISION);
@@ -3283,7 +3817,8 @@ GDEFCORE_Result gdefcore_changeset_apply(GDEFCORE_Changeset * changeset,
       }
       for (i = 0; i < changeset->nops; i++) {
         GDEFCORE_Op * op = &changeset->ops[i];
-        if (op->kind == GDEFCORE_OP_SAVE || op->kind == GDEFCORE_OP_CLEAR) {
+        if (op->kind == GDEFCORE_OP_SAVE || op->kind == GDEFCORE_OP_CLEAR ||
+            op->kind == GDEFCORE_OP_DRAFT || op->kind == GDEFCORE_OP_PUBLISH) {
           hook_rc = fire_named(changeset, op, GDEFCORE_HOOK_AFTER_COMMIT);
           if (hook_rc != GDEFCORE_OK && first == GDEFCORE_OK) {
             first = hook_rc;
@@ -3604,20 +4139,43 @@ GDEFCORE_Result gdefcore_changeset_serialize(const GDEFCORE_Changeset * changese
                                 : (op->decls[f].many ? "optional many"
                                                      : "optional one");
         char flag[32];
+        char * suffix = NULL;
+        size_t suffix_len = 0;
         int fn = snprintf(flag, sizeof flag, "%s%s", word,
             op->decls[f].personal ? " personal" : "");
         if (fn <= 0 || (size_t)fn >= sizeof flag) {
           rc = GDEFCORE_ERR_LIMIT;
           break;
         }
+        rc = constraint_suffix(alloc, &op->decls[f], &suffix, &suffix_len);
+        if (rc != GDEFCORE_OK) {
+          break;
+        }
         kn = snprintf(path, sizeof path, "type/%.*s/field/%.*s",
             (int)op->machine.n, op->machine.p, (int)op->decls[f].name.n,
             op->decls[f].name.p);
         if (kn <= 0 || (size_t)kn >= sizeof path) {
+          gcu_allocator_free(alloc, suffix);
           rc = GDEFCORE_ERR_LIMIT;
           break;
         }
-        rc = patch_add(alloc, &files, &count, path, flag, (size_t)fn);
+        if (suffix_len == 0) {
+          rc = patch_add(alloc, &files, &count, path, flag, (size_t)fn);
+        } else {
+          char * both = (char *)gcu_allocator_malloc(
+              alloc, (size_t)fn + suffix_len);
+          if (both == NULL) {
+            gcu_allocator_free(alloc, suffix);
+            rc = GDEFCORE_ERR_OOM;
+            break;
+          }
+          memcpy(both, flag, (size_t)fn);
+          memcpy(both + fn, suffix, suffix_len);
+          rc = patch_add(alloc, &files, &count, path, both,
+              (size_t)fn + suffix_len);
+          gcu_allocator_free(alloc, both);
+        }
+        gcu_allocator_free(alloc, suffix);
       }
       continue;
     }
@@ -3663,10 +4221,19 @@ GDEFCORE_Result gdefcore_changeset_serialize(const GDEFCORE_Changeset * changese
     if (op->kind == GDEFCORE_OP_CLEAR) {
       rc = patch_add(alloc, &files, &count, path, "clear", 5);
     } else {
+      const char * word = "save";
+      size_t word_n = 4;
       size_t li;
+      if (op->kind == GDEFCORE_OP_DRAFT) {
+        word = "draft";
+        word_n = 5;
+      } else if (op->kind == GDEFCORE_OP_PUBLISH) {
+        word = "publish";
+        word_n = 7;
+      }
+      rc = patch_add(alloc, &files, &count, path, word, word_n);
       size_t fi;
       size_t vi;
-      rc = patch_add(alloc, &files, &count, path, "save", 4);
       for (li = 0; rc == GDEFCORE_OK && li < op->staged.nlangs; li++) {
         for (fi = 0; rc == GDEFCORE_OK && fi < op->staged.langs[li].nfields;
              fi++) {
@@ -4129,11 +4696,27 @@ GDEFCORE_Result gdefcore_changeset_parse(GDEFCORE_Catalog * catalog,
           int personal = 0;
           const uint8_t * body = files[f].bytes;
           size_t body_len = files[f].len;
+          const uint8_t * pipe = NULL;
+          size_t flag_len;
+          GDEFCORE_Decl extra;
           if (!field_name_ok(fname, flen) || nfields >= cap.max_fields ||
               nfields >= 64) {
             gdefcore_changeset_destroy(cs);
             return GDEFCORE_ERR_CORRUPT;
           }
+          memset(&extra, 0, sizeof extra);
+          pipe = memchr(body, '|', body_len);
+          flag_len = pipe == NULL ? body_len : (size_t)(pipe - body);
+          if (pipe != NULL) {
+            GDEFCORE_Result crc = fill_constraints(catalog->alloc,
+                (const char *)pipe + 1, body_len - flag_len - 1, &extra);
+            if (crc != GDEFCORE_OK) {
+              text_clear(catalog->alloc, &extra.pattern);
+              gdefcore_changeset_destroy(cs);
+              return crc;
+            }
+          }
+          body_len = flag_len;
           if (body_len >= 9 && memcmp(body + body_len - 9, " personal", 9) == 0) {
             personal = 1;
             body_len -= 9;
@@ -4149,6 +4732,11 @@ GDEFCORE_Result gdefcore_changeset_parse(GDEFCORE_Catalog * catalog,
                          13)) {
             many = 1;
           } else {
+            size_t z;
+            text_clear(catalog->alloc, &extra.pattern);
+            for (z = 0; z < nfields; z++) {
+              gcu_allocator_free(catalog->alloc, (void *)stack[z].pattern);
+            }
             gdefcore_changeset_destroy(cs);
             return GDEFCORE_ERR_CORRUPT;
           }
@@ -4159,10 +4747,21 @@ GDEFCORE_Result gdefcore_changeset_parse(GDEFCORE_Catalog * catalog,
           stack[nfields].required = required;
           stack[nfields].many = many;
           stack[nfields].personal = personal;
+          stack[nfields].min_len = extra.min_len;
+          stack[nfields].max_len = extra.max_len;
+          stack[nfields].has_range = extra.has_range;
+          stack[nfields].range_min = extra.range_min;
+          stack[nfields].range_max = extra.range_max;
+          stack[nfields].pattern = extra.pattern.p;
+          stack[nfields].pattern_len = extra.pattern.n;
           nfields += 1;
         }
       }
       rc = gdefcore_changeset_define(cs, name, name_len, kind, stack, nfields);
+      for (f = 0; f < nfields; f++) {
+        gcu_allocator_free(catalog->alloc, (void *)stack[f].pattern);
+        stack[f].pattern = NULL;
+      }
       if (rc != GDEFCORE_OK) {
         gdefcore_changeset_destroy(cs);
         return rc;
@@ -4289,8 +4888,14 @@ GDEFCORE_Result gdefcore_changeset_parse(GDEFCORE_Catalog * catalog,
         gdefcore_changeset_destroy(cs);
         return GDEFCORE_ERR_CORRUPT;
       }
-    } else if (span_eq((const char *)files[i].bytes, files[i].len, "save", 4)) {
+    } else if (span_eq((const char *)files[i].bytes, files[i].len, "save", 4) ||
+        span_eq((const char *)files[i].bytes, files[i].len, "draft", 5) ||
+        span_eq((const char *)files[i].bytes, files[i].len, "publish", 7)) {
       GDEFCORE_Op * op;
+      int drafted = span_eq((const char *)files[i].bytes, files[i].len, "draft",
+          5);
+      int publishing =
+          span_eq((const char *)files[i].bytes, files[i].len, "publish", 7);
       gcu_allocator_free(catalog->alloc, type_name);
       gcu_allocator_free(catalog->alloc, machine);
       rc = stage_parsed_saves(cs, files, count, canon, &cap);
@@ -4304,6 +4909,11 @@ GDEFCORE_Result gdefcore_changeset_parse(GDEFCORE_Catalog * catalog,
               &op->base_seq)) {
         gdefcore_changeset_destroy(cs);
         return GDEFCORE_ERR_CORRUPT;
+      }
+      if (drafted) {
+        op->kind = GDEFCORE_OP_DRAFT;
+      } else if (publishing) {
+        op->kind = GDEFCORE_OP_PUBLISH;
       }
     } else {
       gcu_allocator_free(catalog->alloc, type_name);

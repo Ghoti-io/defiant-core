@@ -1287,6 +1287,81 @@ GDEFCORE_Result gdefcore_account_check(GDEFCORE_Catalog * catalog,
   return set_principal(request, stored_principal);
 }
 
+GDEFCORE_Result gdefcore_account_session_expiry(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Keyring * keyring, const uint8_t * root, size_t root_len,
+    const char * token, size_t token_len, uint64_t * out_expiry) {
+  const uint8_t * raw;
+  const uint8_t * tenant = NULL;
+  size_t tenant_len = 0;
+  size_t purpose_len = 0;
+  size_t aad_len = 0;
+  uint32_t ct_len = 0;
+  uint64_t expiry = 0;
+  uint64_t now = 0;
+  uint8_t session[kKey];
+  uint8_t token_key[kKey];
+  uint8_t plain[kPlain];
+  uint8_t aad[kTenantMax + 32];
+  size_t header = 0;
+  GDEFCORE_Result rc;
+  if (catalog == NULL || keyring == NULL || out_expiry == NULL ||
+      !root_ok(root, root_len) || token == NULL || token_len < 83) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  raw = (const uint8_t *)token;
+  if (raw[0] != kVersion || raw[1] != kAlg || raw[2] != kKeyId) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  purpose_len = raw[3];
+  header = 4 + purpose_len + 8 + kTokenSalt + kNonce + 4;
+  if (purpose_len != strlen(kSession) || token_len < header + kTag ||
+      memcmp(raw + 4, kSession, purpose_len) != 0) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  expiry = get_u64(raw + 4 + purpose_len);
+  ct_len = get_u32(raw + header - 4);
+  if (ct_len != kPlain || token_len != header + ct_len + kTag) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  if (!now_u64(&now)) {
+    return GDEFCORE_ERR_IO;
+  }
+  if (expiry <= now || expiry > now + GDEFCORE_ACCOUNT_SESSION_MAX) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  rc = purpose_key(keyring, root, root_len, kSession, session);
+  if (rc != GDEFCORE_OK) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  rc = from_gsec(gsec_hkdf(GSEC_HKDF_SHA256, raw + 4 + purpose_len + 8,
+      kTokenSalt, session, kKey, NULL, 0, token_key, kKey));
+  wipe(session, sizeof session);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  rc = tenant_of(catalog, &tenant, &tenant_len);
+  if (rc != GDEFCORE_OK) {
+    wipe(token_key, sizeof token_key);
+    return rc;
+  }
+  put_u32(aad, (uint32_t)tenant_len);
+  memcpy(aad + 4, tenant, tenant_len);
+  memcpy(aad + 4 + tenant_len, kSession, strlen(kSession));
+  aad[4 + tenant_len + strlen(kSession)] = kKeyId;
+  put_u64(aad + 5 + tenant_len + strlen(kSession), expiry);
+  aad_len = 13 + tenant_len + strlen(kSession);
+  rc = from_gsec(gsec_aes_gcm_decrypt(token_key, kKey,
+      raw + 4 + purpose_len + 8 + kTokenSalt, kNonce, aad, aad_len,
+      raw + header, ct_len, plain, raw + header + ct_len, kTag));
+  wipe(token_key, sizeof token_key);
+  wipe(plain, sizeof plain);
+  if (rc != GDEFCORE_OK) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  *out_expiry = expiry;
+  return GDEFCORE_OK;
+}
+
 GDEFCORE_Result gdefcore_account_password(GDEFCORE_Catalog * catalog,
     GDEFCORE_Keyring * keyring, const uint8_t * root, size_t root_len,
     const char * id, size_t id_len, const void * password, size_t password_len,

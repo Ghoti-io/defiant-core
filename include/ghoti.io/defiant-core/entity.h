@@ -92,15 +92,23 @@ typedef struct GDEFCORE_Changeset GDEFCORE_Changeset;
  *
  * @ref size is `sizeof(GDEFCORE_Field)`. A value that stops before
  * @ref many is ::GDEFCORE_ERR_INVALID. @ref personal is 0 when @ref size
- * stops before it.
+ * stops before it. Members after @ref personal are absent when @ref size
+ * stops before them: no minimum, no maximum, no range and no pattern.
  */
 typedef struct GDEFCORE_Field {
-  size_t size;         ///< Must be `sizeof(GDEFCORE_Field)`.
-  const char * name;   ///< Required. ASCII letters, digits, underscore.
-  size_t name_len;     ///< Length of @ref name.
-  int required;        ///< Non-zero when a save must supply the field.
-  int many;            ///< Non-zero when the field holds more than one value.
-  int personal;        ///< Non-zero when the value is encrypted for a subject.
+  size_t size;              ///< Must be `sizeof(GDEFCORE_Field)`.
+  const char * name;        ///< Required. ASCII letters, digits, underscore.
+  size_t name_len;          ///< Length of @ref name.
+  int required;             ///< Non-zero when a save must supply the field.
+  int many;                 ///< Non-zero when the field holds more than one value.
+  int personal;             ///< Non-zero when the value is encrypted for a subject.
+  size_t min_len;           ///< Minimum byte length. 0 means no minimum.
+  size_t max_len;           ///< Maximum byte length. 0 means no maximum.
+  int has_range;            ///< Non-zero when @ref range_min and @ref range_max apply.
+  int64_t range_min;        ///< Inclusive lower bound of a base-10 integer.
+  int64_t range_max;        ///< Inclusive upper bound of a base-10 integer.
+  const char * pattern;     ///< ECMAScript regex, or NULL. Must match the whole value.
+  size_t pattern_len;       ///< Length of @ref pattern. 0 means no pattern.
 } GDEFCORE_Field;
 
 /**
@@ -237,6 +245,19 @@ GDEFCORE_API GDEFCORE_Result gdefcore_type_field_personal(
     size_t index, int * out_personal);
 
 /**
+ * @brief Constraints stored on the field at @p index.
+ *
+ * A field stored before these members existed reports no minimum, no
+ * maximum, no range and a NULL pattern. Free @p out_pattern with
+ * gdefcore_text_free() when it is not NULL. Nothing is written on failure.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_type_field_constraints(
+    GDEFCORE_Catalog * catalog, const char * name, size_t name_len,
+    size_t index, size_t * out_min_len, size_t * out_max_len,
+    int * out_has_range, int64_t * out_range_min, int64_t * out_range_max,
+    char ** out_pattern, size_t * out_pattern_len);
+
+/**
  * @brief Mint a public id and a row id for an entity of @p type_name.
  *
  * The row id is returned for inspection. Later calls take the public id.
@@ -291,6 +312,34 @@ GDEFCORE_API GDEFCORE_Result gdefcore_changeset_define(
 GDEFCORE_API GDEFCORE_Result gdefcore_entity_save(GDEFCORE_Changeset * changeset,
     const char * id, size_t id_len, const char * lang, size_t lang_len,
     const GDEFCORE_Value * values, size_t value_count);
+
+/**
+ * @brief Stage field values onto the draft projection only.
+ *
+ * Apply appends a revision and updates the draft. The published projection
+ * is left as it was. The arguments are the same as gdefcore_entity_save().
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_entity_save_draft(
+    GDEFCORE_Changeset * changeset, const char * id, size_t id_len,
+    const char * lang, size_t lang_len, const GDEFCORE_Value * values,
+    size_t value_count);
+
+/**
+ * @brief Stage a copy of the draft projection onto the published one.
+ *
+ * Apply does not append a revision. An entity with no draft writes nothing.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_entity_publish(
+    GDEFCORE_Changeset * changeset, const char * id, size_t id_len);
+
+/**
+ * @brief The latest revision sequence, or 0 when the entity has none.
+ *
+ * A missing id is ::GDEFCORE_ERR_INVALID. @p out_seq is not written then.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_entity_revision(
+    GDEFCORE_Catalog * catalog, const char * id, size_t id_len,
+    uint64_t * out_seq);
 
 /**
  * @brief Read field values.

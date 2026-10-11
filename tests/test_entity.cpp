@@ -207,6 +207,106 @@ TEST_F(Entity, OldFieldLine) {
   ASSERT_EQ(GDEFCORE_OK,
       gdefcore_type_field_personal(catalog_, "site.old", 8, 0, &personal));
   EXPECT_EQ(0, personal);
+  {
+    size_t min_len = 9;
+    size_t max_len = 9;
+    int has_range = 1;
+    int64_t range_min = 3;
+    int64_t range_max = 4;
+    char * pattern = (char *)0x1;
+    size_t pattern_len = 4;
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_type_field_constraints(catalog_, "site.old", 8, 0, &min_len,
+            &max_len, &has_range, &range_min, &range_max, &pattern, &pattern_len));
+    EXPECT_EQ(0u, min_len);
+    EXPECT_EQ(0u, max_len);
+    EXPECT_EQ(0, has_range);
+    EXPECT_EQ(nullptr, pattern);
+    EXPECT_EQ(0u, pattern_len);
+  }
+}
+
+TEST_F(Entity, FieldConstraints) {
+  GDEFCORE_Field field = TitleField();
+  GDEFCORE_Changeset * changeset = NULL;
+  GDEFCORE_Changeset * parsed = NULL;
+  GDEFCORE_Patch * files = NULL;
+  size_t count = 0;
+  size_t min_len = 0;
+  size_t max_len = 0;
+  int has_range = 0;
+  int64_t range_min = 0;
+  int64_t range_max = 0;
+  char * pattern = NULL;
+  size_t pattern_len = 0;
+  field.min_len = 2;
+  field.max_len = 8;
+  field.has_range = 1;
+  field.range_min = 10;
+  field.range_max = 20;
+  field.pattern = "a+";
+  field.pattern_len = 2;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &changeset));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_changeset_define(changeset, "site.bound", 10, GDEFCORE_TYPE_CONTENT,
+          &field, 1));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_serialize(changeset, &files, &count));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_changeset_parse(catalog_, files, count, NULL, &parsed));
+  gdefcore_changeset_destroy(changeset);
+  gdefcore_patch_free(catalog_, files, count);
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(parsed, "site.bound", 10));
+  gdefcore_changeset_destroy(parsed);
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_type_field_constraints(catalog_, "site.bound", 10, 0, &min_len,
+          &max_len, &has_range, &range_min, &range_max, &pattern, &pattern_len));
+  EXPECT_EQ(2u, min_len);
+  EXPECT_EQ(8u, max_len);
+  EXPECT_EQ(1, has_range);
+  EXPECT_EQ(10, range_min);
+  EXPECT_EQ(20, range_max);
+  ASSERT_NE(nullptr, pattern);
+  EXPECT_EQ(std::string("a+"), std::string(pattern, pattern_len));
+  gdefcore_text_free(catalog_, pattern);
+}
+
+TEST_F(Entity, DraftRoundTrip) {
+  char id[GDEFCORE_PUBLIC_ID_LEN + 1];
+  uint64_t row = 0;
+  GDEFCORE_Changeset * changeset = NULL;
+  GDEFCORE_Changeset * parsed = NULL;
+  GDEFCORE_Patch * files = NULL;
+  size_t count = 0;
+  GDEFCORE_Result rc = GDEFCORE_OK;
+  const char * texts[1];
+  size_t lens[1];
+  GDEFCORE_Value value;
+  DefineType(catalog_, "site.note", GDEFCORE_TYPE_CONTENT);
+  CreateEntity(catalog_, "site.note", id, &row);
+  texts[0] = "Hello";
+  lens[0] = 5;
+  memset(&value, 0, sizeof value);
+  value.size = sizeof value;
+  value.field = "title";
+  value.field_len = 5;
+  value.texts = texts;
+  value.text_lens = lens;
+  value.count = 1;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &changeset));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_entity_save_draft(changeset, id, strlen(id), "en", 2, &value, 1));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_serialize(changeset, &files, &count));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_changeset_parse(catalog_, files, count, NULL, &parsed));
+  gdefcore_changeset_destroy(changeset);
+  gdefcore_patch_free(catalog_, files, count);
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(parsed, NULL, 0));
+  gdefcore_changeset_destroy(parsed);
+  EXPECT_EQ("Hello",
+      ReadTitle(catalog_, NULL, GDEFCORE_VIEW_DRAFT, id, "en", &rc));
+  EXPECT_EQ(GDEFCORE_OK, rc);
+  ReadTitle(catalog_, NULL, GDEFCORE_VIEW_PUBLISHED, id, "en", &rc);
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, rc);
 }
 
 TEST_F(Entity, PersonalChangeset) {

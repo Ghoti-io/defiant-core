@@ -219,6 +219,43 @@ GDEFCORE_API GDEFCORE_Result gdefcore_request_set_acting_principal(
 GDEFCORE_API const char * gdefcore_request_acting_principal(
     const GDEFCORE_Request * request, size_t * out_len);
 
+/**
+ * @brief Set a named note, or replace one with the same name.
+ *
+ * The bytes are copied. A later handler reads them with
+ * gdefcore_request_note(). NULL @p name is ::GDEFCORE_ERR_INVALID and the
+ * previous notes stay.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_request_set_note(
+    GDEFCORE_Request * request, const char * name, size_t name_len,
+    const char * value, size_t value_len);
+
+/**
+ * @brief The note named @p name, or NULL when there is none.
+ *
+ * The bytes stay valid until the next set of that name or until the request
+ * is destroyed.
+ */
+GDEFCORE_API const char * gdefcore_request_note(const GDEFCORE_Request * request,
+    const char * name, size_t name_len, size_t * out_len);
+
+/**
+ * @brief Set the resolution and own the request.
+ *
+ * NULL or a zero length clears it, which is not ownership. The bytes are
+ * copied and are not required to be a public id.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_request_set_resolution(
+    GDEFCORE_Request * request, const char * text, size_t text_len);
+
+/**
+ * @brief The resolution, or NULL when the request is not owned.
+ *
+ * @param out_len Receives the length. May be NULL.
+ */
+GDEFCORE_API const char * gdefcore_request_resolution(
+    const GDEFCORE_Request * request, size_t * out_len);
+
 #ifdef __cplusplus
 }
 #endif

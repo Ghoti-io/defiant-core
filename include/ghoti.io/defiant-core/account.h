@@ -183,6 +183,18 @@ GDEFCORE_API GDEFCORE_Result gdefcore_account_check(
     const char * token, size_t token_len);
 
 /**
+ * @brief The absolute expiry of a session token, in seconds since the epoch.
+ *
+ * The token bytes are not changed. A bad tag, a wrong tenant, or an expired
+ * token is an error and @p out_expiry is not written. This does not set a
+ * principal.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_account_session_expiry(
+    GDEFCORE_Catalog * catalog, GDEFCORE_Keyring * keyring,
+    const uint8_t * root, size_t root_len, const char * token,
+    size_t token_len, uint64_t * out_expiry);
+
+/**
  * @brief Replace the password. High risk. The confirmation is the username.
  *
  * A wrong confirmation writes nothing. The security epoch increases. An

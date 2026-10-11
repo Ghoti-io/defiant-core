@@ -88,6 +88,15 @@ void gdefcore_request_destroy(GDEFCORE_Request * request) {
     request->fiber = NULL;
   }
   allocator = request->allocator;
+  if (request->nnotes > 0) {
+    size_t i;
+    for (i = 0; i < request->nnotes; i++) {
+      gcu_allocator_free(allocator, request->notes[i].name);
+      gcu_allocator_free(allocator, request->notes[i].value);
+    }
+    gcu_allocator_free(allocator, request->notes);
+  }
+  gcu_allocator_free(allocator, request->resolution);
   gcu_allocator_free(allocator, request->principal);
   gcu_allocator_free(allocator, request->acting);
   gcu_allocator_free(allocator, request->tenant);
@@ -235,4 +244,128 @@ const char * gdefcore_request_acting_principal(
     return get_public_id(NULL, NULL, 0, out_len);
   }
   return get_public_id(request, request->acting, request->acting_len, out_len);
+}
+
+static char * copy_bytes(const GDEFCORE_Allocator * allocator, const char * text,
+    size_t len) {
+  char * copy;
+  if (len == 0) {
+    copy = (char *)gcu_allocator_malloc(allocator, 1);
+    if (copy != NULL) {
+      copy[0] = '\0';
+    }
+    return copy;
+  }
+  copy = (char *)gcu_allocator_malloc(allocator, len);
+  if (copy == NULL) {
+    return NULL;
+  }
+  memcpy(copy, text, len);
+  return copy;
+}
+
+GDEFCORE_Result gdefcore_request_set_note(GDEFCORE_Request * request,
+    const char * name, size_t name_len, const char * value, size_t value_len) {
+  size_t i;
+  char * name_copy;
+  char * value_copy;
+  GDEFCORE_Note * notes;
+  if (request == NULL || name == NULL || name_len == 0 ||
+      (value == NULL && value_len != 0)) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  for (i = 0; i < request->nnotes; i++) {
+    if (request->notes[i].name_len == name_len &&
+        memcmp(request->notes[i].name, name, name_len) == 0) {
+      value_copy = copy_bytes(request->allocator, value, value_len);
+      if (value_copy == NULL) {
+        return GDEFCORE_ERR_OOM;
+      }
+      gcu_allocator_free(request->allocator, request->notes[i].value);
+      request->notes[i].value = value_copy;
+      request->notes[i].value_len = value_len;
+      return GDEFCORE_OK;
+    }
+  }
+  name_copy = copy_bytes(request->allocator, name, name_len);
+  value_copy = copy_bytes(request->allocator, value, value_len);
+  if (name_copy == NULL || value_copy == NULL) {
+    gcu_allocator_free(request->allocator, name_copy);
+    gcu_allocator_free(request->allocator, value_copy);
+    return GDEFCORE_ERR_OOM;
+  }
+  notes = (GDEFCORE_Note *)gcu_allocator_realloc(request->allocator,
+      request->notes, (request->nnotes + 1) * sizeof *notes);
+  if (notes == NULL) {
+    gcu_allocator_free(request->allocator, name_copy);
+    gcu_allocator_free(request->allocator, value_copy);
+    return GDEFCORE_ERR_OOM;
+  }
+  request->notes = notes;
+  request->notes[request->nnotes].name = name_copy;
+  request->notes[request->nnotes].name_len = name_len;
+  request->notes[request->nnotes].value = value_copy;
+  request->notes[request->nnotes].value_len = value_len;
+  request->nnotes += 1;
+  return GDEFCORE_OK;
+}
+
+const char * gdefcore_request_note(const GDEFCORE_Request * request,
+    const char * name, size_t name_len, size_t * out_len) {
+  size_t i;
+  if (request == NULL || name == NULL || name_len == 0) {
+    if (out_len != NULL) {
+      *out_len = 0;
+    }
+    return NULL;
+  }
+  for (i = 0; i < request->nnotes; i++) {
+    if (request->notes[i].name_len == name_len &&
+        memcmp(request->notes[i].name, name, name_len) == 0) {
+      if (out_len != NULL) {
+        *out_len = request->notes[i].value_len;
+      }
+      return request->notes[i].value;
+    }
+  }
+  if (out_len != NULL) {
+    *out_len = 0;
+  }
+  return NULL;
+}
+
+GDEFCORE_Result gdefcore_request_set_resolution(GDEFCORE_Request * request,
+    const char * text, size_t text_len) {
+  char * copy;
+  if (request == NULL || (text == NULL && text_len != 0)) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  if (text == NULL || text_len == 0) {
+    gcu_allocator_free(request->allocator, request->resolution);
+    request->resolution = NULL;
+    request->resolution_len = 0;
+    return GDEFCORE_OK;
+  }
+  copy = copy_bytes(request->allocator, text, text_len);
+  if (copy == NULL) {
+    return GDEFCORE_ERR_OOM;
+  }
+  gcu_allocator_free(request->allocator, request->resolution);
+  request->resolution = copy;
+  request->resolution_len = text_len;
+  return GDEFCORE_OK;
+}
+
+const char * gdefcore_request_resolution(const GDEFCORE_Request * request,
+    size_t * out_len) {
+  if (request == NULL || request->resolution == NULL) {
+    if (out_len != NULL) {
+      *out_len = 0;
+    }
+    return NULL;
+  }
+  if (out_len != NULL) {
+    *out_len = request->resolution_len;
+  }
+  return request->resolution;
 }
