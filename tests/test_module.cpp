@@ -26,12 +26,15 @@
  * native library.
  */
 
+#include <ghoti.io/cutil/library.h>
 #include <ghoti.io/defiant-core/macros.h>
 #include <ghoti.io/defiant-core/defiant-core.h>
+#include <ghoti.io/defiant-storage/projection.h>
 #include <ghoti.io/defiant-storage-memory/memory.h>
 
 #include <gtest/gtest.h>
 
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -59,6 +62,12 @@ struct Vote {
   int fail;
   int access;
   int saw_request;
+  int saw_block;
+  char arg_id[GDEFCORE_PUBLIC_ID_LEN + 1];
+  size_t arg_id_len;
+  char arg_type[32];
+  size_t arg_type_len;
+  uint64_t arg_seq;
   GDEFCORE_Catalog * catalog;
   char id[GDEFCORE_PUBLIC_ID_LEN + 1];
   char seen[64];
@@ -70,6 +79,14 @@ static GDEFCORE_Module_Manifest g_man;
 static GDEFCORE_Module_Rel g_rel;
 static GDEFCORE_Module_Sub g_sub;
 static const GDEFCORE_Module_Manifest * g_current;
+static const char * g_before;
+static int g_entered_seen = -1;
+static GDEFSTOR_Store * g_probe_store;
+
+struct AppendState {
+  int calls;
+  const char * extra;
+};
 
 extern "C" const GDEFCORE_Module_Manifest * TestGuest(void) {
   return g_current;
@@ -78,9 +95,27 @@ extern "C" const GDEFCORE_Module_Manifest * TestGuest(void) {
 extern "C" GDEFCORE_Result OnVote(GDEFCORE_Request * request, const void * args,
     GDEFCORE_Alter * alter, GDEFCORE_Hook_Out * out, void * user) {
   Vote * vote = (Vote *)user;
-  (void)args;
   (void)alter;
   vote->calls += 1;
+  if (args != NULL) {
+    const GDEFCORE_Write_Hook * block = (const GDEFCORE_Write_Hook *)args;
+    if (block->size >=
+        offsetof(GDEFCORE_Write_Hook, base_seq) + sizeof(uint64_t)) {
+      vote->saw_block = 1;
+      vote->arg_seq = block->base_seq;
+      vote->arg_id_len = 0;
+      vote->arg_type_len = 0;
+      if (block->entity_id != NULL &&
+          block->entity_id_len <= GDEFCORE_PUBLIC_ID_LEN) {
+        memcpy(vote->arg_id, block->entity_id, block->entity_id_len);
+        vote->arg_id_len = block->entity_id_len;
+      }
+      if (block->type_name != NULL && block->type_name_len < sizeof vote->arg_type) {
+        memcpy(vote->arg_type, block->type_name, block->type_name_len);
+        vote->arg_type_len = block->type_name_len;
+      }
+    }
+  }
   vote->saw_request = request != NULL;
   if (out != NULL) {
     out->decision = vote->decision;
@@ -114,6 +149,48 @@ extern "C" GDEFCORE_Result OnAppend(GDEFCORE_Request * request, const void * arg
   memcpy(buf, text, len);
   memcpy(buf + len, extra, extra_len);
   return gdefcore_alter_set(alter, buf, len + extra_len);
+}
+
+extern "C" GDEFCORE_Result OnAppendCount(GDEFCORE_Request * request,
+    const void * args, GDEFCORE_Alter * alter, GDEFCORE_Hook_Out * out,
+    void * user) {
+  AppendState * state = (AppendState *)user;
+  state->calls += 1;
+  return OnAppend(request, args, alter, out, (void *)state->extra);
+}
+
+extern "C" GDEFCORE_Result OnAppendThenFail(GDEFCORE_Request * request,
+    const void * args, GDEFCORE_Alter * alter, GDEFCORE_Hook_Out * out,
+    void * user) {
+  GDEFCORE_Result rc = OnAppend(request, args, alter, out, user);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  return GDEFCORE_ERR_INVALID;
+}
+
+extern "C" void ProbeEntered(void) {
+  GDEFSTOR_Projection * row = NULL;
+  size_t i;
+  size_t n;
+  g_entered_seen = -1;
+  if (g_probe_store == NULL ||
+      gdefstor_projection_get(g_probe_store, "\x01", 1, "core.module.install",
+          19, "example", 7, &row) != GDEFSTOR_OK) {
+    return;
+  }
+  n = gdefstor_projection_column_count(row);
+  for (i = 0; i < n; i++) {
+    GDEFSTOR_Column column;
+    if (gdefstor_projection_column(row, i, &column) != GDEFSTOR_OK) {
+      continue;
+    }
+    if (column.name_len == 7 && memcmp(column.name, "entered", 7) == 0 &&
+        column.value != NULL && column.value_len >= 1) {
+      g_entered_seen = column.value[0];
+    }
+  }
+  gdefstor_projection_free(row);
 }
 
 extern "C" GDEFCORE_Result OnAfter(GDEFCORE_Request * request, const void * args,
@@ -190,6 +267,11 @@ void InstallGuest(GDEFCORE_Host * host, const char * name, const char * token,
     if (after != NULL) {
       g_sub.after = after;
       g_sub.after_len = strlen(after);
+    }
+    if (g_before != NULL) {
+      g_sub.before = g_before;
+      g_sub.before_len = strlen(g_before);
+      g_before = NULL;
     }
   }
   g_man.size = sizeof g_man;
@@ -720,6 +802,382 @@ TEST_F(Module, SameOutput) {
   gdefcore_host_destroy(other_host);
   gdefcore_catalog_destroy(other_catalog);
   gdefstor_store_destroy(other_store);
+}
+
+TEST_F(Module, WriteHooks) {
+  Vote pre;
+  Vote val;
+  Vote sav;
+  Vote rev;
+  Vote del;
+  const char * names[] = {"del", "pre", "rev", "sav", "val"};
+  char id[GDEFCORE_PUBLIC_ID_LEN + 1];
+  GDEFCORE_Changeset * changeset = NULL;
+  uint64_t base = 99;
+  uint64_t epoch = 0;
+  uint64_t after = 0;
+  memset(&pre, 0, sizeof pre);
+  memset(&val, 0, sizeof val);
+  memset(&sav, 0, sizeof sav);
+  memset(&rev, 0, sizeof rev);
+  memset(&del, 0, sizeof del);
+  DefineNote(catalog_);
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_entity_create(catalog_, "site.note", 9, id, NULL));
+  InstallGuest(host_, "pre", kCoreToken, "presave", GDEFCORE_HOOK_EVENT, 0, 0, NULL,
+      OnVote, &pre, 0, NULL);
+  InstallGuest(host_, "val", kCoreToken, "validate", GDEFCORE_HOOK_EVENT, 0, 0, NULL,
+      OnVote, &val, 0, NULL);
+  InstallGuest(host_, "sav", kCoreToken, "save", GDEFCORE_HOOK_EVENT, 0, 0, NULL,
+      OnVote, &sav, 0, NULL);
+  InstallGuest(host_, "rev", kCoreToken, "revision", GDEFCORE_HOOK_EVENT, 0, 0, NULL,
+      OnVote, &rev, 0, NULL);
+  InstallGuest(host_, "del", kCoreToken, "delete", GDEFCORE_HOOK_EVENT, 0, 0, NULL,
+      OnVote, &del, 0, NULL);
+  ASSERT_EQ(GDEFCORE_OK,
+      ApplyModules(host_, catalog_, request_, names, 5, "del\npre\nrev\nsav\nval"));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &changeset));
+  gdefcore_changeset_set_request(changeset, request_);
+  SaveTitle(changeset, id, "kept");
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_base_seq(changeset, id, strlen(id), &base));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(changeset, NULL, 0));
+  gdefcore_changeset_destroy(changeset);
+  changeset = NULL;
+  EXPECT_EQ(1, pre.calls);
+  EXPECT_EQ(1, val.calls);
+  EXPECT_EQ(1, sav.calls);
+  EXPECT_EQ(1, rev.calls);
+  EXPECT_EQ(0, del.calls);
+  EXPECT_EQ(1, pre.saw_block);
+  EXPECT_EQ(std::string(id), std::string(pre.arg_id, pre.arg_id_len));
+  EXPECT_EQ(std::string("site.note"), std::string(pre.arg_type, pre.arg_type_len));
+  EXPECT_EQ(base, pre.arg_seq);
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_epoch(catalog_, &epoch));
+  val.fail = 1;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &changeset));
+  gdefcore_changeset_set_request(changeset, request_);
+  SaveTitle(changeset, id, "next");
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, gdefcore_changeset_apply(changeset, NULL, 0));
+  gdefcore_changeset_destroy(changeset);
+  changeset = NULL;
+  EXPECT_EQ(2, val.calls);
+  EXPECT_EQ(1, sav.calls);
+  EXPECT_EQ(std::string("kept"), PublishedTitle(catalog_, id));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_epoch(catalog_, &after));
+  EXPECT_EQ(epoch, after);
+  val.fail = 0;
+  sav.fail = 1;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &changeset));
+  gdefcore_changeset_set_request(changeset, request_);
+  SaveTitle(changeset, id, "next");
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, gdefcore_changeset_apply(changeset, NULL, 0));
+  gdefcore_changeset_destroy(changeset);
+  changeset = NULL;
+  EXPECT_EQ(2, sav.calls);
+  EXPECT_EQ(1, rev.calls);
+  EXPECT_EQ(std::string("kept"), PublishedTitle(catalog_, id));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_epoch(catalog_, &after));
+  EXPECT_EQ(epoch, after);
+  sav.fail = 0;
+  rev.fail = 1;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &changeset));
+  gdefcore_changeset_set_request(changeset, request_);
+  SaveTitle(changeset, id, "next");
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, gdefcore_changeset_apply(changeset, NULL, 0));
+  gdefcore_changeset_destroy(changeset);
+  changeset = NULL;
+  EXPECT_EQ(2, rev.calls);
+  EXPECT_EQ(std::string("kept"), PublishedTitle(catalog_, id));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_epoch(catalog_, &after));
+  EXPECT_EQ(epoch, after);
+  rev.fail = 0;
+  del.fail = 1;
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_changeset_revert(catalog_, id, strlen(id), NULL, 0, &changeset));
+  gdefcore_changeset_set_request(changeset, request_);
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, gdefcore_changeset_apply(changeset, NULL, 0));
+  gdefcore_changeset_destroy(changeset);
+  changeset = NULL;
+  EXPECT_EQ(1, del.calls);
+  EXPECT_EQ(std::string("kept"), PublishedTitle(catalog_, id));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_epoch(catalog_, &after));
+  EXPECT_EQ(epoch, after);
+  del.fail = 0;
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_changeset_revert(catalog_, id, strlen(id), NULL, 0, &changeset));
+  gdefcore_changeset_set_request(changeset, request_);
+  EXPECT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(changeset, NULL, 0));
+  gdefcore_changeset_destroy(changeset);
+  EXPECT_EQ(2, del.calls);
+  EXPECT_EQ(std::string(), PublishedTitle(catalog_, id));
+}
+
+TEST_F(Module, Disable) {
+  Vote vote;
+  const char * names[] = {"off"};
+  GDEFCORE_Changeset * changeset = NULL;
+  memset(&vote, 0, sizeof vote);
+  InstallGuest(host_, "off", kCoreToken, "demo.off", GDEFCORE_HOOK_EVENT, 0, 0, NULL,
+      OnVote, &vote, 0, NULL);
+  ASSERT_EQ(GDEFCORE_OK, ApplyModules(host_, catalog_, request_, names, 1, "off"));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_hook_fire(host_, request_, catalog_, "demo.off", 8, GDEFCORE_HOOK_EVENT,
+          NULL, NULL, NULL));
+  EXPECT_EQ(1, vote.calls);
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &changeset));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_module_disable(host_, changeset, "off", 3));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(changeset, "off", 3));
+  gdefcore_changeset_destroy(changeset);
+  EXPECT_EQ(0, IsEnabled(host_, request_, "off"));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_hook_fire(host_, request_, catalog_, "demo.off", 8, GDEFCORE_HOOK_EVENT,
+          NULL, NULL, NULL));
+  EXPECT_EQ(1, vote.calls);
+}
+
+TEST_F(Module, RequiresInstalled) {
+  const char * gone[] = {"gone"};
+  const char * need[] = {"need"};
+  InstallGuest(host_, "gone", kCoreToken, "demo.gone", GDEFCORE_HOOK_EVENT, 0, 0, NULL,
+      OnVote, NULL, 0, NULL);
+  InstallGuest(host_, "need", kCoreToken, "demo.need", GDEFCORE_HOOK_EVENT, 0, 0, NULL,
+      OnVote, NULL, GDEFCORE_REL_REQUIRES, "gone");
+  ASSERT_EQ(GDEFCORE_ERR_INVALID,
+      ApplyModules(host_, catalog_, request_, need, 1, "need"));
+  EXPECT_NE(std::string::npos, HostError(host_).find("absent"));
+  EXPECT_EQ(0, IsEnabled(host_, request_, "need"));
+  ASSERT_EQ(GDEFCORE_OK, ApplyModules(host_, catalog_, request_, gone, 1, "gone"));
+  ASSERT_EQ(GDEFCORE_OK, ApplyModules(host_, catalog_, request_, need, 1, "need"));
+  EXPECT_EQ(1, IsEnabled(host_, request_, "gone"));
+  EXPECT_EQ(1, IsEnabled(host_, request_, "need"));
+}
+
+TEST_F(Module, EqualWeight) {
+  const char * names[] = {"a", "b"};
+  InstallGuest(host_, "b", kCoreToken, "demo.tie", GDEFCORE_HOOK_ALTER, 0, 0, NULL,
+      OnAppend, (void *)"b", 0, NULL);
+  InstallGuest(host_, "a", kCoreToken, "demo.tie", GDEFCORE_HOOK_ALTER, 0, 0, NULL,
+      OnAppend, (void *)"a", 0, NULL);
+  ASSERT_EQ(GDEFCORE_OK, ApplyModules(host_, catalog_, request_, names, 2, "a\nb"));
+  EXPECT_EQ(std::string("xab"), AlterText(host_, request_, catalog_, "demo.tie", "x"));
+}
+
+TEST_F(Module, Before) {
+  const char * names[] = {"a", "b"};
+  g_before = "a";
+  InstallGuest(host_, "b", kCoreToken, "demo.before", GDEFCORE_HOOK_ALTER, 0, 0, NULL,
+      OnAppend, (void *)"b", 0, NULL);
+  InstallGuest(host_, "a", kCoreToken, "demo.before", GDEFCORE_HOOK_ALTER, 0, 0, NULL,
+      OnAppend, (void *)"a", 0, NULL);
+  ASSERT_EQ(GDEFCORE_OK, ApplyModules(host_, catalog_, request_, names, 2, "a\nb"));
+  EXPECT_EQ(std::string("xba"),
+      AlterText(host_, request_, catalog_, "demo.before", "x"));
+}
+
+TEST_F(Module, BeforeCycle) {
+  Vote unused;
+  const char * names[] = {"a", "b"};
+  uint64_t epoch = 0;
+  memset(&unused, 0, sizeof unused);
+  g_before = "b";
+  InstallGuest(host_, "a", kCoreToken, "demo.bcycle", GDEFCORE_HOOK_ALTER, 0, 0, NULL,
+      OnVote, &unused, 0, NULL);
+  g_before = "a";
+  InstallGuest(host_, "b", kCoreToken, "demo.bcycle", GDEFCORE_HOOK_ALTER, 0, 0, NULL,
+      OnVote, &unused, 0, NULL);
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_epoch(catalog_, &epoch));
+  ASSERT_EQ(GDEFCORE_ERR_INVALID,
+      ApplyModules(host_, catalog_, request_, names, 2, "a\nb"));
+  EXPECT_NE(std::string::npos, HostError(host_).find(" a"));
+  EXPECT_NE(std::string::npos, HostError(host_).find(" b"));
+  EXPECT_EQ(0, IsEnabled(host_, request_, "a"));
+  {
+    uint64_t after = 99;
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_epoch(catalog_, &after));
+    EXPECT_EQ(epoch, after);
+  }
+}
+
+TEST_F(Module, AlterSkip) {
+  AppendState good;
+  const char * names[] = {"bad", "good"};
+  memset(&good, 0, sizeof good);
+  good.extra = "Y";
+  InstallGuest(host_, "bad", kCoreToken, "demo.skip", GDEFCORE_HOOK_ALTER, 0, 0, NULL,
+      OnAppendThenFail, (void *)"Z", 0, NULL);
+  InstallGuest(host_, "good", kCoreToken, "demo.skip", GDEFCORE_HOOK_ALTER, 0, 0, NULL,
+      OnAppendCount, &good, 0, NULL);
+  ASSERT_EQ(GDEFCORE_OK, ApplyModules(host_, catalog_, request_, names, 2, "bad\ngood"));
+  EXPECT_EQ(std::string("xY"), AlterText(host_, request_, catalog_, "demo.skip", "x"));
+  EXPECT_EQ(1, good.calls);
+  {
+    size_t n = 0;
+    const char * skipped = gdefcore_hook_skipped_names(host_, &n);
+    ASSERT_NE(nullptr, skipped);
+    EXPECT_NE(std::string::npos, std::string(skipped, n).find("bad"));
+  }
+}
+
+TEST_F(Module, DecisionFail) {
+  Vote vote;
+  const char * names[] = {"nope"};
+  int decision = GDEFCORE_DECISION_ALLOW;
+  memset(&vote, 0, sizeof vote);
+  vote.fail = 1;
+  vote.decision = GDEFCORE_DECISION_DENY;
+  InstallGuest(host_, "nope", kCoreToken, "demo.dfail", GDEFCORE_HOOK_DECISION, 0, 0,
+      NULL, OnVote, &vote, 0, NULL);
+  ASSERT_EQ(GDEFCORE_OK, ApplyModules(host_, catalog_, request_, names, 1, "nope"));
+  EXPECT_EQ(GDEFCORE_ERR_INVALID,
+      gdefcore_hook_fire(host_, request_, catalog_, "demo.dfail", 10,
+          GDEFCORE_HOOK_DECISION, NULL, NULL, &decision));
+  EXPECT_EQ(1, vote.calls);
+}
+
+TEST_F(Module, DecisionAbstain) {
+  Vote one;
+  Vote two;
+  const char * names[] = {"one", "two"};
+  int decision = GDEFCORE_DECISION_ALLOW;
+  memset(&one, 0, sizeof one);
+  memset(&two, 0, sizeof two);
+  one.decision = GDEFCORE_DECISION_NONE;
+  two.decision = GDEFCORE_DECISION_NONE;
+  InstallGuest(host_, "one", kCoreToken, "demo.abstain", GDEFCORE_HOOK_DECISION, 0, 0,
+      NULL, OnVote, &one, 0, NULL);
+  InstallGuest(host_, "two", kCoreToken, "demo.abstain", GDEFCORE_HOOK_DECISION, 0, 0,
+      NULL, OnVote, &two, 0, NULL);
+  ASSERT_EQ(GDEFCORE_OK, ApplyModules(host_, catalog_, request_, names, 2, "one\ntwo"));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_hook_fire(host_, request_, catalog_, "demo.abstain", 12,
+          GDEFCORE_HOOK_DECISION, NULL, NULL, &decision));
+  EXPECT_EQ(GDEFCORE_DECISION_DENY, decision);
+  EXPECT_EQ(1, one.calls);
+  EXPECT_EQ(1, two.calls);
+}
+
+TEST_F(Module, ServiceGate) {
+  const char * names[] = {"example"};
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_module_install_guest(host_, gdefcore_module_manifest));
+  EXPECT_EQ(nullptr, gdefcore_module_service(host_, request_, "example.api", 11, 1));
+  ASSERT_EQ(GDEFCORE_OK, ApplyModules(host_, catalog_, request_, names, 1, "example"));
+  EXPECT_NE(nullptr, gdefcore_module_service(host_, request_, "example.api", 11, 1));
+}
+
+TEST_F(Module, ModulePatch) {
+  Vote unused;
+  const char * first[] = {"a"};
+  GDEFCORE_Changeset * changeset = NULL;
+  GDEFCORE_Patch * files = NULL;
+  size_t count = 0;
+  memset(&unused, 0, sizeof unused);
+  InstallGuest(host_, "a", kCoreToken, "demo.patch", GDEFCORE_HOOK_EVENT, 0, 0, NULL,
+      OnVote, &unused, 0, NULL);
+  InstallGuest(host_, "b", kCoreToken, "demo.patch", GDEFCORE_HOOK_EVENT, 0, 0, NULL,
+      OnVote, &unused, 0, NULL);
+  ASSERT_EQ(GDEFCORE_OK, ApplyModules(host_, catalog_, request_, first, 1, "a"));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &changeset));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_module_disable(host_, changeset, "a", 1));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_module_enable(host_, changeset, "b", 1));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_serialize(changeset, &files, &count));
+  gdefcore_changeset_destroy(changeset);
+  changeset = NULL;
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_changeset_parse(catalog_, files, count, NULL, &changeset));
+  gdefcore_patch_free(catalog_, files, count);
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(changeset, "a\nb", 3));
+  gdefcore_changeset_destroy(changeset);
+  EXPECT_EQ(0, IsEnabled(host_, request_, "a"));
+  EXPECT_EQ(1, IsEnabled(host_, request_, "b"));
+}
+
+TEST_F(Module, ConfirmOrder) {
+  Vote unused;
+  GDEFCORE_Changeset * changeset = NULL;
+  uint64_t epoch = 0;
+  uint64_t after = 0;
+  memset(&unused, 0, sizeof unused);
+  InstallGuest(host_, "a", kCoreToken, "demo.confirm", GDEFCORE_HOOK_EVENT, 0, 0, NULL,
+      OnVote, &unused, 0, NULL);
+  InstallGuest(host_, "b", kCoreToken, "demo.confirm", GDEFCORE_HOOK_EVENT, 0, 0, NULL,
+      OnVote, &unused, 0, NULL);
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &changeset));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_module_enable(host_, changeset, "b", 1));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_module_enable(host_, changeset, "a", 1));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_epoch(catalog_, &epoch));
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, gdefcore_changeset_apply(changeset, "b\na", 3));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_epoch(catalog_, &after));
+  EXPECT_EQ(epoch, after);
+  EXPECT_EQ(0, IsEnabled(host_, request_, "a"));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(changeset, "a\nb", 3));
+  gdefcore_changeset_destroy(changeset);
+  EXPECT_EQ(1, IsEnabled(host_, request_, "a"));
+  EXPECT_EQ(1, IsEnabled(host_, request_, "b"));
+}
+
+TEST_F(Module, EnteredFlag) {
+  const char * names[] = {"example"};
+  GCU_Library library;
+  typedef void (*SetDuring)(void (*)(void));
+  SetDuring set_during;
+  ASSERT_EQ(0, gcu_library_open(&library, GDEFCORE_MODULE_EXAMPLE));
+  set_during = (SetDuring)gcu_library_symbol(library, "gdefcore_module_example_set_during");
+  ASSERT_TRUE(set_during != NULL);
+  g_probe_store = store_;
+  g_entered_seen = -1;
+  set_during(ProbeEntered);
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_module_install_native(host_, GDEFCORE_MODULE_EXAMPLE,
+          GDEFCORE_MODULE_TRUST_FULL));
+  ASSERT_EQ(GDEFCORE_OK, ApplyModules(host_, catalog_, request_, names, 1, "example"));
+  EXPECT_EQ(std::string("alpha:touched"),
+      AlterText(host_, request_, catalog_, "example.alter", "alpha"));
+  EXPECT_EQ('1', g_entered_seen);
+  ProbeEntered();
+  EXPECT_EQ('0', g_entered_seen);
+  set_during(NULL);
+  g_probe_store = NULL;
+  gcu_library_close(&library);
+}
+
+TEST_F(Module, SecondSubscriber) {
+  Vote one;
+  Vote two;
+  const char * first[] = {"one"};
+  const char * second[] = {"two"};
+  memset(&one, 0, sizeof one);
+  memset(&two, 0, sizeof two);
+  InstallGuest(host_, "one", kCoreToken, "demo.more", GDEFCORE_HOOK_EVENT, 0, 0, NULL,
+      OnVote, &one, 0, NULL);
+  ASSERT_EQ(GDEFCORE_OK, ApplyModules(host_, catalog_, request_, first, 1, "one"));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_hook_fire(host_, request_, catalog_, "demo.more", 9, GDEFCORE_HOOK_EVENT,
+          NULL, NULL, NULL));
+  EXPECT_EQ(1, one.calls);
+  InstallGuest(host_, "two", kCoreToken, "demo.more", GDEFCORE_HOOK_EVENT, 0, 0, NULL,
+      OnVote, &two, 0, NULL);
+  ASSERT_EQ(GDEFCORE_OK, ApplyModules(host_, catalog_, request_, second, 1, "two"));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_hook_fire(host_, request_, catalog_, "demo.more", 9, GDEFCORE_HOOK_EVENT,
+          NULL, NULL, NULL));
+  EXPECT_EQ(2, one.calls);
+  EXPECT_EQ(1, two.calls);
+}
+
+TEST_F(Module, RebindGuest) {
+  const char * names[] = {"example"};
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_module_install_guest(host_, gdefcore_module_manifest));
+  ASSERT_EQ(GDEFCORE_OK, ApplyModules(host_, catalog_, request_, names, 1, "example"));
+  EXPECT_EQ(std::string("alpha:touched"),
+      AlterText(host_, request_, catalog_, "example.alter", "alpha"));
+  gdefcore_catalog_bind_host(catalog_, NULL);
+  gdefcore_host_destroy(host_);
+  host_ = NULL;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_host_open(store_, NULL, &host_));
+  gdefcore_catalog_bind_host(catalog_, host_);
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_module_install_guest(host_, gdefcore_module_manifest));
+  EXPECT_EQ(1, IsEnabled(host_, request_, "example"));
+  EXPECT_EQ(std::string("alpha:touched"),
+      AlterText(host_, request_, catalog_, "example.alter", "alpha"));
 }
 
 int main(int argc, char ** argv) {

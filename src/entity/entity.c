@@ -1713,7 +1713,7 @@ GDEFCORE_Result gdefcore_catalog_open(GDEFSTOR_Store * store,
     const GDEFCORE_Allocator * allocator, GDEFCORE_Catalog ** out_catalog) {
   GDEFCORE_Catalog * cat;
   if (store == NULL || tenant == NULL || tenant_len == 0 ||
-      out_catalog == NULL) {
+      out_catalog == NULL || (tenant_len == 1 && tenant[0] == 0x01)) {
     return GDEFCORE_ERR_INVALID;
   }
   allocator = use_alloc(allocator);
@@ -3133,19 +3133,23 @@ GDEFCORE_Result gdefcore_changeset_apply(GDEFCORE_Changeset * changeset,
   changeset->epoch = epoch + 1;
   if (changeset->catalog->host != NULL) {
     GDEFCORE_Result hook_rc = GDEFCORE_OK;
+    GDEFCORE_Result first = GDEFCORE_OK;
     if (gdefcore_changeset_module_count(changeset) > 0) {
-      hook_rc = gdefcore_module_after_apply(changeset->catalog->host,
+      first = gdefcore_module_after_apply(changeset->catalog->host,
           changeset->catalog->tenant, changeset->catalog->tenant_len,
           changeset);
     }
-    for (i = 0; hook_rc == GDEFCORE_OK && i < changeset->nops; i++) {
+    for (i = 0; i < changeset->nops; i++) {
       GDEFCORE_Op * op = &changeset->ops[i];
       if (op->kind == GDEFCORE_OP_SAVE || op->kind == GDEFCORE_OP_CLEAR) {
         hook_rc = fire_named(changeset, op, GDEFCORE_HOOK_AFTER_COMMIT);
+        if (hook_rc != GDEFCORE_OK && first == GDEFCORE_OK) {
+          first = hook_rc;
+        }
       }
     }
-    if (hook_rc != GDEFCORE_OK) {
-      return hook_rc;
+    if (first != GDEFCORE_OK) {
+      return first;
     }
   }
   return GDEFCORE_OK;

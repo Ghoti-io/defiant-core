@@ -112,6 +112,7 @@ typedef struct Mod {
   int loaded;
   GCU_Library library;
   int have_library;
+  int enter_depth;
   GDEFCORE_Module_Entry entry;
   Rel rels[kRelMax];
   size_t nrels;
@@ -160,6 +161,7 @@ struct GDEFCORE_Host {
   char skipped[kSkipMax];
   size_t skipped_n;
   size_t skipped_count;
+  int firing;
 };
 
 struct GDEFCORE_Alter {
@@ -579,6 +581,32 @@ static GDEFCORE_Result persist_entered(GDEFCORE_Host * host, Mod * mod,
   return map_stor(gdefstor_write_commit(write));
 }
 
+/* The stored flag stays set until the outermost native call returns. */
+static GDEFCORE_Result touch_entered(GDEFCORE_Host * host, Mod * mod,
+    int enter) {
+  if (!mod->native) {
+    return GDEFCORE_OK;
+  }
+  if (enter) {
+    if (mod->enter_depth == 0) {
+      GDEFCORE_Result rc = persist_entered(host, mod, 1);
+      if (rc != GDEFCORE_OK) {
+        return rc;
+      }
+    }
+    mod->enter_depth += 1;
+    return GDEFCORE_OK;
+  }
+  if (mod->enter_depth == 0) {
+    return persist_entered(host, mod, 0);
+  }
+  mod->enter_depth -= 1;
+  if (mod->enter_depth > 0) {
+    return GDEFCORE_OK;
+  }
+  return persist_entered(host, mod, 0);
+}
+
 static GDEFCORE_Result copy_manifest(GDEFCORE_Host * host, Mod * mod,
     const GDEFCORE_Module_Manifest * src) {
   GDEFCORE_Module_Manifest man;
@@ -737,7 +765,7 @@ static GDEFCORE_Result call_entry(GDEFCORE_Host * host, Mod * mod) {
   /* The name is known after install. The first read of a new library has no
    * row yet, so the entered flag starts with the next call. */
   if (mod->native && mod->name_len > 0) {
-    rc = persist_entered(host, mod, 1);
+    rc = touch_entered(host, mod, 1);
     if (rc != GDEFCORE_OK) {
       return rc;
     }
@@ -745,7 +773,7 @@ static GDEFCORE_Result call_entry(GDEFCORE_Host * host, Mod * mod) {
   manifest = mod->entry();
   clear_rc = GDEFCORE_OK;
   if (mod->native && mod->name_len > 0) {
-    clear_rc = persist_entered(host, mod, 0);
+    clear_rc = touch_entered(host, mod, 0);
   }
   if (manifest == NULL) {
     set_error(host, "Module entry returned nothing.");
@@ -860,8 +888,11 @@ static GDEFCORE_Result reload_one(GDEFCORE_Host * host, const Name * name) {
   if (mod.native) {
     rc = open_native(host, &mod);
     if (rc != GDEFCORE_OK) {
-      clear_mod(&mod);
-      return rc;
+      mod.quarantined = 1;
+      mod.loaded = 0;
+      mod.entry = NULL;
+      mod.have_library = 0;
+      return adopt(host, &mod);
     }
     rc = call_entry(host, &mod);
     if (rc != GDEFCORE_OK) {
@@ -979,10 +1010,19 @@ GDEFCORE_Result gdefcore_module_install_guest(GDEFCORE_Host * host,
     clear_mod(&mod);
     return rc;
   }
-  if (find_mod(host, mod.name, mod.name_len) != NULL) {
-    clear_mod(&mod);
-    set_error(host, "Module is already installed.");
-    return GDEFCORE_ERR_INVALID;
+  {
+    Mod * existing = find_mod(host, mod.name, mod.name_len);
+    if (existing != NULL) {
+      if (!existing->native && existing->entry == NULL) {
+        *existing = mod;
+        existing->used = 1;
+        set_error(host, NULL);
+        return GDEFCORE_OK;
+      }
+      clear_mod(&mod);
+      set_error(host, "Module is already installed.");
+      return GDEFCORE_ERR_INVALID;
+    }
   }
   rc = store_install(host, &mod);
   if (rc != GDEFCORE_OK) {
@@ -1000,7 +1040,7 @@ GDEFCORE_Result gdefcore_module_install_guest(GDEFCORE_Host * host,
 static GDEFCORE_Result stage_named(GDEFCORE_Host * host,
     GDEFCORE_Changeset * changeset, const char * name, size_t name_len,
     int enable) {
-  if (host == NULL || changeset == NULL) {
+  if (host == NULL || changeset == NULL || !name_ok(name, name_len)) {
     return GDEFCORE_ERR_INVALID;
   }
   if (find_mod(host, name, name_len) == NULL) {
@@ -1048,9 +1088,8 @@ GDEFCORE_Result gdefcore_module_enabled(GDEFCORE_Host * host,
     return rc;
   }
   mod = find_mod(host, name, name_len);
-  *out_enabled =
-      name_has(names, nnames, name, name_len) &&
-      (mod == NULL || !mod->quarantined);
+  *out_enabled = name_has(names, nnames, name, name_len) && mod != NULL &&
+                 !mod->quarantined && (mod->native || mod->entry != NULL);
   return GDEFCORE_OK;
 }
 
@@ -1236,7 +1275,7 @@ static GDEFCORE_Result order_hook(GDEFCORE_Host * host, const Name * enabled,
   for (i = 0; i < host->nmods; i++) {
     const Sub * sub = NULL;
     Mod * mod = &host->mods[i];
-    if (!mod->used || !mod->loaded || mod->quarantined) {
+    if (!mod->used || !mod->loaded) {
       continue;
     }
     if (!name_has(enabled, nenabled, mod->name, mod->name_len)) {
@@ -1363,6 +1402,41 @@ static GDEFCORE_Result order_hook(GDEFCORE_Host * host, const Name * enabled,
   return GDEFCORE_OK;
 }
 
+/* A quarantined install still has edges. Read them before the cycle check. */
+static GDEFCORE_Result load_edges(GDEFCORE_Host * host, Mod * mod) {
+  int was_quarantined;
+  GDEFCORE_Result rc;
+  if (mod->loaded) {
+    return GDEFCORE_OK;
+  }
+  was_quarantined = mod->quarantined;
+  if (mod->native && !mod->have_library) {
+    if (mod->path_len == 0) {
+      return GDEFCORE_OK;
+    }
+    rc = open_native(host, mod);
+    if (rc != GDEFCORE_OK) {
+      mod->quarantined = 1;
+      mod->loaded = 0;
+      mod->entry = NULL;
+      mod->have_library = 0;
+      return GDEFCORE_OK;
+    }
+  }
+  if (mod->entry == NULL) {
+    return GDEFCORE_OK;
+  }
+  rc = call_entry(host, mod);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  if (was_quarantined) {
+    mod->quarantined = 1;
+    return persist_entered(host, mod, 1);
+  }
+  return GDEFCORE_OK;
+}
+
 GDEFCORE_Result gdefcore_module_vet(GDEFCORE_Host * host,
     const uint8_t * tenant, size_t tenant_len, GDEFCORE_Changeset * changeset) {
   Name names[kModMax];
@@ -1391,12 +1465,19 @@ GDEFCORE_Result gdefcore_module_vet(GDEFCORE_Host * host,
       set_error(host, "Module is not installed.");
       return GDEFCORE_ERR_INVALID;
     }
+    if (!mod->loaded) {
+      rc = load_edges(host, mod);
+      if (rc != GDEFCORE_OK) {
+        return rc;
+      }
+    }
     for (r = 0; r < mod->nrels; r++) {
       Mod * target = find_mod(host, mod->rels[r].name, mod->rels[r].name_len);
-      int present = name_has(names, nnames, mod->rels[r].name,
-          mod->rels[r].name_len);
+      int present = target != NULL && !target->quarantined &&
+                     name_has(names, nnames, mod->rels[r].name,
+                         mod->rels[r].name_len);
       if (mod->rels[r].kind == GDEFCORE_REL_REQUIRES) {
-        if (target == NULL || !present) {
+        if (!present) {
           snprintf(host->error, sizeof host->error,
               "Module %s requires %s, which is absent.", mod->name,
               mod->rels[r].name);
@@ -1527,6 +1608,7 @@ static GDEFCORE_Result activate(GDEFCORE_Host * host, Mod * mod) {
       return rc;
     }
   }
+  mod->enter_depth = 0;
   rc = persist_entered(host, mod, 0);
   if (rc != GDEFCORE_OK) {
     return rc;
@@ -1784,17 +1866,42 @@ static GDEFCORE_Result call_subscriber(GDEFCORE_Host * host, ChainNode * node,
   }
   memset(&out, 0, sizeof out);
   out.size = sizeof out;
-  if (mod != NULL && mod->native && mod->have_library) {
-    rc = persist_entered(host, mod, 1);
-    if (rc != GDEFCORE_OK) {
-      return rc;
+  {
+    char * saved = NULL;
+    size_t saved_len = 0;
+    if (alter != NULL) {
+      saved_len = alter->len;
+      saved = gcu_allocator_malloc(host->alloc, saved_len + 1);
+      if (saved == NULL) {
+        return GDEFCORE_ERR_OOM;
+      }
+      if (saved_len > 0 && alter->text != NULL) {
+        memcpy(saved, alter->text, saved_len);
+      }
+      saved[saved_len] = '\0';
     }
-  }
-  rc = node->fn(request, args, alter, &out, node->user);
-  if (mod != NULL && mod->native && mod->have_library) {
-    GDEFCORE_Result clear_rc = persist_entered(host, mod, 0);
-    if (rc == GDEFCORE_OK) {
-      rc = clear_rc;
+    if (mod != NULL && mod->native && mod->have_library) {
+      rc = touch_entered(host, mod, 1);
+      if (rc != GDEFCORE_OK) {
+        gcu_allocator_free(host->alloc, saved);
+        return rc;
+      }
+    }
+    rc = node->fn(request, args, alter, &out, node->user);
+    if (mod != NULL && mod->native && mod->have_library) {
+      GDEFCORE_Result clear_rc = touch_entered(host, mod, 0);
+      if (rc == GDEFCORE_OK) {
+        rc = clear_rc;
+      }
+    }
+    if (rc != GDEFCORE_OK && alter != NULL) {
+      GDEFCORE_Result restore = gdefcore_alter_set(alter, saved, saved_len);
+      gcu_allocator_free(host->alloc, saved);
+      if (restore != GDEFCORE_OK) {
+        return restore;
+      }
+    } else {
+      gcu_allocator_free(host->alloc, saved);
     }
   }
   if (field_covers(out.size,
@@ -1832,16 +1939,24 @@ static GDEFCORE_Result fire_at(GDEFCORE_Host * host, GDEFCORE_Request * request,
   size_t i;
   int any_deny = 0;
   int any_allow = 0;
-  GDEFCORE_Result rc;
+  GDEFCORE_Result rc = GDEFCORE_OK;
   if (host == NULL || request == NULL || catalog == NULL || hook == NULL ||
       hook_len == 0) {
     return GDEFCORE_ERR_INVALID;
   }
+  if (kind == GDEFCORE_HOOK_DECISION && out_decision == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  if (host->firing) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  host->firing = 1;
   host->skipped_n = 0;
   host->skipped[0] = '\0';
   host->skipped_count = 0;
   if (kind == GDEFCORE_HOOK_ALTER && alter == NULL) {
-    return GDEFCORE_ERR_INVALID;
+    rc = GDEFCORE_ERR_INVALID;
+    goto done;
   }
   tenant = gdefcore_request_tenant(request, &tenant_len);
   {
@@ -1849,36 +1964,39 @@ static GDEFCORE_Result fire_at(GDEFCORE_Host * host, GDEFCORE_Request * request,
     const uint8_t * cat_tenant = gdefcore_catalog_tenant(catalog, &cat_len);
     if (tenant == NULL || cat_tenant == NULL || tenant_len != cat_len ||
         memcmp(tenant, cat_tenant, tenant_len) != 0) {
-      return GDEFCORE_ERR_INVALID;
+      rc = GDEFCORE_ERR_INVALID;
+      goto done;
     }
   }
   rc = gdefcore_epoch(catalog, &epoch);
   if (rc != GDEFCORE_OK) {
-    return rc;
+    goto done;
   }
   chain = find_chain(host, tenant, tenant_len, epoch, hook, hook_len);
   if (chain == NULL) {
     rc = build_chain(host, tenant, tenant_len, epoch, hook, hook_len, &chain);
     if (rc != GDEFCORE_OK) {
-      return rc;
+      goto done;
     }
   }
   if (chain->n == 0) {
-    if (kind == GDEFCORE_HOOK_DECISION && out_decision != NULL) {
+    if (kind == GDEFCORE_HOOK_DECISION) {
       *out_decision = GDEFCORE_DECISION_DENY;
     }
-    return GDEFCORE_OK;
+    rc = GDEFCORE_OK;
+    goto done;
   }
   if (chain->kind != kind) {
     set_error(host, "Hook kind does not match its subscribers.");
-    return GDEFCORE_ERR_INVALID;
+    rc = GDEFCORE_ERR_INVALID;
+    goto done;
   }
   for (i = 0; i < chain->n; i++) {
     int vote = GDEFCORE_DECISION_NONE;
     rc = call_subscriber(host, &chain->nodes[i], request, args, alter, &vote,
         kind == GDEFCORE_HOOK_DECISION ? 0 : skip_soft);
     if (rc != GDEFCORE_OK) {
-      return rc;
+      goto done;
     }
     if (vote == GDEFCORE_DECISION_DENY) {
       any_deny = 1;
@@ -1886,7 +2004,7 @@ static GDEFCORE_Result fire_at(GDEFCORE_Host * host, GDEFCORE_Request * request,
       any_allow = 1;
     }
   }
-  if (kind == GDEFCORE_HOOK_DECISION && out_decision != NULL) {
+  if (kind == GDEFCORE_HOOK_DECISION) {
     if (any_deny) {
       *out_decision = GDEFCORE_DECISION_DENY;
     } else if (any_allow) {
@@ -1895,7 +2013,10 @@ static GDEFCORE_Result fire_at(GDEFCORE_Host * host, GDEFCORE_Request * request,
       *out_decision = GDEFCORE_DECISION_DENY;
     }
   }
-  return GDEFCORE_OK;
+  rc = GDEFCORE_OK;
+done:
+  host->firing = 0;
+  return rc;
 }
 
 GDEFCORE_Result gdefcore_hook_fire(GDEFCORE_Host * host,

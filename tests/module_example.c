@@ -39,6 +39,20 @@ extern "C" {
 #define EXAMPLE_STR2(x) #x
 #define EXAMPLE_STR(x) EXAMPLE_STR2(x)
 
+#if defined(_WIN32) || defined(__CYGWIN__)
+#define EXAMPLE_EXPORT __declspec(dllexport)
+#else
+#define EXAMPLE_EXPORT __attribute__((visibility("default")))
+#endif
+
+typedef void (*ExampleDuring)(void);
+
+static ExampleDuring g_during;
+
+EXAMPLE_EXPORT void gdefcore_module_example_set_during(ExampleDuring during) {
+  g_during = during;
+}
+
 static GDEFCORE_Result example_alter(GDEFCORE_Request * request,
     const void * args, GDEFCORE_Alter * alter, GDEFCORE_Hook_Out * out,
     void * user) {
@@ -49,6 +63,9 @@ static GDEFCORE_Result example_alter(GDEFCORE_Request * request,
   (void)args;
   (void)out;
   (void)user;
+  if (g_during != NULL) {
+    g_during();
+  }
   if (gdefcore_alter_text(alter, &text, &len) != GDEFCORE_OK) {
     return GDEFCORE_ERR_INVALID;
   }
@@ -93,8 +110,7 @@ static const GDEFCORE_Module_Manifest kManifest = {sizeof(GDEFCORE_Module_Manife
     kToken, sizeof kToken - 1, "example", 7, "Example", 7, &kRel, 1, &kSub, 1,
     &kSvc, 1};
 
-__attribute__((visibility("default"))) const GDEFCORE_Module_Manifest *
-gdefcore_module_manifest(void) {
+EXAMPLE_EXPORT const GDEFCORE_Module_Manifest * gdefcore_module_manifest(void) {
   return &kManifest;
 }
 
