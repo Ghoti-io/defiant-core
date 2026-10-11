@@ -32,6 +32,7 @@
 #include <ghoti.io/defiant-core/allocator.h>
 #include <ghoti.io/defiant-core/core.h>
 #include <ghoti.io/defiant-core/entity.h>
+#include <ghoti.io/defiant-core/inst.h>
 #include <ghoti.io/defiant-core/macros.h>
 #include <ghoti.io/defiant-core/module.h>
 #include <ghoti.io/defiant-core/request.h>

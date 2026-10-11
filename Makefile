@@ -427,6 +427,17 @@ endif
 endif
 INCLUDE += $(SEC_CFLAGS)
 
+# TOML bootstrap settings. Same pkg-config rule as cutil.
+TEXT_PC ?= ghoti.io-text$(BRANCH)
+TEXT_CFLAGS := $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_LOOKUP_PATH) pkg-config --cflags $(TEXT_PC) 2>/dev/null)
+TEXT_LIBS := $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_LOOKUP_PATH) pkg-config --libs $(TEXT_PC) 2>/dev/null)
+ifeq ($(strip $(TEXT_CFLAGS)),)
+ifndef SKIP_DEP_CHECK
+$(error ghoti.io-text was not found by pkg-config. Install text into the same prefix as cutil and point PKG_CONFIG_PATH at its .pc directory. There is deliberately no sibling-checkout fallback.)
+endif
+endif
+INCLUDE += $(TEXT_CFLAGS)
+
 # The memory backend is a test double, not a link dependency of the library.
 MEM_PC ?= ghoti.io-defiant-storage-memory$(BRANCH)
 MEM_CFLAGS := $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_LOOKUP_PATH) pkg-config --cflags $(MEM_PC) 2>/dev/null)
@@ -438,7 +449,7 @@ INCLUDE += $(MEM_CFLAGS)
 # rpath there is recorded in the installed library and names this build machine.
 # First occurrence wins. Alphabetical sort put an older copy of the same
 # soname ahead of the one pkg-config compiled against.
-DEP_LIB_DIRS := $(shell printf '%s\n' $(patsubst -L%,%,$(filter -L%,$(STOR_LIBS) $(CUTIL_LIBS) $(SEC_LIBS) $(MEM_LIBS))) | awk '!seen[$$0]++')
+DEP_LIB_DIRS := $(shell printf '%s\n' $(patsubst -L%,%,$(filter -L%,$(STOR_LIBS) $(CUTIL_LIBS) $(SEC_LIBS) $(TEXT_LIBS) $(MEM_LIBS))) | awk '!seen[$$0]++')
 empty :=
 space := $(empty) $(empty)
 DEP_LD_PATH := $(subst $(space),:,$(strip $(DEP_LIB_DIRS)))
@@ -456,7 +467,7 @@ TESTFLAGS := `PKG_CONFIG_PATH=$(PKG_CONFIG_LOOKUP_PATH) pkg-config --libs --cfla
 # coverage target does, because --coverage links the gcov runtime, whose
 # mangle_path check-symbols is right to reject in a shipping library and
 # wrong to reject in an instrumented one. Spelled as text's TEST_GATES is.
-TEST_GATES ?= check-symbols check-aliasing check-seams check-prefix check-labels check-access check-account
+TEST_GATES ?= check-symbols check-aliasing check-seams check-prefix check-labels check-access check-account check-inst
 
 # Valgrind flags (exclude "still reachable" as it's not a leak)
 # --suppressions: see tests/valgrind.supp. It holds allocations that are
@@ -477,7 +488,7 @@ TEST_HELPER_OBJ := $(patsubst tests/%.cpp,$(OBJ_DIR)/tests/%.o,$(TEST_HELPER_SRC
 # --whole-archive because anything registering itself from a constructor is
 # otherwise dropped - a plain archive link only pulls in object files that
 # something references by name.
-MODELLIBRARY := -Wl,--whole-archive $(APP_DIR)/$(STATIC_TARGET) -Wl,--no-whole-archive $(STOR_LIBS) $(CUTIL_LIBS) $(SEC_LIBS)
+MODELLIBRARY := -Wl,--whole-archive $(APP_DIR)/$(STATIC_TARGET) -Wl,--no-whole-archive $(STOR_LIBS) $(CUTIL_LIBS) $(SEC_LIBS) $(TEXT_LIBS)
 
 # Windows has no fopencookie, so FailingSink (tests/test_helpers.h) serves its
 # failures from a wrapper around the library's fprintf instead of from the
@@ -498,6 +509,8 @@ EXAMPLE_LINK := -L$(APP_DIR) -l$(SUITE)-$(PROJECT)$(BRANCH) -Wl,-rpath,$(abspath
 # Recursive: ASAN_APP_DIR is defined with the sanitizer tree, below this line.
 ASAN_EXAMPLE_LINK = -L$(ASAN_APP_DIR) -l$(SUITE)-$(PROJECT)$(BRANCH)-asan -Wl,-rpath,$(abspath $(ASAN_APP_DIR))
 MODULE_EXAMPLE_DEF := -DGDEFCORE_MODULE_EXAMPLE=\"$(abspath $(APP_DIR))/libgdefcore-module-example.$(LIB_EXTENSION)\"
+EFFECTIVE_DEF := -DGDEFCORE_EFFECTIVE_CONFIG=\"$(abspath $(APP_DIR))/examples/effective-config$(EXE_EXTENSION)\"
+EXAMPLE_RPATH := $(foreach d,$(DEP_LIB_DIRS),-Wl,-rpath,$(d))
 ASAN_MODULE_EXAMPLE_DEF = -DGDEFCORE_MODULE_EXAMPLE=\"$(abspath $(ASAN_APP_DIR))/libgdefcore-module-example.$(LIB_EXTENSION)\"
 
 # Discover test sources and compute an executable name for each, as
@@ -603,7 +616,7 @@ $(OBJ_DIR)/%.o: src/%.c $(FLAGS_STAMP) | $(LIBVER_GEN)
 $(APP_DIR)/$(TARGET): $(LIBOBJECTS)
 	@printf "\n### Compiling Model Library ###\n"
 	@mkdir -p $(@D)
-	$(CXX) $(CXXFLAGS) -shared -o $@ $^ $(LDFLAGS) $(STOR_LIBS) $(CUTIL_LIBS) $(SEC_LIBS) $(OS_SPECIFIC_LIBRARY_NAME_FLAG)
+	$(CXX) $(CXXFLAGS) -shared -o $@ $^ $(LDFLAGS) $(STOR_LIBS) $(CUTIL_LIBS) $(SEC_LIBS) $(TEXT_LIBS) $(OS_SPECIFIC_LIBRARY_NAME_FLAG)
 
 ifeq ($(OS_NAME), Linux)
 	@ln -f -s $(TARGET) $(APP_DIR)/$(SO_NAME)
@@ -636,12 +649,12 @@ endif
 $(OBJ_DIR)/tests/%.o: tests/%.cpp $(FLAGS_STAMP) | $(LIBVER_GEN)
 	@printf "\n### Compiling Test: $* ###\n"
 	@mkdir -p $(@D)
-	$(CXX) $(CXXFLAGS) $(INCLUDE) -Itests -DGDEFCORE_TEST_DATA=\"$(TEST_DATA)\" $(MODULE_EXAMPLE_DEF) -c $< -MMD -MP -MF $(@:.o=.d) -o $@
+	$(CXX) $(CXXFLAGS) $(INCLUDE) -Itests -DGDEFCORE_TEST_DATA=\"$(TEST_DATA)\" $(MODULE_EXAMPLE_DEF) $(EFFECTIVE_DEF) -c $< -MMD -MP -MF $(@:.o=.d) -o $@
 
 $(OBJ_DIR)/tests/%.o: tests/unit/%.cpp $(FLAGS_STAMP) | $(LIBVER_GEN)
 	@printf "\n### Compiling Test: $* ###\n"
 	@mkdir -p $(@D)
-	$(CXX) $(CXXFLAGS) $(INCLUDE) -Itests -DGDEFCORE_TEST_DATA=\"$(TEST_DATA)\" $(MODULE_EXAMPLE_DEF) -c $< -MMD -MP -MF $(@:.o=.d) -o $@
+	$(CXX) $(CXXFLAGS) $(INCLUDE) -Itests -DGDEFCORE_TEST_DATA=\"$(TEST_DATA)\" $(MODULE_EXAMPLE_DEF) $(EFFECTIVE_DEF) -c $< -MMD -MP -MF $(@:.o=.d) -o $@
 
 # Build rule for one test executable. $1 = source path, $2 = executable name.
 # Tests compile to .o first and link separately, so a library change relinks
@@ -660,7 +673,7 @@ $(APP_DIR)/$2$(EXE_EXTENSION): $$(TEST_OBJ_$1) $(TEST_HELPER_OBJ) \
 		$(APP_DIR)/$(STATIC_TARGET) | $(APP_DIR)/$(TARGET)
 	@printf "\n### Linking Test: $2 ###\n"
 	@mkdir -p $$(@D)
-	$(CXX) $(CXXFLAGS) -o $$@ $$(TEST_OBJ_$1) $(TEST_HELPER_OBJ) $(LDFLAGS) $(TEST_LDFLAGS) $(MODELLIBRARY) $(STOR_LIBS) $(CUTIL_LIBS) $(SEC_LIBS) $(MEM_LIBS) $(TESTFLAGS)
+	$(CXX) $(CXXFLAGS) -o $$@ $$(TEST_OBJ_$1) $(TEST_HELPER_OBJ) $(LDFLAGS) $(TEST_LDFLAGS) $(MODELLIBRARY) $(STOR_LIBS) $(CUTIL_LIBS) $(SEC_LIBS) $(TEXT_LIBS) $(MEM_LIBS) $(TESTFLAGS)
 endef
 
 $(foreach pair,$(TEST_PAIRS),\
@@ -674,6 +687,7 @@ $(APP_DIR)/libgdefcore-module-example.$(LIB_EXTENSION): tests/module_example.c \
 	$(CC) $(CFLAGS) -fPIC -shared $(INCLUDE) -o $@ $< $(LDFLAGS) $(EXAMPLE_LINK)
 
 $(APP_DIR)/testModule$(EXE_EXTENSION): $(APP_DIR)/libgdefcore-module-example.$(LIB_EXTENSION)
+$(APP_DIR)/testInst$(EXE_EXTENSION): $(APP_DIR)/examples/effective-config$(EXE_EXTENSION)
 
 ####################################################################
 # Examples
@@ -684,7 +698,7 @@ $(APP_DIR)/examples/%$(EXE_EXTENSION): examples/%.c $(APP_DIR)/$(STATIC_TARGET) 
 		$(FLAGS_STAMP) | $(APP_DIR)/$(TARGET)
 	@printf "\n### Compiling Example: $* ###\n"
 	@mkdir -p $(@D)
-	$(CC) $(CFLAGS) $(INCLUDE) -o $@ $< $(LDFLAGS) $(MODELLIBRARY) $(STOR_LIBS) $(CUTIL_LIBS) $(SEC_LIBS)
+	$(CC) $(CFLAGS) $(INCLUDE) -o $@ $< $(LDFLAGS) $(EXAMPLE_RPATH) $(MODELLIBRARY) $(STOR_LIBS) $(CUTIL_LIBS) $(SEC_LIBS) $(TEXT_LIBS)
 
 ####################################################################
 # Commands
@@ -1192,17 +1206,17 @@ $(ASAN_OBJ_DIR)/%.o: src/%.c $(ASAN_FLAGS_STAMP) | $(LIBVER_GEN)
 $(ASAN_APP_DIR)/$(ASAN_TARGET): $(ASAN_LIBOBJECTS)
 	@printf "\n### Linking ASan+UBSan Model Library ###\n"
 	@mkdir -p $(@D)
-	$(CXX) $(ASAN_CXXFLAGS) -shared -o $@ $^ $(ASAN_LDFLAGS) $(STOR_LIBS) $(CUTIL_LIBS) $(SEC_LIBS)
+	$(CXX) $(ASAN_CXXFLAGS) -shared -o $@ $^ $(ASAN_LDFLAGS) $(STOR_LIBS) $(CUTIL_LIBS) $(SEC_LIBS) $(TEXT_LIBS)
 
 $(ASAN_OBJ_DIR)/tests/%.o: tests/%.cpp $(ASAN_FLAGS_STAMP) | $(LIBVER_GEN)
 	@printf "\n### Compiling ASan Test: $* ###\n"
 	@mkdir -p $(@D)
-	$(CXX) $(ASAN_CXXFLAGS) $(INCLUDE) -Itests -DGDEFCORE_TEST_DATA=\"$(TEST_DATA)\" $(ASAN_MODULE_EXAMPLE_DEF) -c $< -MMD -MP -MF $(@:.o=.d) -o $@
+	$(CXX) $(ASAN_CXXFLAGS) $(INCLUDE) -Itests -DGDEFCORE_TEST_DATA=\"$(TEST_DATA)\" $(ASAN_MODULE_EXAMPLE_DEF) $(EFFECTIVE_DEF) -c $< -MMD -MP -MF $(@:.o=.d) -o $@
 
 $(ASAN_OBJ_DIR)/tests/%.o: tests/unit/%.cpp $(ASAN_FLAGS_STAMP) | $(LIBVER_GEN)
 	@printf "\n### Compiling ASan Test: $* ###\n"
 	@mkdir -p $(@D)
-	$(CXX) $(ASAN_CXXFLAGS) $(INCLUDE) -Itests -DGDEFCORE_TEST_DATA=\"$(TEST_DATA)\" $(ASAN_MODULE_EXAMPLE_DEF) -c $< -MMD -MP -MF $(@:.o=.d) -o $@
+	$(CXX) $(ASAN_CXXFLAGS) $(INCLUDE) -Itests -DGDEFCORE_TEST_DATA=\"$(TEST_DATA)\" $(ASAN_MODULE_EXAMPLE_DEF) $(EFFECTIVE_DEF) -c $< -MMD -MP -MF $(@:.o=.d) -o $@
 
 define asan-test-executable-rule
 ASAN_TEST_OBJ_$1 := $(ASAN_OBJ_DIR)/tests/$(basename $(notdir $1)).o
@@ -1210,7 +1224,7 @@ ASAN_TEST_OBJ_$1 := $(ASAN_OBJ_DIR)/tests/$(basename $(notdir $1)).o
 $(ASAN_APP_DIR)/$2$(EXE_EXTENSION): $$(ASAN_TEST_OBJ_$1) $(ASAN_APP_DIR)/$(ASAN_TARGET)
 	@printf "\n### Linking ASan Test: $2 ###\n"
 	@mkdir -p $$(@D)
-	$(CXX) $(ASAN_CXXFLAGS) -o $$@ $$(ASAN_TEST_OBJ_$1) $(ASAN_LDFLAGS) $(ASAN_MODELLIBRARY) $(STOR_LIBS) $(CUTIL_LIBS) $(SEC_LIBS) $(MEM_LIBS) $(TESTFLAGS)
+	$(CXX) $(ASAN_CXXFLAGS) -o $$@ $$(ASAN_TEST_OBJ_$1) $(ASAN_LDFLAGS) $(ASAN_MODELLIBRARY) $(STOR_LIBS) $(CUTIL_LIBS) $(SEC_LIBS) $(TEXT_LIBS) $(MEM_LIBS) $(TESTFLAGS)
 endef
 
 $(foreach pair,$(TEST_PAIRS),\
@@ -1224,6 +1238,7 @@ $(ASAN_APP_DIR)/libgdefcore-module-example.$(LIB_EXTENSION): tests/module_exampl
 
 $(ASAN_APP_DIR)/testModule$(EXE_EXTENSION): \
 		$(ASAN_APP_DIR)/libgdefcore-module-example.$(LIB_EXTENSION)
+$(ASAN_APP_DIR)/testInst$(EXE_EXTENSION): $(APP_DIR)/examples/effective-config$(EXE_EXTENSION)
 
 ASAN_TEST_EXECUTABLES := $(addprefix $(ASAN_APP_DIR)/,$(addsuffix $(EXE_EXTENSION),$(TEST_NAMES)))
 
@@ -1301,7 +1316,7 @@ $$(FUZZ_APP_DIR)/$1: tests/fuzz/$1.cpp $$(FUZZ_OBJECTS) $$(FUZZ_FLAGS_STAMP)
 	@mkdir -p $$(@D) $$(FUZZ_CORPUS)/$2
 	@printf "\n### Building fuzz harness: $1 ###\n"
 	$$(FUZZ_CXX) $$(FUZZ_BIN_FLAGS) -std=c++20 -w $$(INCLUDE) \
-		-o $$@ $$< $$(FUZZ_OBJECTS) $(STOR_LIBS) $(CUTIL_LIBS) $(SEC_LIBS) $(MEM_LIBS)
+		-o $$@ $$< $$(FUZZ_OBJECTS) $(STOR_LIBS) $(CUTIL_LIBS) $(SEC_LIBS) $(TEXT_LIBS) $(MEM_LIBS)
 
 fuzz-run-$2: ## Run the $2 fuzzer for $$(FUZZ_TIME) seconds
 fuzz-run-$2: $$(FUZZ_APP_DIR)/$1
@@ -1334,7 +1349,7 @@ LDCONF_INSTALL_PATH ?= /etc/ld.so.conf.d
 # What goes in the .pc Requires: field. Built from the same variables the
 # compile uses, so a dependency on another branch cannot be named one way for
 # the build and another way for consumers.
-PC_REQUIRES := $(CUTIL_PC),$(STOR_PC),$(SEC_PC)
+PC_REQUIRES := $(CUTIL_PC),$(STOR_PC),$(SEC_PC),$(TEXT_PC)
 
 # Where this project's own .pc file is installed.
 PKGCONFIG_INSTALL_PATH ?= $(PC_INSTALL_PATH)
@@ -1344,7 +1359,7 @@ install: ## Install the library globally, requires sudo
 # Depends on all: install used to copy whatever happened to be in the build
 # directory, so it could install a stale artifact or fail outright on a clean
 # tree.
-install: all
+install: all $(APP_DIR)/examples/effective-config$(EXE_EXTENSION)
 	# Installing the shared library.
 	@mkdir -p $(LIB_INSTALL_PATH)/$(SUITE)
 ifeq ($(OS_NAME), Linux)
@@ -1381,6 +1396,7 @@ endif
 ifeq ($(OS_NAME), Linux)
 	@if [ -n "$(LDCONF_INSTALL_PATH)" ]; then ldconfig >> /dev/null 2>&1; fi
 endif
+	@if [ -n "$(BIN_INSTALL_PATH)" ]; then mkdir -p $(BIN_INSTALL_PATH) && cp $(APP_DIR)/examples/effective-config$(EXE_EXTENSION) $(BIN_INSTALL_PATH)/effective-config$(EXE_EXTENSION); fi
 	@echo "Ghoti.io $(PROJECT)$(BRANCH) installed"
 
 uninstall: ## Delete the globally-installed files.  Requires sudo.
@@ -1393,6 +1409,7 @@ ifeq ($(OS_NAME), Windows)
 	@rm -f $(BIN_INSTALL_PATH)/$(TARGET)
 endif
 	@rm -rf $(INCLUDE_INSTALL_PATH)/$(SUITE)/$(PROJECT)$(BRANCH)
+	@if [ -n "$(BIN_INSTALL_PATH)" ]; then rm -f $(BIN_INSTALL_PATH)/effective-config$(EXE_EXTENSION); fi
 	@rm -f $(PKGCONFIG_INSTALL_PATH)/$(SUITE)-$(PROJECT)$(BRANCH).pc
 	@rmdir --ignore-fail-on-non-empty $(INCLUDE_INSTALL_PATH)/$(SUITE)
 	@rmdir --ignore-fail-on-non-empty $(LIB_INSTALL_PATH)/$(SUITE)
@@ -1549,20 +1566,20 @@ help: ## Display this help
 
 $(FLAGS_STAMP): force-flags
 	@mkdir -p $(@D)
-	@printf '%s\n' '$(CC) $(CXX) $(LIB_CFLAGS) $(CFLAGS) $(CXXFLAGS) $(LDFLAGS) $(INCLUDE) $(TEST_DATA) $(MODELLIBRARY) $(STOR_LIBS) $(CUTIL_LIBS) $(SEC_LIBS) $(MEM_LIBS) $(TESTFLAGS) $(TEST_LDFLAGS) $(OS_SPECIFIC_LIBRARY_NAME_FLAG) $(EXAMPLE_LINK) $(MODULE_EXAMPLE_DEF)' > $@.new
+	@printf '%s\n' '$(CC) $(CXX) $(LIB_CFLAGS) $(CFLAGS) $(CXXFLAGS) $(LDFLAGS) $(INCLUDE) $(TEST_DATA) $(MODELLIBRARY) $(STOR_LIBS) $(CUTIL_LIBS) $(SEC_LIBS) $(TEXT_LIBS) $(MEM_LIBS) $(TESTFLAGS) $(TEST_LDFLAGS) $(OS_SPECIFIC_LIBRARY_NAME_FLAG) $(EXAMPLE_LINK) $(EXAMPLE_RPATH) $(MODULE_EXAMPLE_DEF) $(EFFECTIVE_DEF)' > $@.new
 	@cmp -s $@.new $@ 2>/dev/null && rm -f $@.new || mv -f $@.new $@
 
 $(ASAN_FLAGS_STAMP): force-flags
 	@mkdir -p $(@D)
-	@printf '%s\n' '$(CC) $(CXX) $(ASAN_CFLAGS) $(ASAN_CXXFLAGS) $(ASAN_LDFLAGS) $(INCLUDE) $(TEST_DATA) $(ASAN_MODELLIBRARY) $(STOR_LIBS) $(CUTIL_LIBS) $(SEC_LIBS) $(MEM_LIBS) $(TESTFLAGS) $(ASAN_EXAMPLE_LINK) $(ASAN_MODULE_EXAMPLE_DEF)' > $@.new
+	@printf '%s\n' '$(CC) $(CXX) $(ASAN_CFLAGS) $(ASAN_CXXFLAGS) $(ASAN_LDFLAGS) $(INCLUDE) $(TEST_DATA) $(ASAN_MODELLIBRARY) $(STOR_LIBS) $(CUTIL_LIBS) $(SEC_LIBS) $(TEXT_LIBS) $(MEM_LIBS) $(TESTFLAGS) $(ASAN_EXAMPLE_LINK) $(ASAN_MODULE_EXAMPLE_DEF) $(EFFECTIVE_DEF)' > $@.new
 	@cmp -s $@.new $@ 2>/dev/null && rm -f $@.new || mv -f $@.new $@
 
 $(FUZZ_FLAGS_STAMP): force-flags
 	@mkdir -p $(@D)
-	@printf '%s\n' '$(FUZZ_CC) $(FUZZ_CXX) $(FUZZ_SAN) $(FUZZ_LIB_FLAGS) $(FUZZ_BIN_FLAGS) $(INCLUDE) $(STOR_LIBS) $(CUTIL_LIBS) $(SEC_LIBS) $(MEM_LIBS)' > $@.new
+	@printf '%s\n' '$(FUZZ_CC) $(FUZZ_CXX) $(FUZZ_SAN) $(FUZZ_LIB_FLAGS) $(FUZZ_BIN_FLAGS) $(INCLUDE) $(STOR_LIBS) $(CUTIL_LIBS) $(SEC_LIBS) $(TEXT_LIBS) $(MEM_LIBS)' > $@.new
 	@cmp -s $@.new $@ 2>/dev/null && rm -f $@.new || mv -f $@.new $@
 
-.PHONY: check-seams check-prefix check-labels check-access check-account
+.PHONY: check-seams check-prefix check-labels check-access check-account check-inst
 check-seams: ## Fail if a subsystem includes another's private header
 	@tools/check-seams.sh .
 check-prefix: ## Fail if a derived Defiant prefix collides or a dependency is out of order
@@ -1573,3 +1590,5 @@ check-access: $(APP_DIR)/testAccess$(EXE_EXTENSION) ## The access-filter gates, 
 	@LD_LIBRARY_PATH="$(TEST_LD_PATH)" tools/check-access.sh "$(APP_DIR)/testAccess$(EXE_EXTENSION)"
 check-account: $(APP_DIR)/testAccount$(EXE_EXTENSION) ## The session-revocation gate, with a plant
 	@LD_LIBRARY_PATH="$(TEST_LD_PATH)" tools/check-account.sh "$(APP_DIR)/testAccount$(EXE_EXTENSION)"
+check-inst: $(APP_DIR)/testInst$(EXE_EXTENSION) ## The cross-tenant gate, with a plant
+	@LD_LIBRARY_PATH="$(TEST_LD_PATH)" tools/check-inst.sh "$(APP_DIR)/testInst$(EXE_EXTENSION)"
