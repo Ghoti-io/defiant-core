@@ -42,6 +42,7 @@
 #define GDEFCORE_Hook_Fn GHOTIIO_DEFCORE(GDEFCORE_Hook_Fn)
 #define GDEFCORE_Hook_Out GHOTIIO_DEFCORE(GDEFCORE_Hook_Out)
 #define GDEFCORE_Host GHOTIIO_DEFCORE(GDEFCORE_Host)
+#define GDEFCORE_Keyring GHOTIIO_DEFCORE(GDEFCORE_Keyring)
 #define GDEFCORE_Limits GHOTIIO_DEFCORE(GDEFCORE_Limits)
 #define GDEFCORE_Module_Entry GHOTIIO_DEFCORE(GDEFCORE_Module_Entry)
 #define GDEFCORE_Module_Manifest GHOTIIO_DEFCORE(GDEFCORE_Module_Manifest)
@@ -93,6 +94,19 @@
   GHOTIIO_DEFCORE(gdefcore_access_shared_cache)
 #define gdefcore_access_stage_module_permission                                \
   GHOTIIO_DEFCORE(gdefcore_access_stage_module_permission)
+#define gdefcore_account_bind GHOTIIO_DEFCORE(gdefcore_account_bind)
+#define gdefcore_account_check GHOTIIO_DEFCORE(gdefcore_account_check)
+#define gdefcore_account_create GHOTIIO_DEFCORE(gdefcore_account_create)
+#define gdefcore_account_epoch GHOTIIO_DEFCORE(gdefcore_account_epoch)
+#define gdefcore_account_login GHOTIIO_DEFCORE(gdefcore_account_login)
+#define gdefcore_account_logout_everywhere                                     \
+  GHOTIIO_DEFCORE(gdefcore_account_logout_everywhere)
+#define gdefcore_account_password GHOTIIO_DEFCORE(gdefcore_account_password)
+#define gdefcore_account_remove_identifier                                     \
+  GHOTIIO_DEFCORE(gdefcore_account_remove_identifier)
+#define gdefcore_account_remove_role                                           \
+  GHOTIIO_DEFCORE(gdefcore_account_remove_role)
+#define gdefcore_account_revert GHOTIIO_DEFCORE(gdefcore_account_revert)
 #define gdefcore_allocator_default GHOTIIO_DEFCORE(gdefcore_allocator_default)
 #define gdefcore_alter_create GHOTIIO_DEFCORE(gdefcore_alter_create)
 #define gdefcore_alter_destroy GHOTIIO_DEFCORE(gdefcore_alter_destroy)
@@ -143,6 +157,8 @@
 #define gdefcore_id_encode GHOTIIO_DEFCORE(gdefcore_id_encode)
 #define gdefcore_id_generate GHOTIIO_DEFCORE(gdefcore_id_generate)
 #define gdefcore_ids_free GHOTIIO_DEFCORE(gdefcore_ids_free)
+#define gdefcore_keyring_create GHOTIIO_DEFCORE(gdefcore_keyring_create)
+#define gdefcore_keyring_destroy GHOTIIO_DEFCORE(gdefcore_keyring_destroy)
 #define gdefcore_limits_default GHOTIIO_DEFCORE(gdefcore_limits_default)
 #define gdefcore_module_after_apply GHOTIIO_DEFCORE(gdefcore_module_after_apply)
 #define gdefcore_module_clear_pending                                          \

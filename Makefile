@@ -456,7 +456,7 @@ TESTFLAGS := `PKG_CONFIG_PATH=$(PKG_CONFIG_LOOKUP_PATH) pkg-config --libs --cfla
 # coverage target does, because --coverage links the gcov runtime, whose
 # mangle_path check-symbols is right to reject in a shipping library and
 # wrong to reject in an instrumented one. Spelled as text's TEST_GATES is.
-TEST_GATES ?= check-symbols check-aliasing check-seams check-prefix check-labels check-access
+TEST_GATES ?= check-symbols check-aliasing check-seams check-prefix check-labels check-access check-account
 
 # Valgrind flags (exclude "still reachable" as it's not a leak)
 # --suppressions: see tests/valgrind.supp. It holds allocations that are
@@ -1562,7 +1562,7 @@ $(FUZZ_FLAGS_STAMP): force-flags
 	@printf '%s\n' '$(FUZZ_CC) $(FUZZ_CXX) $(FUZZ_SAN) $(FUZZ_LIB_FLAGS) $(FUZZ_BIN_FLAGS) $(INCLUDE) $(STOR_LIBS) $(CUTIL_LIBS) $(SEC_LIBS) $(MEM_LIBS)' > $@.new
 	@cmp -s $@.new $@ 2>/dev/null && rm -f $@.new || mv -f $@.new $@
 
-.PHONY: check-seams check-prefix check-labels check-access
+.PHONY: check-seams check-prefix check-labels check-access check-account
 check-seams: ## Fail if a subsystem includes another's private header
 	@tools/check-seams.sh .
 check-prefix: ## Fail if a derived Defiant prefix collides or a dependency is out of order
@@ -1571,3 +1571,5 @@ check-labels: ## Fail if a public header lacks @stability free
 	@tools/check-labels.sh .
 check-access: $(APP_DIR)/testAccess$(EXE_EXTENSION) ## The access-filter gates, each with a plant
 	@LD_LIBRARY_PATH="$(TEST_LD_PATH)" tools/check-access.sh "$(APP_DIR)/testAccess$(EXE_EXTENSION)"
+check-account: $(APP_DIR)/testAccount$(EXE_EXTENSION) ## The session-revocation gate, with a plant
+	@LD_LIBRARY_PATH="$(TEST_LD_PATH)" tools/check-account.sh "$(APP_DIR)/testAccount$(EXE_EXTENSION)"

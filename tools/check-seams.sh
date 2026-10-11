@@ -2,9 +2,9 @@
 #
 # Fail if one subsystem includes another's private header.
 #
-# request, sched, entity, module and access are the subsystems. Each may
-# include another's public header. A private header included from another
-# subsystem is the seam the gate exists to catch.
+# request, sched, entity, module, access and account are the subsystems.
+# Each may include another's public header. A private header included
+# from another subsystem is the seam the gate exists to catch.
 #
 # The real tree must pass. A planted copy of request that includes
 # sched_internal.h must fail. The script also refuses gcu_tls: a current
@@ -32,8 +32,8 @@ refuse() {
 scan() {
   tree=$1
   status=0
-  dirs='request sched entity module access'
-  headers='request_internal\.h sched_internal\.h entity_internal\.h module_internal\.h access_internal\.h'
+  dirs='request sched entity module access account'
+  headers='request_internal\.h sched_internal\.h entity_internal\.h module_internal\.h access_internal\.h account_internal\.h'
   for dir in $dirs; do
     for header in $headers; do
       case "$header" in
@@ -61,7 +61,8 @@ if [ ! -f "$ROOT/src/request/request_internal.h" ] ||
    [ ! -f "$ROOT/src/sched/sched_internal.h" ] ||
    [ ! -f "$ROOT/src/entity/entity_internal.h" ] ||
    [ ! -f "$ROOT/src/module/module_internal.h" ] ||
-   [ ! -f "$ROOT/src/access/access_internal.h" ]; then
+   [ ! -f "$ROOT/src/access/access_internal.h" ] ||
+   [ ! -f "$ROOT/src/account/account_internal.h" ]; then
   printf 'check-seams: private headers are missing; this gate is measuring nothing\n' >&2
   exit 1
 fi
@@ -69,18 +70,20 @@ fi
 if ! scan "$ROOT"; then
   exit 1
 fi
-printf 'check-seams: request, sched, entity, module and access include only public headers of each other\n'
+printf 'check-seams: request, sched, entity, module, access and account include only public headers of each other\n'
 
 plant=$(mktemp -d)
 trap 'rm -rf "$plant"' EXIT
 mkdir -p "$plant/src/request" "$plant/src/sched" "$plant/src/entity" \
-  "$plant/src/module" "$plant/src/access" "$plant/include"
+  "$plant/src/module" "$plant/src/access" "$plant/src/account" \
+  "$plant/include"
 printf '%s\n' '#include "../sched/sched_internal.h"' > "$plant/src/request/plant.c"
 printf '%s\n' '/* private */' > "$plant/src/sched/sched_internal.h"
 printf '%s\n' '/* private */' > "$plant/src/request/request_internal.h"
 printf '%s\n' '/* private */' > "$plant/src/entity/entity_internal.h"
 printf '%s\n' '/* private */' > "$plant/src/module/module_internal.h"
 printf '%s\n' '/* private */' > "$plant/src/access/access_internal.h"
+printf '%s\n' '/* private */' > "$plant/src/account/account_internal.h"
 if scan "$plant"; then
   printf 'check-seams: the planted private include passed\n' >&2
   exit 1
@@ -110,3 +113,11 @@ if scan "$plant"; then
   exit 1
 fi
 printf 'check-seams: planted include of access_internal.h was refused\n'
+
+rm -f "$plant/src/request/plant.c"
+printf '%s\n' '#include "../account/account_internal.h"' > "$plant/src/request/plant.c"
+if scan "$plant"; then
+  printf 'check-seams: the planted account include passed\n' >&2
+  exit 1
+fi
+printf 'check-seams: planted include of account_internal.h was refused\n'
