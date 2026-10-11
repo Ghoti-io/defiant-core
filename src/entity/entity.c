@@ -27,6 +27,7 @@
 
 #include <ghoti.io/defiant-core/macros.h>
 #include <ghoti.io/defiant-core/entity.h>
+#include <ghoti.io/defiant-core/module.h>
 
 #include <ghoti.io/cutil/allocator.h>
 #include <ghoti.io/defiant-storage/projection.h>
@@ -370,6 +371,23 @@ static int path_ok(const char * path, size_t n) {
       }
       start = i + 1;
     } else if (path[i] == '\\' || path[i] == '\0') {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static int module_name_ok(const char * s, size_t n) {
+  size_t i;
+  if (s == NULL || n == 0 || n > 64) {
+    return 0;
+  }
+  if (s[0] < 'a' || s[0] > 'z') {
+    return 0;
+  }
+  for (i = 1; i < n; i++) {
+    char c = s[i];
+    if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-')) {
       return 0;
     }
   }
@@ -2647,6 +2665,8 @@ GDEFCORE_Result gdefcore_changeset_rate(const GDEFCORE_Changeset * changeset,
   }
   for (i = 0; i < changeset->nops; i++) {
     if (changeset->ops[i].kind == GDEFCORE_OP_DEFINE ||
+        changeset->ops[i].kind == GDEFCORE_OP_ENABLE ||
+        changeset->ops[i].kind == GDEFCORE_OP_DISABLE ||
         changeset->ops[i].type_kind == GDEFCORE_TYPE_CONFIG) {
       high = 1;
     }
@@ -2665,7 +2685,9 @@ static GDEFCORE_Result confirm_text(const GDEFCORE_Changeset * cs, char ** out,
   for (i = 0; i < cs->nops; i++) {
     const char * name = NULL;
     size_t name_len = 0;
-    if (cs->ops[i].kind == GDEFCORE_OP_DEFINE) {
+    if (cs->ops[i].kind == GDEFCORE_OP_DEFINE ||
+        cs->ops[i].kind == GDEFCORE_OP_ENABLE ||
+        cs->ops[i].kind == GDEFCORE_OP_DISABLE) {
       name = cs->ops[i].machine.p;
       name_len = cs->ops[i].machine.n;
     } else if (cs->ops[i].type_kind == GDEFCORE_TYPE_CONFIG &&
@@ -2866,6 +2888,120 @@ static GDEFCORE_Result apply_op(GDEFCORE_Catalog * cat, GDEFSTOR_Write * write,
   return rc;
 }
 
+const uint8_t * gdefcore_catalog_tenant(const GDEFCORE_Catalog * catalog,
+    size_t * out_len) {
+  if (catalog == NULL) {
+    if (out_len != NULL) {
+      *out_len = 0;
+    }
+    return NULL;
+  }
+  if (out_len != NULL) {
+    *out_len = catalog->tenant_len;
+  }
+  return catalog->tenant;
+}
+
+void gdefcore_catalog_bind_host(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Host * host) {
+  if (catalog == NULL) {
+    return;
+  }
+  catalog->host = host;
+}
+
+void gdefcore_changeset_set_request(GDEFCORE_Changeset * changeset,
+    GDEFCORE_Request * request) {
+  if (changeset == NULL) {
+    return;
+  }
+  changeset->request = request;
+}
+
+GDEFCORE_Result gdefcore_changeset_stage_module(GDEFCORE_Changeset * changeset,
+    const char * name, size_t name_len, int enable) {
+  GDEFCORE_Op * op;
+  GDEFCORE_Result rc;
+  if (changeset == NULL || changeset->applied ||
+      !module_name_ok(name, name_len)) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  rc = add_op(changeset, &op);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  op->kind = enable ? GDEFCORE_OP_ENABLE : GDEFCORE_OP_DISABLE;
+  op->type_kind = GDEFCORE_TYPE_CONFIG;
+  op->have_row = 0;
+  if (text_set(changeset->catalog->alloc, &op->machine, name, name_len) !=
+      GDEFCORE_OK) {
+    op_free(changeset->catalog->alloc, op);
+    changeset->nops -= 1;
+    return GDEFCORE_ERR_OOM;
+  }
+  return GDEFCORE_OK;
+}
+
+size_t gdefcore_changeset_module_count(const GDEFCORE_Changeset * changeset) {
+  size_t i;
+  size_t n = 0;
+  if (changeset == NULL) {
+    return 0;
+  }
+  for (i = 0; i < changeset->nops; i++) {
+    if (changeset->ops[i].kind == GDEFCORE_OP_ENABLE ||
+        changeset->ops[i].kind == GDEFCORE_OP_DISABLE) {
+      n += 1;
+    }
+  }
+  return n;
+}
+
+GDEFCORE_Result gdefcore_changeset_module_at(const GDEFCORE_Changeset * changeset,
+    size_t index, const char ** out_name, size_t * out_len, int * out_enable) {
+  size_t i;
+  size_t seen = 0;
+  if (changeset == NULL || out_name == NULL || out_len == NULL ||
+      out_enable == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  for (i = 0; i < changeset->nops; i++) {
+    if (changeset->ops[i].kind != GDEFCORE_OP_ENABLE &&
+        changeset->ops[i].kind != GDEFCORE_OP_DISABLE) {
+      continue;
+    }
+    if (seen == index) {
+      *out_name = changeset->ops[i].machine.p;
+      *out_len = changeset->ops[i].machine.n;
+      *out_enable = changeset->ops[i].kind == GDEFCORE_OP_ENABLE;
+      return GDEFCORE_OK;
+    }
+    seen += 1;
+  }
+  return GDEFCORE_ERR_INVALID;
+}
+
+static int module_op_kind(int kind) {
+  return kind == GDEFCORE_OP_ENABLE || kind == GDEFCORE_OP_DISABLE;
+}
+
+static GDEFCORE_Result fire_named(GDEFCORE_Changeset * changeset,
+    const GDEFCORE_Op * op, const char * hook) {
+  GDEFCORE_Write_Hook args;
+  if (changeset->catalog->host == NULL) {
+    return GDEFCORE_OK;
+  }
+  memset(&args, 0, sizeof args);
+  args.size = sizeof args;
+  args.entity_id = op->id.p;
+  args.entity_id_len = op->id.n;
+  args.type_name = op->type_name.p;
+  args.type_name_len = op->type_name.n;
+  args.base_seq = op->base_seq;
+  return gdefcore_module_fire_write(changeset->catalog->host,
+      changeset->request, changeset->catalog, hook, strlen(hook), &args);
+}
+
 GDEFCORE_Result gdefcore_changeset_apply(GDEFCORE_Changeset * changeset,
     const char * confirmation, size_t confirmation_len) {
   int risk = 0;
@@ -2918,16 +3054,56 @@ GDEFCORE_Result gdefcore_changeset_apply(GDEFCORE_Changeset * changeset,
       }
     }
   }
+  if (gdefcore_changeset_module_count(changeset) > 0) {
+    if (changeset->catalog->host == NULL) {
+      return GDEFCORE_ERR_INVALID;
+    }
+    rc = gdefcore_module_vet(changeset->catalog->host,
+        changeset->catalog->tenant, changeset->catalog->tenant_len, changeset);
+    if (rc != GDEFCORE_OK) {
+      gdefcore_module_clear_pending(changeset->catalog->host);
+      return rc;
+    }
+  }
   rc = map_stor(gdefstor_write_begin(changeset->catalog->store,
       (const char *)changeset->catalog->tenant,
       changeset->catalog->tenant_len, NULL, &write));
   if (rc != GDEFCORE_OK) {
+    if (changeset->catalog->host != NULL) {
+      gdefcore_module_clear_pending(changeset->catalog->host);
+    }
     return rc;
   }
   rc = cursor_load(changeset->catalog, &cursor);
   for (i = 0; rc == GDEFCORE_OK && i < changeset->nops; i++) {
-    rc = apply_op(changeset->catalog, write, &cursor, &changeset->ops[i],
-        changeset->actor.p, changeset->actor.n);
+    GDEFCORE_Op * op = &changeset->ops[i];
+    if (module_op_kind(op->kind)) {
+      continue;
+    }
+    if (op->kind == GDEFCORE_OP_SAVE || op->kind == GDEFCORE_OP_CLEAR) {
+      rc = fire_named(changeset, op, GDEFCORE_HOOK_PRESAVE);
+      if (rc == GDEFCORE_OK) {
+        rc = fire_named(changeset, op, GDEFCORE_HOOK_VALIDATE);
+      }
+    }
+    if (rc == GDEFCORE_OK) {
+      rc = apply_op(changeset->catalog, write, &cursor, op, changeset->actor.p,
+          changeset->actor.n);
+    }
+    if (rc == GDEFCORE_OK && op->kind == GDEFCORE_OP_SAVE) {
+      rc = fire_named(changeset, op, GDEFCORE_HOOK_SAVE);
+      if (rc == GDEFCORE_OK) {
+        rc = fire_named(changeset, op, GDEFCORE_HOOK_REVISION);
+      }
+    }
+    if (rc == GDEFCORE_OK && op->kind == GDEFCORE_OP_CLEAR) {
+      rc = fire_named(changeset, op, GDEFCORE_HOOK_DELETE);
+    }
+  }
+  if (rc == GDEFCORE_OK && gdefcore_changeset_module_count(changeset) > 0) {
+    rc = gdefcore_module_write_enables(changeset->catalog->host,
+        changeset->catalog->tenant, changeset->catalog->tenant_len, write,
+        changeset);
   }
   if (rc == GDEFCORE_OK) {
     rc = cursor_store(write, &cursor);
@@ -2941,14 +3117,37 @@ GDEFCORE_Result gdefcore_changeset_apply(GDEFCORE_Changeset * changeset,
   }
   if (rc != GDEFCORE_OK) {
     gdefstor_write_abort(write);
+    if (changeset->catalog->host != NULL) {
+      gdefcore_module_clear_pending(changeset->catalog->host);
+    }
     return rc;
   }
   rc = map_stor(gdefstor_write_commit(write));
   if (rc != GDEFCORE_OK) {
+    if (changeset->catalog->host != NULL) {
+      gdefcore_module_clear_pending(changeset->catalog->host);
+    }
     return rc;
   }
   changeset->applied = 1;
   changeset->epoch = epoch + 1;
+  if (changeset->catalog->host != NULL) {
+    GDEFCORE_Result hook_rc = GDEFCORE_OK;
+    if (gdefcore_changeset_module_count(changeset) > 0) {
+      hook_rc = gdefcore_module_after_apply(changeset->catalog->host,
+          changeset->catalog->tenant, changeset->catalog->tenant_len,
+          changeset);
+    }
+    for (i = 0; hook_rc == GDEFCORE_OK && i < changeset->nops; i++) {
+      GDEFCORE_Op * op = &changeset->ops[i];
+      if (op->kind == GDEFCORE_OP_SAVE || op->kind == GDEFCORE_OP_CLEAR) {
+        hook_rc = fire_named(changeset, op, GDEFCORE_HOOK_AFTER_COMMIT);
+      }
+    }
+    if (hook_rc != GDEFCORE_OK) {
+      return hook_rc;
+    }
+  }
   return GDEFCORE_OK;
 }
 
@@ -3266,6 +3465,18 @@ GDEFCORE_Result gdefcore_changeset_serialize(const GDEFCORE_Changeset * changese
         }
         rc = patch_add(alloc, &files, &count, path, flag, strlen(flag));
       }
+      continue;
+    }
+    if (op->kind == GDEFCORE_OP_ENABLE || op->kind == GDEFCORE_OP_DISABLE) {
+      const char * word =
+          op->kind == GDEFCORE_OP_ENABLE ? "enable" : "disable";
+      kn = snprintf(path, sizeof path, "module/%.*s/op", (int)op->machine.n,
+          op->machine.p);
+      if (kn <= 0 || (size_t)kn >= sizeof path) {
+        rc = GDEFCORE_ERR_LIMIT;
+        break;
+      }
+      rc = patch_add(alloc, &files, &count, path, word, strlen(word));
       continue;
     }
     kn = snprintf(path, sizeof path, "entity/%.*s/type", (int)op->id.n, op->id.p);
@@ -3666,6 +3877,21 @@ GDEFCORE_Result gdefcore_changeset_parse(GDEFCORE_Catalog * catalog,
           return GDEFCORE_ERR_CORRUPT;
         }
       }
+    } else if (files[i].path_len >= 7 &&
+               memcmp(files[i].path, "module/", 7) == 0) {
+      const char * rest = files[i].path + 7;
+      size_t rest_len = files[i].path_len - 7;
+      size_t slash = 0;
+      while (slash < rest_len && rest[slash] != '/') {
+        slash += 1;
+      }
+      if (slash == 0 || slash >= rest_len || !module_name_ok(rest, slash) ||
+          !span_eq(rest + slash, rest_len - slash, "/op", 3) ||
+          (!span_eq((const char *)files[i].bytes, files[i].len, "enable", 6) &&
+              !span_eq((const char *)files[i].bytes, files[i].len, "disable",
+                  7))) {
+        return GDEFCORE_ERR_CORRUPT;
+      }
     } else if (!span_eq(files[i].path, files[i].path_len, "format", 6) &&
                !span_eq(files[i].path, files[i].path_len, "epoch", 5) &&
                !span_eq(files[i].path, files[i].path_len, "actor", 5) &&
@@ -3783,6 +4009,24 @@ GDEFCORE_Result gdefcore_changeset_parse(GDEFCORE_Catalog * catalog,
       }
       op = find_op_machine(cs, name, name_len);
       (void)op;
+    }
+  }
+  for (i = 0; i < count; i++) {
+    const char * rest;
+    size_t slash = 0;
+    int enable;
+    if (files[i].path_len < 11 || memcmp(files[i].path, "module/", 7) != 0) {
+      continue;
+    }
+    rest = files[i].path + 7;
+    while (slash < files[i].path_len - 7 && rest[slash] != '/') {
+      slash += 1;
+    }
+    enable = span_eq((const char *)files[i].bytes, files[i].len, "enable", 6);
+    rc = gdefcore_changeset_stage_module(cs, rest, slash, enable);
+    if (rc != GDEFCORE_OK) {
+      gdefcore_changeset_destroy(cs);
+      return rc;
     }
   }
   for (i = 0; i < count; i++) {

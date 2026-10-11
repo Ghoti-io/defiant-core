@@ -436,7 +436,12 @@ INCLUDE += $(MEM_CFLAGS)
 # A private PREFIX does not hold cutil, defiant-storage or security. Test
 # binaries need those -L directories at run time. They stay off LDFLAGS: an
 # rpath there is recorded in the installed library and names this build machine.
-DEP_LIB_DIRS := $(sort $(patsubst -L%,%,$(filter -L%,$(STOR_LIBS) $(CUTIL_LIBS) $(SEC_LIBS) $(MEM_LIBS))))
+# First occurrence wins. Alphabetical sort put an older copy of the same
+# soname ahead of the one pkg-config compiled against.
+DEP_LIB_DIRS := $(shell printf '%s\n' $(patsubst -L%,%,$(filter -L%,$(STOR_LIBS) $(CUTIL_LIBS) $(SEC_LIBS) $(MEM_LIBS))) | awk '!seen[$$0]++')
+empty :=
+space := $(empty) $(empty)
+DEP_LD_PATH := $(subst $(space),:,$(strip $(DEP_LIB_DIRS)))
 
 # Automatically collect all .c source files under the src directory.
 SOURCES := $(shell find src -type f -name '*.c')
@@ -482,7 +487,18 @@ TEST_LDFLAGS := -Wl,--wrap=__mingw_fprintf
 else
 TEST_LDFLAGS :=
 endif
-TEST_LDFLAGS += $(foreach dir,$(DEP_LIB_DIRS),-Wl,-rpath,$(dir))
+TEST_LDFLAGS += $(foreach d,$(DEP_LIB_DIRS),-Wl,-rpath,$(d))
+
+# The example module is a test artifact: one .so the native loader opens, and
+# the same translation unit compiled into the module test as the guest.
+# Release tests link the static archive, so this .so links the shared library
+# and the two copies of an alter must keep the same layout. ASan tests link
+# the sanitized shared library only, and this .so links that one copy.
+EXAMPLE_LINK := -L$(APP_DIR) -l$(SUITE)-$(PROJECT)$(BRANCH) -Wl,-rpath,$(abspath $(APP_DIR))
+# Recursive: ASAN_APP_DIR is defined with the sanitizer tree, below this line.
+ASAN_EXAMPLE_LINK = -L$(ASAN_APP_DIR) -l$(SUITE)-$(PROJECT)$(BRANCH)-asan -Wl,-rpath,$(abspath $(ASAN_APP_DIR))
+MODULE_EXAMPLE_DEF := -DGDEFCORE_MODULE_EXAMPLE=\"$(abspath $(APP_DIR))/libgdefcore-module-example.$(LIB_EXTENSION)\"
+ASAN_MODULE_EXAMPLE_DEF = -DGDEFCORE_MODULE_EXAMPLE=\"$(abspath $(ASAN_APP_DIR))/libgdefcore-module-example.$(LIB_EXTENSION)\"
 
 # Discover test sources and compute an executable name for each, as
 # "path|name" pairs. test_foo.cpp -> testFoo.
@@ -620,12 +636,12 @@ endif
 $(OBJ_DIR)/tests/%.o: tests/%.cpp $(FLAGS_STAMP) | $(LIBVER_GEN)
 	@printf "\n### Compiling Test: $* ###\n"
 	@mkdir -p $(@D)
-	$(CXX) $(CXXFLAGS) $(INCLUDE) -Itests -DGDEFCORE_TEST_DATA=\"$(TEST_DATA)\" -c $< -MMD -MP -MF $(@:.o=.d) -o $@
+	$(CXX) $(CXXFLAGS) $(INCLUDE) -Itests -DGDEFCORE_TEST_DATA=\"$(TEST_DATA)\" $(MODULE_EXAMPLE_DEF) -c $< -MMD -MP -MF $(@:.o=.d) -o $@
 
 $(OBJ_DIR)/tests/%.o: tests/unit/%.cpp $(FLAGS_STAMP) | $(LIBVER_GEN)
 	@printf "\n### Compiling Test: $* ###\n"
 	@mkdir -p $(@D)
-	$(CXX) $(CXXFLAGS) $(INCLUDE) -Itests -DGDEFCORE_TEST_DATA=\"$(TEST_DATA)\" -c $< -MMD -MP -MF $(@:.o=.d) -o $@
+	$(CXX) $(CXXFLAGS) $(INCLUDE) -Itests -DGDEFCORE_TEST_DATA=\"$(TEST_DATA)\" $(MODULE_EXAMPLE_DEF) -c $< -MMD -MP -MF $(@:.o=.d) -o $@
 
 # Build rule for one test executable. $1 = source path, $2 = executable name.
 # Tests compile to .o first and link separately, so a library change relinks
@@ -649,6 +665,15 @@ endef
 
 $(foreach pair,$(TEST_PAIRS),\
 	$(eval $(call test-executable-rule,$(word 1,$(subst |, ,$(pair))),$(word 2,$(subst |, ,$(pair))))))
+
+# TODO(windows): the example is a .so here. A DLL name is untested.
+$(APP_DIR)/libgdefcore-module-example.$(LIB_EXTENSION): tests/module_example.c \
+		$(APP_DIR)/$(TARGET) $(FLAGS_STAMP)
+	@printf "\n### Linking example module ###\n"
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) -fPIC -shared $(INCLUDE) -o $@ $< $(LDFLAGS) $(EXAMPLE_LINK)
+
+$(APP_DIR)/testModule$(EXE_EXTENSION): $(APP_DIR)/libgdefcore-module-example.$(LIB_EXTENSION)
 
 ####################################################################
 # Examples
@@ -725,7 +750,7 @@ endif
 # So the tests can load the model library and its dependency on cutil. cutil's
 # build tree has no release/debug component, so only the leading OS component
 # of BUILD applies to it.
-TEST_LD_PATH := $(APP_DIR):$(LIB_INSTALL_PATH)/$(SUITE)$(foreach dir,$(DEP_LIB_DIRS),:$(dir))
+TEST_LD_PATH := $(APP_DIR):$(LIB_INSTALL_PATH)/$(SUITE):$(DEP_LD_PATH)
 
 ####################################################################
 # Symbol namespace check
@@ -1172,12 +1197,12 @@ $(ASAN_APP_DIR)/$(ASAN_TARGET): $(ASAN_LIBOBJECTS)
 $(ASAN_OBJ_DIR)/tests/%.o: tests/%.cpp $(ASAN_FLAGS_STAMP) | $(LIBVER_GEN)
 	@printf "\n### Compiling ASan Test: $* ###\n"
 	@mkdir -p $(@D)
-	$(CXX) $(ASAN_CXXFLAGS) $(INCLUDE) -Itests -DGDEFCORE_TEST_DATA=\"$(TEST_DATA)\" -c $< -MMD -MP -MF $(@:.o=.d) -o $@
+	$(CXX) $(ASAN_CXXFLAGS) $(INCLUDE) -Itests -DGDEFCORE_TEST_DATA=\"$(TEST_DATA)\" $(ASAN_MODULE_EXAMPLE_DEF) -c $< -MMD -MP -MF $(@:.o=.d) -o $@
 
 $(ASAN_OBJ_DIR)/tests/%.o: tests/unit/%.cpp $(ASAN_FLAGS_STAMP) | $(LIBVER_GEN)
 	@printf "\n### Compiling ASan Test: $* ###\n"
 	@mkdir -p $(@D)
-	$(CXX) $(ASAN_CXXFLAGS) $(INCLUDE) -Itests -DGDEFCORE_TEST_DATA=\"$(TEST_DATA)\" -c $< -MMD -MP -MF $(@:.o=.d) -o $@
+	$(CXX) $(ASAN_CXXFLAGS) $(INCLUDE) -Itests -DGDEFCORE_TEST_DATA=\"$(TEST_DATA)\" $(ASAN_MODULE_EXAMPLE_DEF) -c $< -MMD -MP -MF $(@:.o=.d) -o $@
 
 define asan-test-executable-rule
 ASAN_TEST_OBJ_$1 := $(ASAN_OBJ_DIR)/tests/$(basename $(notdir $1)).o
@@ -1190,6 +1215,15 @@ endef
 
 $(foreach pair,$(TEST_PAIRS),\
 	$(eval $(call asan-test-executable-rule,$(word 1,$(subst |, ,$(pair))),$(word 2,$(subst |, ,$(pair))))))
+
+$(ASAN_APP_DIR)/libgdefcore-module-example.$(LIB_EXTENSION): tests/module_example.c \
+		$(ASAN_APP_DIR)/$(ASAN_TARGET) $(ASAN_FLAGS_STAMP)
+	@printf "\n### Linking ASan example module ###\n"
+	@mkdir -p $(@D)
+	$(CC) $(ASAN_CFLAGS) -shared $(INCLUDE) -o $@ $< $(ASAN_LDFLAGS) $(ASAN_EXAMPLE_LINK)
+
+$(ASAN_APP_DIR)/testModule$(EXE_EXTENSION): \
+		$(ASAN_APP_DIR)/libgdefcore-module-example.$(LIB_EXTENSION)
 
 ASAN_TEST_EXECUTABLES := $(addprefix $(ASAN_APP_DIR)/,$(addsuffix $(EXE_EXTENSION),$(TEST_NAMES)))
 
@@ -1205,7 +1239,7 @@ test-asan: $(ASAN_TEST_EXECUTABLES)
 		test_name=$$(basename $$test_exe $(EXE_EXTENSION)); \
 		printf "\033[0;30;43m\n### Running %s (ASan+UBSan) ###\033[0m\n\n" "$$test_name"; \
 		LD_PRELOAD="$(ASAN_RUNTIME)$${LD_PRELOAD:+:$$LD_PRELOAD}" \
-		LD_LIBRARY_PATH="$(ASAN_APP_DIR):$(LIB_INSTALL_PATH)/$(SUITE)$(foreach dir,$(DEP_LIB_DIRS),:$(dir))" \
+		LD_LIBRARY_PATH="$(ASAN_APP_DIR):$(LIB_INSTALL_PATH)/$(SUITE):$(DEP_LD_PATH)" \
 			$$test_exe --gtest_brief=1 || exit 1; \
 	done
 	@printf "\033[0;32m\nASan+UBSan suite clean.\033[0m\n"
@@ -1273,7 +1307,7 @@ fuzz-run-$2: ## Run the $2 fuzzer for $$(FUZZ_TIME) seconds
 fuzz-run-$2: $$(FUZZ_APP_DIR)/$1
 	@mkdir -p $$(FUZZ_CORPUS)/$2
 	@printf "\n### Fuzzing $2 for $$(FUZZ_TIME)s ###\n"
-	@LD_LIBRARY_PATH="$(TEST_LD_PATH)" $$(FUZZ_APP_DIR)/$1 $$(FUZZ_CORPUS)/$2 \
+	@LD_LIBRARY_PATH="$(FUZZ_APP_DIR):$(LIB_INSTALL_PATH)/$(SUITE):$(DEP_LD_PATH)" $$(FUZZ_APP_DIR)/$1 $$(FUZZ_CORPUS)/$2 \
 		-max_total_time=$$(FUZZ_TIME) -print_final_stats=1
 endef
 
@@ -1515,12 +1549,12 @@ help: ## Display this help
 
 $(FLAGS_STAMP): force-flags
 	@mkdir -p $(@D)
-	@printf '%s\n' '$(CC) $(CXX) $(LIB_CFLAGS) $(CFLAGS) $(CXXFLAGS) $(LDFLAGS) $(INCLUDE) $(TEST_DATA) $(MODELLIBRARY) $(STOR_LIBS) $(CUTIL_LIBS) $(SEC_LIBS) $(MEM_LIBS) $(TESTFLAGS) $(TEST_LDFLAGS) $(OS_SPECIFIC_LIBRARY_NAME_FLAG)' > $@.new
+	@printf '%s\n' '$(CC) $(CXX) $(LIB_CFLAGS) $(CFLAGS) $(CXXFLAGS) $(LDFLAGS) $(INCLUDE) $(TEST_DATA) $(MODELLIBRARY) $(STOR_LIBS) $(CUTIL_LIBS) $(SEC_LIBS) $(MEM_LIBS) $(TESTFLAGS) $(TEST_LDFLAGS) $(OS_SPECIFIC_LIBRARY_NAME_FLAG) $(EXAMPLE_LINK) $(MODULE_EXAMPLE_DEF)' > $@.new
 	@cmp -s $@.new $@ 2>/dev/null && rm -f $@.new || mv -f $@.new $@
 
 $(ASAN_FLAGS_STAMP): force-flags
 	@mkdir -p $(@D)
-	@printf '%s\n' '$(CC) $(CXX) $(ASAN_CFLAGS) $(ASAN_CXXFLAGS) $(ASAN_LDFLAGS) $(INCLUDE) $(TEST_DATA) $(ASAN_MODELLIBRARY) $(STOR_LIBS) $(CUTIL_LIBS) $(SEC_LIBS) $(MEM_LIBS) $(TESTFLAGS)' > $@.new
+	@printf '%s\n' '$(CC) $(CXX) $(ASAN_CFLAGS) $(ASAN_CXXFLAGS) $(ASAN_LDFLAGS) $(INCLUDE) $(TEST_DATA) $(ASAN_MODELLIBRARY) $(STOR_LIBS) $(CUTIL_LIBS) $(SEC_LIBS) $(MEM_LIBS) $(TESTFLAGS) $(ASAN_EXAMPLE_LINK) $(ASAN_MODULE_EXAMPLE_DEF)' > $@.new
 	@cmp -s $@.new $@ 2>/dev/null && rm -f $@.new || mv -f $@.new $@
 
 $(FUZZ_FLAGS_STAMP): force-flags

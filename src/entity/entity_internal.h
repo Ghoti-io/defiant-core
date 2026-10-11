@@ -30,7 +30,13 @@
 #include <ghoti.io/defiant-core/macros.h>
 #include <ghoti.io/defiant-core/entity.h>
 
-enum { GDEFCORE_OP_SAVE = 1, GDEFCORE_OP_CLEAR = 2, GDEFCORE_OP_DEFINE = 3 };
+enum {
+  GDEFCORE_OP_SAVE = 1,
+  GDEFCORE_OP_CLEAR = 2,
+  GDEFCORE_OP_DEFINE = 3,
+  GDEFCORE_OP_ENABLE = 4,
+  GDEFCORE_OP_DISABLE = 5
+};
 
 typedef struct GDEFCORE_Text {
   char * p;
@@ -81,6 +87,7 @@ struct GDEFCORE_Catalog {
   size_t tenant_len;
   const GDEFCORE_Allocator * alloc;
   GDEFCORE_Limits limits;
+  GDEFCORE_Host * host;
 };
 
 struct GDEFCORE_Changeset {
@@ -91,6 +98,7 @@ struct GDEFCORE_Changeset {
   size_t nops;
   GDEFCORE_Text conflict;
   int applied;
+  GDEFCORE_Request * request;
 };
 
 #endif /* GHOTI_IO_GDEFCORE_SRC_ENTITY_ENTITY_INTERNAL_H */

@@ -393,6 +393,78 @@ GDEFCORE_API GDEFCORE_Result gdefcore_changeset_parse(
     GDEFCORE_Catalog * catalog, const GDEFCORE_Patch * files, size_t count,
     const GDEFCORE_Limits * limits, GDEFCORE_Changeset ** out_changeset);
 
+/** The module host bound to a catalog. Opaque to this header. */
+typedef struct GDEFCORE_Host GDEFCORE_Host;
+
+/** The request a write-path hook receives. */
+typedef struct GDEFCORE_Request GDEFCORE_Request;
+
+/**
+ * @brief Borrow the catalog's tenant bytes.
+ *
+ * @param catalog The catalog. NULL returns NULL.
+ * @param out_len Receives the length. May be NULL.
+ * @return The bytes, or NULL.
+ */
+GDEFCORE_API const uint8_t * gdefcore_catalog_tenant(
+    const GDEFCORE_Catalog * catalog, size_t * out_len);
+
+/**
+ * @brief Remember the module host apply should fire. NULL clears it.
+ *
+ * The host is borrowed. It must outlive the catalog, or be cleared first.
+ *
+ * @param catalog The catalog. NULL is ignored.
+ * @param host The host, or NULL.
+ */
+GDEFCORE_API void gdefcore_catalog_bind_host(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Host * host);
+
+/**
+ * @brief The request write-path hooks receive. NULL clears it.
+ *
+ * @param changeset The changeset. NULL is ignored.
+ * @param request Borrowed. Not a thread-local.
+ */
+GDEFCORE_API void gdefcore_changeset_set_request(GDEFCORE_Changeset * changeset,
+    GDEFCORE_Request * request);
+
+/**
+ * @brief Stage enabling or disabling a module. Apply commits it.
+ *
+ * The operation is high risk. @p name is lowercase letters, digits and
+ * hyphens. Confirmation is that name.
+ *
+ * @param changeset The changeset.
+ * @param name Module name.
+ * @param name_len Its length.
+ * @param enable Non-zero to enable, zero to disable.
+ * @return ::GDEFCORE_OK, ::GDEFCORE_ERR_INVALID, or ::GDEFCORE_ERR_OOM.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_changeset_stage_module(
+    GDEFCORE_Changeset * changeset, const char * name, size_t name_len,
+    int enable);
+
+/** @brief How many module enable or disable ops are staged. */
+GDEFCORE_API size_t gdefcore_changeset_module_count(
+    const GDEFCORE_Changeset * changeset);
+
+/**
+ * @brief One staged module op.
+ *
+ * @p out_name is borrowed from the changeset.
+ *
+ * @param changeset The changeset.
+ * @param index Zero-based among module ops.
+ * @param out_name Receives the name.
+ * @param out_len Receives its length.
+ * @param out_enable Receives non-zero when the op enables.
+ * @return ::GDEFCORE_OK or ::GDEFCORE_ERR_INVALID.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_changeset_module_at(
+    const GDEFCORE_Changeset * changeset, size_t index, const char ** out_name,
+    size_t * out_len, int * out_enable);
+
 #ifdef __cplusplus
 }
 #endif
