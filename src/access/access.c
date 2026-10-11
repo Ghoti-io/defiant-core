@@ -38,7 +38,13 @@
 #include <stdlib.h>
 #include <string.h>
 
-enum { kStageSlots = 8, kStageMax = 16, kPart = 160, kGrantMax = 64 };
+enum {
+  kStageSlots = 8,
+  kStageMax = 16,
+  kPart = 160,
+  kGrantMax = 64,
+  kAssignedRoles = 8
+};
 
 static const char kLang[] = "en";
 static const char kRoleType[] = "core.role";
@@ -96,10 +102,10 @@ static const GDEFCORE_Allocator * alloc_default(void) {
 }
 
 static int same(const char * a, size_t an, const char * b, size_t bn) {
-  if (an != bn) {
+  if (an != bn || a == NULL || b == NULL) {
     return 0;
   }
-  return an == 0 || memcmp(a, b, an) == 0;
+  return memcmp(a, b, an) == 0;
 }
 
 static int is_state(const char * name, size_t len) {
@@ -147,16 +153,16 @@ static void value_set(GDEFCORE_Value * value, const char * field,
   value->count = count;
 }
 
-static GDEFCORE_Result read_values(GDEFCORE_Catalog * catalog, const char * id,
-    const char * field, char *** out_texts, size_t ** out_lens,
-    size_t * out_count) {
+static GDEFCORE_Result read_lang(GDEFCORE_Catalog * catalog, const char * id,
+    const char * lang, size_t lang_len, const char * field, char *** out_texts,
+    size_t ** out_lens, size_t * out_count) {
   GDEFCORE_Result rc;
   *out_texts = NULL;
   *out_lens = NULL;
   *out_count = 0;
   rc = gdefcore_entity_values(catalog, NULL, GDEFCORE_VIEW_PUBLISHED, id,
-      GDEFCORE_PUBLIC_ID_LEN, kLang, strlen(kLang), field, strlen(field),
-      out_texts, out_lens, out_count);
+      GDEFCORE_PUBLIC_ID_LEN, lang, lang_len, field, strlen(field), out_texts,
+      out_lens, out_count);
   if (rc == GDEFCORE_ERR_INVALID) {
     *out_texts = NULL;
     *out_lens = NULL;
@@ -164,6 +170,13 @@ static GDEFCORE_Result read_values(GDEFCORE_Catalog * catalog, const char * id,
     return GDEFCORE_OK;
   }
   return rc;
+}
+
+static GDEFCORE_Result read_values(GDEFCORE_Catalog * catalog, const char * id,
+    const char * field, char *** out_texts, size_t ** out_lens,
+    size_t * out_count) {
+  return read_lang(catalog, id, kLang, strlen(kLang), field, out_texts,
+      out_lens, out_count);
 }
 
 static int values_have(char ** texts, size_t * lens, size_t count,
@@ -493,8 +506,8 @@ static GDEFCORE_Result load_effective(GDEFCORE_Catalog * catalog,
   const char * principal = NULL;
   size_t principal_len = 0;
   char principal_id[GDEFCORE_PUBLIC_ID_LEN + 1];
-  const char * roles[8];
-  size_t role_lens[8];
+  const char * roles[kAssignedRoles + 1];
+  size_t role_lens[kAssignedRoles + 1];
   size_t nroles = 0;
   size_t i;
   *out_n = 0;
@@ -511,16 +524,19 @@ static GDEFCORE_Result load_effective(GDEFCORE_Catalog * catalog,
     size_t * held_lens = NULL;
     size_t held_n = 0;
     GDEFCORE_Result rc;
+    memcpy(principal_id, principal, principal_len);
+    principal_id[principal_len] = '\0';
+    if (retired_id(catalog, principal_id)) {
+      return GDEFCORE_OK;
+    }
     roles[nroles] = kAuthenticated;
     role_lens[nroles] = strlen(kAuthenticated);
     nroles += 1;
-    memcpy(principal_id, principal, principal_len);
-    principal_id[principal_len] = '\0';
     rc = read_values(catalog, principal_id, "role", &held, &held_lens, &held_n);
     if (rc != GDEFCORE_OK) {
       return rc;
     }
-    for (i = 0; i < held_n && nroles < 8; i++) {
+    for (i = 0; i < held_n && nroles < kAssignedRoles + 1; i++) {
       if (same(held[i], held_lens[i], kEmptyMark, strlen(kEmptyMark))) {
         continue;
       }
@@ -643,10 +659,17 @@ static GDEFCORE_Result load_decls(GDEFCORE_Catalog * catalog, Grant * decls,
       copy_part(decl->action, sizeof decl->action, &decl->action_len, action[0],
           al[0]);
     }
-    if (cn > 0 && cl[0] == 3 && memcmp(condition[0], "own", 3) == 0) {
+    if (cn == 1 && same(condition[0], cl[0], "own", 3)) {
       decl->condition = GDEFCORE_ACCESS_OWN;
-    } else {
+    } else if (cn == 1 && same(condition[0], cl[0], "any", 3)) {
       decl->condition = GDEFCORE_ACCESS_ANY;
+    } else {
+      gdefcore_values_free(catalog, label, ll, ln);
+      gdefcore_values_free(catalog, type_name, tl, tn);
+      gdefcore_values_free(catalog, field, fl, fn);
+      gdefcore_values_free(catalog, condition, cl, cn);
+      gdefcore_values_free(catalog, action, al, an);
+      continue;
     }
     *out_n += 1;
     gdefcore_values_free(catalog, label, ll, ln);
@@ -694,6 +717,9 @@ static int entity_visible(const Grant * grants, size_t ngrants,
     if (!same(grants[i].type_name, grants[i].type_len, type, type_len)) {
       continue;
     }
+    if (grants[i].field_len != 0) {
+      continue;
+    }
     if (same(grants[i].action, grants[i].action_len, "read", 4) &&
         condition_ok(&grants[i], actor, actor_len, principal, principal_len)) {
       return 1;
@@ -729,6 +755,9 @@ static int field_granted(const Grant * grants, size_t ngrants, const char * type
         !same(grants[i].field, grants[i].field_len, field, field_len)) {
       continue;
     }
+    if (!same(grants[i].action, grants[i].action_len, "read", 4)) {
+      continue;
+    }
     if (condition_ok(&grants[i], actor, actor_len, principal, principal_len)) {
       return 1;
     }
@@ -736,7 +765,7 @@ static int field_granted(const Grant * grants, size_t ngrants, const char * type
   return 0;
 }
 
-static int may_name_field(const Grant * grants, size_t ngrants,
+static int grant_names_field(const Grant * grants, size_t ngrants,
     const Grant * decls, size_t ndecls, const char * type, size_t type_len,
     const char * field, size_t field_len, const char * principal,
     size_t principal_len) {
@@ -746,7 +775,8 @@ static int may_name_field(const Grant * grants, size_t ngrants,
   }
   for (i = 0; i < ngrants; i++) {
     if (!same(grants[i].type_name, grants[i].type_len, type, type_len) ||
-        !same(grants[i].field, grants[i].field_len, field, field_len)) {
+        !same(grants[i].field, grants[i].field_len, field, field_len) ||
+        !same(grants[i].action, grants[i].action_len, "read", 4)) {
       continue;
     }
     if (grants[i].condition == GDEFCORE_ACCESS_ANY) {
@@ -758,6 +788,17 @@ static int may_name_field(const Grant * grants, size_t ngrants,
     }
   }
   return 0;
+}
+
+static int may_name_field(const Grant * grants, size_t ngrants,
+    const Grant * decls, size_t ndecls, const char * type, size_t type_len,
+    const char * field, size_t field_len, const char * actor, size_t actor_len,
+    const char * principal, size_t principal_len) {
+  if (!field_restricted(decls, ndecls, type, type_len, field, field_len)) {
+    return 1;
+  }
+  return field_granted(grants, ngrants, type, type_len, field, field_len, actor,
+      actor_len, principal, principal_len);
 }
 
 static StageSlot * find_slot(GDEFCORE_Changeset * changeset, int create) {
@@ -785,7 +826,8 @@ static int line_ok(const char * text, size_t len) {
     return 0;
   }
   for (i = 0; i < len; i++) {
-    if (text[i] == '\n' || text[i] == '\r' || text[i] == 0x1f) {
+    if (text[i] == '\n' || text[i] == '\r' || text[i] == '\t' ||
+        text[i] == 0x1f) {
       return 0;
     }
   }
@@ -891,11 +933,10 @@ static GDEFCORE_Result declare_grant(GDEFCORE_Catalog * catalog,
   GDEFCORE_Value values[6];
   const char * texts[6];
   size_t lens[6];
+  Grant stored;
   const char * cond;
-  GDEFCORE_Permission probe;
-  (void)probe;
   if (permission_by_label(catalog, grant->label, grant->label_len, existing,
-          (Grant *)grant, NULL, 0, NULL) == GDEFCORE_OK) {
+          &stored, NULL, 0, NULL) == GDEFCORE_OK) {
     return GDEFCORE_OK;
   }
   cond = grant->condition == GDEFCORE_ACCESS_OWN ? "own" : "any";
@@ -1013,14 +1054,16 @@ static GDEFCORE_Result grant_role(GDEFCORE_Catalog * catalog, const char * role,
   return write_grants(catalog, role_id, existing, nexisting);
 }
 
-static size_t admin_holders(GDEFCORE_Catalog * catalog) {
+static GDEFCORE_Result admin_holders(GDEFCORE_Catalog * catalog, size_t * out) {
   char ** ids = NULL;
   size_t count = 0;
   size_t i;
-  size_t holders = 0;
-  if (gdefcore_entity_ids(catalog, kPrincipalType, strlen(kPrincipalType), &ids,
-          &count) != GDEFCORE_OK) {
-    return 0;
+  GDEFCORE_Result rc;
+  *out = 0;
+  rc = gdefcore_entity_ids(catalog, kPrincipalType, strlen(kPrincipalType),
+      &ids, &count);
+  if (rc != GDEFCORE_OK) {
+    return rc;
   }
   for (i = 0; i < count; i++) {
     char ** texts = NULL;
@@ -1029,33 +1072,37 @@ static size_t admin_holders(GDEFCORE_Catalog * catalog) {
     if (retired_id(catalog, ids[i])) {
       continue;
     }
-    if (read_values(catalog, ids[i], "role", &texts, &lens, &n) !=
-        GDEFCORE_OK) {
-      continue;
+    rc = read_values(catalog, ids[i], "role", &texts, &lens, &n);
+    if (rc != GDEFCORE_OK) {
+      gdefcore_ids_free(catalog, ids, count);
+      return rc;
     }
     if (values_have(texts, lens, n, kAdmin, strlen(kAdmin))) {
-      holders += 1;
+      *out += 1;
     }
     gdefcore_values_free(catalog, texts, lens, n);
   }
   gdefcore_ids_free(catalog, ids, count);
-  return holders;
+  return GDEFCORE_OK;
 }
 
-static int holds_admin(GDEFCORE_Catalog * catalog, const char * id) {
+static GDEFCORE_Result holds_admin(GDEFCORE_Catalog * catalog, const char * id,
+    int * out) {
   char ** texts = NULL;
   size_t * lens = NULL;
   size_t n = 0;
-  int held = 0;
+  GDEFCORE_Result rc;
+  *out = 0;
   if (retired_id(catalog, id)) {
-    return 0;
+    return GDEFCORE_OK;
   }
-  if (read_values(catalog, id, "role", &texts, &lens, &n) != GDEFCORE_OK) {
-    return 0;
+  rc = read_values(catalog, id, "role", &texts, &lens, &n);
+  if (rc != GDEFCORE_OK) {
+    return rc;
   }
-  held = values_have(texts, lens, n, kAdmin, strlen(kAdmin));
+  *out = values_have(texts, lens, n, kAdmin, strlen(kAdmin));
   gdefcore_values_free(catalog, texts, lens, n);
-  return held;
+  return GDEFCORE_OK;
 }
 
 static GDEFCORE_Result canonical_id(const char * id, size_t id_len, char * out) {
@@ -1151,11 +1198,18 @@ GDEFCORE_Result gdefcore_access_admin_principal(GDEFCORE_Catalog * catalog,
   }
   rc = GDEFCORE_ERR_INVALID;
   for (i = 0; i < count; i++) {
-    if (holds_admin(catalog, ids[i])) {
+    int held = 0;
+    rc = holds_admin(catalog, ids[i], &held);
+    if (rc != GDEFCORE_OK) {
+      gdefcore_ids_free(catalog, ids, count);
+      return rc;
+    }
+    if (held) {
       memcpy(out_id, ids[i], GDEFCORE_PUBLIC_ID_LEN + 1);
       rc = GDEFCORE_OK;
       break;
     }
+    rc = GDEFCORE_ERR_INVALID;
   }
   gdefcore_ids_free(catalog, ids, count);
   return rc;
@@ -1232,8 +1286,12 @@ GDEFCORE_Result gdefcore_access_role_create(GDEFCORE_Catalog * catalog,
   if (rc != GDEFCORE_OK) {
     return rc;
   }
-  if (find_role(catalog, name, name_len, existing) == GDEFCORE_OK) {
+  rc = find_role(catalog, name, name_len, existing);
+  if (rc == GDEFCORE_OK) {
     return GDEFCORE_ERR_INVALID;
+  }
+  if (rc != GDEFCORE_ERR_INVALID) {
+    return rc;
   }
   text = name;
   text_len = name_len;
@@ -1294,9 +1352,14 @@ GDEFCORE_Result gdefcore_access_copy_template(GDEFCORE_Catalog * catalog,
       }
       role_len = (size_t)en;
     }
-    if (find_role(catalog, role_name, role_len, existing) != GDEFCORE_OK) {
-      break;
+    rc = find_role(catalog, role_name, role_len, existing);
+    if (rc == GDEFCORE_OK) {
+      continue;
     }
+    if (rc != GDEFCORE_ERR_INVALID) {
+      return rc;
+    }
+    break;
   }
   if (n == 1000) {
     return GDEFCORE_ERR_LIMIT;
@@ -1320,7 +1383,8 @@ GDEFCORE_Result gdefcore_access_delete_role(GDEFCORE_Catalog * catalog,
   const char * text = kRetired;
   size_t text_len = strlen(kRetired);
   GDEFCORE_Result rc;
-  if (catalog == NULL || is_state(name, name_len)) {
+  if (catalog == NULL || is_state(name, name_len) ||
+      same(name, name_len, kAdmin, strlen(kAdmin))) {
     return GDEFCORE_ERR_INVALID;
   }
   rc = ensure(catalog);
@@ -1368,19 +1432,20 @@ GDEFCORE_Result gdefcore_access_declare(GDEFCORE_Catalog * catalog,
     return rc;
   }
   memset(&grant, 0, sizeof grant);
-  copy_part(grant.label, sizeof grant.label, &grant.label_len, local.label,
-      local.label_len);
-  copy_part(grant.action, sizeof grant.action, &grant.action_len, local.action,
-      local.action_len);
-  copy_part(grant.type_name, sizeof grant.type_name, &grant.type_len,
-      local.type_name, local.type_name_len);
-  if (local.field_len > 0) {
-    copy_part(grant.field, sizeof grant.field, &grant.field_len, local.field,
-        local.field_len);
+  if (!copy_part(grant.label, sizeof grant.label, &grant.label_len, local.label,
+          local.label_len) ||
+      !copy_part(grant.action, sizeof grant.action, &grant.action_len,
+          local.action, local.action_len) ||
+      !copy_part(grant.type_name, sizeof grant.type_name, &grant.type_len,
+          local.type_name, local.type_name_len) ||
+      (local.field_len > 0 &&
+          !copy_part(grant.field, sizeof grant.field, &grant.field_len,
+              local.field, local.field_len)) ||
+      !copy_part(grant.module_name, sizeof grant.module_name,
+          &grant.module_len, local.module_name, local.module_name_len)) {
+    return GDEFCORE_ERR_LIMIT;
   }
   grant.condition = local.condition;
-  copy_part(grant.module_name, sizeof grant.module_name, &grant.module_len,
-      local.module_name, local.module_name_len);
   return declare_grant(catalog, &grant, local.module_name,
       local.module_name_len);
 }
@@ -1506,9 +1571,22 @@ GDEFCORE_Result gdefcore_access_principal_remove_role(
   if (rc != GDEFCORE_OK) {
     return rc;
   }
-  if (same(role, role_len, kAdmin, strlen(kAdmin)) && holds_admin(catalog, id) &&
-      admin_holders(catalog) <= 1) {
-    return GDEFCORE_ERR_INVALID;
+  if (same(role, role_len, kAdmin, strlen(kAdmin))) {
+    int held = 0;
+    size_t holders = 0;
+    rc = holds_admin(catalog, id, &held);
+    if (rc != GDEFCORE_OK) {
+      return rc;
+    }
+    if (held) {
+      rc = admin_holders(catalog, &holders);
+      if (rc != GDEFCORE_OK) {
+        return rc;
+      }
+      if (holders <= 1) {
+        return GDEFCORE_ERR_INVALID;
+      }
+    }
   }
   rc = read_values(catalog, id, "role", &texts, &lens, &count);
   if (rc != GDEFCORE_OK) {
@@ -1557,8 +1635,22 @@ GDEFCORE_Result gdefcore_access_principal_remove(GDEFCORE_Catalog * catalog,
   if (rc != GDEFCORE_OK) {
     return rc;
   }
-  if (holds_admin(catalog, id) && admin_holders(catalog) <= 1) {
-    return GDEFCORE_ERR_INVALID;
+  {
+    int held = 0;
+    size_t holders = 0;
+    rc = holds_admin(catalog, id, &held);
+    if (rc != GDEFCORE_OK) {
+      return rc;
+    }
+    if (held) {
+      rc = admin_holders(catalog, &holders);
+      if (rc != GDEFCORE_OK) {
+        return rc;
+      }
+      if (holders <= 1) {
+        return GDEFCORE_ERR_INVALID;
+      }
+    }
   }
   value_set(&value, "retired", &text, &text_len, 1);
   return apply_save(catalog, id, &value, 1, kPrincipalConfirm);
@@ -1647,7 +1739,7 @@ GDEFCORE_Result gdefcore_access_read(GDEFCORE_Catalog * catalog,
   rc = gdefcore_entity_type(catalog, canon, GDEFCORE_PUBLIC_ID_LEN, &type_name,
       &type_len);
   if (rc != GDEFCORE_OK) {
-    return GDEFCORE_ERR_INVALID;
+    return rc;
   }
   rc = gdefcore_entity_actor(catalog, canon, GDEFCORE_PUBLIC_ID_LEN, &actor,
       &actor_len);
@@ -1707,6 +1799,17 @@ static int cmp_listed(const void * a, const void * b) {
   return strcmp(ak, bk);
 }
 
+static void drop_rows(GDEFCORE_Catalog * catalog, struct Listed * rows,
+    size_t nrows, char ** ids, size_t count) {
+  size_t i;
+  for (i = 0; i < nrows; i++) {
+    gdefcore_text_free(catalog, rows[i].id);
+    gdefcore_text_free(catalog, rows[i].key);
+  }
+  gcu_allocator_free(alloc_default(), rows);
+  gdefcore_ids_free(catalog, ids, count);
+}
+
 GDEFCORE_Result gdefcore_access_list(GDEFCORE_Catalog * catalog,
     GDEFCORE_Request * request, const GDEFCORE_Access_List * query,
     char *** out_ids, size_t * out_count) {
@@ -1757,7 +1860,7 @@ GDEFCORE_Result gdefcore_access_list(GDEFCORE_Catalog * catalog,
   if (local.filter_field != NULL && local.filter_field_len > 0) {
     if (!type_has_field(catalog, local.type_name, local.type_name_len,
             local.filter_field, local.filter_field_len) ||
-        !may_name_field(grants, ngrants, decls, ndecls, local.type_name,
+        !grant_names_field(grants, ngrants, decls, ndecls, local.type_name,
             local.type_name_len, local.filter_field, local.filter_field_len,
             principal, principal_len)) {
       return GDEFCORE_ERR_INVALID;
@@ -1766,7 +1869,7 @@ GDEFCORE_Result gdefcore_access_list(GDEFCORE_Catalog * catalog,
   if (local.sort_field != NULL && local.sort_field_len > 0) {
     if (!type_has_field(catalog, local.type_name, local.type_name_len,
             local.sort_field, local.sort_field_len) ||
-        !may_name_field(grants, ngrants, decls, ndecls, local.type_name,
+        !grant_names_field(grants, ngrants, decls, ndecls, local.type_name,
             local.type_name_len, local.sort_field, local.sort_field_len,
             principal, principal_len)) {
       return GDEFCORE_ERR_INVALID;
@@ -1789,33 +1892,47 @@ GDEFCORE_Result gdefcore_access_list(GDEFCORE_Catalog * catalog,
     char ** texts = NULL;
     size_t * lens = NULL;
     size_t n = 0;
-    if (gdefcore_entity_actor(catalog, ids[i], GDEFCORE_PUBLIC_ID_LEN, &actor,
-            &actor_len) != GDEFCORE_OK) {
-      continue;
+    rc = gdefcore_entity_actor(catalog, ids[i], GDEFCORE_PUBLIC_ID_LEN, &actor,
+        &actor_len);
+    if (rc != GDEFCORE_OK) {
+      drop_rows(catalog, rows, nrows, ids, count);
+      return rc;
     }
     if (!entity_visible(grants, ngrants, local.type_name, local.type_name_len,
             actor, actor_len, principal, principal_len)) {
       gdefcore_text_free(catalog, actor);
       continue;
     }
+    if ((local.filter_field != NULL && local.filter_field_len > 0 &&
+            !may_name_field(grants, ngrants, decls, ndecls, local.type_name,
+                local.type_name_len, local.filter_field, local.filter_field_len,
+                actor, actor_len, principal, principal_len)) ||
+        (local.sort_field != NULL && local.sort_field_len > 0 &&
+            !may_name_field(grants, ngrants, decls, ndecls, local.type_name,
+                local.type_name_len, local.sort_field, local.sort_field_len,
+                actor, actor_len, principal, principal_len))) {
+      gdefcore_text_free(catalog, actor);
+      drop_rows(catalog, rows, nrows, ids, count);
+      return GDEFCORE_ERR_INVALID;
+    }
     gdefcore_text_free(catalog, actor);
     if (local.filter_text != NULL && local.filter_field != NULL &&
         local.filter_field_len > 0) {
       char field_name[65];
       if (local.filter_field_len >= sizeof field_name) {
-        gdefcore_ids_free(catalog, ids, count);
-        for (i = 0; i < nrows; i++) {
-          gdefcore_text_free(catalog, rows[i].id);
-          gdefcore_text_free(catalog, rows[i].key);
-        }
-        gcu_allocator_free(alloc_default(), rows);
+        drop_rows(catalog, rows, nrows, ids, count);
         return GDEFCORE_ERR_LIMIT;
       }
       memcpy(field_name, local.filter_field, local.filter_field_len);
       field_name[local.filter_field_len] = '\0';
-      if (read_values(catalog, ids[i], field_name, &texts, &lens, &n) !=
-              GDEFCORE_OK ||
-          !values_have(texts, lens, n, local.filter_text,
+      rc = read_lang(catalog, ids[i], local.lang, local.lang_len, field_name,
+          &texts, &lens, &n);
+      if (rc != GDEFCORE_OK) {
+        gdefcore_values_free(catalog, texts, lens, n);
+        drop_rows(catalog, rows, nrows, ids, count);
+        return rc;
+      }
+      if (!values_have(texts, lens, n, local.filter_text,
               local.filter_text_len)) {
         gdefcore_values_free(catalog, texts, lens, n);
         continue;
@@ -1824,31 +1941,27 @@ GDEFCORE_Result gdefcore_access_list(GDEFCORE_Catalog * catalog,
     }
     rc = gdefcore_text_dup(catalog, ids[i], strlen(ids[i]), &rows[nrows].id);
     if (rc != GDEFCORE_OK) {
-      gdefcore_ids_free(catalog, ids, count);
-      for (i = 0; i < nrows; i++) {
-        gdefcore_text_free(catalog, rows[i].id);
-        gdefcore_text_free(catalog, rows[i].key);
-      }
-      gcu_allocator_free(alloc_default(), rows);
+      drop_rows(catalog, rows, nrows, ids, count);
       return rc;
     }
     if (local.sort_field != NULL && local.sort_field_len > 0) {
       char field_name[65];
       if (local.sort_field_len >= sizeof field_name) {
         gdefcore_text_free(catalog, rows[nrows].id);
-        gdefcore_ids_free(catalog, ids, count);
-        for (i = 0; i < nrows; i++) {
-          gdefcore_text_free(catalog, rows[i].id);
-          gdefcore_text_free(catalog, rows[i].key);
-        }
-        gcu_allocator_free(alloc_default(), rows);
+        drop_rows(catalog, rows, nrows, ids, count);
         return GDEFCORE_ERR_LIMIT;
       }
       memcpy(field_name, local.sort_field, local.sort_field_len);
       field_name[local.sort_field_len] = '\0';
-      if (read_values(catalog, ids[i], field_name, &texts, &lens, &n) ==
-              GDEFCORE_OK &&
-          n > 0) {
+      rc = read_lang(catalog, ids[i], local.lang, local.lang_len, field_name,
+          &texts, &lens, &n);
+      if (rc != GDEFCORE_OK) {
+        gdefcore_values_free(catalog, texts, lens, n);
+        gdefcore_text_free(catalog, rows[nrows].id);
+        drop_rows(catalog, rows, nrows, ids, count);
+        return rc;
+      }
+      if (n > 0) {
         gdefcore_text_dup(catalog, texts[0], lens[0], &rows[nrows].key);
       }
       gdefcore_values_free(catalog, texts, lens, n);
@@ -1986,8 +2099,12 @@ GDEFCORE_Result gdefcore_access_render_key(GDEFCORE_Catalog * catalog,
     qsort(lines, nlines, sizeof *lines, cmp_cstr);
   }
   for (i = 0; i < nlines; i++) {
-    size_t ln = strlen(lines[i]);
+    size_t ln;
     char * next;
+    if (i > 0 && strcmp(lines[i], lines[i - 1]) == 0) {
+      continue;
+    }
+    ln = strlen(lines[i]);
     if (blob_n + ln + 1 > blob_cap) {
       size_t cap = blob_cap == 0 ? 256 : blob_cap * 2;
       while (cap < blob_n + ln + 1) {
@@ -2113,23 +2230,24 @@ GDEFCORE_Result gdefcore_access_stage_module_permission(
   if (slot == NULL || slot->n >= kStageMax) {
     return GDEFCORE_ERR_LIMIT;
   }
+  perm = &slot->perms[slot->n];
+  memset(perm, 0, sizeof *perm);
+  if (!copy_part(perm->label, sizeof perm->label, &perm->label_len, label,
+          label_len) ||
+      !copy_part(perm->module_name, sizeof perm->module_name, &perm->module_len,
+          module_name, module_name_len) ||
+      !copy_part(perm->action, sizeof perm->action, &perm->action_len, action,
+          action_len) ||
+      !copy_part(perm->type_name, sizeof perm->type_name, &perm->type_len,
+          type_name, type_name_len) ||
+      (field_len > 0 &&
+          !copy_part(perm->field, sizeof perm->field, &perm->field_len, field,
+              field_len))) {
+    return GDEFCORE_ERR_LIMIT;
+  }
   rc = gdefcore_changeset_add_confirm_line(changeset, label, label_len);
   if (rc != GDEFCORE_OK) {
     return rc;
-  }
-  perm = &slot->perms[slot->n];
-  memset(perm, 0, sizeof *perm);
-  copy_part(perm->label, sizeof perm->label, &perm->label_len, label,
-      label_len);
-  copy_part(perm->module_name, sizeof perm->module_name, &perm->module_len,
-      module_name, module_name_len);
-  copy_part(perm->action, sizeof perm->action, &perm->action_len, action,
-      action_len);
-  copy_part(perm->type_name, sizeof perm->type_name, &perm->type_len, type_name,
-      type_name_len);
-  if (field_len > 0) {
-    copy_part(perm->field, sizeof perm->field, &perm->field_len, field,
-        field_len);
   }
   perm->condition = condition;
   slot->n += 1;
@@ -2164,13 +2282,24 @@ GDEFCORE_Result gdefcore_access_commit_staged(GDEFCORE_Changeset * changeset) {
   if (slot == NULL || slot->n == 0) {
     return GDEFCORE_OK;
   }
-  n = slot->n;
-  memcpy(local, slot->perms, n * sizeof *local);
-  memset(slot, 0, sizeof *slot);
   catalog = gdefcore_changeset_catalog(changeset);
   if (catalog == NULL) {
     return GDEFCORE_ERR_INVALID;
   }
+  {
+    int risk = 0;
+    rc = gdefcore_changeset_rate(changeset, &risk);
+    if (rc != GDEFCORE_OK) {
+      return rc;
+    }
+    if (risk != GDEFCORE_RISK_HIGH) {
+      memset(slot, 0, sizeof *slot);
+      return GDEFCORE_OK;
+    }
+  }
+  n = slot->n;
+  memcpy(local, slot->perms, n * sizeof *local);
+  memset(slot, 0, sizeof *slot);
   g_committing = 1;
   for (i = 0; i < n; i++) {
     Grant grant;

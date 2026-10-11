@@ -47,7 +47,7 @@ const char kNote[] = "site.note";
 static const char kCoreToken[] = MODULE_STR(GHOTIIO_DEFCORE_NAME);
 
 static GDEFCORE_Module_Manifest g_man;
-static GDEFCORE_Module_Perm g_perm;
+static GDEFCORE_Module_Perm g_perms[2];
 static const GDEFCORE_Module_Manifest * g_current;
 
 extern "C" const GDEFCORE_Module_Manifest * TestGuest(void) {
@@ -278,7 +278,13 @@ TEST_F(Access, Seed) {
   EXPECT_EQ(GDEFCORE_ERR_INVALID, gdefcore_access_delete_role(catalog_, "anonymous", 9));
   EXPECT_EQ(GDEFCORE_ERR_INVALID,
       gdefcore_access_delete_role(catalog_, "authenticated", 13));
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, gdefcore_access_delete_role(catalog_, "admin", 5));
   EXPECT_EQ(epoch, Epoch(catalog_));
+  {
+    char again[GDEFCORE_PUBLIC_ID_LEN + 1];
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_access_admin_principal(catalog_, again));
+    EXPECT_STREQ(admin, again);
+  }
 }
 
 TEST_F(Access, LastAdmin) {
@@ -304,8 +310,15 @@ TEST_F(Access, Editor) {
   char ** grants = NULL;
   size_t count = 0;
   uint64_t epoch;
+  GDEFCORE_Permission planted =
+      Perm("Edit own content", "delete", GDEFCORE_ACCESS_ANY, NULL);
+  char ** grant_text = NULL;
+  size_t * grant_lens = NULL;
+  size_t grant_n = 0;
+  std::string encoded;
   ASSERT_EQ(GDEFCORE_OK, gdefcore_access_roles(catalog_, &grants, &count));
   gdefcore_access_free(catalog_, grants, count);
+  Declare(catalog_, &planted);
   epoch = Epoch(catalog_);
   EXPECT_EQ(GDEFCORE_ERR_INVALID,
       gdefcore_access_copy_template(catalog_, "Moderator", 9, first));
@@ -313,6 +326,16 @@ TEST_F(Access, Editor) {
       gdefcore_access_copy_template(catalog_, "Usher", 5, first));
   EXPECT_EQ(epoch, Epoch(catalog_));
   ASSERT_EQ(GDEFCORE_OK, gdefcore_access_copy_template(catalog_, "Editor", 6, first));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_entity_values(catalog_, NULL, GDEFCORE_VIEW_PUBLISHED, first,
+          strlen(first), "en", 2, "grant", 5, &grant_text, &grant_lens,
+          &grant_n));
+  ASSERT_EQ(1u, grant_n);
+  encoded.assign(grant_text[0], grant_lens[0]);
+  EXPECT_NE(std::string::npos, encoded.find("update"));
+  EXPECT_NE(std::string::npos, encoded.find("core.node"));
+  EXPECT_EQ(std::string::npos, encoded.find("delete"));
+  gdefcore_values_free(catalog_, grant_text, grant_lens, grant_n);
   ASSERT_EQ(GDEFCORE_OK,
       gdefcore_access_role_grants(catalog_, "editor", 6, &grants, &count));
   EXPECT_TRUE(Has(grants, count, "Edit own content"));
@@ -355,6 +378,16 @@ TEST_F(Access, Own) {
   absent = ReadUntouched(catalog_, request_, missing, "title");
   EXPECT_EQ(hidden, absent);
   EXPECT_EQ(GDEFCORE_ERR_INVALID, hidden);
+  {
+    char bare[GDEFCORE_PUBLIC_ID_LEN + 1];
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_entity_create(catalog_, kNote, strlen(kNote), bare, NULL));
+    SaveTitle(catalog_, bare, NULL, "bare", NULL);
+    EXPECT_EQ(ReadUntouched(catalog_, request_, bare, "title"),
+        ReadUntouched(catalog_, request_, missing, "title"));
+    EXPECT_EQ(GDEFCORE_ERR_INVALID,
+        ReadUntouched(catalog_, request_, bare, "title"));
+  }
 }
 
 TEST_F(Access, Any) {
@@ -404,6 +437,25 @@ TEST_F(Access, AbsentField) {
   EXPECT_EQ("", Filtered(catalog_, request_, id, "secret", &rc, &filtered_count));
   EXPECT_EQ(GDEFCORE_OK, rc);
   EXPECT_EQ(0u, filtered_count);
+  {
+    char peek[GDEFCORE_PUBLIC_ID_LEN + 1];
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_access_role_create(catalog_, "peekers", 7, NULL));
+    Grant(catalog_, "peekers", "Read secret", "core.role");
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_access_principal_create(catalog_, peek));
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_access_principal_add_role(catalog_, peek, strlen(peek),
+            "peekers", 7));
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_request_set_principal(request_, peek, strlen(peek)));
+    EXPECT_EQ(GDEFCORE_ERR_INVALID,
+        ReadUntouched(catalog_, request_, id, "secret"));
+    EXPECT_EQ(GDEFCORE_ERR_INVALID, ReadUntouched(catalog_, request_, id, "title"));
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_request_set_principal(request_, who, strlen(who)));
+  }
+  Grant(catalog_, "readers", "Read secret", "core.role");
+  EXPECT_EQ("hidden", Filtered(catalog_, request_, id, "secret", NULL, NULL));
   ASSERT_EQ(GDEFCORE_OK,
       gdefcore_entity_values(catalog_, NULL, GDEFCORE_VIEW_PUBLISHED, id,
           strlen(id), "en", 2, "secret", 6, &texts, &lens, &count));
@@ -521,6 +573,40 @@ TEST_F(Access, GrantState) {
           "authenticated means something else",
           strlen("authenticated means something else")));
   EXPECT_EQ(epoch, Epoch(catalog_));
+  {
+    char who[GDEFCORE_PUBLIC_ID_LEN + 1];
+    char id[GDEFCORE_PUBLIC_ID_LEN + 1];
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_access_principal_create(catalog_, who));
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_entity_create(catalog_, kNote, strlen(kNote), id, NULL));
+    SaveTitle(catalog_, id, who, "seen", NULL);
+    EXPECT_EQ(GDEFCORE_ERR_INVALID,
+        ReadUntouched(catalog_, request_, id, "title"));
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_request_set_principal(request_, who, strlen(who)));
+    EXPECT_EQ("seen", Filtered(catalog_, request_, id, "title", NULL, NULL));
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_access_principal_remove(catalog_, who, strlen(who)));
+    EXPECT_EQ(GDEFCORE_ERR_INVALID,
+        ReadUntouched(catalog_, request_, id, "title"));
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_request_set_principal(request_, NULL, 0));
+    epoch = Epoch(catalog_);
+    EXPECT_EQ(GDEFCORE_ERR_INVALID,
+        gdefcore_access_grant(catalog_, "anonymous", 9, "Read notes", 10, NULL,
+            strlen(GDEFCORE_ACCESS_CONFIRM_ANONYMOUS)));
+    EXPECT_EQ(epoch, Epoch(catalog_));
+    EXPECT_EQ(GDEFCORE_ERR_INVALID,
+        gdefcore_access_grant(catalog_, "anonymous", 9, "Read notes", 10,
+            "anonymous means something else",
+            strlen("anonymous means something else")));
+    EXPECT_EQ(epoch, Epoch(catalog_));
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_access_grant(catalog_, "anonymous", 9, "Read notes", 10,
+            GDEFCORE_ACCESS_CONFIRM_ANONYMOUS,
+            strlen(GDEFCORE_ACCESS_CONFIRM_ANONYMOUS)));
+    EXPECT_EQ("seen", Filtered(catalog_, request_, id, "title", NULL, NULL));
+  }
 }
 
 TEST_F(Access, ModuleGrant) {
@@ -531,15 +617,23 @@ TEST_F(Access, ModuleGrant) {
   int on = 0;
   ASSERT_EQ(GDEFCORE_OK, gdefcore_access_roles(catalog_, &grants, &count));
   gdefcore_access_free(catalog_, grants, count);
-  memset(&g_perm, 0, sizeof g_perm);
-  g_perm.size = sizeof g_perm;
-  g_perm.label = "example.note";
-  g_perm.label_len = strlen(g_perm.label);
-  g_perm.action = "read";
-  g_perm.action_len = 4;
-  g_perm.condition = GDEFCORE_ACCESS_ANY;
-  g_perm.type_name = kNote;
-  g_perm.type_name_len = strlen(kNote);
+  memset(g_perms, 0, sizeof g_perms);
+  g_perms[0].size = sizeof g_perms[0];
+  g_perms[0].label = "example.zeta";
+  g_perms[0].label_len = strlen(g_perms[0].label);
+  g_perms[0].action = "read";
+  g_perms[0].action_len = 4;
+  g_perms[0].condition = GDEFCORE_ACCESS_ANY;
+  g_perms[0].type_name = kNote;
+  g_perms[0].type_name_len = strlen(kNote);
+  g_perms[1].size = sizeof g_perms[1];
+  g_perms[1].label = "example.note";
+  g_perms[1].label_len = strlen(g_perms[1].label);
+  g_perms[1].action = "read";
+  g_perms[1].action_len = 4;
+  g_perms[1].condition = GDEFCORE_ACCESS_ANY;
+  g_perms[1].type_name = kNote;
+  g_perms[1].type_name_len = strlen(kNote);
   memset(&g_man, 0, sizeof g_man);
   g_man.size = sizeof g_man;
   g_man.core_token = kCoreToken;
@@ -548,13 +642,14 @@ TEST_F(Access, ModuleGrant) {
   g_man.name_len = strlen(name);
   g_man.label = name;
   g_man.label_len = strlen(name);
-  g_man.perms = &g_perm;
-  g_man.nperms = 1;
+  g_man.perms = g_perms;
+  g_man.nperms = 2;
   g_current = &g_man;
   ASSERT_EQ(GDEFCORE_OK, gdefcore_module_install_guest(host_, TestGuest));
   ASSERT_EQ(GDEFCORE_OK,
       gdefcore_access_role_grants(catalog_, "admin", 5, &grants, &count));
   EXPECT_FALSE(Has(grants, count, "example.note"));
+  EXPECT_FALSE(Has(grants, count, "example.zeta"));
   gdefcore_access_free(catalog_, grants, count);
   ASSERT_EQ(GDEFCORE_OK,
       gdefcore_changeset_prepare(catalog_, NULL, 0, &changeset));
@@ -566,14 +661,21 @@ TEST_F(Access, ModuleGrant) {
   EXPECT_EQ(GDEFCORE_ERR_INVALID, gdefcore_changeset_apply(changeset, "example", 7));
   gdefcore_changeset_destroy(changeset);
   ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_changeset_prepare(catalog_, NULL, 0, &changeset));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_module_enable(host_, changeset, name, strlen(name)));
+  EXPECT_EQ(GDEFCORE_ERR_INVALID,
+      gdefcore_changeset_apply(changeset, "example\nexample.zeta\nexample.note",
+          strlen("example\nexample.zeta\nexample.note")));
+  gdefcore_changeset_destroy(changeset);
+  ASSERT_EQ(GDEFCORE_OK,
       gdefcore_module_enabled(host_, request_, name, strlen(name), &on));
   EXPECT_EQ(0, on);
   ASSERT_EQ(GDEFCORE_OK,
       gdefcore_changeset_prepare(catalog_, NULL, 0, &changeset));
   ASSERT_EQ(GDEFCORE_OK, gdefcore_module_enable(host_, changeset, name, strlen(name)));
   ASSERT_EQ(GDEFCORE_OK,
-      gdefcore_changeset_apply(changeset, "example\nexample.note",
-          strlen("example\nexample.note")));
+      gdefcore_changeset_apply(changeset, "example\nexample.note\nexample.zeta",
+          strlen("example\nexample.note\nexample.zeta")));
   gdefcore_changeset_destroy(changeset);
   ASSERT_EQ(GDEFCORE_OK,
       gdefcore_module_enabled(host_, request_, name, strlen(name), &on));
@@ -581,6 +683,7 @@ TEST_F(Access, ModuleGrant) {
   ASSERT_EQ(GDEFCORE_OK,
       gdefcore_access_role_grants(catalog_, "admin", 5, &grants, &count));
   EXPECT_TRUE(Has(grants, count, "example.note"));
+  EXPECT_TRUE(Has(grants, count, "example.zeta"));
   gdefcore_access_free(catalog_, grants, count);
 }
 
@@ -601,20 +704,41 @@ TEST_F(Access, RenderKey) {
   DefineNote(catalog_, 0);
   Declare(catalog_, &any);
   ASSERT_EQ(GDEFCORE_OK, gdefcore_access_role_create(catalog_, "readers", 7, NULL));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_access_role_create(catalog_, "viewers", 7, NULL));
   Grant(catalog_, "readers", "Read notes", "core.role");
+  Grant(catalog_, "viewers", "Read notes", "core.role");
   ASSERT_EQ(GDEFCORE_OK, gdefcore_access_principal_create(catalog_, a));
   ASSERT_EQ(GDEFCORE_OK, gdefcore_access_principal_create(catalog_, b));
   ASSERT_EQ(GDEFCORE_OK,
       gdefcore_access_principal_add_role(catalog_, a, strlen(a), "readers", 7));
   ASSERT_EQ(GDEFCORE_OK,
-      gdefcore_access_principal_add_role(catalog_, b, strlen(b), "readers", 7));
+      gdefcore_access_principal_add_role(catalog_, a, strlen(a), "viewers", 7));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_access_principal_add_role(catalog_, b, strlen(b), "viewers", 7));
   ASSERT_EQ(GDEFCORE_OK, gdefcore_request_set_principal(request_, a, strlen(a)));
+  {
+    size_t acting_len = 0;
+    const char * acting =
+        gdefcore_request_acting_principal(request_, &acting_len);
+    EXPECT_EQ(nullptr, acting);
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_request_set_acting_principal(request_, a, strlen(a)));
+    acting = gdefcore_request_acting_principal(request_, &acting_len);
+    ASSERT_NE(acting, nullptr);
+    EXPECT_EQ(std::string(a), std::string(acting, acting_len));
+  }
   ASSERT_EQ(GDEFCORE_OK,
       gdefcore_request_create((const uint8_t *)kTenant, 1, 0, 0, NULL, &other));
   ASSERT_EQ(GDEFCORE_OK, gdefcore_request_set_principal(other, b, strlen(b)));
   left = Key(catalog_, request_, NULL, NULL, 0);
   right = Key(catalog_, other, "live", NULL, 0);
   EXPECT_EQ(left, right);
+  EXPECT_NE(std::string::npos, left.find("tenant:74\n"));
+  EXPECT_NE(std::string::npos,
+      left.find(std::string("\nepoch:") + std::to_string(Epoch(catalog_)) +
+          "\n"));
+  EXPECT_EQ(std::string::npos, left.find("readers"));
+  EXPECT_EQ(std::string::npos, left.find("viewers"));
   EXPECT_NE(std::string::npos, left.find("\nedition:\n"));
   EXPECT_EQ(1, gdefcore_access_shared_cache(NULL, 0));
   EXPECT_EQ(1, gdefcore_access_shared_cache("live", 4));
@@ -625,7 +749,7 @@ TEST_F(Access, RenderKey) {
   EXPECT_EQ(std::string::npos, with_bytes.find("not-a-hash-name"));
   EXPECT_NE(std::string::npos, with_bytes.find("\noverlay:preview\n"));
   Declare(catalog_, &own);
-  Grant(catalog_, "readers", "Read own notes", "core.role");
+  Grant(catalog_, "viewers", "Read own notes", "core.role");
   left = Key(catalog_, request_, "live", NULL, 0);
   right = Key(catalog_, other, "live", NULL, 0);
   EXPECT_NE(left, right);
@@ -671,7 +795,7 @@ TEST_F(Access, Bypass) {
   size_t * lens = NULL;
   size_t count = 0;
   DefineNote(catalog_, 0);
-  ASSERT_EQ(GDEFCORE_OK, gdefcore_access_principal_create(catalog_, who));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_access_admin_principal(catalog_, who));
   ASSERT_EQ(GDEFCORE_OK,
       gdefcore_entity_create(catalog_, kNote, strlen(kNote), id, NULL));
   SaveTitle(catalog_, id, who, "present", NULL);
@@ -685,6 +809,70 @@ TEST_F(Access, Bypass) {
         gdefcore_entity_values(catalog_, NULL, GDEFCORE_VIEW_PUBLISHED, id,
             strlen(id), "en", 2, "title", 5, &texts, &lens, &count));
   }
+}
+
+TEST_F(Access, EighthRole) {
+  char who[GDEFCORE_PUBLIC_ID_LEN + 1];
+  char note[GDEFCORE_PUBLIC_ID_LEN + 1];
+  const char * roles[8] = {"r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7"};
+  GDEFCORE_Permission permission =
+      Perm("Read notes", "read", GDEFCORE_ACCESS_ANY, NULL);
+  int i;
+  DefineNote(catalog_, 0);
+  Declare(catalog_, &permission);
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_access_principal_create(catalog_, who));
+  for (i = 0; i < 8; i++) {
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_access_role_create(catalog_, roles[i], strlen(roles[i]), NULL));
+    if (i == 7) {
+      Grant(catalog_, roles[i], "Read notes", "core.role");
+    }
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_access_principal_add_role(catalog_, who, strlen(who), roles[i],
+            strlen(roles[i])));
+  }
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_entity_create(catalog_, kNote, strlen(kNote), note, NULL));
+  SaveTitle(catalog_, note, who, "eighth", NULL);
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_request_set_principal(request_, who, strlen(who)));
+  EXPECT_EQ("eighth", Filtered(catalog_, request_, note, "title", NULL, NULL));
+}
+
+TEST_F(Access, LowRiskStage) {
+  char id[GDEFCORE_PUBLIC_ID_LEN + 1];
+  char ** grants = NULL;
+  size_t count = 0;
+  GDEFCORE_Changeset * changeset = NULL;
+  GDEFCORE_Value value;
+  const char * text = "plain";
+  size_t text_len = 5;
+  DefineNote(catalog_, 0);
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_access_roles(catalog_, &grants, &count));
+  gdefcore_access_free(catalog_, grants, count);
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_entity_create(catalog_, kNote, strlen(kNote), id, NULL));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_changeset_prepare(catalog_, NULL, 0, &changeset));
+  memset(&value, 0, sizeof value);
+  value.size = sizeof value;
+  value.field = "title";
+  value.field_len = 5;
+  value.texts = &text;
+  value.text_lens = &text_len;
+  value.count = 1;
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_entity_save(changeset, id, strlen(id), "en", 2, &value, 1));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_access_stage_module_permission(changeset, "example", 7,
+          "staged.note", 11, "read", 4, GDEFCORE_ACCESS_ANY, kNote,
+          strlen(kNote), NULL, 0));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(changeset, NULL, 0));
+  gdefcore_changeset_destroy(changeset);
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_access_role_grants(catalog_, "admin", 5, &grants, &count));
+  EXPECT_FALSE(Has(grants, count, "staged.note"));
+  gdefcore_access_free(catalog_, grants, count);
 }
 
 int main(int argc, char ** argv) {

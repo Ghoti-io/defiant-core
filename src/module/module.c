@@ -839,6 +839,7 @@ static GDEFCORE_Result call_entry(GDEFCORE_Host * host, Mod * mod) {
   }
   rc = copy_manifest(host, mod, manifest);
   if (rc != GDEFCORE_OK) {
+    mod->nperms = 0;
     return rc;
   }
   rc = tokens_differ(host, mod);
