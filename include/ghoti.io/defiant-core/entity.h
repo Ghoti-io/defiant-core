@@ -342,6 +342,29 @@ GDEFCORE_API GDEFCORE_Result gdefcore_entity_revision(
     uint64_t * out_seq);
 
 /**
+ * @brief How many revisions were recorded for the entity.
+ *
+ * A revision is recorded when a changeset that appends one is applied.
+ * A missing id is ::GDEFCORE_ERR_INVALID. An entity with none reports 0.
+ * @p out_count is not written on failure.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_entity_revision_count(
+    GDEFCORE_Catalog * catalog, const char * id, size_t id_len,
+    size_t * out_count);
+
+/**
+ * @brief One recorded revision, oldest first.
+ *
+ * @p out_seq receives the sequence. @p out_actor receives the actor public
+ * id, or NULL when that revision recorded none. Free @p out_actor with
+ * gdefcore_text_free(). An index past the end is ::GDEFCORE_ERR_INVALID
+ * and nothing is written.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_entity_revision_at(
+    GDEFCORE_Catalog * catalog, const char * id, size_t id_len, size_t index,
+    uint64_t * out_seq, char ** out_actor, size_t * out_actor_len);
+
+/**
  * @brief Read field values.
  *
  * When @p changeset touches the entity, the staged fields are returned and

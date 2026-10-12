@@ -154,6 +154,10 @@
 #define gdefcore_entity_ids GHOTIIO_DEFCORE(gdefcore_entity_ids)
 #define gdefcore_entity_publish GHOTIIO_DEFCORE(gdefcore_entity_publish)
 #define gdefcore_entity_revision GHOTIIO_DEFCORE(gdefcore_entity_revision)
+#define gdefcore_entity_revision_at                                            \
+  GHOTIIO_DEFCORE(gdefcore_entity_revision_at)
+#define gdefcore_entity_revision_count                                         \
+  GHOTIIO_DEFCORE(gdefcore_entity_revision_count)
 #define gdefcore_entity_save GHOTIIO_DEFCORE(gdefcore_entity_save)
 #define gdefcore_entity_save_draft GHOTIIO_DEFCORE(gdefcore_entity_save_draft)
 #define gdefcore_entity_type GHOTIIO_DEFCORE(gdefcore_entity_type)

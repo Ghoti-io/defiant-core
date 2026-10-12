@@ -1002,7 +1002,12 @@ static GDEFCORE_Result render_display(GDEFCORE_Catalog * catalog,
   }
   rc = gdefcore_entity_values(catalog, NULL, GDEFCORE_VIEW_PUBLISHED, id,
       GDEFCORE_PUBLIC_ID_LEN, "en", 2, "panes", 5, &panes, &lens, &count);
-  if (rc != GDEFCORE_OK) {
+  if (rc == GDEFCORE_ERR_INVALID) {
+    panes = NULL;
+    lens = NULL;
+    count = 0;
+    rc = GDEFCORE_OK;
+  } else if (rc != GDEFCORE_OK) {
     gdefcore_text_free(catalog, layout);
     return rc;
   }
@@ -1754,7 +1759,7 @@ GDEFCORE_Result gdefcore_render_kit(GDEFCORE_Catalog * catalog, uint8_t ** out_b
   view[4].name = "sort";
   set_field(&display[0], "name", 1, 0);
   set_field(&display[1], "layout", 1, 0);
-  set_field(&display[2], "panes", 1, 1);
+  set_field(&display[2], "panes", 0, 1);
   /* range is optional and declared with sort's slot reused below. */
   rc = gdefcore_changeset_prepare(catalog, NULL, 0, &cs);
   if (rc != GDEFCORE_OK) {

@@ -787,6 +787,41 @@ TEST_F(Access, Revert) {
   gdefcore_access_free(catalog_, grants, count);
 }
 
+TEST_F(Access, RevertNamesActor) {
+  char role[GDEFCORE_PUBLIC_ID_LEN + 1];
+  char actor[GDEFCORE_PUBLIC_ID_LEN + 1];
+  GDEFCORE_Changeset * changeset = NULL;
+  GDEFCORE_Permission permission = Perm("Read notes", "read", GDEFCORE_ACCESS_ANY, NULL);
+  size_t count = 0;
+  uint64_t seq = 0;
+  char * who = NULL;
+  size_t who_n = 0;
+  DefineNote(catalog_, 0);
+  Declare(catalog_, &permission);
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_access_role_id(catalog_, "admin", 5, role));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_id_generate(actor));
+  Grant(catalog_, "admin", "Read notes", "core.role");
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_entity_revision_count(catalog_, role, strlen(role), &count));
+  ASSERT_GE(count, 1u);
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_changeset_revert(catalog_, role, strlen(role), actor, strlen(actor),
+          &changeset));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(changeset, "core.role", 9));
+  gdefcore_changeset_destroy(changeset);
+  EXPECT_EQ(GDEFCORE_OK,
+      gdefcore_entity_revision_at(catalog_, role, strlen(role), count, &seq, &who,
+          &who_n));
+  ASSERT_NE(who, nullptr);
+  EXPECT_EQ(std::string(actor), std::string(who, who_n));
+  gdefcore_text_free(catalog_, who);
+  /* The revision the grant made names no one: no actor was given. */
+  EXPECT_EQ(GDEFCORE_OK,
+      gdefcore_entity_revision_at(catalog_, role, strlen(role), count - 1, &seq, &who,
+          &who_n));
+  EXPECT_EQ(who, nullptr);
+}
+
 TEST_F(Access, Bypass) {
   char who[GDEFCORE_PUBLIC_ID_LEN + 1];
   char id[GDEFCORE_PUBLIC_ID_LEN + 1];

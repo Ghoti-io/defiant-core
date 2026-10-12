@@ -1157,6 +1157,115 @@ TEST_F(Entity, ActorOnProjection) {
   gdefstor_projection_free(projection);
 }
 
+TEST_F(Entity, RevisionActors) {
+  char id[GDEFCORE_PUBLIC_ID_LEN + 1];
+  uint64_t row = 0;
+  uint64_t seq = 0;
+  size_t count = 99;
+  size_t actor_n = 0;
+  char * actor = NULL;
+  GDEFCORE_Changeset * changeset = NULL;
+  const char * ada = "00041061050R3GG28A1C60T3GFGB";
+  char bob[GDEFCORE_PUBLIC_ID_LEN + 1];
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_id_generate(bob));
+  DefineType(catalog_, "site.note", GDEFCORE_TYPE_CONTENT);
+  CreateEntity(catalog_, "site.note", id, &row);
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_entity_revision_count(catalog_, id, strlen(id), &count));
+  EXPECT_EQ(0u, count);
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_changeset_prepare(catalog_, ada, strlen(ada), &changeset));
+  SaveTitle(changeset, id, "en", "Hello");
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(changeset, NULL, 0));
+  gdefcore_changeset_destroy(changeset);
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &changeset));
+  SaveTitle(changeset, id, "en", "Bonjour");
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(changeset, NULL, 0));
+  gdefcore_changeset_destroy(changeset);
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_changeset_prepare(catalog_, bob, strlen(bob), &changeset));
+  SaveTitle(changeset, id, "en", "Hola");
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(changeset, NULL, 0));
+  gdefcore_changeset_destroy(changeset);
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_entity_revision_count(catalog_, id, strlen(id), &count));
+  EXPECT_EQ(3u, count);
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_entity_revision_at(catalog_, id, strlen(id), 0, &seq, &actor,
+          &actor_n));
+  EXPECT_EQ(1u, seq);
+  ASSERT_NE(actor, nullptr);
+  EXPECT_EQ(std::string(ada), std::string(actor, actor_n));
+  gdefcore_text_free(catalog_, actor);
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_entity_revision_at(catalog_, id, strlen(id), 1, &seq, &actor,
+          &actor_n));
+  EXPECT_EQ(2u, seq);
+  EXPECT_EQ(actor, nullptr);
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_entity_revision_at(catalog_, id, strlen(id), 2, &seq, &actor,
+          &actor_n));
+  EXPECT_EQ(3u, seq);
+  ASSERT_NE(actor, nullptr);
+  EXPECT_EQ(std::string(bob), std::string(actor, actor_n));
+  gdefcore_text_free(catalog_, actor);
+  seq = 77;
+  EXPECT_EQ(GDEFCORE_ERR_INVALID,
+      gdefcore_entity_revision_at(catalog_, id, strlen(id), 3, &seq, &actor,
+          &actor_n));
+  EXPECT_EQ(77u, seq);
+  count = 99;
+  EXPECT_EQ(GDEFCORE_ERR_INVALID,
+      gdefcore_entity_revision_count(catalog_, "nope", 4, &count));
+  EXPECT_EQ(99u, count);
+}
+
+TEST_F(Entity, ManyFieldClears) {
+  char id[GDEFCORE_PUBLIC_ID_LEN + 1];
+  uint64_t row = 0;
+  GDEFCORE_Changeset * changeset = NULL;
+  GDEFCORE_Value value;
+  GDEFCORE_Field field;
+  const char * two[2] = {"a", "b"};
+  size_t lens[2] = {1, 1};
+  char ** texts = NULL;
+  size_t * out_lens = NULL;
+  size_t count = 0;
+  memset(&field, 0, sizeof field);
+  field.size = sizeof field;
+  field.name = "tags";
+  field.name_len = 4;
+  field.many = 1;
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_type_define(catalog_, "site.tagged", 11, GDEFCORE_TYPE_CONTENT,
+          &field, 1));
+  CreateEntity(catalog_, "site.tagged", id, &row);
+  memset(&value, 0, sizeof value);
+  value.size = sizeof value;
+  value.field = "tags";
+  value.field_len = 4;
+  value.texts = two;
+  value.text_lens = lens;
+  value.count = 2;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &changeset));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_entity_save(changeset, id, strlen(id), "en", 2, &value, 1));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(changeset, NULL, 0));
+  gdefcore_changeset_destroy(changeset);
+  value.texts = NULL;
+  value.text_lens = NULL;
+  value.count = 0;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &changeset));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_entity_save(changeset, id, strlen(id), "en", 2, &value, 1));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(changeset, NULL, 0));
+  gdefcore_changeset_destroy(changeset);
+  /* A cleared many field reads as absent, the same as one never set. */
+  EXPECT_EQ(GDEFCORE_ERR_INVALID,
+      gdefcore_entity_values(catalog_, NULL, GDEFCORE_VIEW_PUBLISHED, id,
+          strlen(id), "en", 2, "tags", 4, &texts, &out_lens, &count));
+}
+
 TEST_F(Entity, ConfirmationSortsMachineNames) {
   GDEFCORE_Field field = TitleField();
   GDEFCORE_Changeset * changeset = NULL;
