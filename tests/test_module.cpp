@@ -26,6 +26,9 @@
  * native library.
  */
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
 #include <ghoti.io/cutil/library.h>
 #include <ghoti.io/defiant-core/macros.h>
 #include <ghoti.io/defiant-core/defiant-core.h>
@@ -238,6 +241,14 @@ std::string HostNotice(const GDEFCORE_Host * host) {
   return std::string(text, n);
 }
 
+#ifdef _WIN32
+bool Mapped(const std::string & path) {
+  /* The loader knows a module by its file name. */
+  size_t slash = path.find_last_of("/\\");
+  return GetModuleHandleA(slash == std::string::npos ? path.c_str() : path.c_str() + slash + 1) !=
+         NULL;
+}
+#else
 bool Mapped(const std::string & path) {
   std::ifstream in("/proc/self/maps");
   std::string line;
@@ -248,6 +259,7 @@ bool Mapped(const std::string & path) {
   }
   return false;
 }
+#endif
 
 void InstallGuest(GDEFCORE_Host * host, const char * name, const char * token,
     const char * hook, int kind, int weight, int access, const char * after,
@@ -577,7 +589,7 @@ TEST_F(Module, Requires) {
 }
 
 TEST_F(Module, Trust) {
-  char tmpl[] = "/tmp/gdefcore-mod-XXXXXX";
+  char tmpl[] = "/tmp/gdefcore-mod-XXXXXX\0.dll.pad";
   int fd = mkstemp(tmpl);
   std::ifstream in(GDEFCORE_MODULE_EXAMPLE, std::ios::binary);
   std::string bytes((std::istreambuf_iterator<char>(in)),
@@ -586,6 +598,15 @@ TEST_F(Module, Trust) {
   ASSERT_FALSE(bytes.empty());
   ASSERT_EQ((ssize_t)bytes.size(), write(fd, bytes.data(), bytes.size()));
   ASSERT_EQ(0, close(fd));
+#ifdef _WIN32
+  /* LoadLibrary adds .dll to a name that has no extension, so the copy has one. */
+  {
+    std::string named = std::string(tmpl) + ".dll";
+    ASSERT_EQ(0, rename(tmpl, named.c_str()));
+    ASSERT_LT(named.size(), sizeof tmpl + 8);
+    strcpy(tmpl, named.c_str());
+  }
+#endif
   EXPECT_FALSE(Mapped(tmpl));
   ASSERT_EQ(GDEFCORE_ERR_INVALID, gdefcore_module_install_native(host_, tmpl, 0));
   EXPECT_EQ(std::string("Native install requires full trust."), HostError(host_));

@@ -34,7 +34,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef _WIN32
 #include <sys/wait.h>
+#endif
+#include "portable.h"
 #include <unistd.h>
 
 #include <string>
@@ -86,6 +89,12 @@ bool WriteText(const std::string & path, const std::string & text) {
 }
 
 std::string RunConfig(const std::string & path, char * const * envp) {
+#ifdef _WIN32
+  /* No fork or execve: the caller skips the test. */
+  (void)path;
+  (void)envp;
+  return std::string();
+#else
   int fds[2];
   pid_t pid;
   std::string out;
@@ -123,6 +132,7 @@ std::string RunConfig(const std::string & path, char * const * envp) {
     return std::string();
   }
   return out;
+#endif
 }
 
 class Inst : public ::testing::Test {
@@ -561,6 +571,9 @@ TEST_F(Inst, SecretEnv) {
 }
 
 TEST_F(Inst, Effective) {
+#ifdef _WIN32
+  GTEST_SKIP() << "the effective-config example is run with a chosen environment through fork and execve";
+#endif
   uint8_t secret[GDEFCORE_ACCOUNT_ROOT_LEN];
   std::string path = Tmp("secret");
   std::string listen = "DEFIANT_LISTEN=10.1.2.3:4242";

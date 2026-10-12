@@ -563,7 +563,16 @@ GDEFCORE_Result gdefcore_inst_config_load(const GDEFCORE_Allocator * allocator,
   }
   if (secret_env != NULL) {
     wipe(secret_env, secret_len);
+#ifdef _WIN32
+    {
+      /* The C runtime has no unsetenv; NAME= removes the variable. */
+      char blank[64];
+      snprintf(blank, sizeof blank, "%s=", kEnvNames[kSecret]);
+      _putenv(blank);
+    }
+#else
     unsetenv(kEnvNames[kSecret]);
+#endif
   }
   *out_config = config;
   return GDEFCORE_OK;

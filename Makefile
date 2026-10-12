@@ -608,6 +608,10 @@ LIBVER_GEN := $(GEN_DIR)/ghoti.io/$(PROJECT)/libver_gen.h
 # make BRANCH=-dev - takes effect. Keying the rule on the Makefile's timestamp
 # alone left the previous token and version baked into the build, and nothing
 # said so.
+# Where the manifest is. A tree laid out some other way (the cross build's
+# scratch directory) names it.
+LIBRARIES_TXT ?= ../../suite/libraries.txt
+
 .PHONY: force-libver
 force-libver:
 
@@ -1616,7 +1620,7 @@ $(FUZZ_FLAGS_STAMP): force-flags
 check-seams: ## Fail if a subsystem includes another's private header
 	@tools/check-seams.sh .
 check-prefix: ## Fail if a derived Defiant prefix collides or a dependency is out of order
-	@tools/check-prefix.sh ../../suite/libraries.txt
+	@tools/check-prefix.sh $(LIBRARIES_TXT)
 check-labels: ## Fail if a public header lacks @stability free
 	@tools/check-labels.sh .
 check-access: $(APP_DIR)/testAccess$(EXE_EXTENSION) ## The access-filter gates, each with a plant
