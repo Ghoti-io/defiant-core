@@ -224,6 +224,14 @@
 #define gdefcore_module_write_enables                                          \
   GHOTIIO_DEFCORE(gdefcore_module_write_enables)
 #define gdefcore_patch_free GHOTIIO_DEFCORE(gdefcore_patch_free)
+#define gdefcore_render_install GHOTIIO_DEFCORE(gdefcore_render_install)
+#define gdefcore_render_kit GHOTIIO_DEFCORE(gdefcore_render_kit)
+#define gdefcore_render_names_free GHOTIIO_DEFCORE(gdefcore_render_names_free)
+#define gdefcore_render_page GHOTIIO_DEFCORE(gdefcore_render_page)
+#define gdefcore_render_pane_at GHOTIIO_DEFCORE(gdefcore_render_pane_at)
+#define gdefcore_render_regions GHOTIIO_DEFCORE(gdefcore_render_regions)
+#define gdefcore_render_scope GHOTIIO_DEFCORE(gdefcore_render_scope)
+#define gdefcore_render_view_define GHOTIIO_DEFCORE(gdefcore_render_view_define)
 #define gdefcore_request_acting_principal                                      \
   GHOTIIO_DEFCORE(gdefcore_request_acting_principal)
 #define gdefcore_request_attach_fiber                                          \
