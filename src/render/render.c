@@ -1614,6 +1614,92 @@ static GDEFCORE_Result put_display(GDEFCORE_Catalog * catalog, const char * name
   return save_entity(catalog, "core.display", values, 3, 1);
 }
 
+static GDEFCORE_Result ensure_named(GDEFCORE_Catalog * catalog, const char * type,
+    size_t type_len, const char * name, size_t name_len, const char * extra_field,
+    const char * extra) {
+  char id[GDEFCORE_PUBLIC_ID_LEN + 1];
+  GDEFCORE_Result rc = find_named(catalog, type, type_len, name, name_len, id);
+  if (rc == GDEFCORE_OK) {
+    return GDEFCORE_OK;
+  }
+  if (rc != GDEFCORE_ERR_INVALID) {
+    return rc;
+  }
+  return put_named(catalog, type, name, extra_field, extra);
+}
+
+static GDEFCORE_Result ensure_display(GDEFCORE_Catalog * catalog,
+    const char * name, const char * pane) {
+  char id[GDEFCORE_PUBLIC_ID_LEN + 1];
+  GDEFCORE_Result rc = find_named(catalog, "core.display", 12, name, strlen(name),
+      id);
+  if (rc == GDEFCORE_OK) {
+    return GDEFCORE_OK;
+  }
+  if (rc != GDEFCORE_ERR_INVALID) {
+    return rc;
+  }
+  return put_display(catalog, name, pane);
+}
+
+static GDEFCORE_Result grant_posts(GDEFCORE_Catalog * catalog);
+
+static GDEFCORE_Result write_kit(GDEFCORE_Catalog * catalog) {
+  char id[GDEFCORE_PUBLIC_ID_LEN + 1];
+  GDEFCORE_Result rc;
+  rc = ensure_named(catalog, "core.template", 13, "layout", 6, "body",
+      kLayoutBody);
+  if (rc == GDEFCORE_OK) {
+    rc = ensure_named(catalog, "core.template", 13, "entity", 6, "body",
+        kEntityBody);
+  }
+  if (rc == GDEFCORE_OK) {
+    rc = ensure_named(catalog, "core.template", 13, "recent", 6, "body",
+        kRecentBody);
+  }
+  if (rc == GDEFCORE_OK) {
+    rc = ensure_named(catalog, "core.template", 13, "field", 5, "body",
+        kFieldBody);
+  }
+  if (rc == GDEFCORE_OK) {
+    rc = ensure_named(catalog, "core.theme", 10, "base", 4, NULL, NULL);
+  }
+  if (rc == GDEFCORE_OK) {
+    rc = find_named(catalog, "core.view", 9, "recent", 6, id);
+    if (rc == GDEFCORE_ERR_INVALID) {
+      rc = gdefcore_render_view_define(catalog, "recent", 6, "site.post", 9, 5,
+          "recent", 6, NULL, 0, NULL, 0);
+    }
+  }
+  if (rc == GDEFCORE_OK) {
+    rc = ensure_display(catalog, "front", "side view recent");
+  }
+  if (rc == GDEFCORE_OK) {
+    rc = ensure_display(catalog, "post", "main entity entity");
+  }
+  if (rc == GDEFCORE_OK) {
+    rc = grant_posts(catalog);
+  }
+  return rc;
+}
+
+static GDEFCORE_Result displays_ready(GDEFCORE_Catalog * catalog, int * ready) {
+  char id[GDEFCORE_PUBLIC_ID_LEN + 1];
+  GDEFCORE_Result front;
+  GDEFCORE_Result post;
+  *ready = 0;
+  front = find_named(catalog, "core.display", 12, "front", 5, id);
+  if (front != GDEFCORE_OK && front != GDEFCORE_ERR_INVALID) {
+    return front;
+  }
+  post = find_named(catalog, "core.display", 12, "post", 4, id);
+  if (post != GDEFCORE_OK && post != GDEFCORE_ERR_INVALID) {
+    return post;
+  }
+  *ready = front == GDEFCORE_OK && post == GDEFCORE_OK;
+  return GDEFCORE_OK;
+}
+
 static GDEFCORE_Result grant_posts(GDEFCORE_Catalog * catalog) {
   GDEFCORE_Permission permission;
   const char * confirm = GDEFCORE_ACCESS_CONFIRM_ANONYMOUS;
@@ -1729,6 +1815,7 @@ GDEFCORE_Result gdefcore_render_kit(GDEFCORE_Catalog * catalog, uint8_t ** out_b
 GDEFCORE_Result gdefcore_render_install(GDEFCORE_Catalog * catalog,
     const uint8_t * archive, size_t archive_len) {
   int kind = 0;
+  int ready = 0;
   uint8_t * blob = NULL;
   size_t blob_len = 0;
   GDEFCORE_Patch * files = NULL;
@@ -1738,60 +1825,39 @@ GDEFCORE_Result gdefcore_render_install(GDEFCORE_Catalog * catalog,
   if (catalog == NULL) {
     return GDEFCORE_ERR_INVALID;
   }
-  rc = gdefcore_type_kind(catalog, "site.post", 9, &kind);
-  if (rc == GDEFCORE_OK) {
+  rc = displays_ready(catalog, &ready);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  if (ready) {
     return GDEFCORE_OK;
   }
-  if (rc != GDEFCORE_ERR_INVALID) {
+  rc = gdefcore_type_kind(catalog, "site.post", 9, &kind);
+  if (rc == GDEFCORE_ERR_INVALID) {
+    if (archive == NULL || archive_len == 0) {
+      return GDEFCORE_ERR_INVALID;
+    }
+    rc = read_changeset(archive, archive_len, &blob, &blob_len);
+    if (rc != GDEFCORE_OK) {
+      return rc;
+    }
+    rc = unpack_patches(catalog, blob, blob_len, &files, &count);
+    free(blob);
+    if (rc != GDEFCORE_OK) {
+      return rc;
+    }
+    rc = gdefcore_changeset_parse(catalog, files, count, NULL, &cs);
+    free_patches(catalog, files, count);
+    if (rc != GDEFCORE_OK) {
+      return rc;
+    }
+    rc = gdefcore_changeset_apply(cs, kConfirm, sizeof kConfirm - 1);
+    gdefcore_changeset_destroy(cs);
+    if (rc != GDEFCORE_OK) {
+      return rc;
+    }
+  } else if (rc != GDEFCORE_OK) {
     return rc;
   }
-  if (archive == NULL || archive_len == 0) {
-    return GDEFCORE_ERR_INVALID;
-  }
-  rc = read_changeset(archive, archive_len, &blob, &blob_len);
-  if (rc != GDEFCORE_OK) {
-    return rc;
-  }
-  rc = unpack_patches(catalog, blob, blob_len, &files, &count);
-  free(blob);
-  if (rc != GDEFCORE_OK) {
-    return rc;
-  }
-  rc = gdefcore_changeset_parse(catalog, files, count, NULL, &cs);
-  free_patches(catalog, files, count);
-  if (rc != GDEFCORE_OK) {
-    return rc;
-  }
-  rc = gdefcore_changeset_apply(cs, kConfirm, sizeof kConfirm - 1);
-  gdefcore_changeset_destroy(cs);
-  if (rc != GDEFCORE_OK) {
-    return rc;
-  }
-  rc = put_named(catalog, "core.template", "layout", "body", kLayoutBody);
-  if (rc == GDEFCORE_OK) {
-    rc = put_named(catalog, "core.template", "entity", "body", kEntityBody);
-  }
-  if (rc == GDEFCORE_OK) {
-    rc = put_named(catalog, "core.template", "recent", "body", kRecentBody);
-  }
-  if (rc == GDEFCORE_OK) {
-    rc = put_named(catalog, "core.template", "field", "body", kFieldBody);
-  }
-  if (rc == GDEFCORE_OK) {
-    rc = put_named(catalog, "core.theme", "base", NULL, NULL);
-  }
-  if (rc == GDEFCORE_OK) {
-    rc = gdefcore_render_view_define(catalog, "recent", 6, "site.post", 9, 5,
-        "recent", 6, NULL, 0, NULL, 0);
-  }
-  if (rc == GDEFCORE_OK) {
-    rc = put_display(catalog, "front", "side view recent");
-  }
-  if (rc == GDEFCORE_OK) {
-    rc = put_display(catalog, "post", "main entity entity");
-  }
-  if (rc == GDEFCORE_OK) {
-    rc = grant_posts(catalog);
-  }
-  return rc;
+  return write_kit(catalog);
 }

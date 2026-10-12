@@ -182,11 +182,16 @@ TEST_F(Render, Page) {
   GDEFCORE_Result rc = GDEFCORE_ERR_INVALID;
   Install();
   Login();
-  Save("hello-title", "Hello Title", "Hello Body", NULL, 1, id);
+  Save("hello-title", "Hello <Title", "Hello Body", NULL, 1, id);
   std::string page = Show(anon_, "hello-title", &rc);
   EXPECT_EQ(GDEFCORE_OK, rc);
-  EXPECT_NE(std::string::npos, page.find("Hello Title"));
+  EXPECT_NE(std::string::npos, page.find("Hello &lt;Title"));
+  EXPECT_EQ(std::string::npos, page.find("Hello <Title"));
   EXPECT_NE(std::string::npos, page.find("Hello Body"));
+  page = Show(anon_, "/", &rc);
+  EXPECT_EQ(GDEFCORE_OK, rc);
+  EXPECT_NE(std::string::npos, page.find("<article"));
+  EXPECT_EQ(std::string::npos, page.find("&lt;article"));
 }
 
 TEST_F(Render, Manual) {
@@ -218,18 +223,21 @@ TEST_F(Render, Break) {
 TEST_F(Render, Trim) {
   char id[GDEFCORE_PUBLIC_ID_LEN + 1];
   GDEFCORE_Result rc = GDEFCORE_ERR_INVALID;
-  std::string body(598, 'A');
   std::string euro = std::string("\xE2\x82\xAC", 3);
+  std::string kept(560, 'A');
+  std::string body;
   Install();
   Login();
-  body += euro;
-  body += " ";
-  body += "TAIL";
+  kept += euro;
+  kept += " KEEPME";
+  body = kept;
+  body += " ZTOKENZ";
+  body += std::string(40, 'B');
   Save("trimmed", "Trim Title", body.c_str(), NULL, 1, id);
   std::string page = Show(anon_, "/", &rc);
   EXPECT_EQ(GDEFCORE_OK, rc);
-  EXPECT_NE(std::string::npos, page.find(std::string(598, 'A') + euro));
-  EXPECT_EQ(std::string::npos, page.find("TAIL"));
+  EXPECT_NE(std::string::npos, page.find(kept));
+  EXPECT_EQ(std::string::npos, page.find("ZTOKENZ"));
 }
 
 TEST_F(Render, Draft) {
@@ -284,23 +292,32 @@ TEST_F(Render, Hidden) {
 }
 
 TEST_F(Render, Recent) {
-  char older[GDEFCORE_PUBLIC_ID_LEN + 1];
-  char newer[GDEFCORE_PUBLIC_ID_LEN + 1];
+  static const char * kTitles[] = {"Oldest Title", "Second Title",
+      "Third Title", "Fourth Title", "Fifth Title", "Newest Title"};
+  char ids[6][GDEFCORE_PUBLIC_ID_LEN + 1];
   char draft[GDEFCORE_PUBLIC_ID_LEN + 1];
   GDEFCORE_Result rc = GDEFCORE_ERR_INVALID;
+  int i;
   Install();
   Login();
-  Save("older", "Older Title", "Older summary text", "older sum", 1, older);
-  Save("newer", "Newer Title", "Newer summary text", "newer sum", 1, newer);
+  for (i = 0; i < 6; i++) {
+    std::string alias = std::string("post-") + char('0' + i);
+    Save(alias.c_str(), kTitles[i], "body", "sum", 1, ids[i]);
+  }
   Save("draft-one", "Draft Title", "Draft summary text", "draft sum", 0, draft);
   std::string page = Show(anon_, "/", &rc);
   EXPECT_EQ(GDEFCORE_OK, rc);
-  EXPECT_NE(std::string::npos, page.find("Newer Title"));
-  EXPECT_NE(std::string::npos, page.find("Older Title"));
-  EXPECT_NE(std::string::npos, page.find("newer sum"));
-  EXPECT_NE(std::string::npos, page.find("older sum"));
-  EXPECT_LT(page.find("Newer Title"), page.find("Older Title"));
+  EXPECT_EQ(std::string::npos, page.find("Oldest Title"));
   EXPECT_EQ(std::string::npos, page.find("Draft Title"));
+  EXPECT_NE(std::string::npos, page.find("Second Title"));
+  EXPECT_NE(std::string::npos, page.find("Third Title"));
+  EXPECT_NE(std::string::npos, page.find("Fourth Title"));
+  EXPECT_NE(std::string::npos, page.find("Fifth Title"));
+  EXPECT_NE(std::string::npos, page.find("Newest Title"));
+  EXPECT_LT(page.find("Newest Title"), page.find("Fifth Title"));
+  EXPECT_LT(page.find("Fifth Title"), page.find("Fourth Title"));
+  EXPECT_LT(page.find("Fourth Title"), page.find("Third Title"));
+  EXPECT_LT(page.find("Third Title"), page.find("Second Title"));
 }
 
 TEST_F(Render, Region) {
@@ -439,13 +456,80 @@ TEST_F(Render, Kit) {
 }
 
 TEST_F(Render, Miss) {
-  char * out = (char *)1;
-  size_t n = 4;
+  GDEFCORE_Field fields[2];
+  GDEFCORE_Permission permission;
+  GDEFCORE_Value values[2];
+  const char * slots[2];
+  size_t lens[2];
+  char id[GDEFCORE_PUBLIC_ID_LEN + 1];
+  char * token = NULL;
+  char * resolved = NULL;
+  char * miss = (char *)1;
+  char * other = (char *)1;
+  size_t token_len = 0;
+  size_t resolved_len = 0;
+  size_t miss_len = 4;
+  size_t other_len = 4;
+  int conflict = 1;
+  const char * confirm = GDEFCORE_ACCESS_CONFIRM_ANONYMOUS;
+  GDEFCORE_Result unknown;
+  GDEFCORE_Result refused;
   Install();
-  EXPECT_EQ(GDEFCORE_ERR_INVALID,
-      gdefcore_render_page(catalog_, NULL, anon_, "no-such", 7,
-          GDEFCORE_RENDER_PAGE_FUEL, &out, &n));
-  EXPECT_EQ((char *)1, out);
+  Login();
+  memset(fields, 0, sizeof fields);
+  fields[0].size = sizeof fields[0];
+  fields[0].name = "title";
+  fields[0].name_len = 5;
+  fields[0].required = 1;
+  fields[1].size = sizeof fields[1];
+  fields[1].name = "body";
+  fields[1].name_len = 4;
+  fields[1].required = 1;
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_type_define(catalog_, "site.note", 9, GDEFCORE_TYPE_CONTENT,
+          fields, 2));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_entity_create(catalog_, "site.note", 9, id, NULL));
+  OneValue(&values[0], "title", "Note Title", &slots[0], &lens[0]);
+  OneValue(&values[1], "body", "Note Body", &slots[1], &lens[1]);
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_form_sign(catalog_, request_, keyring_, root_, sizeof root_,
+          session_.data(), session_.size(), "edit", 4, id, strlen(id), "en", 2,
+          values, 2, "a-note", 6, &token, &token_len));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_form_submit(catalog_, request_, keyring_, root_, sizeof root_,
+          session_.data(), session_.size(), token, token_len, &conflict));
+  gdefcore_text_free(catalog_, token);
+  EXPECT_EQ(0, conflict);
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_form_publish(catalog_, id, strlen(id)));
+  memset(&permission, 0, sizeof permission);
+  permission.size = sizeof permission;
+  permission.label = "Read notes";
+  permission.label_len = 10;
+  permission.module_name = "site";
+  permission.module_name_len = 4;
+  permission.action = "read";
+  permission.action_len = 4;
+  permission.condition = GDEFCORE_ACCESS_ANY;
+  permission.type_name = "site.note";
+  permission.type_name_len = 9;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_access_declare(catalog_, &permission));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_access_grant(catalog_, "anonymous", 9, "Read notes", 10, confirm,
+          strlen(confirm)));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_form_resolve(NULL, catalog_, anon_, "a-note", 6, &resolved,
+          &resolved_len));
+  EXPECT_EQ(GDEFCORE_PUBLIC_ID_LEN, resolved_len);
+  gdefcore_text_free(catalog_, resolved);
+  unknown = gdefcore_render_page(catalog_, NULL, anon_, "no-such", 7,
+      GDEFCORE_RENDER_PAGE_FUEL, &miss, &miss_len);
+  refused = gdefcore_render_page(catalog_, NULL, anon_, "a-note", 6,
+      GDEFCORE_RENDER_PAGE_FUEL, &other, &other_len);
+  EXPECT_EQ(unknown, refused);
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, refused);
+  EXPECT_EQ((char *)1, miss);
+  EXPECT_EQ((char *)1, other);
 }
 
 TEST_F(Render, Partial) {

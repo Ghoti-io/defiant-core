@@ -46,11 +46,12 @@ the recent-posts view, and the two displays. It grants anonymous read
 of `site.post`. The confirmation text is `anonymous means everyone
 without an account`.
 
-A second install writes nothing. Render never opens the archive: after
-install, the store is the only source.
+A second install writes nothing once the front and post displays exist.
+If `site.post` exists and those displays do not, install does not apply
+the changeset again. It still writes whichever of the theme, the view,
+the displays, and the anonymous grant are missing. Render never opens
+the archive: after install, the store is the only source.
 
 The changeset defines the types. The theme, the view and the displays
 are written after it applies, because an entity of a type cannot be
-saved in the same changeset that defines the type. An install that
-fails after the types exist is not retried by a second install, which
-sees `site.post` and stops.
+saved in the same changeset that defines the type.
