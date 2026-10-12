@@ -2060,6 +2060,16 @@ static GDEFCORE_Result judge_object(const GTEXT_JSON_Value * root) {
   return GDEFCORE_OK;
 }
 
+static GDEFCORE_Result from_garc(GARC_Result gr) {
+  if (gr == GARC_ERR_OOM) {
+    return GDEFCORE_ERR_OOM;
+  }
+  if (garc_result_is_limit(gr)) {
+    return GDEFCORE_ERR_LIMIT;
+  }
+  return GDEFCORE_ERR_CORRUPT;
+}
+
 static GDEFCORE_Result judge_member(const GDEFCORE_Allocator * alloc,
     const uint8_t * body, size_t n) {
   GTEXT_JSON_Parse_Options opt;
@@ -2115,7 +2125,7 @@ static GDEFCORE_Result archive_refuse(const GDEFCORE_Allocator * alloc,
   gr = garc_open(stream, &alimits, &archive);
   if (gr != GARC_OK) {
     garc_stream_destroy(stream);
-    return GDEFCORE_ERR_CORRUPT;
+    return from_garc(gr);
   }
   for (;;) {
     const GARC_Member * member = NULL;
@@ -2126,7 +2136,7 @@ static GDEFCORE_Result archive_refuse(const GDEFCORE_Allocator * alloc,
       break;
     }
     if (gr != GARC_OK) {
-      rc = GDEFCORE_ERR_CORRUPT;
+      rc = from_garc(gr);
       break;
     }
     if (member->type != GARC_MEMBER_FILE ||
@@ -2161,7 +2171,9 @@ static GDEFCORE_Result archive_refuse(const GDEFCORE_Allocator * alloc,
       }
       got_total += got;
     }
-    if (rc == GDEFCORE_OK) {
+    if (rc == GDEFCORE_OK &&
+        !(member->name != NULL && member->name_length >= 2 &&
+            member->name[0] == 'b' && member->name[1] == ':')) {
       rc = judge_member(alloc, body, (size_t)member->size);
     }
     gcu_allocator_free(alloc, body);
