@@ -32,14 +32,21 @@
 
 #include "subject_internal.h"
 
+#include <ghoti.io/archive/reader.h>
+#include <ghoti.io/archive/stream.h>
+#include <ghoti.io/archive/zip.h>
 #include <ghoti.io/cutil/allocator.h>
+#include <ghoti.io/defiant-core/access.h>
+#include <ghoti.io/defiant-storage/core.h>
 #include <ghoti.io/defiant-storage/projection.h>
 #include <ghoti.io/defiant-storage/snapshot.h>
 #include <ghoti.io/security/aes_gcm.h>
+#include <ghoti.io/text/json.h>
 #include <ghoti.io/security/hmac.h>
 #include <ghoti.io/security/random.h>
 #include <ghoti.io/security/secret.h>
 
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -1914,6 +1921,259 @@ GDEFCORE_Result gdefcore_subject_snapshot(GDEFCORE_Subjects * subjects,
   return rc;
 }
 
+static int name_bad(const char * name, size_t n) {
+  size_t i;
+  size_t start = 0;
+  if (n == 0) {
+    return 1;
+  }
+  for (i = 0; i <= n; i++) {
+    if (i == n || name[i] == '/' || name[i] == '\\' || name[i] == '\0') {
+      size_t seglen = i - start;
+      if (i != n && (name[i] == '\\' || name[i] == '\0')) {
+        return 1;
+      }
+      if (seglen == 0 || (seglen == 1 && name[start] == '.') ||
+          (seglen == 2 && name[start] == '.' && name[start + 1] == '.')) {
+        return 1;
+      }
+      start = i + 1;
+    }
+  }
+  return 0;
+}
+
+static int ratio_over(uint64_t uncomp, uint64_t comp, uint32_t max_ratio) {
+  if (uncomp == 0) {
+    return 0;
+  }
+  if (comp == 0 || max_ratio == 0) {
+    return 1;
+  }
+  if (comp > UINT64_MAX / (uint64_t)max_ratio) {
+    return 0;
+  }
+  return uncomp > (uint64_t)max_ratio * comp;
+}
+
+static int digits_only(const char * text, size_t n) {
+  size_t i;
+  if (n == 0) {
+    return 0;
+  }
+  for (i = 0; i < n; i++) {
+    if (text[i] < '0' || text[i] > '9') {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static int span_is(const char * text, size_t n, const char * want) {
+  size_t want_len = strlen(want);
+  return n == want_len && memcmp(text, want, n) == 0;
+}
+
+static int grant_confirm_ok(const char * role, size_t role_len,
+    const char * confirm, size_t confirm_len) {
+  if (span_is(role, role_len, "anonymous")) {
+    return span_is(confirm, confirm_len, GDEFCORE_ACCESS_CONFIRM_ANONYMOUS);
+  }
+  if (span_is(role, role_len, "authenticated")) {
+    return span_is(confirm, confirm_len,
+        GDEFCORE_ACCESS_CONFIRM_AUTHENTICATED);
+  }
+  return span_is(confirm, confirm_len, "core.role");
+}
+
+/* A stored role row has no top-level role and label. Those two keys are an
+ * applied grant, which needs the same confirmation the grant call does. */
+static GDEFCORE_Result judge_object(const GTEXT_JSON_Value * root) {
+  const GTEXT_JSON_Value * format;
+  const GTEXT_JSON_Value * entity;
+  const GTEXT_JSON_Value * type;
+  const GTEXT_JSON_Value * tenant;
+  const GTEXT_JSON_Value * role;
+  const GTEXT_JSON_Value * label;
+  const GTEXT_JSON_Value * confirm;
+  const char * format_text = NULL;
+  size_t format_len = 0;
+  const char * entity_text = NULL;
+  size_t entity_len = 0;
+  const char * type_text = NULL;
+  size_t type_len = 0;
+  const char * role_text = NULL;
+  size_t role_len = 0;
+  const char * label_text = NULL;
+  size_t label_len = 0;
+  const char * confirm_text = NULL;
+  size_t confirm_len = 0;
+  char canon[GDEFCORE_PUBLIC_ID_LEN + 1];
+  int revision = 0;
+  if (gtext_json_typeof(root) != GTEXT_JSON_OBJECT) {
+    return GDEFCORE_OK;
+  }
+  format = gtext_json_object_get(root, "format", 6);
+  if (gtext_json_get_string(format, &format_text, &format_len) ==
+      GTEXT_JSON_OK) {
+    revision = format_len >= 17 &&
+               memcmp(format_text, "defiant-revision/", 17) == 0;
+  }
+  tenant = gtext_json_object_get(root, "tenant", 6);
+  if (tenant != NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  if (revision) {
+    entity = gtext_json_object_get(root, "entity", 6);
+    if (gtext_json_get_string(entity, &entity_text, &entity_len) !=
+        GTEXT_JSON_OK) {
+      return GDEFCORE_ERR_CORRUPT;
+    }
+    if (digits_only(entity_text, entity_len)) {
+      return GDEFCORE_ERR_INVALID;
+    }
+    if (gdefcore_id_canonical(entity_text, entity_len, canon) !=
+        GDEFCORE_OK) {
+      return GDEFCORE_ERR_INVALID;
+    }
+    type = gtext_json_object_get(root, "type", 4);
+    if (gtext_json_get_string(type, &type_text, &type_len) == GTEXT_JSON_OK &&
+        span_is(type_text, type_len, "core.tenant")) {
+      return GDEFCORE_ERR_INVALID;
+    }
+  }
+  role = gtext_json_object_get(root, "role", 4);
+  label = gtext_json_object_get(root, "label", 5);
+  if (role == NULL && label == NULL) {
+    return GDEFCORE_OK;
+  }
+  if (gtext_json_get_string(role, &role_text, &role_len) != GTEXT_JSON_OK ||
+      gtext_json_get_string(label, &label_text, &label_len) != GTEXT_JSON_OK) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  confirm = gtext_json_object_get(root, "confirmation", 12);
+  if (gtext_json_get_string(confirm, &confirm_text, &confirm_len) !=
+          GTEXT_JSON_OK ||
+      !grant_confirm_ok(role_text, role_len, confirm_text, confirm_len)) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  return GDEFCORE_OK;
+}
+
+static GDEFCORE_Result judge_member(const GDEFCORE_Allocator * alloc,
+    const uint8_t * body, size_t n) {
+  GTEXT_JSON_Parse_Options opt;
+  GTEXT_JSON_Error err;
+  GTEXT_JSON_Value * root;
+  GDEFCORE_Result rc;
+  size_t i;
+  for (i = 0; i < n; i++) {
+    if (body[i] != ' ' && body[i] != '\n' && body[i] != '\r' &&
+        body[i] != '\t') {
+      break;
+    }
+  }
+  if (i >= n || body[i] != '{') {
+    return GDEFCORE_OK;
+  }
+  memset(&err, 0, sizeof err);
+  opt = gtext_json_parse_options_default();
+  opt.allocator = (const GTEXT_Allocator *)alloc;
+  root = gtext_json_parse((const char *)body, n, &opt, &err);
+  gtext_json_error_free(&err);
+  if (root == NULL) {
+    return GDEFCORE_ERR_CORRUPT;
+  }
+  rc = judge_object(root);
+  gtext_json_free(root);
+  return rc;
+}
+
+/* Walk the zip before any tenant write. A bad name, a defeated ratio, a
+ * named tenant, an internal id, an installation-scope type, a mistyped
+ * public id, or a role grant without its confirmation refuses the import. */
+static GDEFCORE_Result archive_refuse(const GDEFCORE_Allocator * alloc,
+    const uint8_t * bytes, size_t len) {
+  GARC_Stream * stream = NULL;
+  GARC_Archive * archive = NULL;
+  GARC_Limits alimits;
+  GDEFSTOR_Limits caps;
+  GARC_Result gr;
+  GDEFCORE_Result rc = GDEFCORE_OK;
+  if (len == 0) {
+    return GDEFCORE_ERR_CORRUPT;
+  }
+  gr = garc_stream_create_memory(bytes, len, &stream);
+  if (gr != GARC_OK) {
+    return GDEFCORE_ERR_CORRUPT;
+  }
+  gdefstor_limits_default(&caps);
+  garc_limits_default(&alimits);
+  alimits.max_members = caps.max_members;
+  alimits.max_member_bytes = caps.max_member_bytes;
+  alimits.max_total_bytes = caps.max_snapshot_bytes;
+  gr = garc_open(stream, &alimits, &archive);
+  if (gr != GARC_OK) {
+    garc_stream_destroy(stream);
+    return GDEFCORE_ERR_CORRUPT;
+  }
+  for (;;) {
+    const GARC_Member * member = NULL;
+    uint8_t * body = NULL;
+    size_t got_total = 0;
+    gr = garc_next(archive, &member);
+    if (gr == GARC_END) {
+      break;
+    }
+    if (gr != GARC_OK) {
+      rc = GDEFCORE_ERR_CORRUPT;
+      break;
+    }
+    if (member->type != GARC_MEMBER_FILE ||
+        name_bad(member->name, member->name_length)) {
+      rc = GDEFCORE_ERR_CORRUPT;
+      break;
+    }
+    if (member->size > caps.max_member_bytes || member->size > SIZE_MAX) {
+      rc = GDEFCORE_ERR_LIMIT;
+      break;
+    }
+    if (ratio_over(member->size, garc_zip_member_compressed_size(archive),
+            caps.max_zip_ratio)) {
+      rc = GDEFCORE_ERR_LIMIT;
+      break;
+    }
+    if (member->size == 0) {
+      continue;
+    }
+    body = (uint8_t *)gcu_allocator_malloc(alloc, (size_t)member->size);
+    if (body == NULL) {
+      rc = GDEFCORE_ERR_OOM;
+      break;
+    }
+    while (got_total < (size_t)member->size) {
+      size_t got = 0;
+      size_t chunk = (size_t)member->size - got_total;
+      gr = garc_read_member(archive, body + got_total, chunk, &got);
+      if (gr != GARC_OK || got == 0) {
+        rc = GDEFCORE_ERR_CORRUPT;
+        break;
+      }
+      got_total += got;
+    }
+    if (rc == GDEFCORE_OK) {
+      rc = judge_member(alloc, body, (size_t)member->size);
+    }
+    gcu_allocator_free(alloc, body);
+    if (rc != GDEFCORE_OK) {
+      break;
+    }
+  }
+  garc_close(archive);
+  garc_stream_destroy(stream);
+  return rc;
+}
+
 GDEFCORE_Result gdefcore_subject_import(GDEFCORE_Subjects * subjects,
     GDEFSTOR_Store * tenant_store, const uint8_t * bytes, size_t len) {
   uint8_t * copy = NULL;
@@ -1926,6 +2186,10 @@ GDEFCORE_Result gdefcore_subject_import(GDEFCORE_Subjects * subjects,
   if (subjects == NULL || tenant_store == NULL || tenant_store == subjects->side ||
       (bytes == NULL && len != 0)) {
     return GDEFCORE_ERR_INVALID;
+  }
+  rc = archive_refuse(subjects->alloc, bytes, len);
+  if (rc != GDEFCORE_OK) {
+    return rc;
   }
   rc = from_stor(gdefstor_snapshot_ledger(tenant_store, bytes, len, NULL, &copy,
       &copy_len));
