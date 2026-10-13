@@ -18,8 +18,15 @@
 #
 # Plants live only in the scratch copy. Nothing in src/ knows about them.
 #
-# It also runs the one known-open defect (a personal field written through a
-# form is stored as plaintext) and reports whether it still fails.
+# The form route is gated the same way (AD-19): the plain form sign and
+# submit and gdefcore_entity_save refuse a personal value, and the subject
+# route (gdefcore_form_sign_subject / gdefcore_form_submit_subject) seals it.
+# Erasure.FormPersonalField, FormSubjectRoute, FormSubjectBinding,
+# EntitySavePersonal and PlaintextHistoryIsNotRestored are those gates. The
+# entity layer and the form layer each refuse a plaintext on their own, so a
+# plant that must show the form layer's refusal also lifts the entity layer's
+# (a plant may edit several files: a "--file <path>" pair switches the file
+# the following old/new pairs apply to).
 #
 # Usage: check-erasure.sh <make> <app-dir> [make args]
 
@@ -70,7 +77,12 @@ if ! build "$SCRATCH/control"; then
   exit 1
 fi
 
-for t in Erasure.Scanner Erasure.Channels Erasure.Sweep Erasure.SnapshotCarriesNoKey; do
+for t in Erasure.Scanner Erasure.Channels Erasure.Sweep Erasure.SnapshotCarriesNoKey \
+    Erasure.FormPersonalField Erasure.FormPlainRouteOtherFields \
+    Erasure.EntitySavePersonal Erasure.RevertKeepsCiphertext \
+    Erasure.ParsePersonalPatch Erasure.PlaintextHistoryIsNotRestored \
+    Erasure.FormSubjectRoute Erasure.FormUnknownSubject \
+    Erasure.FormSubjectBinding; do
   if ! run_test "$SCRATCH/control" "$t"; then
     printf 'check-erasure: %s failed on the real tree\n' "$t" >&2
     tail -30 "$SCRATCH/control.run" >&2
@@ -80,6 +92,7 @@ for t in Erasure.Scanner Erasure.Channels Erasure.Sweep Erasure.SnapshotCarriesN
 done
 
 # plant <name> <file> <test that must fail> <old> <new> [<old> <new> ...]
+#       [--file <file2> <old> <new> ...]
 plant() {
   name=$1
   file=$2
@@ -87,19 +100,32 @@ plant() {
   shift 3
   dir="$SCRATCH/$name"
   cp -a "$SCRATCH/control" "$dir"
-  python3 - "$dir/$file" "$@" <<'PY'
+  python3 - "$dir" "$file" "$@" <<'PY'
 import sys
-path = sys.argv[1]
-pairs = sys.argv[2:]
-text = open(path).read()
-for i in range(0, len(pairs), 2):
-    old, new = pairs[i], pairs[i + 1]
-    if text.count(old) != 1:
-        sys.stderr.write("anchor matched %d times in %s:\n%s\n"
-                         % (text.count(old), path, old))
-        sys.exit(3)
-    text = text.replace(old, new, 1)
-open(path, "w").write(text)
+root = sys.argv[1]
+path = root + "/" + sys.argv[2]
+args = sys.argv[3:]
+edits = {}
+names = []
+i = 0
+while i < len(args):
+    if args[i] == "--file":
+        path = root + "/" + args[i + 1]
+        i += 2
+        continue
+    edits.setdefault(path, []).append((args[i], args[i + 1]))
+    i += 2
+for path, pairs in edits.items():
+    text = open(path).read()
+    for old, new in pairs:
+        if text.count(old) != 1:
+            sys.stderr.write("anchor matched %d times in %s:\n%s\n"
+                             % (text.count(old), path, old))
+            sys.exit(3)
+        text = text.replace(old, new, 1)
+    open(path, "w").write(text)
+    names.append(path[len(root) + 1:])
+open(root + ".files", "w").write("\n".join(names) + "\n")
 PY
   rc=$?
   if [ $rc -ne 0 ]; then
@@ -107,12 +133,14 @@ PY
     fail=1
     return
   fi
-  if cmp -s "$ROOT/$file" "$dir/$file"; then
-    printf 'check-erasure: %s: the patched file equals the original\n' "$name" >&2
-    fail=1
-    return
-  fi
-  touch "$dir/$file"
+  for f in $(cat "$dir.files"); do
+    if cmp -s "$ROOT/$f" "$dir/$f"; then
+      printf 'check-erasure: %s: the patched file %s equals the original\n' "$name" "$f" >&2
+      fail=1
+      return
+    fi
+    touch "$dir/$f"
+  done
   rm -f "$dir/$APP_DIR/testErasure"
   if ! build "$dir"; then
     printf 'check-erasure: %s: the planted tree does not build, read %s.log\n' "$name" "$dir" >&2
@@ -229,15 +257,89 @@ plant snapshot-key src/subject/subject.c Erasure.SnapshotCarriesNoKey \
   gcu_allocator_free(subjects->alloc, ledger);
   return rc;'
 
-# The known-open defect: it is expected to fail until the form path refuses or
-# encrypts a personal value. When it starts to pass, enable the test.
-if run_test "$SCRATCH/control" 'Erasure.DISABLED_FormPersonalField' \
-    --gtest_also_run_disabled_tests; then
-  printf 'check-erasure: Erasure.DISABLED_FormPersonalField now PASSES: remove its DISABLED_ prefix\n' >&2
-  fail=1
-else
-  printf 'check-erasure: KNOWN OPEN: a personal field written through a form is stored as plaintext (Erasure.DISABLED_FormPersonalField still fails)\n'
-fi
+# AD-19 on the form route. Every plant below edits the real source of the
+# library, and the named test must go red BY NAME.
+#
+# The entity layer refuses a plaintext for a personal field on its own, and so
+# does the form layer; the plants that lift one layer lift both, or the other
+# refuses and the plant would show nothing. ENTITY_GATE is the entity layer's
+# refusal, the first test in personal_value_ok().
+ENTITY_GATE_OLD='  if (!decl->personal || value->count == 0) {
+    return 1;
+  }'
+ENTITY_GATE_NEW='  if (1 || !decl->personal || value->count == 0) {
+    return 1;
+  }'
+
+# 5. The subject route of a form stores the caller's plaintext (the sealed text
+#    is built and then not used). The entity layer's refusal is lifted too, so
+#    the plaintext is really stored.
+plant form-submit-stores-plaintext src/form/form.c Erasure.FormSubjectRoute \
+  '          values[j].texts = &sealed_texts[k];
+          values[j].text_lens = &sealed.len[k];' \
+  '          (void)sealed_texts;' \
+  --file src/entity/entity.c "$ENTITY_GATE_OLD" "$ENTITY_GATE_NEW"
+
+# 6. The plain submit stops refusing a personal value. (The plain sign still
+#    refuses, so the token comes from the subject route.)
+plant plain-submit-takes-personal src/form/form.c Erasure.FormPersonalField \
+  '  if (rc == GDEFCORE_OK && personal_valued(opened.fields, opened.nfields) &&
+      (subjects == NULL || !opened.has_subject)) {' \
+  '  if (rc == GDEFCORE_OK && 0 &&
+      (subjects == NULL || !opened.has_subject)) {' \
+  --file src/entity/entity.c "$ENTITY_GATE_OLD" "$ENTITY_GATE_NEW"
+
+# 6b. The plain sign stops refusing a personal value (the token then holds
+#     plaintext for a subject-less submit to find).
+plant plain-sign-takes-personal src/form/form.c Erasure.FormPersonalField \
+  '  if (rc == GDEFCORE_OK && !opened.has_subject &&
+      personal_valued(opened.fields, opened.nfields)) {' \
+  '  if (rc == GDEFCORE_OK && 0) {'
+
+# 7. The token no longer authenticates its subject: the AEAD's associated data
+#    carries the "no subject" bytes whatever the header says.
+plant token-drops-subject src/form/form.c Erasure.FormSubjectBinding \
+  '      !put_bytes(aad, n, &at, subject, GDEFCORE_PUBLIC_ID_LEN) ||' \
+  '      !put_bytes(aad, n, &at, subject == NULL ? kNoSubject : kNoSubject,
+          GDEFCORE_PUBLIC_ID_LEN) ||'
+
+# 8. gdefcore_entity_save takes a personal value as it always did.
+plant entity-save-takes-personal src/entity/entity.c Erasure.EntitySavePersonal \
+  "$ENTITY_GATE_OLD" "$ENTITY_GATE_NEW"
+
+# 9. A changeset that accepts sealed values accepts plaintext too.
+plant sealed-accepts-plaintext src/entity/entity.c Erasure.EntitySavePersonal \
+  '    if (!sealed_ok(value->texts[v], value->text_lens[v])) {
+      return 0;
+    }' \
+  '    if (!sealed_ok(value->texts[v], value->text_lens[v]) && 0) {
+      return 0;
+    }'
+
+# 10. A revert and a publish restore a personal value without asking whether
+#     it is sealed.
+plant restore-skips-sealed-check src/entity/entity.c Erasure.PlaintextHistoryIsNotRestored \
+  '      if (decl == NULL || !decl->personal) {
+        continue;
+      }' \
+  '      if (decl == NULL || 1) {
+        continue;
+      }'
+
+# 10b. The seal takes a text that is already sealed (what the form tree shows
+#      for a personal field) and seals it a second time.
+plant seal-takes-sealed src/subject/subject.c Erasure.FormSubjectRoute \
+  '  if (looks_sealed(plain, plain_len)) {
+    return GDEFCORE_ERR_INVALID;
+  }' \
+  '  if (0 && looks_sealed(plain, plain_len)) {
+    return GDEFCORE_ERR_INVALID;
+  }'
+
+# 11. A patch is parsed without the sealed-value rule: the parser accepts
+#     plaintext for a personal field.
+plant parse-takes-personal src/entity/entity.c Erasure.ParsePersonalPatch \
+  "$ENTITY_GATE_OLD" "$ENTITY_GATE_NEW"
 
 if [ "$fail" -ne 0 ]; then
   exit 1

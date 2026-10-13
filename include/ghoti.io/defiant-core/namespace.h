@@ -126,6 +126,8 @@
 #define gdefcore_catalog_tenant GHOTIIO_DEFCORE(gdefcore_catalog_tenant)
 #define gdefcore_changeset_add_confirm_line                                    \
   GHOTIIO_DEFCORE(gdefcore_changeset_add_confirm_line)
+#define gdefcore_changeset_accept_sealed                                       \
+  GHOTIIO_DEFCORE(gdefcore_changeset_accept_sealed)
 #define gdefcore_changeset_apply GHOTIIO_DEFCORE(gdefcore_changeset_apply)
 #define gdefcore_changeset_base_seq GHOTIIO_DEFCORE(gdefcore_changeset_base_seq)
 #define gdefcore_changeset_catalog GHOTIIO_DEFCORE(gdefcore_changeset_catalog)
@@ -172,7 +174,10 @@
 #define gdefcore_form_resign GHOTIIO_DEFCORE(gdefcore_form_resign)
 #define gdefcore_form_resolve GHOTIIO_DEFCORE(gdefcore_form_resolve)
 #define gdefcore_form_sign GHOTIIO_DEFCORE(gdefcore_form_sign)
+#define gdefcore_form_sign_subject GHOTIIO_DEFCORE(gdefcore_form_sign_subject)
 #define gdefcore_form_submit GHOTIIO_DEFCORE(gdefcore_form_submit)
+#define gdefcore_form_submit_subject                                           \
+  GHOTIIO_DEFCORE(gdefcore_form_submit_subject)
 #define gdefcore_form_tree GHOTIIO_DEFCORE(gdefcore_form_tree)
 #define gdefcore_hook_fire GHOTIIO_DEFCORE(gdefcore_hook_fire)
 #define gdefcore_hook_skipped GHOTIIO_DEFCORE(gdefcore_hook_skipped)
@@ -288,10 +293,12 @@
 #define gdefcore_subject_export GHOTIIO_DEFCORE(gdefcore_subject_export)
 #define gdefcore_subject_free GHOTIIO_DEFCORE(gdefcore_subject_free)
 #define gdefcore_subject_import GHOTIIO_DEFCORE(gdefcore_subject_import)
+#define gdefcore_subject_index GHOTIIO_DEFCORE(gdefcore_subject_index)
 #define gdefcore_subject_key GHOTIIO_DEFCORE(gdefcore_subject_key)
 #define gdefcore_subject_open GHOTIIO_DEFCORE(gdefcore_subject_open)
 #define gdefcore_subject_read GHOTIIO_DEFCORE(gdefcore_subject_read)
 #define gdefcore_subject_save GHOTIIO_DEFCORE(gdefcore_subject_save)
+#define gdefcore_subject_seal GHOTIIO_DEFCORE(gdefcore_subject_seal)
 #define gdefcore_subject_snapshot GHOTIIO_DEFCORE(gdefcore_subject_snapshot)
 #define gdefcore_text_dup GHOTIIO_DEFCORE(gdefcore_text_dup)
 #define gdefcore_text_free GHOTIIO_DEFCORE(gdefcore_text_free)

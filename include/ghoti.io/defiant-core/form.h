@@ -27,6 +27,17 @@
  * values. It is not HTML. The token is AES-256-GCM under the tenant
  * keyring's `form` purpose. A draft save leaves the published projection
  * alone. An alias stays hidden until publish.
+ *
+ * A personal field (AD-19) is never stored as the caller's text. The plain
+ * route, gdefcore_form_sign() and gdefcore_form_submit(), refuses a value for
+ * one. The subject route, gdefcore_form_sign_subject() and
+ * gdefcore_form_submit_subject(), binds the form to one subject and seals the
+ * personal values under that subject's key as gdefcore_subject_save() does.
+ * Every value in a form's tree is plaintext as the caller supplies it, so
+ * an edit form for a personal field is filled from gdefcore_subject_read(),
+ * not from gdefcore_form_tree(), which returns what is stored: ciphertext.
+ * The token carries the values, sealed by the `form` key, and is returned to
+ * the caller; the library keeps no copy.
  */
 
 #ifndef GHOTI_IO_GDEFCORE_FORM_H
@@ -38,6 +49,7 @@
 #include <ghoti.io/defiant-core/core.h>
 #include <ghoti.io/defiant-core/entity.h>
 #include <ghoti.io/defiant-core/request.h>
+#include <ghoti.io/defiant-core/subject.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -101,6 +113,8 @@ GDEFCORE_API GDEFCORE_Result gdefcore_form_tree(GDEFCORE_Catalog * catalog,
  * means no alias. The caller-supplied alias is stored unchanged when the
  * token is later submitted. Free @p out_token with gdefcore_text_free().
  * A value that fails a constraint is an error and @p out_token is not written.
+ * A value for a personal field is ::GDEFCORE_ERR_INVALID, because this token
+ * has no subject to seal it for; see gdefcore_form_sign_subject().
  */
 GDEFCORE_API GDEFCORE_Result gdefcore_form_sign(GDEFCORE_Catalog * catalog,
     GDEFCORE_Request * request, GDEFCORE_Keyring * keyring,
@@ -109,6 +123,26 @@ GDEFCORE_API GDEFCORE_Result gdefcore_form_sign(GDEFCORE_Catalog * catalog,
     const char * target, size_t target_len, const char * lang, size_t lang_len,
     const GDEFCORE_Value * values, size_t value_count, const char * alias,
     size_t alias_len, char ** out_token, size_t * out_token_len);
+
+/**
+ * @brief Sign @p values for one @p subject.
+ *
+ * As gdefcore_form_sign(), and the token also carries @p subject, the public
+ * id of the person the personal values belong to. The id is in what the AEAD
+ * authenticates, as the session and the tenant are, so a token cannot be
+ * moved to another subject. @p values for personal fields are plaintext.
+ * Submit with gdefcore_form_submit_subject(). The subject is not looked up
+ * here; submit refuses an unknown or erased one.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_form_sign_subject(
+    GDEFCORE_Catalog * catalog, GDEFCORE_Request * request,
+    GDEFCORE_Keyring * keyring, const uint8_t * root, size_t root_len,
+    const char * session, size_t session_len, const char * form_id,
+    size_t form_id_len, const char * target, size_t target_len,
+    const char * lang, size_t lang_len, const GDEFCORE_Value * values,
+    size_t value_count, const char * alias, size_t alias_len,
+    const char * subject, size_t subject_len, char ** out_token,
+    size_t * out_token_len);
 
 /**
  * @brief Verify @p token. Nothing is written.
@@ -127,6 +161,8 @@ GDEFCORE_API GDEFCORE_Result gdefcore_form_check(GDEFCORE_Catalog * catalog,
  *
  * The entity is not written. A value that fails a constraint is an error
  * and @p out_token is not written. Free @p out_token with gdefcore_text_free().
+ * The new token keeps the subject of @p token, if it has one. A value for a
+ * personal field on a token with no subject is ::GDEFCORE_ERR_INVALID.
  */
 GDEFCORE_API GDEFCORE_Result gdefcore_form_resign(GDEFCORE_Catalog * catalog,
     GDEFCORE_Request * request, GDEFCORE_Keyring * keyring,
@@ -142,12 +178,42 @@ GDEFCORE_API GDEFCORE_Result gdefcore_form_resign(GDEFCORE_Catalog * catalog,
  * nothing. A second submit whose base revision is no longer current writes
  * nothing and sets @p out_conflict to 1 when it is not NULL. Other errors
  * set it to 0.
+ *
+ * A token that holds a value for a personal field is
+ * ::GDEFCORE_ERR_INVALID and writes nothing, whether or not the token has a
+ * subject: this route does not seal. Fields without a value, and every
+ * non-personal field, are written as always.
  */
 GDEFCORE_API GDEFCORE_Result gdefcore_form_submit(GDEFCORE_Catalog * catalog,
     GDEFCORE_Request * request, GDEFCORE_Keyring * keyring,
     const uint8_t * root, size_t root_len, const char * session,
     size_t session_len, const char * token, size_t token_len,
     int * out_conflict);
+
+/**
+ * @brief Submit @p token and seal its personal values for its subject.
+ *
+ * As gdefcore_form_submit(), for a token from gdefcore_form_sign_subject()
+ * (or gdefcore_form_resign() of one). Each personal field's value is
+ * encrypted with the subject's key exactly as gdefcore_subject_save() does,
+ * the draft stores the ciphertext, and the blind-index row is recorded after
+ * the draft is applied. Non-personal fields behave as in the plain route.
+ * A personal field must be single-valued; a many field is refused.
+ *
+ * A subject that is unknown or erased, a token with no subject that holds a
+ * personal value, or any failure before the draft is applied writes nothing
+ * and never falls back to plaintext. The draft and the blind-index row are
+ * two commits in two stores, as in gdefcore_subject_save(): a failure of the
+ * second leaves the sealed draft without its row, the error is returned, and
+ * erasure still makes the draft unreadable. The row reflects the draft, so
+ * until gdefcore_form_publish() the published text and the row can differ.
+ * @p subjects must be the store of the same tenant as @p catalog.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_form_submit_subject(
+    GDEFCORE_Catalog * catalog, GDEFCORE_Request * request,
+    GDEFCORE_Keyring * keyring, const uint8_t * root, size_t root_len,
+    const char * session, size_t session_len, const char * token,
+    size_t token_len, GDEFCORE_Subjects * subjects, int * out_conflict);
 
 /**
  * @brief Copy the draft onto the published projection and reveal the alias.

@@ -307,11 +307,28 @@ GDEFCORE_API GDEFCORE_Result gdefcore_changeset_define(
  *
  * @p lang is required: non-empty, at most 35 bytes, ASCII letters, digits
  * and hyphens. An undeclared field or a missing required field stages
- * nothing.
+ * nothing. A value for a personal field is ::GDEFCORE_ERR_INVALID and stages
+ * nothing: a personal value is stored only sealed for its subject (see
+ * gdefcore_subject_save() and gdefcore_changeset_accept_sealed()).
  */
 GDEFCORE_API GDEFCORE_Result gdefcore_entity_save(GDEFCORE_Changeset * changeset,
     const char * id, size_t id_len, const char * lang, size_t lang_len,
     const GDEFCORE_Value * values, size_t value_count);
+
+/**
+ * @brief Let @p changeset stage sealed values for personal fields.
+ *
+ * By default gdefcore_entity_save() and gdefcore_entity_save_draft() refuse
+ * a value for a personal field. After this call they take one for a
+ * personal field if, and only if, it is a sealed text from
+ * gdefcore_subject_seal(). The entity layer holds no key, so it checks the
+ * shape (`s1:` and an even run of lower-case hex of at least a nonce and a
+ * tag), not the seal: plaintext is refused and a forged shape is not. This
+ * exists for the subject routes and is not a way to store personal data.
+ * ::GDEFCORE_ERR_INVALID for a NULL or an applied changeset.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_changeset_accept_sealed(
+    GDEFCORE_Changeset * changeset);
 
 /**
  * @brief Stage field values onto the draft projection only.

@@ -1227,6 +1227,40 @@ static int loc_match_any(const char * text, size_t n, const char * entity,
   return 0;
 }
 
+/* Whether @p text is shaped like what encrypt_value returns: "s1:" and the
+ * lower-case hex of a nonce, the ciphertext and a tag. Such a text is a value
+ * that came out of storage, not a person's data; sealing it would store a
+ * second ciphertext over the first (the entity layer's sealed_ok is the same
+ * test). */
+static int looks_sealed(const void * text, size_t n) {
+  const char * p = (const char *)text;
+  size_t i;
+  if (p == NULL || n < 3 + 2 * (kNonce + kTag) || memcmp(p, "s1:", 3) != 0 ||
+      ((n - 3) % 2) != 0) {
+    return 0;
+  }
+  for (i = 3; i < n; i++) {
+    if (!((p[i] >= '0' && p[i] <= '9') || (p[i] >= 'a' && p[i] <= 'f'))) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+/* A subject the ledger names takes no new value, and no new index row. */
+static GDEFCORE_Result not_erased(GDEFCORE_Subjects * subjects, const char * sid) {
+  char * ledger = NULL;
+  size_t ledger_len = 0;
+  int erased;
+  GDEFCORE_Result rc = ledger_load(subjects, &ledger, &ledger_len);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  erased = ledger_has(ledger, ledger_len, sid);
+  gcu_allocator_free(subjects->alloc, ledger);
+  return erased ? GDEFCORE_ERR_INVALID : GDEFCORE_OK;
+}
+
 GDEFCORE_Result gdefcore_subject_save(GDEFCORE_Subjects * subjects,
     GDEFCORE_Catalog * catalog, const char * subject, size_t subject_len,
     const char * entity, size_t entity_len, const char * field, size_t field_len,
@@ -1237,8 +1271,6 @@ GDEFCORE_Result gdefcore_subject_save(GDEFCORE_Subjects * subjects,
   size_t type_len = 0;
   char * stored = NULL;
   size_t stored_len = 0;
-  char * ledger = NULL;
-  size_t ledger_len = 0;
   int personal = 0;
   int kind = 0;
   uint8_t mac[kMac];
@@ -1259,15 +1291,10 @@ GDEFCORE_Result gdefcore_subject_save(GDEFCORE_Subjects * subjects,
   if (rc != GDEFCORE_OK) {
     return rc;
   }
-  rc = ledger_load(subjects, &ledger, &ledger_len);
+  rc = not_erased(subjects, sid);
   if (rc != GDEFCORE_OK) {
     return rc;
   }
-  if (ledger_has(ledger, ledger_len, sid)) {
-    gcu_allocator_free(subjects->alloc, ledger);
-    return GDEFCORE_ERR_INVALID;
-  }
-  gcu_allocator_free(subjects->alloc, ledger);
   rc = gdefcore_entity_type(catalog, eid, GDEFCORE_PUBLIC_ID_LEN, &type,
       &type_len);
   if (rc != GDEFCORE_OK) {
@@ -1283,20 +1310,19 @@ GDEFCORE_Result gdefcore_subject_save(GDEFCORE_Subjects * subjects,
     gdefcore_text_free(catalog, type);
     return rc;
   }
-  rc = encrypt_value(subjects, sid, field, field_len, plain, plain_len, &stored,
-      &stored_len);
+  rc = gdefcore_subject_seal(subjects, sid, GDEFCORE_PUBLIC_ID_LEN, field,
+      field_len, plain, plain_len, &stored, &stored_len, mac);
   if (rc != GDEFCORE_OK) {
-    gdefcore_text_free(catalog, type);
-    return rc;
-  }
-  rc = index_value(subjects, field, field_len, plain, plain_len, mac);
-  if (rc != GDEFCORE_OK) {
-    gcu_allocator_free(subjects->alloc, stored);
     gdefcore_text_free(catalog, type);
     return rc;
   }
   rc = gdefcore_changeset_prepare(catalog, NULL, 0, &changeset);
+  if (rc == GDEFCORE_OK) {
+    /* The one caller that hands the entity layer sealed personal values. */
+    rc = gdefcore_changeset_accept_sealed(changeset);
+  }
   if (rc != GDEFCORE_OK) {
+    gdefcore_changeset_destroy(changeset);
     gcu_allocator_free(subjects->alloc, stored);
     gdefcore_text_free(catalog, type);
     return rc;
@@ -1326,6 +1352,73 @@ GDEFCORE_Result gdefcore_subject_save(GDEFCORE_Subjects * subjects,
     return rc;
   }
   gcu_allocator_free(subjects->alloc, stored);
+  return remember(subjects, sid, eid, field, field_len, lang, lang_len, mac);
+}
+
+GDEFCORE_Result gdefcore_subject_seal(GDEFCORE_Subjects * subjects,
+    const char * subject, size_t subject_len, const char * field,
+    size_t field_len, const void * plain, size_t plain_len, char ** out_text,
+    size_t * out_len, uint8_t out_mac[GDEFCORE_SUBJECT_MAC_LEN]) {
+  char sid[GDEFCORE_PUBLIC_ID_LEN + 1];
+  char * sealed = NULL;
+  size_t sealed_len = 0;
+  uint8_t mac[kMac];
+  GDEFCORE_Result rc;
+  if (subjects == NULL || field == NULL || field_len == 0 ||
+      (plain == NULL && plain_len != 0) || out_text == NULL ||
+      out_len == NULL || out_mac == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  if (looks_sealed(plain, plain_len)) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  rc = canon_id(subject, subject_len, sid);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  rc = not_erased(subjects, sid);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  rc = encrypt_value(subjects, sid, field, field_len, plain, plain_len, &sealed,
+      &sealed_len);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  rc = index_value(subjects, field, field_len, plain, plain_len, mac);
+  if (rc != GDEFCORE_OK) {
+    gcu_allocator_free(subjects->alloc, sealed);
+    return rc;
+  }
+  memcpy(out_mac, mac, kMac);
+  *out_text = sealed;
+  *out_len = sealed_len;
+  return GDEFCORE_OK;
+}
+
+GDEFCORE_Result gdefcore_subject_index(GDEFCORE_Subjects * subjects,
+    const char * subject, size_t subject_len, const char * entity,
+    size_t entity_len, const char * field, size_t field_len, const char * lang,
+    size_t lang_len, const uint8_t mac[GDEFCORE_SUBJECT_MAC_LEN]) {
+  char sid[GDEFCORE_PUBLIC_ID_LEN + 1];
+  char eid[GDEFCORE_PUBLIC_ID_LEN + 1];
+  GDEFCORE_Result rc;
+  if (subjects == NULL || field == NULL || field_len == 0 || lang == NULL ||
+      mac == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  rc = canon_id(subject, subject_len, sid);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  rc = canon_id(entity, entity_len, eid);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  rc = not_erased(subjects, sid);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
   return remember(subjects, sid, eid, field, field_len, lang, lang_len, mac);
 }
 

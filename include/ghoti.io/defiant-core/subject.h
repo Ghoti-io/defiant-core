@@ -54,6 +54,9 @@ extern "C" {
 /** Raw subject key length. */
 #define GDEFCORE_SUBJECT_KEY_LEN 32
 
+/** Length of a blind-index value, as gdefcore_subject_seal() returns it. */
+#define GDEFCORE_SUBJECT_MAC_LEN 32
+
 /**
  * Side-store projection that holds the append-only ledger. A row is the
  * subject public id and the time. The plant in the restore gate names
@@ -111,13 +114,56 @@ GDEFCORE_API GDEFCORE_Result gdefcore_subject_create(
  *
  * The field must be personal. The stored revision text is ciphertext.
  * A blind-index row is HMAC-SHA-256 under `blind-index:<field>`. A failure
- * writes nothing.
+ * of the revision writes nothing. This and the form route
+ * (gdefcore_form_submit_subject()) are the only ways to store a value in a
+ * personal field: gdefcore_entity_save() and the plain form route refuse it.
  */
 GDEFCORE_API GDEFCORE_Result gdefcore_subject_save(GDEFCORE_Subjects * subjects,
     GDEFCORE_Catalog * catalog, const char * subject, size_t subject_len,
     const char * entity, size_t entity_len, const char * field,
     size_t field_len, const char * lang, size_t lang_len, const void * plain,
     size_t plain_len);
+
+/**
+ * @brief Seal @p plain for @p subject without writing anything.
+ *
+ * The first half of gdefcore_subject_save() for a caller that has to stage
+ * the revision itself, as the subject route of a form does
+ * (gdefcore_form_submit_subject()). @p out_text receives the same ciphertext
+ * gdefcore_subject_save() would store, in the same format and under the same
+ * key, and @p out_mac the blind-index value for gdefcore_subject_index().
+ * A @p plain that is itself a sealed text (it came out of storage, from
+ * gdefcore_form_tree() or gdefcore_entity_values(), not from a person) is
+ * ::GDEFCORE_ERR_INVALID: it would be sealed a second time. The same is
+ * true of gdefcore_subject_save(). An unknown subject, and an erased one,
+ * are ::GDEFCORE_ERR_INVALID and
+ * nothing is written to @p out_text or @p out_mac. The side store is not
+ * written either way. Free @p out_text with gdefcore_subject_free().
+ *
+ * Sealing is not a write of the field: a sealed text is accepted for a
+ * personal field only by a changeset that gdefcore_changeset_accept_sealed()
+ * was called on. Most callers want gdefcore_subject_save().
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_subject_seal(GDEFCORE_Subjects * subjects,
+    const char * subject, size_t subject_len, const char * field,
+    size_t field_len, const void * plain, size_t plain_len, char ** out_text,
+    size_t * out_len, uint8_t out_mac[GDEFCORE_SUBJECT_MAC_LEN]);
+
+/**
+ * @brief Record the blind-index row for a value already stored.
+ *
+ * The second half of gdefcore_subject_save(). Call it after the revision
+ * holding the text from gdefcore_subject_seal() has been applied. It
+ * replaces the row the same @p entity, @p field and @p lang had before. The
+ * two halves are separate commits, in two stores, so a failure between them
+ * leaves a sealed revision with no index row; erasure does not need the row
+ * to make the revision unreadable. An erased subject is
+ * ::GDEFCORE_ERR_INVALID and writes nothing.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_subject_index(GDEFCORE_Subjects * subjects,
+    const char * subject, size_t subject_len, const char * entity,
+    size_t entity_len, const char * field, size_t field_len, const char * lang,
+    size_t lang_len, const uint8_t mac[GDEFCORE_SUBJECT_MAC_LEN]);
 
 /**
  * @brief The plaintext, or ::GDEFCORE_SUBJECT_ERASED when the ledger says so.

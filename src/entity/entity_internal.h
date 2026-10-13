@@ -110,6 +110,7 @@ struct GDEFCORE_Changeset {
   size_t nlines;
   int applied;
   GDEFCORE_Request * request;
+  int accept_sealed;
 };
 
 #endif /* GHOTI_IO_GDEFCORE_SRC_ENTITY_ENTITY_INTERNAL_H */

@@ -2679,6 +2679,71 @@ static const GDEFCORE_Decl * decl_named(const GDEFCORE_Decl * decls, size_t n,
   return NULL;
 }
 
+/* What gdefcore_subject_save and the subject form route store for a personal
+ * field: "s1:" and the hex of nonce (12), ciphertext and tag (16). The entity
+ * layer holds no key, so this is the whole of what it can check: a plaintext
+ * is refused, and so is anything not shaped like a sealed value. The shape is
+ * the subject subsystem's (encrypt_value); keep the two in step. */
+static int sealed_ok(const char * text, size_t n) {
+  size_t i;
+  if (text == NULL || n < 3 + 2 * (12 + 16) || memcmp(text, "s1:", 3) != 0 ||
+      ((n - 3) % 2) != 0) {
+    return 0;
+  }
+  for (i = 3; i < n; i++) {
+    char c = text[i];
+    if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+/* A personal field takes only a sealed value, and only from a changeset that
+ * was told to accept sealed values (AD-19). A field that is cleared (no
+ * value) carries nothing and is let through. */
+static int personal_value_ok(const GDEFCORE_Changeset * changeset,
+    const GDEFCORE_Decl * decl, const GDEFCORE_Value * value) {
+  size_t v;
+  if (!decl->personal || value->count == 0) {
+    return 1;
+  }
+  if (!changeset->accept_sealed) {
+    return 0;
+  }
+  for (v = 0; v < value->count; v++) {
+    if (!sealed_ok(value->texts[v], value->text_lens[v])) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+/* Every personal value in a document restored from a stored revision or a
+ * draft must already be sealed. Used where no value passes through
+ * stage_values: a revert and a publish. */
+static int doc_personal_sealed(const GDEFCORE_Doc * doc,
+    const GDEFCORE_Decl * decls, size_t ndecls) {
+  size_t li;
+  size_t fi;
+  size_t vi;
+  for (li = 0; li < doc->nlangs; li++) {
+    for (fi = 0; fi < doc->langs[li].nfields; fi++) {
+      const GDEFCORE_Vals * f = &doc->langs[li].fields[fi];
+      const GDEFCORE_Decl * decl = decl_named(decls, ndecls, f->name.p, f->name.n);
+      if (decl == NULL || !decl->personal) {
+        continue;
+      }
+      for (vi = 0; vi < f->nvals; vi++) {
+        if (!sealed_ok(f->vals[vi].p, f->vals[vi].n)) {
+          return 0;
+        }
+      }
+    }
+  }
+  return 1;
+}
+
 static GDEFCORE_Result stage_values(GDEFCORE_Changeset * changeset,
     const char * id, size_t id_len, const char * lang, size_t lang_len,
     const GDEFCORE_Value * values, size_t value_count, int draft) {
@@ -2733,6 +2798,10 @@ static GDEFCORE_Result stage_values(GDEFCORE_Changeset * changeset,
     }
     decl = decl_named(decls, ndecls, values[i].field, values[i].field_len);
     if (decl == NULL) {
+      rc = GDEFCORE_ERR_INVALID;
+      goto done;
+    }
+    if (!personal_value_ok(changeset, decl, &values[i])) {
       rc = GDEFCORE_ERR_INVALID;
       goto done;
     }
@@ -2863,6 +2932,15 @@ GDEFCORE_Result gdefcore_entity_save_draft(GDEFCORE_Changeset * changeset,
       value_count, 1);
 }
 
+GDEFCORE_Result gdefcore_changeset_accept_sealed(
+    GDEFCORE_Changeset * changeset) {
+  if (changeset == NULL || changeset->applied) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  changeset->accept_sealed = 1;
+  return GDEFCORE_OK;
+}
+
 GDEFCORE_Result gdefcore_entity_publish(GDEFCORE_Changeset * changeset,
     const char * id, size_t id_len) {
   char canon[GDEFCORE_PUBLIC_ID_LEN + 1];
@@ -2905,6 +2983,21 @@ GDEFCORE_Result gdefcore_entity_publish(GDEFCORE_Changeset * changeset,
     gcu_allocator_free(cat->alloc, type_name);
     gcu_allocator_free(cat->alloc, machine);
     return rc;
+  }
+  {
+    GDEFCORE_Decl * pdecls = NULL;
+    size_t pn = 0;
+    int sealed;
+    rc = load_type(cat, type_name, type_len, &kind, &pdecls, &pn, NULL, NULL,
+        NULL);
+    sealed = rc == GDEFCORE_OK && doc_personal_sealed(&staged, pdecls, pn);
+    decls_free(cat->alloc, pdecls, pn);
+    if (rc != GDEFCORE_OK || !sealed) {
+      doc_free(cat->alloc, &staged);
+      gcu_allocator_free(cat->alloc, type_name);
+      gcu_allocator_free(cat->alloc, machine);
+      return rc != GDEFCORE_OK ? rc : GDEFCORE_ERR_INVALID;
+    }
   }
   rc = read_high(cat, row, &high);
   if (rc != GDEFCORE_OK || high != seq) {
@@ -4326,6 +4419,9 @@ GDEFCORE_Result gdefcore_changeset_revert(GDEFCORE_Catalog * catalog,
     } else {
       op->kind = GDEFCORE_OP_SAVE;
       rc = rev_doc(catalog, row, seq - 1, &op->staged);
+      if (rc == GDEFCORE_OK && !doc_personal_sealed(&op->staged, decls, ndecls)) {
+        rc = GDEFCORE_ERR_INVALID;
+      }
       if (rc != GDEFCORE_OK) {
         gcu_allocator_free(catalog->alloc, type_name);
         gcu_allocator_free(catalog->alloc, machine);
@@ -5203,7 +5299,9 @@ GDEFCORE_Result gdefcore_changeset_parse(GDEFCORE_Catalog * catalog,
           span_eq((const char *)files[i].bytes, files[i].len, "publish", 7);
       gcu_allocator_free(catalog->alloc, type_name);
       gcu_allocator_free(catalog->alloc, machine);
+      cs->accept_sealed = 1;
       rc = stage_parsed_saves(cs, files, count, canon, &cap);
+      cs->accept_sealed = 0;
       if (rc != GDEFCORE_OK) {
         gdefcore_changeset_destroy(cs);
         return rc;

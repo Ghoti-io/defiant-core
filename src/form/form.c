@@ -46,7 +46,7 @@
 #include <time.h>
 
 enum {
-  kVersion = 1,
+  kVersion = 2,
   kAlg = 1,
   kKeyId = 1,
   kKey = 32,
@@ -64,6 +64,9 @@ enum {
 static const char kPurpose[] = "form";
 static const char kAliasType[] = "core.alias";
 static const char kTitle[] = "title";
+/* The subject slot of a token that carries no subject. A canonical public id
+ * is never all zero bytes. */
+static const char kNoSubject[GDEFCORE_PUBLIC_ID_LEN] = {0};
 
 typedef struct FormField {
   char * name;
@@ -96,6 +99,8 @@ typedef struct Opened {
   char * form_id;
   size_t form_id_len;
   char target[GDEFCORE_PUBLIC_ID_LEN + 1];
+  char subject[GDEFCORE_PUBLIC_ID_LEN + 1];
+  int has_subject;
   char * lang;
   size_t lang_len;
   char * alias;
@@ -828,8 +833,8 @@ static GDEFCORE_Result read_plain(GDEFCORE_Catalog * catalog, const uint8_t * p,
 static GDEFCORE_Result build_aad(GDEFCORE_Catalog * catalog,
     const char * session, size_t session_len, const char * principal,
     size_t principal_len, const char * form_id, size_t form_id_len,
-    const char * target, uint64_t expiry, uint64_t base, uint8_t ** out,
-    size_t * out_len) {
+    const char * target, const char * subject, uint64_t expiry, uint64_t base,
+    uint8_t ** out, size_t * out_len) {
   const uint8_t * tenant = NULL;
   size_t tenant_len = 0;
   size_t n;
@@ -841,7 +846,8 @@ static GDEFCORE_Result build_aad(GDEFCORE_Catalog * catalog,
     return GDEFCORE_ERR_INVALID;
   }
   n = 4 + tenant_len + strlen(kPurpose) + 1 + 8 + 4 + session_len + 2 +
-      principal_len + 2 + form_id_len + GDEFCORE_PUBLIC_ID_LEN + 8;
+      principal_len + 2 + form_id_len + GDEFCORE_PUBLIC_ID_LEN +
+      GDEFCORE_PUBLIC_ID_LEN + 8;
   aad = cat_zalloc(catalog, n);
   if (aad == NULL) {
     return GDEFCORE_ERR_OOM;
@@ -861,6 +867,7 @@ static GDEFCORE_Result build_aad(GDEFCORE_Catalog * catalog,
       !put_u16_at(aad, n, &at, (uint16_t)form_id_len) ||
       !put_bytes(aad, n, &at, form_id, form_id_len) ||
       !put_bytes(aad, n, &at, target, GDEFCORE_PUBLIC_ID_LEN) ||
+      !put_bytes(aad, n, &at, subject, GDEFCORE_PUBLIC_ID_LEN) ||
       !put_u64_at(aad, n, &at, base) || at != n) {
     gdefcore_text_free(catalog, (char *)aad);
     return GDEFCORE_ERR_LIMIT;
@@ -934,7 +941,8 @@ static GDEFCORE_Result seal(GDEFCORE_Catalog * catalog, GDEFCORE_Keyring * keyri
     return rc;
   }
   rc = build_aad(catalog, session, session_len, principal, principal_len,
-      opened->form_id, opened->form_id_len, opened->target, opened->expiry,
+      opened->form_id, opened->form_id_len, opened->target,
+      opened->has_subject ? opened->subject : kNoSubject, opened->expiry,
       opened->base, &aad, &aad_n);
   if (rc != GDEFCORE_OK) {
     wipe(token_key, sizeof token_key);
@@ -953,7 +961,7 @@ static GDEFCORE_Result seal(GDEFCORE_Catalog * catalog, GDEFCORE_Keyring * keyri
     return rc;
   }
   raw_n = 4 + strlen(kPurpose) + 8 + 2 + opened->form_id_len +
-          GDEFCORE_PUBLIC_ID_LEN + 8 + kSalt + kNonce + 4 + plain_n + kTag;
+          GDEFCORE_PUBLIC_ID_LEN + GDEFCORE_PUBLIC_ID_LEN + 8 + kSalt + kNonce + 4 + plain_n + kTag;
   raw = cat_zalloc(catalog, raw_n);
   if (raw == NULL) {
     gdefcore_text_free(catalog, (char *)ct);
@@ -972,6 +980,9 @@ static GDEFCORE_Result seal(GDEFCORE_Catalog * catalog, GDEFCORE_Keyring * keyri
   memcpy(raw + at, opened->form_id, opened->form_id_len);
   at += opened->form_id_len;
   memcpy(raw + at, opened->target, GDEFCORE_PUBLIC_ID_LEN);
+  at += GDEFCORE_PUBLIC_ID_LEN;
+  memcpy(raw + at, opened->has_subject ? opened->subject : kNoSubject,
+      GDEFCORE_PUBLIC_ID_LEN);
   at += GDEFCORE_PUBLIC_ID_LEN;
   put_u64(raw + at, opened->base);
   at += 8;
@@ -999,7 +1010,7 @@ static GDEFCORE_Result seal(GDEFCORE_Catalog * catalog, GDEFCORE_Keyring * keyri
 
 static GDEFCORE_Result parse_clear(const char * token, size_t token_len,
     const uint8_t ** form_id, size_t * form_id_len, const uint8_t ** target,
-    uint64_t * expiry, uint64_t * base, const uint8_t ** salt,
+    const uint8_t ** subject, uint64_t * expiry, uint64_t * base, const uint8_t ** salt,
     const uint8_t ** nonce, const uint8_t ** ct, uint32_t * ct_len,
     const uint8_t ** tag) {
   const uint8_t * raw;
@@ -1028,14 +1039,16 @@ static GDEFCORE_Result parse_clear(const char * token, size_t token_len,
   fid_len = get_u16(raw + at);
   at += 2;
   if (fid_len == 0 || fid_len > kMaxFormId ||
-      token_len < at + fid_len + GDEFCORE_PUBLIC_ID_LEN + 8 + kSalt + kNonce +
-                      4 + kTag) {
+      token_len < at + fid_len + GDEFCORE_PUBLIC_ID_LEN +
+                      GDEFCORE_PUBLIC_ID_LEN + 8 + kSalt + kNonce + 4 + kTag) {
     return GDEFCORE_ERR_INVALID;
   }
   *form_id = raw + at;
   *form_id_len = fid_len;
   at += fid_len;
   *target = raw + at;
+  at += GDEFCORE_PUBLIC_ID_LEN;
+  *subject = raw + at;
   at += GDEFCORE_PUBLIC_ID_LEN;
   *base = get_u64(raw + at);
   at += 8;
@@ -1060,6 +1073,7 @@ static GDEFCORE_Result open_token(GDEFCORE_Catalog * catalog,
     size_t token_len, Opened * opened) {
   const uint8_t * form_id = NULL;
   const uint8_t * target = NULL;
+  const uint8_t * subject = NULL;
   const uint8_t * salt = NULL;
   const uint8_t * nonce = NULL;
   const uint8_t * ct = NULL;
@@ -1075,7 +1089,7 @@ static GDEFCORE_Result open_token(GDEFCORE_Catalog * catalog,
   char canon[GDEFCORE_PUBLIC_ID_LEN + 1];
   GDEFCORE_Result rc;
   memset(opened, 0, sizeof *opened);
-  rc = parse_clear(token, token_len, &form_id, &form_id_len, &target,
+  rc = parse_clear(token, token_len, &form_id, &form_id_len, &target, &subject,
       &opened->expiry, &opened->base, &salt, &nonce, &ct, &ct_len, &tag);
   if (rc != GDEFCORE_OK) {
     return rc;
@@ -1092,6 +1106,16 @@ static GDEFCORE_Result open_token(GDEFCORE_Catalog * catalog,
     return GDEFCORE_ERR_INVALID;
   }
   memcpy(opened->target, canon, GDEFCORE_PUBLIC_ID_LEN + 1);
+  if (memcmp(subject, kNoSubject, GDEFCORE_PUBLIC_ID_LEN) != 0) {
+    char scanon[GDEFCORE_PUBLIC_ID_LEN + 1];
+    if (gdefcore_id_canonical((const char *)subject, GDEFCORE_PUBLIC_ID_LEN,
+            scanon) != GDEFCORE_OK ||
+        memcmp(scanon, subject, GDEFCORE_PUBLIC_ID_LEN) != 0) {
+      return GDEFCORE_ERR_INVALID;
+    }
+    memcpy(opened->subject, scanon, GDEFCORE_PUBLIC_ID_LEN + 1);
+    opened->has_subject = 1;
+  }
   rc = purpose_key(keyring, root, root_len, form_key);
   if (rc != GDEFCORE_OK) {
     return rc;
@@ -1103,8 +1127,8 @@ static GDEFCORE_Result open_token(GDEFCORE_Catalog * catalog,
     return rc;
   }
   rc = build_aad(catalog, session, session_len, principal, principal_len,
-      (const char *)form_id, form_id_len, opened->target, opened->expiry,
-      opened->base, &aad, &aad_n);
+      (const char *)form_id, form_id_len, opened->target,
+      (const char *)subject, opened->expiry, opened->base, &aad, &aad_n);
   if (rc != GDEFCORE_OK) {
     wipe(token_key, sizeof token_key);
     return rc;
@@ -1364,6 +1388,17 @@ static int form_lang_ok(const char * s, size_t n) {
   return 1;
 }
 
+/* Whether any personal field holds a value. */
+static int personal_valued(const FormField * fields, size_t n) {
+  size_t i;
+  for (i = 0; i < n; i++) {
+    if (fields[i].personal && fields[i].count > 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
 static GDEFCORE_Result sign_opened(GDEFCORE_Catalog * catalog,
     GDEFCORE_Request * request, GDEFCORE_Keyring * keyring, const uint8_t * root,
     size_t root_len, const char * session, size_t session_len,
@@ -1371,8 +1406,8 @@ static GDEFCORE_Result sign_opened(GDEFCORE_Catalog * catalog,
     size_t target_len, const char * lang, size_t lang_len,
     const GDEFCORE_Value * values, size_t value_count, const char * alias,
     size_t alias_len, int reuse_constraints, const FormField * prior,
-    size_t prior_n, uint64_t prior_base, char ** out_token,
-    size_t * out_token_len) {
+    size_t prior_n, uint64_t prior_base, const char * subject,
+    size_t subject_len, char ** out_token, size_t * out_token_len) {
   const char * principal = NULL;
   size_t principal_len = 0;
   uint64_t session_expiry = 0;
@@ -1396,6 +1431,14 @@ static GDEFCORE_Result sign_opened(GDEFCORE_Catalog * catalog,
     return GDEFCORE_ERR_INVALID;
   }
   memcpy(opened.target, canon, GDEFCORE_PUBLIC_ID_LEN + 1);
+  if (subject != NULL) {
+    char scanon[GDEFCORE_PUBLIC_ID_LEN + 1];
+    if (gdefcore_id_canonical(subject, subject_len, scanon) != GDEFCORE_OK) {
+      return GDEFCORE_ERR_INVALID;
+    }
+    memcpy(opened.subject, scanon, GDEFCORE_PUBLIC_ID_LEN + 1);
+    opened.has_subject = 1;
+  }
   rc = cap_expiry(session_expiry, &opened.expiry);
   if (rc != GDEFCORE_OK) {
     return rc;
@@ -1438,6 +1481,11 @@ static GDEFCORE_Result sign_opened(GDEFCORE_Catalog * catalog,
     return rc;
   }
   rc = bind_values(opened.fields, opened.nfields, values, value_count);
+  if (rc == GDEFCORE_OK && !opened.has_subject &&
+      personal_valued(opened.fields, opened.nfields)) {
+    /* A personal value needs a subject to be sealed for (AD-19). */
+    rc = GDEFCORE_ERR_INVALID;
+  }
   if (rc != GDEFCORE_OK) {
     opened_free(catalog, &opened);
     return rc;
@@ -1470,8 +1518,25 @@ GDEFCORE_Result gdefcore_form_sign(GDEFCORE_Catalog * catalog,
     size_t alias_len, char ** out_token, size_t * out_token_len) {
   return sign_opened(catalog, request, keyring, root, root_len, session,
       session_len, form_id, form_id_len, target, target_len, lang, lang_len,
-      values, value_count, alias, alias_len, 0, NULL, 0, 0, out_token,
+      values, value_count, alias, alias_len, 0, NULL, 0, 0, NULL, 0, out_token,
       out_token_len);
+}
+
+GDEFCORE_Result gdefcore_form_sign_subject(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Request * request, GDEFCORE_Keyring * keyring, const uint8_t * root,
+    size_t root_len, const char * session, size_t session_len,
+    const char * form_id, size_t form_id_len, const char * target,
+    size_t target_len, const char * lang, size_t lang_len,
+    const GDEFCORE_Value * values, size_t value_count, const char * alias,
+    size_t alias_len, const char * subject, size_t subject_len,
+    char ** out_token, size_t * out_token_len) {
+  if (subject == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  return sign_opened(catalog, request, keyring, root, root_len, session,
+      session_len, form_id, form_id_len, target, target_len, lang, lang_len,
+      values, value_count, alias, alias_len, 0, NULL, 0, 0, subject,
+      subject_len, out_token, out_token_len);
 }
 
 GDEFCORE_Result gdefcore_form_check(GDEFCORE_Catalog * catalog,
@@ -1531,7 +1596,8 @@ GDEFCORE_Result gdefcore_form_resign(GDEFCORE_Catalog * catalog,
       session_len, opened.form_id, opened.form_id_len, opened.target,
       GDEFCORE_PUBLIC_ID_LEN, opened.lang, opened.lang_len, values, value_count,
       opened.alias, opened.alias_len, 1, opened.fields, opened.nfields,
-      opened.base, out_token, out_token_len);
+      opened.base, opened.has_subject ? opened.subject : NULL,
+      GDEFCORE_PUBLIC_ID_LEN, out_token, out_token_len);
   opened_free(catalog, &opened);
   return rc;
 }
@@ -1738,10 +1804,61 @@ static GDEFCORE_Result values_from_fields(const FormField * fields, size_t n,
   return GDEFCORE_OK;
 }
 
-GDEFCORE_Result gdefcore_form_submit(GDEFCORE_Catalog * catalog,
+/* The personal values of a form, sealed for its subject. One sealed text per
+ * personal field that holds a value; field[] indexes opened.fields. */
+typedef struct Sealed {
+  size_t nsealed;
+  size_t field[kMaxFields];
+  char * text[kMaxFields];
+  size_t len[kMaxFields];
+  uint8_t mac[kMaxFields][GDEFCORE_SUBJECT_MAC_LEN];
+} Sealed;
+
+static void sealed_free(GDEFCORE_Subjects * subjects, Sealed * sealed) {
+  size_t i;
+  for (i = 0; i < sealed->nsealed; i++) {
+    gdefcore_subject_free(subjects, sealed->text[i]);
+    sealed->text[i] = NULL;
+  }
+  sealed->nsealed = 0;
+}
+
+/* Seal every personal value under the form's subject. Nothing is written to
+ * a store: a subject that is erased or unknown fails here, ahead of every
+ * write. A many field has no sealed form (gdefcore_subject_save stores one
+ * value per field), so it is refused. */
+static GDEFCORE_Result seal_personal(GDEFCORE_Subjects * subjects,
+    const Opened * opened, Sealed * sealed) {
+  size_t i;
+  memset(sealed, 0, sizeof *sealed);
+  for (i = 0; i < opened->nfields; i++) {
+    const FormField * f = &opened->fields[i];
+    GDEFCORE_Result rc;
+    if (!f->personal || f->count == 0) {
+      continue;
+    }
+    if (f->many || f->count != 1) {
+      sealed_free(subjects, sealed);
+      return GDEFCORE_ERR_INVALID;
+    }
+    rc = gdefcore_subject_seal(subjects, opened->subject, GDEFCORE_PUBLIC_ID_LEN,
+        f->name, f->name_len, f->texts[0], f->lens[0],
+        &sealed->text[sealed->nsealed], &sealed->len[sealed->nsealed],
+        sealed->mac[sealed->nsealed]);
+    if (rc != GDEFCORE_OK) {
+      sealed_free(subjects, sealed);
+      return rc;
+    }
+    sealed->field[sealed->nsealed] = i;
+    sealed->nsealed += 1;
+  }
+  return GDEFCORE_OK;
+}
+
+static GDEFCORE_Result submit_impl(GDEFCORE_Catalog * catalog,
     GDEFCORE_Request * request, GDEFCORE_Keyring * keyring, const uint8_t * root,
     size_t root_len, const char * session, size_t session_len, const char * token,
-    size_t token_len, int * out_conflict) {
+    size_t token_len, GDEFCORE_Subjects * subjects, int * out_conflict) {
   const char * principal = NULL;
   size_t principal_len = 0;
   uint64_t session_expiry = 0;
@@ -1751,6 +1868,8 @@ GDEFCORE_Result gdefcore_form_submit(GDEFCORE_Catalog * catalog,
   GDEFCORE_Value * values = NULL;
   size_t nvalues = 0;
   char * alias_id = NULL;
+  Sealed sealed;
+  const char * sealed_texts[kMaxFields];
   const GDEFCORE_Allocator * def = gdefcore_allocator_default();
   GDEFCORE_Result rc;
   if (out_conflict != NULL) {
@@ -1772,10 +1891,17 @@ GDEFCORE_Result gdefcore_form_submit(GDEFCORE_Catalog * catalog,
     return rc;
   }
   rc = fields_still_ok(opened.fields, opened.nfields);
+  if (rc == GDEFCORE_OK && personal_valued(opened.fields, opened.nfields) &&
+      (subjects == NULL || !opened.has_subject)) {
+    /* The plain route does not seal, and a personal value is never stored
+     * as text (AD-19): refuse before anything is written. */
+    rc = GDEFCORE_ERR_INVALID;
+  }
   if (rc != GDEFCORE_OK) {
     opened_free(catalog, &opened);
     return rc;
   }
+  memset(&sealed, 0, sizeof sealed);
   rc = gdefcore_entity_revision(catalog, opened.target, GDEFCORE_PUBLIC_ID_LEN,
       &current);
   if (rc != GDEFCORE_OK) {
@@ -1789,15 +1915,39 @@ GDEFCORE_Result gdefcore_form_submit(GDEFCORE_Catalog * catalog,
     opened_free(catalog, &opened);
     return GDEFCORE_ERR_INVALID;
   }
+  if (subjects != NULL) {
+    rc = seal_personal(subjects, &opened, &sealed);
+    if (rc != GDEFCORE_OK) {
+      opened_free(catalog, &opened);
+      return rc;
+    }
+  }
   rc = values_from_fields(opened.fields, opened.nfields, &values, &nvalues);
   if (rc != GDEFCORE_OK) {
+    sealed_free(subjects, &sealed);
     opened_free(catalog, &opened);
     return rc;
+  }
+  {
+    size_t k;
+    for (k = 0; k < sealed.nsealed; k++) {
+      size_t j;
+      const FormField * f = &opened.fields[sealed.field[k]];
+      sealed_texts[k] = sealed.text[k];
+      for (j = 0; j < nvalues; j++) {
+        if (span_eq(values[j].field, values[j].field_len, f->name,
+                f->name_len)) {
+          values[j].texts = &sealed_texts[k];
+          values[j].text_lens = &sealed.len[k];
+        }
+      }
+    }
   }
   if (opened.alias_len > 0) {
     rc = ensure_alias_type(catalog);
     if (rc != GDEFCORE_OK) {
       gcu_allocator_free(def, values);
+      sealed_free(subjects, &sealed);
       opened_free(catalog, &opened);
       return rc;
     }
@@ -1808,6 +1958,7 @@ GDEFCORE_Result gdefcore_form_submit(GDEFCORE_Catalog * catalog,
     }
     if (rc != GDEFCORE_OK) {
       gcu_allocator_free(def, values);
+      sealed_free(subjects, &sealed);
       opened_free(catalog, &opened);
       return rc;
     }
@@ -1816,11 +1967,17 @@ GDEFCORE_Result gdefcore_form_submit(GDEFCORE_Catalog * catalog,
   if (rc != GDEFCORE_OK) {
     gdefcore_text_free(catalog, alias_id);
     gcu_allocator_free(def, values);
+    sealed_free(subjects, &sealed);
     opened_free(catalog, &opened);
     return rc;
   }
-  rc = gdefcore_entity_save_draft(changeset, opened.target, GDEFCORE_PUBLIC_ID_LEN,
-      opened.lang, opened.lang_len, values, nvalues);
+  if (sealed.nsealed > 0) {
+    rc = gdefcore_changeset_accept_sealed(changeset);
+  }
+  if (rc == GDEFCORE_OK) {
+    rc = gdefcore_entity_save_draft(changeset, opened.target,
+        GDEFCORE_PUBLIC_ID_LEN, opened.lang, opened.lang_len, values, nvalues);
+  }
   if (rc == GDEFCORE_OK && opened.alias_len > 0) {
     rc = save_alias(changeset, catalog, opened.target, opened.alias,
         opened.alias_len, opened.lang, opened.lang_len, &alias_id);
@@ -1837,8 +1994,43 @@ GDEFCORE_Result gdefcore_form_submit(GDEFCORE_Catalog * catalog,
   gdefcore_changeset_destroy(changeset);
   gdefcore_text_free(catalog, alias_id);
   gcu_allocator_free(def, values);
+  if (rc == GDEFCORE_OK) {
+    /* The blind-index rows go in the side store after the revision, as
+     * gdefcore_subject_save does. A failure here leaves the sealed revision
+     * and no row for it, which erasure handles (the key is what it destroys). */
+    size_t k;
+    for (k = 0; rc == GDEFCORE_OK && k < sealed.nsealed; k++) {
+      const FormField * f = &opened.fields[sealed.field[k]];
+      rc = gdefcore_subject_index(subjects, opened.subject,
+          GDEFCORE_PUBLIC_ID_LEN, opened.target, GDEFCORE_PUBLIC_ID_LEN,
+          f->name, f->name_len, opened.lang, opened.lang_len, sealed.mac[k]);
+    }
+  }
+  sealed_free(subjects, &sealed);
   opened_free(catalog, &opened);
   return rc;
+}
+
+GDEFCORE_Result gdefcore_form_submit(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Request * request, GDEFCORE_Keyring * keyring, const uint8_t * root,
+    size_t root_len, const char * session, size_t session_len, const char * token,
+    size_t token_len, int * out_conflict) {
+  return submit_impl(catalog, request, keyring, root, root_len, session,
+      session_len, token, token_len, NULL, out_conflict);
+}
+
+GDEFCORE_Result gdefcore_form_submit_subject(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Request * request, GDEFCORE_Keyring * keyring, const uint8_t * root,
+    size_t root_len, const char * session, size_t session_len, const char * token,
+    size_t token_len, GDEFCORE_Subjects * subjects, int * out_conflict) {
+  if (subjects == NULL) {
+    if (out_conflict != NULL) {
+      *out_conflict = 0;
+    }
+    return GDEFCORE_ERR_INVALID;
+  }
+  return submit_impl(catalog, request, keyring, root, root_len, session,
+      session_len, token, token_len, subjects, out_conflict);
 }
 
 static GDEFCORE_Result published_field(GDEFCORE_Catalog * catalog,

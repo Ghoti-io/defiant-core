@@ -66,7 +66,10 @@ namespace {
 const char kCanary[] = "zq-canary-7f3a91c4-platypus";
 const char kCanaryLater[] = "zq-canary-7f3a91c4-platypus-v2";
 const char kCanaryFr[] = "zq-canary-7f3a91c4-ornithorynque";
+const char kCanaryForm[] = "zq-canary-7f3a91c4-form-route-narwhal";
+const char kCanaryEdit[] = "zq-canary-7f3a91c4-form-edited-manatee";
 const char kSurvivor[] = "keep-me-survivor-55d0e2b8";
+const char kSurvivorEdit[] = "keep-me-survivor-edited-91ac44f0";
 const char kField[] = "name";
 const uint8_t kRegistryTenant[] = {0x02};
 
@@ -351,6 +354,7 @@ class Erasure : public ::testing::Test {
   char ea_[GDEFCORE_PUBLIC_ID_LEN + 1];      // a's entity
   char eb_[GDEFCORE_PUBLIC_ID_LEN + 1];      // b's entity
   char post_[GDEFCORE_PUBLIC_ID_LEN + 1];    // a published page
+  char ef_[GDEFCORE_PUBLIC_ID_LEN + 1];      // a's entity, written by a form
   std::vector<Needle> needles_;
   std::vector<Needle> survivor_;
 
@@ -366,6 +370,7 @@ class Erasure : public ::testing::Test {
     memset(root_, 0x42, sizeof root_);
     memset(storage_, 0, sizeof storage_);
     memset(tenant_, 0, sizeof tenant_);
+    memset(ef_, 0, sizeof ef_);
     ASSERT_EQ(GDEFSMEMORY_OK, gdefsmemory_store_create(NULL, NULL, &registry_));
     ASSERT_EQ(GDEFSMEMORY_OK, gdefsmemory_store_create(NULL, NULL, &site_));
     ASSERT_EQ(GDEFSMEMORY_OK, gdefsmemory_store_create(NULL, NULL, &side_));
@@ -584,6 +589,38 @@ class Erasure : public ::testing::Test {
         }
       }
     }
+    if (ef_[0] != '\0') {
+      for (j = 0; j < 2; j++) {
+        int view;
+        for (view = 0; view < 2; view++) {
+          char ** texts = NULL;
+          size_t * lens = NULL;
+          size_t n = 0;
+          Bytes joined;
+          size_t t;
+          if (gdefcore_entity_values(catalog_, NULL,
+                  view == 0 ? GDEFCORE_VIEW_PUBLISHED : GDEFCORE_VIEW_DRAFT,
+                  ef_, strlen(ef_), langs[j], 2, kField, strlen(kField), &texts,
+                  &lens, &n) == GDEFCORE_OK) {
+            for (t = 0; t < n; t++) {
+              joined += B(texts[t], lens[t]) + "\n";
+            }
+          }
+          gdefcore_values_free(catalog_, texts, lens, n);
+          AddText(out, "entity values (form route) " + stage, joined);
+        }
+      }
+      for (j = 0; j < 2; j++) {
+        char * text = NULL;
+        size_t tn = 0;
+        if (gdefcore_subject_read(subjects_, catalog_, a_, strlen(a_), ef_,
+                strlen(ef_), kField, strlen(kField), langs[j], 2, &text, &tn) ==
+            GDEFCORE_OK) {
+          AddText(out, "output: read of a (form route) " + stage, B(text, tn));
+        }
+        gdefcore_subject_free(subjects_, text);
+      }
+    }
     for (i = 0; i < 2; i++) {
       char * json = NULL;
       size_t n = 0;
@@ -704,6 +741,109 @@ class Erasure : public ::testing::Test {
     SaveValue(b_, eb_, "fr", kSurvivor);
     Login();
     PublishPost();
+  }
+
+  /* The subject route of a form: sign for a subject, submit with the store. */
+  GDEFCORE_Result SignFor(const char * subject, const char * entity,
+      const char * text, std::string * token) {
+    GDEFCORE_Value value;
+    const char * slot = NULL;
+    size_t slot_len = 0;
+    char * out = NULL;
+    size_t out_len = 0;
+    GDEFCORE_Result rc;
+    OneValue(&value, kField, text, &slot, &slot_len);
+    rc = gdefcore_form_sign_subject(catalog_, request_, Ring(), root_,
+        sizeof root_, session_.data(), session_.size(), "edit", 4, entity,
+        strlen(entity), "en", 2, &value, 1, NULL, 0, subject, strlen(subject),
+        &out, &out_len);
+    if (rc == GDEFCORE_OK) {
+      token->assign(out, out_len);
+      gdefcore_text_free(catalog_, out);
+    }
+    return rc;
+  }
+
+  GDEFCORE_Result SubmitFor(const std::string & token, int * conflict) {
+    return gdefcore_form_submit_subject(catalog_, request_, Ring(), root_,
+        sizeof root_, session_.data(), session_.size(), token.data(),
+        token.size(), subjects_, conflict);
+  }
+
+  GDEFCORE_Result SubmitPlain(const std::string & token, int * conflict) {
+    return gdefcore_form_submit(catalog_, request_, Ring(), root_, sizeof root_,
+        session_.data(), session_.size(), token.data(), token.size(), conflict);
+  }
+
+  void Publish(const char * entity) {
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_form_publish(catalog_, entity, strlen(entity)));
+  }
+
+  /* What the subject reads, or "<error N>". */
+  std::string ReadAs(const char * subject, const char * entity) {
+    char * text = NULL;
+    size_t n = 0;
+    GDEFCORE_Result rc = gdefcore_subject_read(subjects_, catalog_, subject,
+        strlen(subject), entity, strlen(entity), kField, strlen(kField), "en", 2,
+        &text, &n);
+    std::string out;
+    if (rc != GDEFCORE_OK) {
+      return "<error " + std::to_string(static_cast<int>(rc)) + ">";
+    }
+    out.assign(text, n);
+    gdefcore_subject_free(subjects_, text);
+    return out;
+  }
+
+  /* The text stored for the field in one view, "" when there is none. */
+  std::string Stored(const char * entity, int view) {
+    char ** texts = NULL;
+    size_t * lens = NULL;
+    size_t n = 0;
+    std::string out;
+    if (gdefcore_entity_values(catalog_, NULL, view, entity, strlen(entity),
+            "en", 2, kField, strlen(kField), &texts, &lens, &n) == GDEFCORE_OK &&
+        n == 1) {
+      out.assign(texts[0], lens[0]);
+    }
+    gdefcore_values_free(catalog_, texts, lens, n);
+    return out;
+  }
+
+  size_t Revisions(const char * entity) {
+    size_t n = 0;
+    EXPECT_EQ(GDEFCORE_OK,
+        gdefcore_entity_revision_count(catalog_, entity, strlen(entity), &n));
+    return n;
+  }
+
+  size_t BlindCount(const char * subject) {
+    size_t n = 0;
+    EXPECT_EQ(GDEFCORE_OK,
+        gdefcore_subject_blind_count(subjects_, subject, strlen(subject), &n));
+    return n;
+  }
+
+  void NewPerson(char out[GDEFCORE_PUBLIC_ID_LEN + 1]) {
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_entity_create(catalog_, "site.person", 11, out, NULL));
+  }
+
+  Bytes TenantExport() {
+    return StorageExport(site_, storage_, sizeof storage_);
+  }
+
+  /* The form route: a value for subject a, written by a form through the
+   * subject functions and published. Extends Populate. */
+  void PopulateForm() {
+    std::string token;
+    int conflict = 0;
+    NewPerson(ef_);
+    ASSERT_FALSE(HasFatalFailure());
+    ASSERT_EQ(GDEFCORE_OK, SignFor(a_, ef_, kCanaryForm, &token));
+    ASSERT_EQ(GDEFCORE_OK, SubmitFor(token, &conflict));
+    Publish(ef_);
   }
 
   void Erase(const char * subject) {
@@ -844,19 +984,26 @@ TEST_F(Erasure, Sweep) {
   Bytes mac_fr;
   Bytes mac_first;
   Bytes mac_survivor;
+  Bytes mac_form;
   size_t count = 0;
   Populate();
   if (HasFatalFailure()) {
     return;
   }
+  PopulateForm();
+  if (HasFatalFailure()) {
+    return;
+  }
   ASSERT_EQ(GDEFCORE_OK,
       gdefcore_subject_blind_count(subjects_, a_, strlen(a_), &count));
-  ASSERT_EQ(2u, count);
+  ASSERT_EQ(3u, count);
   mac_later = BlindMac(a_, 0);
   mac_fr = BlindMac(a_, 1);
+  mac_form = BlindMac(a_, 2);
   mac_survivor = BlindMac(b_, 0);
   ASSERT_EQ(32u, mac_later.size());
   ASSERT_EQ(32u, mac_fr.size());
+  ASSERT_EQ(32u, mac_form.size());
   ASSERT_EQ(32u, mac_survivor.size());
   /* The first value was superseded, and its blind index with it, but its
    * HMAC is still a form of the canary. Compute it independently, and check
@@ -869,6 +1016,7 @@ TEST_F(Erasure, Sweep) {
     mac_first = Hmac(B(key, sizeof key), kCanary);
     EXPECT_EQ(mac_later, Hmac(B(key, sizeof key), kCanaryLater));
     EXPECT_EQ(mac_fr, Hmac(B(key, sizeof key), kCanaryFr));
+    EXPECT_EQ(mac_form, Hmac(B(key, sizeof key), kCanaryForm));
     EXPECT_EQ(mac_survivor, Hmac(B(key, sizeof key), kSurvivor));
   }
   wrapped = WrappedKey(a_);
@@ -877,6 +1025,7 @@ TEST_F(Erasure, Sweep) {
   values.push_back(kCanary);
   values.push_back(kCanaryLater);
   values.push_back(kCanaryFr);
+  values.push_back(kCanaryForm);
   Needles(a_, values, wrapped, &needles_);
   ASSERT_FALSE(HasFatalFailure());
   {
@@ -892,6 +1041,10 @@ TEST_F(Erasure, Sweep) {
   EXPECT_TRUE(FoundIn(pre, kCanary, "output: export of a"));
   EXPECT_TRUE(FoundIn(pre, kCanaryLater, "output: export of a"));
   EXPECT_TRUE(FoundIn(pre, kCanaryFr, "output: read of a"));
+  EXPECT_TRUE(FoundIn(pre, kCanaryForm, "output: export of a"));
+  EXPECT_TRUE(FoundIn(pre, kCanaryForm, "output: read of a (form route)"));
+  EXPECT_TRUE(FoundIn(pre, Bytes("s1:"), "entity values (form route)"));
+  EXPECT_TRUE(FoundIn(pre, mac_form, "side store snapshot"));
   EXPECT_TRUE(FoundIn(pre, mac_later, "side store snapshot"));
   EXPECT_TRUE(FoundIn(pre, Hex(mac_later, false), "side store snapshot"));
   EXPECT_TRUE(FoundIn(pre, mac_fr, "side store snapshot"));
@@ -983,11 +1136,16 @@ TEST_F(Erasure, SnapshotCarriesNoKey) {
   if (HasFatalFailure()) {
     return;
   }
+  PopulateForm();
+  if (HasFatalFailure()) {
+    return;
+  }
   wrapped = WrappedKey(a_);
   ASSERT_EQ(static_cast<size_t>(GDEFCORE_KEYRING_WRAP_LEN), wrapped.size());
   values.push_back(kCanary);
   values.push_back(kCanaryLater);
   values.push_back(kCanaryFr);
+  values.push_back(kCanaryForm);
   Needles(a_, values, wrapped, &needles);
   ASSERT_FALSE(HasFatalFailure());
 
@@ -1062,15 +1220,10 @@ TEST_F(Erasure, SnapshotCarriesNoKey) {
   gdefstor_store_destroy(empty);
 }
 
-/* KNOWN OPEN. A personal field written through a form (or gdefcore_entity_save)
- * is stored as the caller's plaintext: nothing in the form or entity path
- * checks the field's `personal` flag, so erasure cannot reach it. AD-19 says
- * personal fields are ciphertext in documents and projections. Disabled so
- * that `make test` stays green; tools/check-erasure.sh runs it with
- * --gtest_also_run_disabled_tests and reports whether it still fails. Remove
- * the DISABLED_ prefix when the form path refuses or encrypts a personal
- * value. */
-TEST_F(Erasure, DISABLED_FormPersonalField) {
+/* AD-19, the plain form route. A personal field is never stored as the
+ * caller's text: the plain sign and the plain submit refuse it and write
+ * nothing, and the fields that are not personal go through as before. */
+TEST_F(Erasure, FormPersonalField) {
   std::vector<Needle> needles;
   std::vector<Artifact> arts;
   GDEFCORE_Value value;
@@ -1079,24 +1232,634 @@ TEST_F(Erasure, DISABLED_FormPersonalField) {
   char entity[GDEFCORE_PUBLIC_ID_LEN + 1];
   char * token = NULL;
   size_t token_len = 0;
-  int conflict = 0;
+  std::string held;
+  int conflict = 7;
+  size_t before;
   DefinePerson();
   Login();
-  ASSERT_EQ(GDEFCORE_OK,
-      gdefcore_entity_create(catalog_, "site.person", 11, entity, NULL));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_subject_create(subjects_, a_));
+  NewPerson(entity);
+  ASSERT_FALSE(HasFatalFailure());
+  before = Revisions(entity);
+
+  /* The plain sign has no subject to seal for. */
   OneValue(&value, kField, kCanary, &slot, &slot_len);
-  if (gdefcore_form_sign(catalog_, request_, Ring(), root_, sizeof root_,
+  EXPECT_EQ(GDEFCORE_ERR_INVALID,
+      gdefcore_form_sign(catalog_, request_, Ring(), root_, sizeof root_,
           session_.data(), session_.size(), "edit", 4, entity, strlen(entity),
-          "en", 2, &value, 1, NULL, 0, &token, &token_len) == GDEFCORE_OK) {
-    (void)gdefcore_form_submit(catalog_, request_, Ring(), root_, sizeof root_,
-        session_.data(), session_.size(), token, token_len, &conflict);
-    gdefcore_text_free(catalog_, token);
-  }
+          "en", 2, &value, 1, NULL, 0, &token, &token_len));
+  EXPECT_EQ(NULL, token);
+
+  /* A token that does hold a personal value (it has a subject) is not
+   * accepted by the plain submit either: nothing is written, and the
+   * refusal is not a conflict. */
+  ASSERT_EQ(GDEFCORE_OK, SignFor(a_, entity, kCanary, &held));
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, SubmitPlain(held, &conflict));
+  EXPECT_EQ(0, conflict);
+  EXPECT_EQ(before, Revisions(entity));
+  EXPECT_EQ("", Stored(entity, GDEFCORE_VIEW_DRAFT));
+  EXPECT_EQ("", Stored(entity, GDEFCORE_VIEW_PUBLISHED));
+  EXPECT_EQ(0u, BlindCount(a_));
+
+  /* The same token still goes through the subject route: the refusal was
+   * about the route, not the token. */
+  ASSERT_EQ(GDEFCORE_OK, SubmitFor(held, &conflict));
+  EXPECT_EQ(before + 1, Revisions(entity));
+
   AddForms(&needles, "canary", kCanary, false);
-  AddZip(&arts, "tenant store snapshot",
-      StorageExport(site_, storage_, sizeof storage_), true);
+  AddZip(&arts, "tenant store snapshot", TenantExport(), true);
   EXPECT_TRUE(Sweep(arts, needles).empty())
       << "a personal field written through a form is stored as plaintext";
+  EXPECT_TRUE(FoundIn(arts, Bytes("s1:"), "tenant store snapshot"));
+}
+
+/* The plain form route keeps working for every field that is not personal,
+ * on a type that has a personal field it leaves empty. */
+TEST_F(Erasure, FormPlainRouteOtherFields) {
+  GDEFCORE_Field fields[2];
+  GDEFCORE_Value values[1];
+  const char * slot = NULL;
+  size_t slot_len = 0;
+  char entity[GDEFCORE_PUBLIC_ID_LEN + 1];
+  char * token = NULL;
+  size_t token_len = 0;
+  int conflict = 0;
+  memset(fields, 0, sizeof fields);
+  fields[0].size = sizeof fields[0];
+  fields[0].name = "title";
+  fields[0].name_len = 5;
+  fields[0].required = 1;
+  fields[1].size = sizeof fields[1];
+  fields[1].name = "secret";
+  fields[1].name_len = 6;
+  fields[1].personal = 1;
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_type_define(catalog_, "site.mixed", 10, GDEFCORE_TYPE_CONTENT,
+          fields, 2));
+  Login();
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_entity_create(catalog_, "site.mixed", 10, entity, NULL));
+  OneValue(&values[0], "title", "Parish notices", &slot, &slot_len);
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_form_sign(catalog_, request_, Ring(), root_, sizeof root_,
+          session_.data(), session_.size(), "edit", 4, entity, strlen(entity),
+          "en", 2, values, 1, NULL, 0, &token, &token_len));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_form_submit(catalog_, request_, Ring(), root_, sizeof root_,
+          session_.data(), session_.size(), token, token_len, &conflict));
+  gdefcore_text_free(catalog_, token);
+  {
+    char ** texts = NULL;
+    size_t * lens = NULL;
+    size_t n = 0;
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_entity_values(catalog_, NULL, GDEFCORE_VIEW_DRAFT, entity,
+            strlen(entity), "en", 2, "title", 5, &texts, &lens, &n));
+    ASSERT_EQ(1u, n);
+    EXPECT_EQ("Parish notices", std::string(texts[0], lens[0]));
+    gdefcore_values_free(catalog_, texts, lens, n);
+  }
+}
+
+/* The entity layer, writer by writer. gdefcore_entity_save and its draft
+ * form refuse a personal value; a changeset that was told to accept sealed
+ * values still refuses plaintext; a patch is parsed under the same rule; a
+ * revert restores ciphertext and does not seal it again. */
+TEST_F(Erasure, EntitySavePersonal) {
+  GDEFCORE_Value value;
+  const char * slot = NULL;
+  size_t slot_len = 0;
+  char entity[GDEFCORE_PUBLIC_ID_LEN + 1];
+  GDEFCORE_Changeset * cs = NULL;
+  DefinePerson();
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_subject_create(subjects_, a_));
+  NewPerson(entity);
+  ASSERT_FALSE(HasFatalFailure());
+  OneValue(&value, kField, kCanary, &slot, &slot_len);
+
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
+  EXPECT_EQ(GDEFCORE_ERR_INVALID,
+      gdefcore_entity_save(cs, entity, strlen(entity), "en", 2, &value, 1));
+  EXPECT_EQ(GDEFCORE_ERR_INVALID,
+      gdefcore_entity_save_draft(cs, entity, strlen(entity), "en", 2, &value, 1));
+  /* The refusal staged nothing: applying the changeset changes nothing. */
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, NULL, 0));
+  gdefcore_changeset_destroy(cs);
+  EXPECT_EQ(0u, Revisions(entity));
+  EXPECT_EQ("", Stored(entity, GDEFCORE_VIEW_PUBLISHED));
+  EXPECT_EQ("", Stored(entity, GDEFCORE_VIEW_DRAFT));
+
+  /* Accepting sealed values is not accepting plaintext. */
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_accept_sealed(cs));
+  EXPECT_EQ(GDEFCORE_ERR_INVALID,
+      gdefcore_entity_save(cs, entity, strlen(entity), "en", 2, &value, 1));
+  EXPECT_EQ(GDEFCORE_ERR_INVALID,
+      gdefcore_entity_save_draft(cs, entity, strlen(entity), "en", 2, &value, 1));
+  OneValue(&value, kField, "s1:short", &slot, &slot_len);
+  EXPECT_EQ(GDEFCORE_ERR_INVALID,
+      gdefcore_entity_save(cs, entity, strlen(entity), "en", 2, &value, 1));
+  gdefcore_changeset_destroy(cs);
+  EXPECT_EQ(0u, Revisions(entity));
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, gdefcore_changeset_accept_sealed(NULL));
+}
+
+/* A revert restores an earlier revision whose personal value is already
+ * ciphertext. It must keep working, and what it restores is that ciphertext:
+ * the subject reads the earlier plaintext, not a sealed copy of the sealed
+ * text. */
+TEST_F(Erasure, RevertKeepsCiphertext) {
+  GDEFCORE_Changeset * cs = NULL;
+  std::string first_stored;
+  std::string second_stored;
+  DefinePerson();
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_subject_create(subjects_, a_));
+  NewPerson(ea_);
+  ASSERT_FALSE(HasFatalFailure());
+  SaveValue(a_, ea_, "en", kCanary);
+  first_stored = Stored(ea_, GDEFCORE_VIEW_PUBLISHED);
+  SaveValue(a_, ea_, "en", kCanaryLater);
+  second_stored = Stored(ea_, GDEFCORE_VIEW_PUBLISHED);
+  ASSERT_NE(first_stored, second_stored);
+  EXPECT_EQ(kCanaryLater, ReadAs(a_, ea_));
+
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_changeset_revert(catalog_, ea_, strlen(ea_), NULL, 0, &cs));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, NULL, 0));
+  gdefcore_changeset_destroy(cs);
+  EXPECT_EQ(first_stored, Stored(ea_, GDEFCORE_VIEW_PUBLISHED))
+      << "the revert did not restore the stored text byte for byte";
+  EXPECT_EQ(kCanary, ReadAs(a_, ea_));
+  EXPECT_EQ(0u, Stored(ea_, GDEFCORE_VIEW_PUBLISHED).compare(0, 3, "s1:"));
+}
+
+/* A type can be redefined, after which a field that held plaintext is
+ * personal. What was stored stays as it is (nothing here rewrites history),
+ * but the paths that would carry it into a new revision refuse: a revert
+ * does not restore plaintext into a personal field, and a draft that holds
+ * plaintext for one is not published. */
+TEST_F(Erasure, PlaintextHistoryIsNotRestored) {
+  GDEFCORE_Field field;
+  GDEFCORE_Changeset * cs = NULL;
+  GDEFCORE_Value value;
+  const char * slot = NULL;
+  size_t slot_len = 0;
+  char entity[GDEFCORE_PUBLIC_ID_LEN + 1];
+  size_t revisions;
+  std::string published;
+  memset(&field, 0, sizeof field);
+  field.size = sizeof field;
+  field.name = kField;
+  field.name_len = strlen(kField);
+  field.required = 1;
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_type_define(catalog_, "site.late", 9, GDEFCORE_TYPE_CONTENT,
+          &field, 1));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_entity_create(catalog_, "site.late", 9, entity, NULL));
+  /* Plaintext history: two published revisions and a draft. */
+  OneValue(&value, kField, "plain-one", &slot, &slot_len);
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_entity_save(cs, entity, strlen(entity), "en", 2, &value, 1));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, NULL, 0));
+  gdefcore_changeset_destroy(cs);
+  OneValue(&value, kField, "plain-two", &slot, &slot_len);
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_entity_save(cs, entity, strlen(entity), "en", 2, &value, 1));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, NULL, 0));
+  gdefcore_changeset_destroy(cs);
+  OneValue(&value, kField, "plain-draft", &slot, &slot_len);
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_entity_save_draft(cs, entity, strlen(entity), "en", 2, &value, 1));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, NULL, 0));
+  gdefcore_changeset_destroy(cs);
+
+  /* The field becomes personal. */
+  field.personal = 1;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_changeset_define(cs, "site.late", 9, GDEFCORE_TYPE_CONTENT,
+          &field, 1));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, "site.late", 9));
+  gdefcore_changeset_destroy(cs);
+  {
+    int personal = 0;
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_type_field_personal(catalog_, "site.late", 9, 0, &personal));
+    ASSERT_EQ(1, personal) << "the redefinition did not take";
+  }
+  revisions = Revisions(entity);
+  published = Stored(entity, GDEFCORE_VIEW_PUBLISHED);
+  ASSERT_EQ("plain-two", published);
+
+  /* A revert would put "plain-one" back into a personal field. */
+  cs = NULL;
+  EXPECT_NE(GDEFCORE_OK,
+      gdefcore_changeset_revert(catalog_, entity, strlen(entity), NULL, 0, &cs));
+  gdefcore_changeset_destroy(cs);
+  /* A publish would copy the plaintext draft onto the published row. */
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
+  EXPECT_NE(GDEFCORE_OK, gdefcore_entity_publish(cs, entity, strlen(entity)));
+  gdefcore_changeset_destroy(cs);
+  EXPECT_EQ(revisions, Revisions(entity));
+  EXPECT_EQ(published, Stored(entity, GDEFCORE_VIEW_PUBLISHED));
+}
+
+/* A patch is untrusted input. Parsed under the same rule: its personal value
+ * is accepted only when it is sealed, and a patch that carries plaintext for
+ * a personal field is refused. */
+TEST_F(Erasure, ParsePersonalPatch) {
+  GDEFCORE_Changeset * cs = NULL;
+  GDEFCORE_Patch * files = NULL;
+  size_t nfiles = 0;
+  GDEFCORE_Value value;
+  const char * slot = NULL;
+  size_t slot_len = 0;
+  char * sealed = NULL;
+  size_t sealed_len = 0;
+  uint8_t mac[GDEFCORE_SUBJECT_MAC_LEN];
+  size_t i;
+  bool edited = false;
+  DefinePerson();
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_subject_create(subjects_, a_));
+  NewPerson(ea_);
+  ASSERT_FALSE(HasFatalFailure());
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_subject_seal(subjects_, a_, strlen(a_), kField, strlen(kField),
+          kCanary, strlen(kCanary), &sealed, &sealed_len, mac));
+  OneValue(&value, kField, sealed, &slot, &slot_len);
+  value.text_lens = &sealed_len;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_accept_sealed(cs));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_entity_save(cs, ea_, strlen(ea_), "en", 2, &value, 1));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_serialize(cs, &files, &nfiles));
+  gdefcore_changeset_destroy(cs);
+  cs = NULL;
+
+  /* Sealed: the patch parses and applies, and the subject reads it. */
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_changeset_parse(catalog_, files, nfiles, NULL, &cs));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, NULL, 0));
+  gdefcore_changeset_destroy(cs);
+  cs = NULL;
+  EXPECT_EQ(kCanary, ReadAs(a_, ea_));
+
+  /* The same patch with the value replaced by plaintext. */
+  for (i = 0; i < nfiles; i++) {
+    if (files[i].len == sealed_len &&
+        memcmp(files[i].bytes, sealed, sealed_len) == 0) {
+      free(files[i].bytes);
+      files[i].bytes = static_cast<uint8_t *>(malloc(strlen(kCanaryLater)));
+      memcpy(files[i].bytes, kCanaryLater, strlen(kCanaryLater));
+      files[i].len = strlen(kCanaryLater);
+      edited = true;
+    }
+  }
+  ASSERT_TRUE(edited) << "the patch does not carry the sealed value";
+  EXPECT_NE(GDEFCORE_OK,
+      gdefcore_changeset_parse(catalog_, files, nfiles, NULL, &cs));
+  EXPECT_EQ(NULL, cs);
+  EXPECT_EQ(kCanary, ReadAs(a_, ea_));
+  gdefcore_patch_free(catalog_, files, nfiles);
+  gdefcore_subject_free(subjects_, sealed);
+}
+
+/* AD-19, the subject route of a form. A personal value is sealed under its
+ * subject's key as gdefcore_subject_save does, the blind index is recorded,
+ * an editor can open the form with the current value and change it, and the
+ * stored text stays ciphertext throughout. Erasing the subject then leaves
+ * nothing of the canary anywhere the sweep looks, and another subject is
+ * untouched. */
+TEST_F(Erasure, FormSubjectRoute) {
+  std::vector<Artifact> pre;
+  std::vector<Artifact> post;
+  std::vector<Needle> needles;
+  std::vector<Needle> survivor;
+  std::vector<std::string> values;
+  std::vector<std::string> leaks;
+  std::string token;
+  std::string stored;
+  std::string draft;
+  Bytes wrapped;
+  Bytes survivor_wrapped;
+  Bytes tenant_before;
+  size_t blinds_before;
+  size_t revisions;
+  int conflict = 9;
+  Populate();
+  if (HasFatalFailure()) {
+    return;
+  }
+  NewPerson(ef_);
+  ASSERT_FALSE(HasFatalFailure());
+  blinds_before = BlindCount(a_);
+  ASSERT_EQ(2u, blinds_before);
+
+  /* Create through the form. The draft holds ciphertext, the published row
+   * holds nothing yet, and the index has a row for it. */
+  ASSERT_EQ(GDEFCORE_OK, SignFor(a_, ef_, kCanaryForm, &token));
+  ASSERT_EQ(GDEFCORE_OK, SubmitFor(token, &conflict));
+  EXPECT_EQ(0, conflict);
+  draft = Stored(ef_, GDEFCORE_VIEW_DRAFT);
+  ASSERT_GT(draft.size(), 3u);
+  EXPECT_EQ("s1:", draft.substr(0, 3));
+  EXPECT_EQ(std::string::npos, draft.find(kCanaryForm));
+  EXPECT_EQ("", Stored(ef_, GDEFCORE_VIEW_PUBLISHED));
+  EXPECT_EQ(blinds_before + 1, BlindCount(a_));
+  Publish(ef_);
+  ASSERT_FALSE(HasFatalFailure());
+  stored = Stored(ef_, GDEFCORE_VIEW_PUBLISHED);
+  EXPECT_EQ(draft, stored);
+  EXPECT_EQ(kCanaryForm, ReadAs(a_, ef_));
+
+  /* The same key and format as gdefcore_subject_save: the text the form
+   * stored is what subject_read decrypts for the subject, and the survivor's
+   * key does not open it. */
+  {
+    uint8_t key[GDEFCORE_KEYRING_KEY_LEN];
+    Bytes expect;
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_keyring_derive(Ring(), root_, sizeof root_, "blind-index:name",
+            strlen("blind-index:name"), key, sizeof key));
+    expect = Hmac(B(key, sizeof key), kCanaryForm);
+    ASSERT_EQ(32u, expect.size());
+    EXPECT_EQ(expect, BlindMac(a_, blinds_before));
+  }
+
+  /* The editing round trip. The tree shows what is stored, which is
+   * ciphertext; the editor's current value comes from subject_read. */
+  {
+    GDEFCORE_Form * form = NULL;
+    const char * name = NULL;
+    size_t name_len = 0;
+    int required = 0;
+    int many = 0;
+    int personal = 0;
+    size_t min_len = 0;
+    size_t max_len = 0;
+    int has_range = 0;
+    int64_t range_min = 0;
+    int64_t range_max = 0;
+    const char * pattern = NULL;
+    size_t pattern_len = 0;
+    const char * const * texts = NULL;
+    const size_t * lens = NULL;
+    size_t count = 0;
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_form_tree(catalog_, "site.person", 11, ef_, strlen(ef_), "en",
+            2, &form));
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_form_field(form, 0, &name, &name_len, &required, &many,
+            &personal, &min_len, &max_len, &has_range, &range_min, &range_max,
+            &pattern, &pattern_len, &texts, &lens, &count));
+    EXPECT_EQ(1, personal);
+    ASSERT_EQ(1u, count);
+    EXPECT_EQ(stored, std::string(texts[0], lens[0]));
+    gdefcore_form_destroy(form);
+  }
+  revisions = Revisions(ef_);
+  /* What the tree shows is ciphertext. Passed back as the value, it is
+   * refused, not sealed over itself, and nothing is written. */
+  ASSERT_EQ(GDEFCORE_OK, SignFor(a_, ef_, stored.c_str(), &token));
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, SubmitFor(token, &conflict));
+  EXPECT_EQ(revisions, Revisions(ef_));
+  EXPECT_EQ(kCanaryForm, ReadAs(a_, ef_));
+  ASSERT_EQ(GDEFCORE_OK, SignFor(a_, ef_, ReadAs(a_, ef_).c_str(), &token));
+  {
+    /* An unchanged edit seals the plaintext again: new nonce, same value,
+     * and the row for this location is replaced, not added. */
+    ASSERT_EQ(GDEFCORE_OK, SubmitFor(token, &conflict));
+    Publish(ef_);
+    EXPECT_NE(stored, Stored(ef_, GDEFCORE_VIEW_PUBLISHED));
+    EXPECT_EQ(kCanaryForm, ReadAs(a_, ef_));
+    EXPECT_EQ(blinds_before + 1, BlindCount(a_));
+  }
+  ASSERT_EQ(GDEFCORE_OK, SignFor(a_, ef_, kCanaryEdit, &token));
+  {
+    /* The form goes through a resign on the way, as an editor's would. */
+    GDEFCORE_Value value;
+    const char * slot = NULL;
+    size_t slot_len = 0;
+    char * again = NULL;
+    size_t again_len = 0;
+    OneValue(&value, kField, kCanaryEdit, &slot, &slot_len);
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_form_resign(catalog_, request_, Ring(), root_, sizeof root_,
+            session_.data(), session_.size(), token.data(), token.size(),
+            &value, 1, &again, &again_len));
+    token.assign(again, again_len);
+    gdefcore_text_free(catalog_, again);
+  }
+  ASSERT_EQ(GDEFCORE_OK, SubmitFor(token, &conflict));
+  Publish(ef_);
+  EXPECT_GT(Revisions(ef_), revisions);
+  EXPECT_EQ(kCanaryEdit, ReadAs(a_, ef_));
+  EXPECT_EQ("s1:", Stored(ef_, GDEFCORE_VIEW_PUBLISHED).substr(0, 3));
+  EXPECT_EQ(blinds_before + 1, BlindCount(a_));
+
+  /* The survivor edits through the same route and is only ever themself. */
+  {
+    std::string t;
+    ASSERT_EQ(GDEFCORE_OK, SignFor(b_, eb_, kSurvivorEdit, &t));
+    ASSERT_EQ(GDEFCORE_OK, SubmitFor(t, &conflict));
+    Publish(eb_);
+    EXPECT_EQ(kSurvivorEdit, ReadAs(b_, eb_));
+  }
+  EXPECT_EQ(kCanaryEdit, ReadAs(a_, ef_));
+  EXPECT_EQ(std::string(kCanaryFr), [&] {
+    char * text = NULL;
+    size_t n = 0;
+    std::string out;
+    if (gdefcore_subject_read(subjects_, catalog_, a_, strlen(a_), ea_,
+            strlen(ea_), kField, strlen(kField), "fr", 2, &text, &n) ==
+        GDEFCORE_OK) {
+      out.assign(text, n);
+      gdefcore_subject_free(subjects_, text);
+    }
+    return out;
+  }());
+
+  /* Needles for every value subject a ever held, the form ones included. */
+  wrapped = WrappedKey(a_);
+  survivor_wrapped = WrappedKey(b_);
+  values.push_back(kCanary);
+  values.push_back(kCanaryLater);
+  values.push_back(kCanaryFr);
+  values.push_back(kCanaryForm);
+  values.push_back(kCanaryEdit);
+  Needles(a_, values, wrapped, &needles);
+  ASSERT_FALSE(HasFatalFailure());
+  {
+    std::vector<std::string> sv;
+    sv.push_back(kSurvivor);
+    sv.push_back(kSurvivorEdit);
+    Needles(b_, sv, survivor_wrapped, &survivor);
+  }
+  ASSERT_FALSE(HasFatalFailure());
+
+  /* CONTROL: the sweep sees the form route's value where it must. */
+  Collect(&pre, "before");
+  ASSERT_FALSE(HasFatalFailure());
+  EXPECT_TRUE(FoundIn(pre, kCanaryEdit, "output: export of a"));
+  EXPECT_TRUE(FoundIn(pre, kCanaryEdit, "output: read of a (form route)"));
+  EXPECT_TRUE(FoundIn(pre, Bytes("s1:"), "entity values (form route)"));
+  EXPECT_TRUE(FoundIn(pre, Bytes("s1:"), "revision document"));
+  EXPECT_FALSE(Sweep(pre, needles).empty());
+  {
+    /* No form-route value is plaintext in tenant data, before erasure. */
+    std::vector<Needle> plain;
+    std::vector<Artifact> tenant;
+    size_t a;
+    for (a = 0; a < pre.size(); a++) {
+      if (pre[a].tenant_data &&
+          pre[a].label.compare(0, 7, "output:") != 0) {
+        tenant.push_back(pre[a]);
+      }
+    }
+    AddForms(&plain, "form canary", kCanaryForm, false);
+    AddForms(&plain, "edited form canary", kCanaryEdit, false);
+    AddForms(&plain, "survivor edit", kSurvivorEdit, false);
+    leaks = Sweep(tenant, plain);
+    EXPECT_TRUE(leaks.empty()) << "the form route stored plaintext:"
+                               << Joined(leaks);
+    EXPECT_FALSE(tenant.empty());
+  }
+
+  /* ERASE. */
+  ASSERT_EQ(GDEFCORE_OK, SignFor(a_, ef_, "late edit by a", &token));
+  tenant_before = TenantExport();
+  testing::internal::CaptureStdout();
+  testing::internal::CaptureStderr();
+  Erase(a_);
+  Collect(&post, "after");
+  AddText(&post, "standard output", testing::internal::GetCapturedStdout());
+  AddText(&post, "standard error", testing::internal::GetCapturedStderr());
+  ASSERT_FALSE(HasFatalFailure());
+  leaks = Sweep(post, needles);
+  EXPECT_TRUE(leaks.empty()) << "erased subject's data is still reachable:"
+                             << Joined(leaks);
+  EXPECT_FALSE(Sweep(post, survivor).empty())
+      << "the sweep no longer sees the survivor";
+  EXPECT_TRUE(FoundIn(post, Bytes("[erased]"), "output: read of a (form route)"));
+  EXPECT_EQ(kSurvivorEdit, ReadAs(b_, eb_));
+  EXPECT_EQ(0u, BlindCount(a_));
+
+  /* A form signed before the erasure cannot be submitted after it, and
+   * neither can a fresh one: nothing is written, and nothing falls back to
+   * the plain text. */
+  revisions = Revisions(ef_);
+  tenant_before = TenantExport();
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, SubmitFor(token, &conflict));
+  ASSERT_EQ(GDEFCORE_OK, SignFor(a_, ef_, "after erasure", &token));
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, SubmitFor(token, &conflict));
+  EXPECT_EQ(revisions, Revisions(ef_));
+  EXPECT_EQ(0u, BlindCount(a_));
+  {
+    std::vector<Artifact> arts;
+    std::vector<Needle> late;
+    AddForms(&late, "late edit", "late edit by a", false);
+    AddForms(&late, "after erasure", "after erasure", false);
+    AddZip(&arts, "tenant store snapshot", TenantExport(), true);
+    EXPECT_TRUE(Sweep(arts, late).empty());
+  }
+}
+
+/* A subject the store does not know: the sign takes the id on trust, the
+ * submit refuses it, and nothing is written. */
+TEST_F(Erasure, FormUnknownSubject) {
+  std::string token;
+  char ghost[GDEFCORE_PUBLIC_ID_LEN + 1];
+  char entity[GDEFCORE_PUBLIC_ID_LEN + 1];
+  int conflict = 3;
+  size_t before;
+  DefinePerson();
+  Login();
+  NewPerson(entity);
+  ASSERT_FALSE(HasFatalFailure());
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_id_generate(ghost));
+  ASSERT_EQ(GDEFCORE_OK, SignFor(ghost, entity, kCanary, &token));
+  before = Revisions(entity);
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, SubmitFor(token, &conflict));
+  EXPECT_EQ(before, Revisions(entity));
+  EXPECT_EQ("", Stored(entity, GDEFCORE_VIEW_DRAFT));
+  {
+    std::vector<Needle> needles;
+    std::vector<Artifact> arts;
+    AddForms(&needles, "canary", kCanary, false);
+    AddZip(&arts, "tenant store snapshot", TenantExport(), true);
+    EXPECT_TRUE(Sweep(arts, needles).empty());
+  }
+  /* A sign without a subject, a NULL store, and a bad id are refused. */
+  {
+    GDEFCORE_Value value;
+    const char * slot = NULL;
+    size_t slot_len = 0;
+    char * out = NULL;
+    size_t out_len = 0;
+    OneValue(&value, kField, kCanary, &slot, &slot_len);
+    EXPECT_EQ(GDEFCORE_ERR_INVALID,
+        gdefcore_form_sign_subject(catalog_, request_, Ring(), root_,
+            sizeof root_, session_.data(), session_.size(), "edit", 4, entity,
+            strlen(entity), "en", 2, &value, 1, NULL, 0, NULL, 0, &out,
+            &out_len));
+    EXPECT_EQ(GDEFCORE_ERR_INVALID,
+        gdefcore_form_sign_subject(catalog_, request_, Ring(), root_,
+            sizeof root_, session_.data(), session_.size(), "edit", 4, entity,
+            strlen(entity), "en", 2, &value, 1, NULL, 0, "not-an-id", 9, &out,
+            &out_len));
+    EXPECT_EQ(NULL, out);
+    EXPECT_EQ(GDEFCORE_ERR_INVALID,
+        gdefcore_form_submit_subject(catalog_, request_, Ring(), root_,
+            sizeof root_, session_.data(), session_.size(), token.data(),
+            token.size(), NULL, &conflict));
+  }
+}
+
+/* The subject is in what the token authenticates, like the session and the
+ * tenant. A form signed for one subject cannot be submitted for another, and
+ * cannot be made to claim none. */
+TEST_F(Erasure, FormSubjectBinding) {
+  std::string token;
+  std::string moved;
+  char entity[GDEFCORE_PUBLIC_ID_LEN + 1];
+  int conflict = 0;
+  size_t at;
+  size_t before;
+  DefinePerson();
+  Login();
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_subject_create(subjects_, a_));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_subject_create(subjects_, b_));
+  NewPerson(entity);
+  ASSERT_FALSE(HasFatalFailure());
+  ASSERT_EQ(GDEFCORE_OK, SignFor(a_, entity, kCanary, &token));
+  at = token.find(a_);
+  ASSERT_NE(std::string::npos, at) << "the subject is not in the token header";
+  before = Revisions(entity);
+
+  /* Moved to the other subject. */
+  moved = token;
+  moved.replace(at, strlen(b_), b_);
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, SubmitFor(moved, &conflict));
+  /* Made to claim no subject. */
+  moved = token;
+  moved.replace(at, GDEFCORE_PUBLIC_ID_LEN, std::string(GDEFCORE_PUBLIC_ID_LEN, '\0'));
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, SubmitFor(moved, &conflict));
+  EXPECT_EQ(before, Revisions(entity));
+  EXPECT_EQ(0u, BlindCount(a_));
+  EXPECT_EQ(0u, BlindCount(b_));
+  EXPECT_EQ("", Stored(entity, GDEFCORE_VIEW_DRAFT));
+
+  /* The untouched token is the control: it submits, for a and only a. */
+  ASSERT_EQ(GDEFCORE_OK, SubmitFor(token, &conflict));
+  EXPECT_EQ(1u, BlindCount(a_));
+  EXPECT_EQ(0u, BlindCount(b_));
+  Publish(entity);
+  EXPECT_EQ(kCanary, ReadAs(a_, entity));
+  EXPECT_NE(kCanary, ReadAs(b_, entity));
 }
 
 int main(int argc, char ** argv) {

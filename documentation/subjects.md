@@ -12,6 +12,16 @@ encrypted with that subject's key. The text stored on the entity is
 ciphertext. `gdefcore_entity_values` returns that stored text. It does
 not decrypt.
 
+Two routes store one: `gdefcore_subject_save`, and a form signed and
+submitted with `gdefcore_form_sign_subject` and
+`gdefcore_form_submit_subject`. Every other writer refuses a personal
+value (`gdefcore_entity_save`, the plain form route, a parsed patch),
+and a revert or publish refuses a personal value that is not sealed. The
+entity layer holds no key, so it checks that a value is shaped like a
+sealed one (`s1:` and hex), not that it is one. `gdefcore_subject_seal`
+and `gdefcore_subject_index` are the two halves of a save for a caller
+that has to stage the revision itself, as the form route does.
+
 A `secret` field is different. The password hash stays a secret under
 the tenant `secret` key. Subject erasure does not unwrap it, replace it,
 or bump the epoch that retires session tokens.
