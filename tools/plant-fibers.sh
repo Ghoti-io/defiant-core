@@ -69,7 +69,7 @@ pl_control() {
   [ -d "$PL_CONTROL" ] || pl_copy_tree "$PL_CONTROL"
   if ! pl_build "$PL_CONTROL" "$exe"; then
     printf '%s: the CONTROL (unpatched) copy does not build; log:\n' "$label" >&2
-    tail -30 "$PL_CONTROL.build.log" >&2
+    grep -E 'error|Error' "$PL_CONTROL.build.log" | cut -c1-300 | tail -10 >&2
     exit 1
   fi
   if ! pl_run "$PL_CONTROL" "$exe" "$filter" "$PL_SCRATCH/control.$exe.log"; then
@@ -113,7 +113,7 @@ PY
   rm -f "$dir/$BUILD_DIR/apps/$exe" "$dir/$BUILD_DIR"/apps/*.a "$dir/$BUILD_DIR"/apps/*.so*
   if ! pl_build "$dir" "$exe"; then
     printf '%s: %s: the planted copy does not build; log:\n' "$label" "$name" >&2
-    tail -30 "$dir.build.log" >&2
+    grep -E 'error|Error' "$dir.build.log" | cut -c1-300 | tail -10 >&2
     PL_FAIL=1
     return
   fi
