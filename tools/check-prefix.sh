@@ -4,8 +4,12 @@
 # another derived prefix, or if a dependency is not on an earlier line.
 #
 # Backend name "tor" derives GDEFSTOR (GDEFS + TOR) and is refused.
+# Backend names "foo-bar" and "foobar" both derive GDEFSFOOBAR (the hyphen
+# is dropped) and the second is refused.
 # The real libraries.txt must pass. A copy with defiant-storage-tor appended
-# must fail.
+# must fail. A copy with defiant-storage-foo-bar appended must pass (the
+# control for the collision plant), and one with defiant-storage-foobar
+# added after it must fail, naming both libraries.
 #
 # Usage: check-prefix.sh <libraries.txt>
 
@@ -120,13 +124,44 @@ if ! check_file "$FILE"; then
 fi
 
 plant=$(mktemp)
-trap 'rm -f "$plant"' EXIT
+err=$(mktemp)
+trap 'rm -f "$plant" "$err"' EXIT
 cp "$FILE" "$plant"
 printf '%s\n' \
   'defiant-storage-tor https://example.invalid master defiant-storage' \
   >> "$plant"
-if check_file "$plant"; then
+if check_file "$plant" 2>"$err"; then
   printf 'check-prefix: backend name tor was accepted\n' >&2
   exit 1
 fi
+if ! grep -q 'defiant-storage-tor derives GDEFSTOR, which is defiant-storage' "$err"; then
+  printf 'check-prefix: the tor plant failed, but not for the reserved prefix:\n' >&2
+  cat "$err" >&2
+  exit 1
+fi
 printf 'check-prefix: planted backend tor (derived GDEFSTOR) was refused\n'
+
+# Two derived prefixes colliding. The control first: foo-bar alone is a
+# legitimate library, so the refusal below can only be the collision.
+cp "$FILE" "$plant"
+printf '%s\n' \
+  'defiant-storage-foo-bar https://example.invalid master defiant-storage' \
+  >> "$plant"
+if ! check_file "$plant" >/dev/null 2>"$err"; then
+  printf 'check-prefix: the control (defiant-storage-foo-bar alone) was refused, so the collision plant below proves nothing:\n' >&2
+  cat "$err" >&2
+  exit 1
+fi
+printf '%s\n' \
+  'defiant-storage-foobar https://example.invalid master defiant-storage' \
+  >> "$plant"
+if check_file "$plant" >/dev/null 2>"$err"; then
+  printf 'check-prefix: defiant-storage-foo-bar and defiant-storage-foobar both derive GDEFSFOOBAR and were accepted\n' >&2
+  exit 1
+fi
+if ! grep -q 'defiant-storage-foobar derives GDEFSFOOBAR, which is defiant-storage-foo-bar' "$err"; then
+  printf 'check-prefix: the collision plant failed, but not for the collision:\n' >&2
+  cat "$err" >&2
+  exit 1
+fi
+printf 'check-prefix: planted foo-bar and foobar (both derive GDEFSFOOBAR) were refused\n'
