@@ -33,6 +33,7 @@
 
 #include <ghoti.io/defiant-core/access.h>
 #include <ghoti.io/cutil/allocator.h>
+#include <ghoti.io/cutil/fiber.h>
 #include <ghoti.io/archive/reader.h>
 #include <ghoti.io/archive/sink.h>
 #include <ghoti.io/archive/stream.h>
@@ -479,121 +480,106 @@ static void region_clear(RegionSet * set) {
   set->n = 0;
 }
 
-static GDEFCORE_Result tang_run(GDEFCORE_Catalog * catalog, const char * source,
-    size_t source_len, uint64_t scope_fuel, const TangBind * binds, size_t nbinds,
-    GLTANG_NativeFn native, void * native_user, const char * native_name,
-    char ** out, size_t * out_len) {
+typedef struct {
+  GDEFCORE_Catalog * catalog;
+  const char * source;
+  size_t source_len;
+  uint64_t scope_fuel;
+  const TangBind * binds;
+  size_t nbinds;
+  GLTANG_NativeFn native;
+  void * native_user;
+  const char * native_name;
+  char ** out;
+  size_t * out_len;
+  GDEFCORE_Result rc;
+} TangJob;
+
+/* A parse or compile refused for depth is a limit, not a format error. */
+static GDEFCORE_Result tang_refusal(GLTANG_Result result) {
+  return result == GLTANG_ERR_LIMIT ? GDEFCORE_ERR_LIMIT : GDEFCORE_ERR_FORMAT;
+}
+
+static GDEFCORE_Result tang_job_run(TangJob * job) {
+  GDEFCORE_Catalog * catalog = job->catalog;
   char * source_z = NULL;
   GLTANG_Tree * body_tree = NULL;
   GLTANG_Tree * wrap_tree = NULL;
   GLTANG_Program * body = NULL;
   GLTANG_Program * wrap = NULL;
   GLTANG_Library * lib = NULL;
-  GRCORE_Group * group = NULL;
-  GRCORE_Options * options = NULL;
-  GRHEAP_Options * heap_options = NULL;
-  GRCORE_Context * context = NULL;
-  GRHEAP_Heap * heap = NULL;
-  GLTANG_Execution * execution = NULL;
+  GDEFCORE_RenderCtx * ctx = NULL;
   char * rendered = NULL;
   size_t rendered_len = 0;
   GDEFCORE_Result rc = GDEFCORE_ERR_INVALID;
+  GLTANG_Result step;
   GLTANG_ParseError error;
-  GRCORE_Outcome outcome = GRCORE_OUTCOME_FINISHED;
   uint64_t ceiling;
   size_t i;
-  if (catalog == NULL || source == NULL || out == NULL || out_len == NULL ||
-      scope_fuel == 0) {
-    return GDEFCORE_ERR_INVALID;
-  }
-  source_z = (char *)malloc(source_len + 1);
+  source_z = (char *)malloc(job->source_len + 1);
   if (source_z == NULL) {
     return GDEFCORE_ERR_OOM;
   }
-  if (source_len > 0) {
-    memcpy(source_z, source, source_len);
+  if (job->source_len > 0) {
+    memcpy(source_z, job->source, job->source_len);
   }
-  source_z[source_len] = '\0';
-  if (gltang_parse(source_z, GLTANG_PARSE_TEMPLATE, &error, &body_tree) !=
-          GLTANG_OK ||
-      gltang_compile(body_tree, "pane.tang", &error, &body) != GLTANG_OK ||
-      gltang_parse(kWrap, GLTANG_PARSE_SCRIPT, &error, &wrap_tree) != GLTANG_OK ||
-      gltang_compile(wrap_tree, "wrap.tang", &error, &wrap) != GLTANG_OK) {
-    rc = GDEFCORE_ERR_FORMAT;
+  source_z[job->source_len] = '\0';
+  step = gltang_parse(source_z, GLTANG_PARSE_TEMPLATE, &error, &body_tree);
+  if (step == GLTANG_OK) {
+    step = gltang_compile(body_tree, "pane.tang", &error, &body);
+  }
+  if (step == GLTANG_OK) {
+    step = gltang_parse(kWrap, GLTANG_PARSE_SCRIPT, &error, &wrap_tree);
+  }
+  if (step == GLTANG_OK) {
+    step = gltang_compile(wrap_tree, "wrap.tang", &error, &wrap);
+  }
+  if (step != GLTANG_OK) {
+    rc = tang_refusal(step);
     goto done;
   }
   if (gltang_library_create(NULL, &lib) != GLTANG_OK) {
     rc = GDEFCORE_ERR_OOM;
     goto done;
   }
-  for (i = 0; i < nbinds; i++) {
-    const char * text = binds[i].text == NULL ? "" : binds[i].text;
-    if (gltang_library_add_string(lib, binds[i].name, text, binds[i].len,
-            GLTANG_UNICODE_STRING_TYPE_TRUSTED) != GLTANG_OK) {
+  for (i = 0; i < job->nbinds; i++) {
+    const char * text = job->binds[i].text == NULL ? "" : job->binds[i].text;
+    if (gltang_library_add_string(lib, job->binds[i].name, text,
+            job->binds[i].len, GLTANG_UNICODE_STRING_TYPE_TRUSTED) != GLTANG_OK) {
       rc = GDEFCORE_ERR_INVALID;
       goto done;
     }
   }
-  if (native != NULL &&
-      gltang_library_add_native(lib, native_name, native, native_user) !=
-          GLTANG_OK) {
+  if (job->native != NULL &&
+      gltang_library_add_native(lib, job->native_name, job->native,
+          job->native_user) != GLTANG_OK) {
     rc = GDEFCORE_ERR_INVALID;
     goto done;
   }
-  if (gltang_library_add_template(lib, "pane", body, scope_fuel,
+  if (gltang_library_add_template(lib, "pane", body, job->scope_fuel,
           GLTANG_SCOPE_SEGMENTS) != GLTANG_OK) {
     rc = GDEFCORE_ERR_INVALID;
     goto done;
   }
-  ceiling = scope_fuel;
+  ceiling = job->scope_fuel;
   if (ceiling <= UINT64_MAX - 1000000ull) {
     ceiling += 1000000ull;
   }
-  if (grcore_group_create(NULL, NULL, &group) != GRCORE_OK ||
-      grcore_options_create(NULL, &options) != GRCORE_OK ||
-      grheap_options_create(NULL, &heap_options) != GRHEAP_OK) {
-    rc = GDEFCORE_ERR_OOM;
+  rc = gdefcore_render_ctx_open(ceiling, &ctx);
+  if (rc != GDEFCORE_OK) {
     goto done;
   }
-  grcore_options_set_fuel(options, ceiling);
-  if (gltang_heap_options_configure(heap_options) != GLTANG_OK ||
-      grcore_context_create(group, options, &context) != GRCORE_OK ||
-      grheap_heap_create(context, heap_options, &heap) != GRHEAP_OK ||
-      gltang_execution_create(context, wrap, &execution) != GLTANG_OK ||
-      gltang_execution_set_libraries(execution, lib) != GLTANG_OK) {
-    rc = GDEFCORE_ERR_OOM;
+  rc = gdefcore_render_ctx_run(ctx, wrap, lib, &rendered, &rendered_len);
+  if (rc != GDEFCORE_OK) {
     goto done;
   }
-  if (grcore_run(context, gltang_execution_entry, execution, &outcome) !=
-          GRCORE_OK ||
-      outcome != GRCORE_OUTCOME_FINISHED) {
-    rc = GDEFCORE_ERR_LIMIT;
-    goto done;
-  }
-  if (gltang_execution_output_render(execution, &rendered, &rendered_len) !=
-      GLTANG_OK) {
-    rc = GDEFCORE_ERR_OOM;
-    goto done;
-  }
-  rc = gdefcore_text_dup(catalog, rendered, rendered_len, out);
+  rc = gdefcore_text_dup(catalog, rendered, rendered_len, job->out);
   if (rc == GDEFCORE_OK) {
-    *out_len = rendered_len;
+    *job->out_len = rendered_len;
   }
 done:
-  (void)heap;
   gltang_buffer_free(rendered);
-  if (context != NULL) {
-    grcore_context_destroy(context);
-  }
-  if (heap_options != NULL) {
-    grheap_options_destroy(heap_options);
-  }
-  if (options != NULL) {
-    grcore_options_destroy(options);
-  }
-  if (group != NULL) {
-    grcore_group_destroy(group);
-  }
+  gdefcore_render_ctx_close(ctx);
   gltang_library_release(lib);
   gltang_program_release(wrap);
   gltang_program_release(body);
@@ -601,6 +587,59 @@ done:
   gltang_tree_destroy(body_tree);
   free(source_z);
   return rc;
+}
+
+static void tang_job_entry(void * arg) {
+  TangJob * job = (TangJob *)arg;
+  job->rc = tang_job_run(job);
+}
+
+/*
+ * Parse, compile and run on a stack of our own (AD-32). The caller's fiber
+ * may have 16 KiB, and lang-tang recurses once per level of a tree.
+ */
+static GDEFCORE_Result side_stack_run(TangJob * job) {
+#if GCU_FIBER_SUPPORTED
+  GCU_Fiber * fiber = NULL;
+  GCU_Fiber_Result made = gcu_fiber_create(
+      &fiber, tang_job_entry, job, GDEFCORE_RENDER_SIDE_STACK, NULL);
+  if (made != GCU_FIBER_OK) {
+    return made == GCU_FIBER_ERR_OOM ? GDEFCORE_ERR_OOM
+                                     : GDEFCORE_ERR_UNSUPPORTED;
+  }
+  job->rc = GDEFCORE_ERR_INTERNAL;
+  if (gcu_fiber_switch_to(fiber) != GCU_FIBER_OK) {
+    job->rc = GDEFCORE_ERR_INTERNAL;
+  }
+  gcu_fiber_destroy(fiber);
+  return job->rc;
+#else
+  return tang_job_run(job);
+#endif
+}
+
+static GDEFCORE_Result tang_run(GDEFCORE_Catalog * catalog, const char * source,
+    size_t source_len, uint64_t scope_fuel, const TangBind * binds, size_t nbinds,
+    GLTANG_NativeFn native, void * native_user, const char * native_name,
+    char ** out, size_t * out_len) {
+  TangJob job;
+  if (catalog == NULL || source == NULL || out == NULL || out_len == NULL ||
+      scope_fuel == 0) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  job.catalog = catalog;
+  job.source = source;
+  job.source_len = source_len;
+  job.scope_fuel = scope_fuel;
+  job.binds = binds;
+  job.nbinds = nbinds;
+  job.native = native;
+  job.native_user = native_user;
+  job.native_name = native_name;
+  job.out = out;
+  job.out_len = out_len;
+  job.rc = GDEFCORE_ERR_INVALID;
+  return side_stack_run(&job);
 }
 
 static GDEFCORE_Result access_copy(GDEFCORE_Catalog * catalog,

@@ -34,7 +34,10 @@ pl_init() {
   PL_FAIL=0
   rm -rf "$PL_SCRATCH"
   mkdir -p "$PL_SCRATCH"
-  trap 'rm -rf "$PL_SCRATCH"' EXIT
+  # GHOTI_CHECK_KEEP=1 leaves the copies and their logs for reading.
+  if [ -z "${GHOTI_CHECK_KEEP:-}" ]; then
+    trap 'rm -rf "$PL_SCRATCH"' EXIT
+  fi
 }
 
 pl_copy_tree() {
