@@ -26,6 +26,7 @@
 
 #include <ghoti.io/defiant-core/defiant-core.h>
 #include <ghoti.io/defiant-storage-memory/memory.h>
+#include <ghoti.io/defiant-storage/snapshot.h>
 
 #include <gtest/gtest.h>
 
@@ -33,6 +34,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #include <string>
 
@@ -40,11 +42,6 @@ namespace {
 
 const uint64_t kLife = 3600;
 const char * kPost = "site.post";
-
-const char * Plant() {
-  const char * plant = getenv("GHOTI_FORM_PLANT");
-  return plant == NULL ? "" : plant;
-}
 
 GDEFCORE_Field Field(const char * name, int required, size_t min_len,
     size_t max_len, int has_range, int64_t range_min, int64_t range_max,
@@ -486,6 +483,9 @@ TEST_F(Form, OtherSession) {
   EXPECT_EQ(0, conflict);
   EXPECT_EQ(0u, Revision(id));
   gdefcore_text_free(catalog_, other);
+  /* The control: the session the token was signed under still submits it. */
+  ASSERT_EQ(GDEFCORE_OK, Submit(token, &conflict));
+  EXPECT_EQ(1u, Revision(id));
 }
 
 TEST_F(Form, OtherTenant) {
@@ -519,6 +519,42 @@ TEST_F(Form, OtherTenant) {
   gdefcore_request_destroy(other_request);
   gdefcore_catalog_destroy(other);
   gdefstor_store_destroy(other_store);
+
+  /*
+   * The same session and token under a tenant holding a copy of every row.
+   * Only the tenant bytes differ, so the associated data is the one thing
+   * that can refuse it. The separate empty store above is refused for want
+   * of an account, whatever the token says.
+   */
+  {
+    uint8_t * zip = NULL;
+    size_t zip_len = 0;
+    const char tenant_t[] = {'t'};
+    const uint8_t clone[] = {'v'};
+    GDEFCORE_Catalog * twin = NULL;
+    GDEFCORE_Request * twin_request = NULL;
+    uint64_t seq = 99;
+    ASSERT_EQ(GDEFSTOR_OK,
+        gdefstor_snapshot_export(store_, tenant_t, 1, NULL, &zip, &zip_len));
+    ASSERT_EQ(GDEFSTOR_OK,
+        gdefstor_snapshot_import(store_, "v", 1, zip, zip_len, NULL));
+    gdefstor_bytes_free(NULL, zip);
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_catalog_open(store_, clone, 1, NULL, NULL, &twin));
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_request_create(clone, 1, 0, 0, NULL, &twin_request));
+    conflict = 1;
+    EXPECT_NE(GDEFCORE_OK,
+        gdefcore_form_submit(twin, twin_request, keyring_, root_, sizeof root_,
+            session_.data(), session_.size(), token.data(), token.size(),
+            &conflict));
+    EXPECT_EQ(0, conflict);
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_entity_revision(twin, id, strlen(id), &seq));
+    EXPECT_EQ(0u, seq);
+    gdefcore_request_destroy(twin_request);
+    gdefcore_catalog_destroy(twin);
+  }
 }
 
 TEST_F(Form, Unsigned) {
@@ -556,6 +592,70 @@ TEST_F(Form, Replay) {
   EXPECT_EQ(1, conflict);
   EXPECT_EQ(1u, Revision(id));
   EXPECT_EQ(std::string("Hello"), Read(id, "title", GDEFCORE_VIEW_DRAFT, NULL));
+}
+
+/*
+ * A form signed against revision N is refused once the entity is at N+1, and
+ * the refusal says conflict, not tamper. The fresh form is the control.
+ */
+TEST_F(Form, StaleBase) {
+  GDEFCORE_Field field = Field("title", 1, 0, 0, 0, 0, 0, NULL);
+  GDEFCORE_Value value;
+  const char * slot = NULL;
+  size_t len_slot = 0;
+  char id[GDEFCORE_PUBLIC_ID_LEN + 1];
+  std::string stale;
+  std::string fresh;
+  int conflict = 0;
+  Login();
+  Define(&field, 1);
+  Create(id);
+  OneValue(&value, "title", "one", &slot, &len_slot);
+  stale = Sign(id, &value, 1, NULL, 0);
+  OneValue(&value, "title", "two", &slot, &len_slot);
+  fresh = Sign(id, &value, 1, NULL, 0);
+  ASSERT_FALSE(stale.empty());
+  ASSERT_FALSE(fresh.empty());
+  ASSERT_EQ(GDEFCORE_OK, Submit(fresh, &conflict));
+  EXPECT_EQ(0, conflict);
+  EXPECT_EQ(1u, Revision(id));
+  conflict = 0;
+  EXPECT_NE(GDEFCORE_OK, Submit(stale, &conflict));
+  EXPECT_EQ(1, conflict);
+  EXPECT_EQ(1u, Revision(id));
+  EXPECT_EQ(std::string("two"), Read(id, "title", GDEFCORE_VIEW_DRAFT, NULL));
+  OneValue(&value, "title", "three", &slot, &len_slot);
+  fresh = Sign(id, &value, 1, NULL, 0);
+  conflict = 1;
+  ASSERT_EQ(GDEFCORE_OK, Submit(fresh, &conflict));
+  EXPECT_EQ(0, conflict);
+  EXPECT_EQ(2u, Revision(id));
+}
+
+/*
+ * A form is capped at its session's expiry, so an expired form is refused
+ * whichever layer sees it first. The form's own expiry compare is behind the
+ * session check and cannot be reached alone; this test is the observable
+ * behaviour, not a plant target.
+ */
+TEST_F(Form, Expired) {
+  GDEFCORE_Field field = Field("title", 1, 0, 0, 0, 0, 0, NULL);
+  GDEFCORE_Value value;
+  const char * slot = NULL;
+  size_t len_slot = 0;
+  char id[GDEFCORE_PUBLIC_ID_LEN + 1];
+  std::string token;
+  int conflict = 1;
+  LoginFor(1);
+  Define(&field, 1);
+  Create(id);
+  OneValue(&value, "title", "late", &slot, &len_slot);
+  token = Sign(id, &value, 1, NULL, 0);
+  ASSERT_FALSE(token.empty());
+  sleep(2);
+  EXPECT_NE(GDEFCORE_OK, Submit(token, &conflict));
+  EXPECT_EQ(0, conflict);
+  EXPECT_EQ(0u, Revision(id));
 }
 
 TEST_F(Form, Resign) {
@@ -876,11 +976,6 @@ TEST_F(Form, Gate) {
   OneValue(&value, "title", "kept", &slot, &len_slot);
   token = Sign(id, &value, 1, NULL, 0);
   ASSERT_FALSE(token.empty());
-  if (strcmp(Plant(), "skip-tag") == 0) {
-    token[token.size() - 1] = (char)(token[token.size() - 1] ^ 0x01);
-    EXPECT_EQ(GDEFCORE_OK, Submit(token, &conflict));
-    return;
-  }
   ASSERT_EQ(GDEFCORE_OK, Submit(token, &conflict));
   EXPECT_EQ(0, conflict);
   EXPECT_EQ(std::string("kept"), Read(id, "title", GDEFCORE_VIEW_DRAFT, NULL));

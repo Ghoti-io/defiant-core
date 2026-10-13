@@ -26,6 +26,7 @@
 
 #include <ghoti.io/defiant-core/defiant-core.h>
 #include <ghoti.io/defiant-storage-memory/memory.h>
+#include <ghoti.io/defiant-storage/snapshot.h>
 
 #include <gtest/gtest.h>
 
@@ -39,11 +40,6 @@
 namespace {
 
 const uint64_t kLife = 3600;
-
-const char * Plant() {
-  const char * plant = getenv("GHOTI_ACCOUNT_PLANT");
-  return plant == NULL ? "" : plant;
-}
 
 int HexNibble(char c) {
   if (c >= '0' && c <= '9') {
@@ -145,6 +141,36 @@ class Account : public ::testing::Test {
 
   const char * Principal(size_t * out_len) {
     return gdefcore_request_principal(request_, out_len);
+  }
+
+  /*
+   * The positive control. A token that is live names its principal. Every
+   * revocation test starts here, so that "anonymous afterwards" cannot be a
+   * check that has always answered anonymous.
+   */
+  void ExpectLive(const std::string & token, const char * principal) {
+    size_t n = 0;
+    const char * who = NULL;
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_account_check(catalog_, request_, keyring_, root_,
+            sizeof root_, token.data(), token.size()));
+    who = Principal(&n);
+    ASSERT_NE(who, nullptr);
+    EXPECT_EQ(std::string(principal), std::string(who, n));
+  }
+
+  /*
+   * The request starts as someone else, so a check that left the request
+   * alone would read as a failure here rather than as anonymous.
+   */
+  void ExpectAnonymous(const std::string & token, const char * stand_in) {
+    size_t n = 0;
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_request_set_principal(request_, stand_in, strlen(stand_in)));
+    EXPECT_EQ(GDEFCORE_OK,
+        gdefcore_account_check(catalog_, request_, keyring_, root_,
+            sizeof root_, token.data(), token.size()));
+    EXPECT_EQ(Principal(&n), nullptr);
   }
 };
 
@@ -264,6 +290,49 @@ TEST_F(Account, OtherTenant) {
   gdefcore_catalog_destroy(catalog_b);
   EXPECT_EQ(GDEFCORE_ERR_INVALID, rc);
   EXPECT_EQ(who, nullptr);
+
+  /*
+   * The same session under a tenant that holds a copy of every row, the
+   * account, its principal and its epoch included. Nothing is different
+   * but the tenant bytes, so the tenant in the associated data is the only
+   * thing standing in the way. The empty tenant above is refused for want of
+   * an account, whatever the token says.
+   */
+  {
+    uint8_t * zip = NULL;
+    size_t zip_len = 0;
+    const char tenant_t[] = {'t'};
+    ASSERT_EQ(GDEFSTOR_OK,
+        gdefstor_snapshot_export(store_, tenant_t, 1, NULL, &zip, &zip_len));
+    ASSERT_EQ(GDEFSTOR_OK,
+        gdefstor_snapshot_import(store_, "v", 1, zip, zip_len, NULL));
+    gdefstor_bytes_free(NULL, zip);
+  }
+  {
+    const uint8_t clone[] = {'v'};
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_catalog_open(store_, clone, 1, NULL, NULL, &catalog_b));
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_request_create(clone, 1, 0, 0, NULL, &request_b));
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_request_set_principal(request_b, admin, strlen(admin)));
+    /* The control: the clone holds the account and its epoch. */
+    {
+      uint64_t copied = 0;
+      ASSERT_EQ(GDEFCORE_OK,
+          gdefcore_account_epoch(catalog_b, id, strlen(id), &copied));
+      EXPECT_EQ(Epoch(id), copied);
+    }
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_request_set_principal(request_b, admin, strlen(admin)));
+    rc = gdefcore_account_check(catalog_b, request_b, keyring_, root_,
+        sizeof root_, token.data(), token.size());
+    who = gdefcore_request_principal(request_b, &n);
+    gdefcore_request_destroy(request_b);
+    gdefcore_catalog_destroy(catalog_b);
+    EXPECT_EQ(GDEFCORE_ERR_INVALID, rc);
+    EXPECT_EQ(who, nullptr);
+  }
 }
 
 TEST_F(Account, OtherKey) {
@@ -290,7 +359,6 @@ TEST_F(Account, Epoch) {
   char id[GDEFCORE_PUBLIC_ID_LEN + 1];
   std::string before;
   std::string token;
-  size_t n = 0;
   uint64_t epoch = 0;
   ASSERT_EQ(GDEFCORE_OK, gdefcore_access_admin_principal(catalog_, admin));
   ASSERT_EQ(GDEFCORE_OK,
@@ -299,6 +367,7 @@ TEST_F(Account, Epoch) {
   EXPECT_EQ(1u, Epoch(id));
   before = Field(id, "password");
   token = Login("ada", "secret");
+  ExpectLive(token, admin);
   EXPECT_EQ(GDEFCORE_ERR_INVALID,
       gdefcore_account_password(catalog_, keyring_, root_, sizeof root_, id,
           strlen(id), "next", 4, "nope", 4));
@@ -310,10 +379,7 @@ TEST_F(Account, Epoch) {
   epoch = Epoch(id);
   EXPECT_GT(epoch, 1u);
   EXPECT_NE(before, Field(id, "password"));
-  EXPECT_EQ(GDEFCORE_OK,
-      gdefcore_account_check(catalog_, request_, keyring_, root_, sizeof root_,
-          token.data(), token.size()));
-  EXPECT_EQ(Principal(&n), nullptr);
+  ExpectAnonymous(token, admin);
   EXPECT_FALSE(Login("ada", "next").empty());
   {
     char * old = (char *)0x1;
@@ -330,22 +396,19 @@ TEST_F(Account, LogOut) {
   char admin[GDEFCORE_PUBLIC_ID_LEN + 1];
   char id[GDEFCORE_PUBLIC_ID_LEN + 1];
   std::string token;
-  size_t n = 0;
   ASSERT_EQ(GDEFCORE_OK, gdefcore_access_admin_principal(catalog_, admin));
   ASSERT_EQ(GDEFCORE_OK,
       gdefcore_account_bind(catalog_, keyring_, root_, sizeof root_, admin,
           strlen(admin), "ada", 3, "secret", 6, id));
   token = Login("ada", "secret");
+  ExpectLive(token, admin);
   EXPECT_EQ(GDEFCORE_ERR_INVALID,
       gdefcore_account_logout_everywhere(catalog_, id, strlen(id), "nope", 4));
   EXPECT_EQ(1u, Epoch(id));
   ASSERT_EQ(GDEFCORE_OK,
       gdefcore_account_logout_everywhere(catalog_, id, strlen(id), "ada", 3));
   EXPECT_GT(Epoch(id), 1u);
-  EXPECT_EQ(GDEFCORE_OK,
-      gdefcore_account_check(catalog_, request_, keyring_, root_, sizeof root_,
-          token.data(), token.size()));
-  EXPECT_EQ(Principal(&n), nullptr);
+  ExpectAnonymous(token, admin);
 }
 
 TEST_F(Account, Demotion) {
@@ -355,7 +418,6 @@ TEST_F(Account, Demotion) {
   char ** roles = NULL;
   size_t count = 0;
   std::string token;
-  size_t n = 0;
   ASSERT_EQ(GDEFCORE_OK, gdefcore_access_admin_principal(catalog_, admin));
   ASSERT_EQ(GDEFCORE_OK,
       gdefcore_account_create(catalog_, keyring_, root_, sizeof root_, "ada",
@@ -367,6 +429,7 @@ TEST_F(Account, Demotion) {
       gdefcore_access_principal_add_role(catalog_, principal, strlen(principal),
           "editor", 6));
   token = Login("ada", "secret");
+  ExpectLive(token, principal);
   EXPECT_EQ(1u, Epoch(id));
   ASSERT_EQ(GDEFCORE_OK,
       gdefcore_account_remove_role(catalog_, id, strlen(id), "editor", 6));
@@ -376,24 +439,24 @@ TEST_F(Account, Demotion) {
           &roles, &count));
   EXPECT_EQ(0u, count);
   gdefcore_access_free(catalog_, roles, count);
-  EXPECT_EQ(GDEFCORE_OK,
-      gdefcore_account_check(catalog_, request_, keyring_, root_, sizeof root_,
-          token.data(), token.size()));
-  EXPECT_EQ(Principal(&n), nullptr);
+  ExpectAnonymous(token, principal);
 }
 
 TEST_F(Account, LastIdentifier) {
   char admin[GDEFCORE_PUBLIC_ID_LEN + 1];
   char id[GDEFCORE_PUBLIC_ID_LEN + 1];
+  std::string token;
   ASSERT_EQ(GDEFCORE_OK, gdefcore_access_admin_principal(catalog_, admin));
   ASSERT_EQ(GDEFCORE_OK,
       gdefcore_account_bind(catalog_, keyring_, root_, sizeof root_, admin,
           strlen(admin), "ada", 3, "secret", 6, id));
   EXPECT_EQ(1u, Epoch(id));
+  token = Login("ada", "secret");
   EXPECT_EQ(GDEFCORE_ERR_INVALID,
       gdefcore_account_remove_identifier(catalog_, id, strlen(id), "ada", 3));
   EXPECT_EQ(1u, Epoch(id));
   EXPECT_EQ("ada", Field(id, "username"));
+  ExpectLive(token, admin);
 }
 
 TEST_F(Account, Revert) {
@@ -401,7 +464,6 @@ TEST_F(Account, Revert) {
   char id[GDEFCORE_PUBLIC_ID_LEN + 1];
   std::string original;
   std::string token;
-  size_t n = 0;
   uint64_t raised = 0;
   ASSERT_EQ(GDEFCORE_OK, gdefcore_access_admin_principal(catalog_, admin));
   ASSERT_EQ(GDEFCORE_OK,
@@ -409,6 +471,7 @@ TEST_F(Account, Revert) {
           strlen(admin), "ada", 3, "secret", 6, id));
   original = Field(id, "password");
   token = Login("ada", "secret");
+  ExpectLive(token, admin);
   ASSERT_EQ(GDEFCORE_OK,
       gdefcore_account_password(catalog_, keyring_, root_, sizeof root_, id,
           strlen(id), "next", 4, "ada", 3));
@@ -418,35 +481,69 @@ TEST_F(Account, Revert) {
   ASSERT_EQ(GDEFCORE_OK, gdefcore_account_revert(catalog_, id, strlen(id)));
   EXPECT_EQ(raised, Epoch(id));
   EXPECT_EQ(original, Field(id, "password"));
-  EXPECT_EQ(GDEFCORE_OK,
-      gdefcore_account_check(catalog_, request_, keyring_, root_, sizeof root_,
-          token.data(), token.size()));
-  EXPECT_EQ(Principal(&n), nullptr);
+  ExpectAnonymous(token, admin);
 }
 
+/*
+ * The session-revocation gate. Every trigger the library offers moves the
+ * security epoch, and the next request on an older token is anonymous. A
+ * fresh login after the trigger is live again, which is the control that
+ * says the check still lets a good session through.
+ *
+ * Triggers with no function in this library, so no test here: account
+ * recovery, a revoked delegation, and erasure of a subject. Removing a login
+ * identifier is refused (the only identifier is the last one), so its test is
+ * that the refusal leaves the session alone.
+ */
 TEST_F(Account, Revocation) {
   char admin[GDEFCORE_PUBLIC_ID_LEN + 1];
+  char principal[GDEFCORE_PUBLIC_ID_LEN + 1];
   char id[GDEFCORE_PUBLIC_ID_LEN + 1];
-  std::string token;
-  size_t n = 0;
+  std::string first;
+  std::string second;
+  std::string third;
+  std::string fourth;
   ASSERT_EQ(GDEFCORE_OK, gdefcore_access_admin_principal(catalog_, admin));
   ASSERT_EQ(GDEFCORE_OK,
-      gdefcore_account_bind(catalog_, keyring_, root_, sizeof root_, admin,
-          strlen(admin), "ada", 3, "secret", 6, id));
-  token = Login("ada", "secret");
+      gdefcore_account_create(catalog_, keyring_, root_, sizeof root_, "ada", 3,
+          "secret", 6, principal, id));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_access_role_create(catalog_, "editor", 6, NULL));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_access_principal_add_role(catalog_, principal, strlen(principal),
+          "editor", 6));
+
+  /* Password change. */
+  first = Login("ada", "secret");
+  ExpectLive(first, principal);
   ASSERT_EQ(GDEFCORE_OK,
       gdefcore_account_password(catalog_, keyring_, root_, sizeof root_, id,
           strlen(id), "next", 4, "ada", 3));
   EXPECT_GT(Epoch(id), 1u);
-  if (strcmp(Plant(), "skip-epoch") == 0) {
-    ASSERT_EQ(GDEFCORE_OK,
-        gdefcore_request_set_principal(request_, admin, strlen(admin)));
-  } else {
-    EXPECT_EQ(GDEFCORE_OK,
-        gdefcore_account_check(catalog_, request_, keyring_, root_,
-            sizeof root_, token.data(), token.size()));
-  }
-  EXPECT_EQ(Principal(&n), nullptr);
+  ExpectAnonymous(first, admin);
+
+  /* Log out everywhere. */
+  second = Login("ada", "next");
+  ExpectLive(second, principal);
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_account_logout_everywhere(catalog_, id, strlen(id), "ada", 3));
+  ExpectAnonymous(second, admin);
+  ExpectAnonymous(first, admin);
+
+  /* Demotion. */
+  third = Login("ada", "next");
+  ExpectLive(third, principal);
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_account_remove_role(catalog_, id, strlen(id), "editor", 6));
+  ExpectAnonymous(third, admin);
+
+  /* Removing the only login identifier is refused and ends nothing. */
+  fourth = Login("ada", "next");
+  ExpectLive(fourth, principal);
+  EXPECT_EQ(GDEFCORE_ERR_INVALID,
+      gdefcore_account_remove_identifier(catalog_, id, strlen(id), "ada", 3));
+  ExpectLive(fourth, principal);
+  ExpectAnonymous(third, admin);
 }
 
 TEST_F(Account, ArgonCosts) {
