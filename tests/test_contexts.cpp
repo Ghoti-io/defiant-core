@@ -350,9 +350,11 @@ TEST(Contexts, HarnessSeesACrash) {
   }
   ASSERT_EQ(pid, waitpid(pid, &status, 0));
   v.exited = WIFEXITED(status);
+  v.code = v.exited ? WEXITSTATUS(status) : -1;
   v.signal = WIFSIGNALED(status) ? WTERMSIG(status) : 0;
-  EXPECT_FALSE(v.exited) << "the overflowing child exited";
-  EXPECT_EQ(SIGSEGV, v.signal);
+  /* A plain build dies of SIGSEGV; under AddressSanitizer its handler reports
+   * the overflow and exits non-zero. Either way it did not exit 0. */
+  EXPECT_FALSE(v.exited && v.code == 0) << "the overflowing child exited 0";
   /* And the opposite control: a child whose render gives the wanted result
    * exits 0, and one that gives another result does not. */
   v = InChild(Case{"<% x = 1; %>OK", 1000000}, GDEFCORE_OK, "OK");
