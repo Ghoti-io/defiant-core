@@ -1304,6 +1304,9 @@ TEST_F(Erasure, FormPlainRouteOtherFields) {
       gdefcore_form_sign(catalog_, request_, Ring(), root_, sizeof root_,
           session_.data(), session_.size(), "edit", 4, entity, strlen(entity),
           "en", 2, values, 1, NULL, 0, &token, &token_len));
+  /* A token with no subject keeps the layout it always had: a reader of the
+   * clear header (the admin's) sees version 1. */
+  EXPECT_EQ(1, static_cast<int>(static_cast<unsigned char>(token[0])));
   ASSERT_EQ(GDEFCORE_OK,
       gdefcore_form_submit(catalog_, request_, Ring(), root_, sizeof root_,
           session_.data(), session_.size(), token, token_len, &conflict));
@@ -1836,6 +1839,7 @@ TEST_F(Erasure, FormSubjectBinding) {
   NewPerson(entity);
   ASSERT_FALSE(HasFatalFailure());
   ASSERT_EQ(GDEFCORE_OK, SignFor(a_, entity, kCanary, &token));
+  EXPECT_EQ(2, static_cast<int>(token[0]));
   at = token.find(a_);
   ASSERT_NE(std::string::npos, at) << "the subject is not in the token header";
   before = Revisions(entity);
@@ -1847,6 +1851,12 @@ TEST_F(Erasure, FormSubjectBinding) {
   /* Made to claim no subject. */
   moved = token;
   moved.replace(at, GDEFCORE_PUBLIC_ID_LEN, std::string(GDEFCORE_PUBLIC_ID_LEN, '\0'));
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, SubmitFor(moved, &conflict));
+  /* Made to claim no subject by the older layout: the version byte says 1 and
+   * the subject's bytes are cut out. */
+  moved = token;
+  moved.erase(at, GDEFCORE_PUBLIC_ID_LEN);
+  moved[0] = 1;
   EXPECT_EQ(GDEFCORE_ERR_INVALID, SubmitFor(moved, &conflict));
   EXPECT_EQ(before, Revisions(entity));
   EXPECT_EQ(0u, BlindCount(a_));

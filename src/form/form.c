@@ -46,7 +46,8 @@
 #include <time.h>
 
 enum {
-  kVersion = 2,
+  kVersion = 1,
+  kVersionSubject = 2,
   kAlg = 1,
   kKeyId = 1,
   kKey = 32,
@@ -64,9 +65,12 @@ enum {
 static const char kPurpose[] = "form";
 static const char kAliasType[] = "core.alias";
 static const char kTitle[] = "title";
-/* The subject slot of a token that carries no subject. A canonical public id
- * is never all zero bytes. */
-static const char kNoSubject[GDEFCORE_PUBLIC_ID_LEN] = {0};
+/* A token with no subject is version 1 and its layout has not changed, so a
+ * reader of it (the admin reads the form id, target and base at fixed
+ * offsets) is not affected. A token with a subject is version 2: the same
+ * layout with the subject's public id after the base, and in the associated
+ * data. The version byte is not authenticated by itself; the associated data
+ * differs between the two, so a token cannot change from one to the other. */
 
 typedef struct FormField {
   char * name;
@@ -833,7 +837,7 @@ static GDEFCORE_Result read_plain(GDEFCORE_Catalog * catalog, const uint8_t * p,
 static GDEFCORE_Result build_aad(GDEFCORE_Catalog * catalog,
     const char * session, size_t session_len, const char * principal,
     size_t principal_len, const char * form_id, size_t form_id_len,
-    const char * target, const char * subject, uint64_t expiry, uint64_t base,
+    const char * target, uint64_t expiry, uint64_t base, const char * subject,
     uint8_t ** out, size_t * out_len) {
   const uint8_t * tenant = NULL;
   size_t tenant_len = 0;
@@ -846,8 +850,8 @@ static GDEFCORE_Result build_aad(GDEFCORE_Catalog * catalog,
     return GDEFCORE_ERR_INVALID;
   }
   n = 4 + tenant_len + strlen(kPurpose) + 1 + 8 + 4 + session_len + 2 +
-      principal_len + 2 + form_id_len + GDEFCORE_PUBLIC_ID_LEN +
-      GDEFCORE_PUBLIC_ID_LEN + 8;
+      principal_len + 2 + form_id_len + GDEFCORE_PUBLIC_ID_LEN + 8 +
+      (subject == NULL ? 0 : GDEFCORE_PUBLIC_ID_LEN);
   aad = cat_zalloc(catalog, n);
   if (aad == NULL) {
     return GDEFCORE_ERR_OOM;
@@ -867,8 +871,10 @@ static GDEFCORE_Result build_aad(GDEFCORE_Catalog * catalog,
       !put_u16_at(aad, n, &at, (uint16_t)form_id_len) ||
       !put_bytes(aad, n, &at, form_id, form_id_len) ||
       !put_bytes(aad, n, &at, target, GDEFCORE_PUBLIC_ID_LEN) ||
-      !put_bytes(aad, n, &at, subject, GDEFCORE_PUBLIC_ID_LEN) ||
-      !put_u64_at(aad, n, &at, base) || at != n) {
+      !put_u64_at(aad, n, &at, base) ||
+      (subject != NULL &&
+          !put_bytes(aad, n, &at, subject, GDEFCORE_PUBLIC_ID_LEN)) ||
+      at != n) {
     gdefcore_text_free(catalog, (char *)aad);
     return GDEFCORE_ERR_LIMIT;
   }
@@ -941,9 +947,8 @@ static GDEFCORE_Result seal(GDEFCORE_Catalog * catalog, GDEFCORE_Keyring * keyri
     return rc;
   }
   rc = build_aad(catalog, session, session_len, principal, principal_len,
-      opened->form_id, opened->form_id_len, opened->target,
-      opened->has_subject ? opened->subject : kNoSubject, opened->expiry,
-      opened->base, &aad, &aad_n);
+      opened->form_id, opened->form_id_len, opened->target, opened->expiry,
+      opened->base, opened->has_subject ? opened->subject : NULL, &aad, &aad_n);
   if (rc != GDEFCORE_OK) {
     wipe(token_key, sizeof token_key);
     gdefcore_text_free(catalog, (char *)plain);
@@ -961,13 +966,14 @@ static GDEFCORE_Result seal(GDEFCORE_Catalog * catalog, GDEFCORE_Keyring * keyri
     return rc;
   }
   raw_n = 4 + strlen(kPurpose) + 8 + 2 + opened->form_id_len +
-          GDEFCORE_PUBLIC_ID_LEN + GDEFCORE_PUBLIC_ID_LEN + 8 + kSalt + kNonce + 4 + plain_n + kTag;
+          GDEFCORE_PUBLIC_ID_LEN + 8 +
+          (opened->has_subject ? GDEFCORE_PUBLIC_ID_LEN : 0) + kSalt + kNonce + 4 + plain_n + kTag;
   raw = cat_zalloc(catalog, raw_n);
   if (raw == NULL) {
     gdefcore_text_free(catalog, (char *)ct);
     return GDEFCORE_ERR_OOM;
   }
-  raw[at++] = kVersion;
+  raw[at++] = opened->has_subject ? kVersionSubject : kVersion;
   raw[at++] = kAlg;
   raw[at++] = kKeyId;
   raw[at++] = (uint8_t)strlen(kPurpose);
@@ -981,11 +987,12 @@ static GDEFCORE_Result seal(GDEFCORE_Catalog * catalog, GDEFCORE_Keyring * keyri
   at += opened->form_id_len;
   memcpy(raw + at, opened->target, GDEFCORE_PUBLIC_ID_LEN);
   at += GDEFCORE_PUBLIC_ID_LEN;
-  memcpy(raw + at, opened->has_subject ? opened->subject : kNoSubject,
-      GDEFCORE_PUBLIC_ID_LEN);
-  at += GDEFCORE_PUBLIC_ID_LEN;
   put_u64(raw + at, opened->base);
   at += 8;
+  if (opened->has_subject) {
+    memcpy(raw + at, opened->subject, GDEFCORE_PUBLIC_ID_LEN);
+    at += GDEFCORE_PUBLIC_ID_LEN;
+  }
   memcpy(raw + at, salt, sizeof salt);
   at += sizeof salt;
   memcpy(raw + at, nonce, sizeof nonce);
@@ -1017,13 +1024,17 @@ static GDEFCORE_Result parse_clear(const char * token, size_t token_len,
   size_t purpose_len;
   size_t fid_len;
   size_t at;
+  int has_subject;
   if (token == NULL || token_len < 4) {
     return GDEFCORE_ERR_INVALID;
   }
   raw = (const uint8_t *)token;
-  if (raw[0] != kVersion || raw[1] != kAlg || raw[2] != kKeyId) {
+  if ((raw[0] != kVersion && raw[0] != kVersionSubject) || raw[1] != kAlg ||
+      raw[2] != kKeyId) {
     return GDEFCORE_ERR_INVALID;
   }
+  has_subject = raw[0] == kVersionSubject;
+  *subject = NULL;
   purpose_len = raw[3];
   at = 4;
   if (purpose_len != strlen(kPurpose) || token_len < at + purpose_len ||
@@ -1039,8 +1050,9 @@ static GDEFCORE_Result parse_clear(const char * token, size_t token_len,
   fid_len = get_u16(raw + at);
   at += 2;
   if (fid_len == 0 || fid_len > kMaxFormId ||
-      token_len < at + fid_len + GDEFCORE_PUBLIC_ID_LEN +
-                      GDEFCORE_PUBLIC_ID_LEN + 8 + kSalt + kNonce + 4 + kTag) {
+      token_len < at + fid_len + GDEFCORE_PUBLIC_ID_LEN + 8 +
+                      (has_subject ? GDEFCORE_PUBLIC_ID_LEN : 0) + kSalt +
+                      kNonce + 4 + kTag) {
     return GDEFCORE_ERR_INVALID;
   }
   *form_id = raw + at;
@@ -1048,10 +1060,12 @@ static GDEFCORE_Result parse_clear(const char * token, size_t token_len,
   at += fid_len;
   *target = raw + at;
   at += GDEFCORE_PUBLIC_ID_LEN;
-  *subject = raw + at;
-  at += GDEFCORE_PUBLIC_ID_LEN;
   *base = get_u64(raw + at);
   at += 8;
+  if (has_subject) {
+    *subject = raw + at;
+    at += GDEFCORE_PUBLIC_ID_LEN;
+  }
   *salt = raw + at;
   at += kSalt;
   *nonce = raw + at;
@@ -1106,7 +1120,7 @@ static GDEFCORE_Result open_token(GDEFCORE_Catalog * catalog,
     return GDEFCORE_ERR_INVALID;
   }
   memcpy(opened->target, canon, GDEFCORE_PUBLIC_ID_LEN + 1);
-  if (memcmp(subject, kNoSubject, GDEFCORE_PUBLIC_ID_LEN) != 0) {
+  if (subject != NULL) {
     char scanon[GDEFCORE_PUBLIC_ID_LEN + 1];
     if (gdefcore_id_canonical((const char *)subject, GDEFCORE_PUBLIC_ID_LEN,
             scanon) != GDEFCORE_OK ||
@@ -1127,8 +1141,8 @@ static GDEFCORE_Result open_token(GDEFCORE_Catalog * catalog,
     return rc;
   }
   rc = build_aad(catalog, session, session_len, principal, principal_len,
-      (const char *)form_id, form_id_len, opened->target,
-      (const char *)subject, opened->expiry, opened->base, &aad, &aad_n);
+      (const char *)form_id, form_id_len, opened->target, opened->expiry,
+      opened->base, (const char *)subject, &aad, &aad_n);
   if (rc != GDEFCORE_OK) {
     wipe(token_key, sizeof token_key);
     return rc;

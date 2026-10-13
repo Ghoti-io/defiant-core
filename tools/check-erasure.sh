@@ -297,11 +297,11 @@ plant plain-sign-takes-personal src/form/form.c Erasure.FormPersonalField \
   '  if (rc == GDEFCORE_OK && 0) {'
 
 # 7. The token no longer authenticates its subject: the AEAD's associated data
-#    carries the "no subject" bytes whatever the header says.
+#    carries a fixed id whatever the header says.
 plant token-drops-subject src/form/form.c Erasure.FormSubjectBinding \
-  '      !put_bytes(aad, n, &at, subject, GDEFCORE_PUBLIC_ID_LEN) ||' \
-  '      !put_bytes(aad, n, &at, subject == NULL ? kNoSubject : kNoSubject,
-          GDEFCORE_PUBLIC_ID_LEN) ||'
+  '          !put_bytes(aad, n, &at, subject, GDEFCORE_PUBLIC_ID_LEN)) ||' \
+  '          !put_bytes(aad, n, &at, "0000000000000000000000000000",
+              GDEFCORE_PUBLIC_ID_LEN)) ||'
 
 # 8. gdefcore_entity_save takes a personal value as it always did.
 plant entity-save-takes-personal src/entity/entity.c Erasure.EntitySavePersonal \
