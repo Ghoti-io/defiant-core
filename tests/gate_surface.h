@@ -1,0 +1,254 @@
+/*
+ * SPDX-License-Identifier: LGPL-3.0-only
+ *
+ * Copyright (C) 2026 Corey Pennycuff
+ *
+ * This file is part of Ghoti.io Defiant Core.
+ *
+ * Ghoti.io Defiant Core is free software: you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public License version
+ * 3 as published by the Free Software Foundation.
+ *
+ * Ghoti.io Defiant Core is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU Lesser
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+/**
+ * @file
+ *
+ * The denominator for the access-filter gates: every function a public header
+ * of defiant-core declares, filed as one of
+ *
+ *  - RF  a read that is made on behalf of a principal. It takes a
+ *        GDEFCORE_Request, and the oracle sweep and the no-permission sweep
+ *        must have called it as a principal who may see nothing;
+ *  - RA  a read of stored data with no principal parameter. The header calls
+ *        it unfiltered (an admin or a preview read), so there is nothing to
+ *        filter by, and it must not take a GDEFCORE_Request: if one grows a
+ *        request it has become an RF and the table must say so;
+ *  - W   a write, a lifecycle call, or a credential or token step;
+ *  - P   an in-memory accessor, a free function or a pure helper.
+ *
+ * A header that gains a function the table does not list fails
+ * Paths.EveryPublicFunctionIsFiled. That is the point: someone adding a read
+ * has to decide here, in the open, whether it is filtered.
+ */
+
+#ifndef GHOTI_DEFCORE_TEST_GATE_SURFACE_H
+#define GHOTI_DEFCORE_TEST_GATE_SURFACE_H
+
+namespace gate {
+
+struct Surface {
+  const char * name;
+  const char * category;  ///< "RF", "RA", "W" or "P".
+};
+
+static const Surface kSurface[] = {
+    {"gdefcore_access_free", "P"},
+    {"gdefcore_access_roles", "RA"},
+    {"gdefcore_access_admin_principal", "RA"},
+    {"gdefcore_access_role_id", "RA"},
+    {"gdefcore_access_role_grants", "RA"},
+    {"gdefcore_access_role_create", "W"},
+    {"gdefcore_access_copy_template", "W"},
+    {"gdefcore_access_delete_role", "W"},
+    {"gdefcore_access_declare", "W"},
+    {"gdefcore_access_grant", "W"},
+    {"gdefcore_access_principal_create", "W"},
+    {"gdefcore_access_principal_add_role", "W"},
+    {"gdefcore_access_principal_remove_role", "W"},
+    {"gdefcore_access_principal_remove", "W"},
+    {"gdefcore_access_principal_roles", "RA"},
+    {"gdefcore_access_read", "RF"},
+    {"gdefcore_access_list", "RF"},
+    {"gdefcore_access_render_key", "RF"},
+    {"gdefcore_access_shared_cache", "P"},
+    {"gdefcore_access_stage_module_permission", "W"},
+    {"gdefcore_access_commit_staged", "W"},
+    {"gdefcore_access_clear_staged", "W"},
+    {"gdefcore_keyring_create", "P"},
+    {"gdefcore_keyring_destroy", "P"},
+    {"gdefcore_keyring_export", "P"},
+    {"gdefcore_keyring_adopt", "P"},
+    {"gdefcore_keyring_derive", "P"},
+    {"gdefcore_account_bind", "W"},
+    {"gdefcore_account_create", "W"},
+    {"gdefcore_account_login", "W"},
+    {"gdefcore_account_check", "W"},
+    {"gdefcore_account_session_expiry", "RA"},
+    {"gdefcore_account_password", "W"},
+    {"gdefcore_account_logout_everywhere", "W"},
+    {"gdefcore_account_remove_identifier", "W"},
+    {"gdefcore_account_remove_role", "W"},
+    {"gdefcore_account_revert", "W"},
+    {"gdefcore_account_epoch", "RA"},
+    {"gdefcore_allocator_default", "P"},
+    {"gdefcore_result_string", "P"},
+    {"gdefcore_limits_default", "P"},
+    {"gdefcore_catalog_open", "W"},
+    {"gdefcore_catalog_destroy", "W"},
+    {"gdefcore_id_encode", "P"},
+    {"gdefcore_id_generate", "P"},
+    {"gdefcore_id_canonical", "P"},
+    {"gdefcore_type_define", "W"},
+    {"gdefcore_type_kind", "RA"},
+    {"gdefcore_type_field_count", "RA"},
+    {"gdefcore_type_field", "RA"},
+    {"gdefcore_type_field_personal", "RA"},
+    {"gdefcore_type_field_constraints", "RA"},
+    {"gdefcore_entity_create", "W"},
+    {"gdefcore_epoch", "RA"},
+    {"gdefcore_changeset_prepare", "W"},
+    {"gdefcore_changeset_destroy", "W"},
+    {"gdefcore_changeset_define", "W"},
+    {"gdefcore_entity_save", "W"},
+    {"gdefcore_entity_save_draft", "W"},
+    {"gdefcore_entity_publish", "W"},
+    {"gdefcore_entity_revision", "RA"},
+    {"gdefcore_entity_revision_count", "RA"},
+    {"gdefcore_entity_revision_at", "RA"},
+    {"gdefcore_entity_values", "RA"},
+    {"gdefcore_values_free", "P"},
+    {"gdefcore_text_free", "P"},
+    {"gdefcore_changeset_diff", "RA"},
+    {"gdefcore_changeset_rate", "P"},
+    {"gdefcore_changeset_apply", "W"},
+    {"gdefcore_changeset_conflict", "P"},
+    {"gdefcore_changeset_rebase", "W"},
+    {"gdefcore_changeset_epoch", "P"},
+    {"gdefcore_changeset_base_seq", "P"},
+    {"gdefcore_changeset_revert", "RA"},
+    {"gdefcore_changeset_serialize", "RA"},
+    {"gdefcore_patch_free", "P"},
+    {"gdefcore_changeset_parse", "W"},
+    {"gdefcore_catalog_tenant", "P"},
+    {"gdefcore_catalog_bind_host", "W"},
+    {"gdefcore_changeset_set_request", "W"},
+    {"gdefcore_changeset_stage_module", "W"},
+    {"gdefcore_changeset_module_count", "P"},
+    {"gdefcore_changeset_module_at", "P"},
+    {"gdefcore_entity_ids", "RA"},
+    {"gdefcore_ids_free", "P"},
+    {"gdefcore_entity_type", "RA"},
+    {"gdefcore_entity_actor", "RA"},
+    {"gdefcore_text_dup", "P"},
+    {"gdefcore_changeset_catalog", "P"},
+    {"gdefcore_changeset_add_confirm_line", "W"},
+    {"gdefcore_form_destroy", "P"},
+    {"gdefcore_form_field_count", "P"},
+    {"gdefcore_form_field", "P"},
+    {"gdefcore_form_tree", "RA"},
+    {"gdefcore_form_sign", "W"},
+    {"gdefcore_form_check", "W"},
+    {"gdefcore_form_resign", "W"},
+    {"gdefcore_form_submit", "W"},
+    {"gdefcore_form_publish", "W"},
+    {"gdefcore_form_alias", "RA"},
+    {"gdefcore_form_resolve", "RF"},
+    {"gdefcore_routes_create", "P"},
+    {"gdefcore_routes_destroy", "P"},
+    {"gdefcore_route_add", "W"},
+    {"gdefcore_routes_free", "P"},
+    {"gdefcore_inst_config_load", "P"},
+    {"gdefcore_inst_config_destroy", "P"},
+    {"gdefcore_inst_config_format", "P"},
+    {"gdefcore_inst_config_free", "P"},
+    {"gdefcore_inst_config_root", "P"},
+    {"gdefcore_inst_config_setting", "P"},
+    {"gdefcore_inst_open", "W"},
+    {"gdefcore_inst_open_side", "W"},
+    {"gdefcore_inst_destroy", "W"},
+    {"gdefcore_inst_default", "RA"},
+    {"gdefcore_inst_tenant_create", "W"},
+    {"gdefcore_inst_resolve", "RA"},
+    {"gdefcore_inst_text_free", "P"},
+    {"gdefcore_inst_catalog_open", "W"},
+    {"gdefcore_inst_storage_key", "P"},
+    {"gdefcore_inst_keyring", "P"},
+    {"gdefcore_inst_tenant_keyring", "P"},
+    {"gdefcore_inst_limit_set", "W"},
+    {"gdefcore_host_open", "W"},
+    {"gdefcore_host_destroy", "W"},
+    {"gdefcore_module_install_native", "W"},
+    {"gdefcore_module_install_guest", "W"},
+    {"gdefcore_module_enable", "W"},
+    {"gdefcore_module_disable", "W"},
+    {"gdefcore_module_enabled", "RF"},
+    {"gdefcore_module_notice", "P"},
+    {"gdefcore_module_error", "P"},
+    {"gdefcore_module_mark_entered", "W"},
+    {"gdefcore_module_service", "RF"},
+    {"gdefcore_module_text_free", "P"},
+    {"gdefcore_hook_fire", "RF"},
+    {"gdefcore_hook_skipped", "P"},
+    {"gdefcore_hook_skipped_names", "P"},
+    {"gdefcore_alter_create", "P"},
+    {"gdefcore_alter_destroy", "P"},
+    {"gdefcore_alter_text", "P"},
+    {"gdefcore_alter_set", "P"},
+    {"gdefcore_module_vet", "W"},
+    {"gdefcore_module_clear_pending", "W"},
+    {"gdefcore_module_write_enables", "W"},
+    {"gdefcore_module_after_apply", "W"},
+    {"gdefcore_module_fire_write", "W"},
+    {"gdefcore_render_page", "RF"},
+    {"gdefcore_render_scope", "P"},
+    {"gdefcore_render_kit", "RA"},
+    {"gdefcore_render_install", "W"},
+    {"gdefcore_render_view_define", "W"},
+    {"gdefcore_render_regions", "RA"},
+    {"gdefcore_render_names_free", "P"},
+    {"gdefcore_render_pane_at", "RA"},
+    {"gdefcore_request_create", "P"},
+    {"gdefcore_request_destroy", "P"},
+    {"gdefcore_request_tenant", "P"},
+    {"gdefcore_request_deadline_ms", "P"},
+    {"gdefcore_request_yield_bound_ms", "P"},
+    {"gdefcore_request_id", "P"},
+    {"gdefcore_request_status", "P"},
+    {"gdefcore_request_set_status", "W"},
+    {"gdefcore_request_fiber", "P"},
+    {"gdefcore_request_attach_fiber", "W"},
+    {"gdefcore_request_set_write", "W"},
+    {"gdefcore_request_write", "P"},
+    {"gdefcore_request_set_principal", "W"},
+    {"gdefcore_request_principal", "P"},
+    {"gdefcore_request_set_acting_principal", "W"},
+    {"gdefcore_request_acting_principal", "P"},
+    {"gdefcore_request_set_note", "W"},
+    {"gdefcore_request_note", "P"},
+    {"gdefcore_request_set_resolution", "W"},
+    {"gdefcore_request_resolution", "P"},
+    {"gdefcore_sched_create", "W"},
+    {"gdefcore_sched_destroy", "W"},
+    {"gdefcore_sched_spawn", "W"},
+    {"gdefcore_sched_run", "W"},
+    {"gdefcore_sched_yield", "W"},
+    {"gdefcore_sched_offload", "W"},
+    {"gdefcore_sched_watchdog_count", "P"},
+    {"gdefcore_sched_watchdog_id_at", "P"},
+    {"gdefcore_subject_open", "W"},
+    {"gdefcore_subject_destroy", "W"},
+    {"gdefcore_subject_bind_keyring", "W"},
+    {"gdefcore_subject_create", "W"},
+    {"gdefcore_subject_save", "W"},
+    {"gdefcore_subject_read", "RA"},
+    {"gdefcore_subject_free", "P"},
+    {"gdefcore_subject_erase", "W"},
+    {"gdefcore_subject_export", "RA"},
+    {"gdefcore_subject_snapshot", "RA"},
+    {"gdefcore_subject_import", "W"},
+    {"gdefcore_subject_key", "RA"},
+    {"gdefcore_subject_blind_count", "RA"},
+    {"gdefcore_subject_blind", "RA"},
+};
+
+}  // namespace gate
+
+#endif /* GHOTI_DEFCORE_TEST_GATE_SURFACE_H */
