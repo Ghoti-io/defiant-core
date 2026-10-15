@@ -104,3 +104,63 @@ run after ownership. The resolution is the entity's public id, or the
 handler's machine name when it is not serving an entity. Two handlers
 with the same machine name are an error naming both. Two handlers may
 share a path.
+
+### Named segments, permission, title, kind and tabs
+
+`gdefcore_route_add()` is unchanged, and a `:` in its path is literal text.
+`gdefcore_route_add_spec()` takes a size-prefixed `GDEFCORE_Route_Spec` with
+the same fields and these:
+
+- **Named segments.** A pattern segment `:name` matches exactly one request
+  segment and captures it under `name`; `*` still matches one segment and
+  captures nothing. A name is `[a-z][a-z0-9_]*`, at most 64 bytes, unique in
+  the pattern, and a pattern has at most 16. `:Id`, `:`, `:x%41`, a non-ASCII
+  name and a repeated name are refused at registration, with the route in the
+  error text. A named segment scores as `*` does (0), so `/node/42/edit` beats
+  `/node/:id/edit` at equal weight; ties fall to registration order as before.
+- **Reading a capture.** The handler is a `GDEFCORE_Route_Call_Fn`, called
+  with a `GDEFCORE_Route_Call` (the request, the machine name, the data). It
+  reads a capture with `gdefcore_route_call_capture(call, name, len, &value,
+  &value_len)`, which returns 1 when the pattern has that name and 0 otherwise.
+  The value is the request segment as received: percent-encoding is not
+  decoded, and `//` still collapses. Nothing is read from ambient state.
+  A handler of the old type can be given to the new call as `fn`.
+- **Permission.** A route may name a permission. The caller installs one check
+  with `gdefcore_routes_set_check()`; dispatch calls it for a route whose path
+  matched, with the call (so the captures) and the permission name, and the
+  principal is the request's. A zero answer makes the route not match: it is
+  left out before ordering, nothing is recorded, and the request is answered
+  as if the route did not exist (AD-11). A route that names a permission when
+  no check is installed never matches. A route with no permission never asks.
+- **Title and kind.** A title is UTF-8 text of at most 256 bytes with no
+  control characters. A kind is `GDEFCORE_ROUTE_PAGE` (the default),
+  `GDEFCORE_ROUTE_TAB` or `GDEFCORE_ROUTE_ACTION`. Neither changes dispatch;
+  both are data for the menu system and are returned by the enumeration.
+- **Tabs, after Drupal's local tasks.** A tab names a parent route by machine
+  name, and the parent must already be registered. At most one tab of a parent
+  is the default. A default tab links to its parent's path, and the parent's
+  path is served by that tab: `node/:id` parent, `node/:id/view` default,
+  `node/:id/edit` tab means `/node/42` and `/node/42/view` run the view
+  handler and `/node/42/edit` runs the edit handler. The parent's path is
+  answered exactly, not as an ancestor, so a longer path does not reach the
+  default tab by that road, and at equal weight the default tab runs before
+  the parent's own handlers. A tab whose parent is missing, a second default
+  for one parent, a parent on a non-tab, and a default tab that captures a
+  name its parent's pattern lacks are errors that name both routes and leave
+  the table unchanged.
+- **Weight** orders dispatch, as it always did, and also the tabs in the
+  enumeration. A parent whose handler owns the request must have a higher
+  weight than its tabs, or it answers its tabs' paths first as an ancestor.
+- **Enumeration.** `gdefcore_routes_tabs()` returns the tabs of a parent in
+  weight order, then machine name, each with title, kind, default flag, path
+  pattern, permission and weight. Free the array with `gdefcore_routes_free()`.
+
+**The access layer gap.** `access.h` offers no call that asks "does this
+principal hold permission P for entity E": a permission is evaluated only
+inside the filtered reads, whose answer is a field value or "not visible".
+So the route table does not check a permission itself; the caller supplies the
+check, which receives the captured entity id and may ask the filtered read
+(`gdefcore_access_read()`) whether the principal can see it. A public
+`gdefcore_access_can()` would let the check be one line; it is a widening of
+the access layer and is not made here.
+

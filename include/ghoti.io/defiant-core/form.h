@@ -265,7 +265,160 @@ GDEFCORE_API GDEFCORE_Result gdefcore_route_add(GDEFCORE_Routes * routes,
     size_t path_len, int weight, int after, GDEFCORE_Route_Fn fn, void * data,
     char ** out_error, size_t * out_error_len);
 
-/** @brief Free bytes from gdefcore_route_add(). NULL is ignored. */
+/** A route is a page. Nothing is implied for a menu. */
+#define GDEFCORE_ROUTE_PAGE 0
+/** A route is a tab of its parent route (Drupal's "local task"). */
+#define GDEFCORE_ROUTE_TAB 1
+/** A route is an action link, such as "add". */
+#define GDEFCORE_ROUTE_ACTION 2
+
+/** Longest capture name in a pattern, in bytes. */
+#define GDEFCORE_ROUTE_NAME_MAX 64
+/** Most `:name` segments in one pattern. */
+#define GDEFCORE_ROUTE_CAPTURE_MAX 16
+/** Longest path pattern gdefcore_route_add_spec() takes, in bytes. */
+#define GDEFCORE_ROUTE_PATH_MAX 2048
+/** Longest title, in bytes. */
+#define GDEFCORE_ROUTE_TITLE_MAX 256
+/** Longest permission name, in bytes. */
+#define GDEFCORE_ROUTE_PERMISSION_MAX 256
+
+/**
+ * @brief What a handler is called with.
+ *
+ * Begins with @ref size. Valid for the duration of the call only; a handler
+ * that keeps a capture copies it. The matched values are reached through
+ * gdefcore_route_call_capture(), never through ambient state.
+ */
+typedef struct GDEFCORE_Route_Call {
+  size_t size;               ///< `sizeof(GDEFCORE_Route_Call)`.
+  GDEFCORE_Request * request; ///< The request being dispatched.
+  const char * machine;      ///< The machine name the route was registered under.
+  size_t machine_len;        ///< Length of @ref machine.
+  void * data;               ///< The route's data pointer.
+  const void * internal;     ///< Private. Use the accessors.
+} GDEFCORE_Route_Call;
+
+/** @brief A handler that reads captures through its call. */
+typedef void (*GDEFCORE_Route_Call_Fn)(const GDEFCORE_Route_Call * call);
+
+/**
+ * @brief The route permission check.
+ *
+ * Called by dispatch, for a route whose path has matched and that names a
+ * permission, with the matched values available from @p call. Return non-zero
+ * to allow. Zero makes the route not match: the request is answered exactly
+ * as if the route did not exist (AD-11). The principal is the request's
+ * (gdefcore_request_principal() on @p call->request). It runs before the
+ * handler and must not set notes, a resolution or a status.
+ */
+typedef int (*GDEFCORE_Route_Check_Fn)(const GDEFCORE_Route_Call * call,
+    const char * permission, size_t permission_len, void * data);
+
+/**
+ * @brief A route with a permission, a title, a kind and a parent.
+ *
+ * Begins with @ref size. Set exactly one of @ref fn and @ref call_fn.
+ */
+typedef struct GDEFCORE_Route_Spec {
+  size_t size;                ///< Must be `sizeof(GDEFCORE_Route_Spec)`.
+  const char * machine;       ///< Unique machine name. Required.
+  size_t machine_len;         ///< Length of @ref machine.
+  const char * path;          ///< Pattern, `/a/:name/*/b`. Required.
+  size_t path_len;            ///< Length of @ref path.
+  int weight;                 ///< Lowest runs first.
+  int after;                  ///< Non-zero: runs after another handler owns.
+  GDEFCORE_Route_Fn fn;       ///< Handler without captures, or NULL.
+  GDEFCORE_Route_Call_Fn call_fn; ///< Handler with captures, or NULL.
+  void * data;                ///< Passed back to the handler.
+  const char * permission;    ///< Permission name, or NULL for none.
+  size_t permission_len;      ///< Length of @ref permission.
+  const char * title;         ///< UTF-8 title for menus, or NULL.
+  size_t title_len;           ///< Length of @ref title.
+  int kind;                   ///< ::GDEFCORE_ROUTE_PAGE, _TAB or _ACTION.
+  const char * parent;        ///< Parent machine name. Required for a tab.
+  size_t parent_len;          ///< Length of @ref parent.
+  int is_default;             ///< Non-zero: the default tab of @ref parent.
+} GDEFCORE_Route_Spec;
+
+/**
+ * @brief One route as the enumeration reports it.
+ *
+ * The text pointers are borrowed from the route table and stay valid until
+ * the table is destroyed. Routes are never removed.
+ */
+typedef struct GDEFCORE_Route_Info {
+  size_t size;                ///< `sizeof(GDEFCORE_Route_Info)`.
+  const char * machine;       ///< Machine name.
+  size_t machine_len;         ///< Length of @ref machine.
+  const char * path;          ///< Path pattern as registered.
+  size_t path_len;            ///< Length of @ref path.
+  const char * title;         ///< Title, or "" when none.
+  size_t title_len;           ///< Length of @ref title.
+  const char * permission;    ///< Permission name, or "" when none.
+  size_t permission_len;      ///< Length of @ref permission.
+  int kind;                   ///< ::GDEFCORE_ROUTE_PAGE, _TAB or _ACTION.
+  int is_default;             ///< Non-zero for the default tab.
+  int weight;                 ///< The route's weight.
+} GDEFCORE_Route_Info;
+
+/**
+ * @brief Register a route with named segments, a permission, a title, a kind
+ * and a parent.
+ *
+ * A pattern segment `:name` matches exactly one segment and captures it under
+ * `name`, which is `[a-z][a-z0-9_]*`, at most ::GDEFCORE_ROUTE_NAME_MAX bytes,
+ * and unique in the pattern, with at most ::GDEFCORE_ROUTE_CAPTURE_MAX per
+ * pattern. `*` still matches one segment and captures nothing. A named
+ * segment scores as `*` does, so an explicit segment beats it.
+ * (gdefcore_route_add() does not read `:`: its segment stays literal.)
+ *
+ * A tab names a parent that is already registered; a second default tab for
+ * one parent, a tab without a parent, a parent on a non-tab, and a default
+ * tab that captures a name its parent's pattern does not are errors. A
+ * default tab also answers its parent's path, exactly (not as an ancestor),
+ * and outranks the parent's own handlers there at equal weight.
+ *
+ * Every error leaves the table unchanged, is ::GDEFCORE_ERR_INVALID, and
+ * when @p out_error is not NULL, names both routes involved. Free
+ * @p out_error with gdefcore_routes_free().
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_route_add_spec(GDEFCORE_Routes * routes,
+    const GDEFCORE_Route_Spec * spec, char ** out_error,
+    size_t * out_error_len);
+
+/**
+ * @brief Set the permission check. NULL removes it.
+ *
+ * A route that names a permission while no check is set never matches.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_routes_set_check(GDEFCORE_Routes * routes,
+    GDEFCORE_Route_Check_Fn fn, void * data);
+
+/**
+ * @brief The value @p name captured for this call.
+ *
+ * Returns 1 and sets @p out_value (borrowed, not NUL-terminated, valid for
+ * the call) and @p out_len when the route's pattern has a segment `:name`.
+ * Returns 0 otherwise, including for `*`. The value is the request segment
+ * as received: percent-encoding is not decoded.
+ */
+GDEFCORE_API int gdefcore_route_call_capture(const GDEFCORE_Route_Call * call,
+    const char * name, size_t name_len, const char ** out_value,
+    size_t * out_len);
+
+/**
+ * @brief The tabs of the route @p parent, in weight order then machine name.
+ *
+ * @p out receives an array of @p out_count entries, to be freed with
+ * gdefcore_routes_free(). An unknown parent, or one with no tabs, is success
+ * with a count of 0 and @p out NULL.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_routes_tabs(GDEFCORE_Routes * routes,
+    const char * parent, size_t parent_len, GDEFCORE_Route_Info ** out,
+    size_t * out_count);
+
+/** @brief Free bytes from the route functions that return them. NULL is ignored. */
 GDEFCORE_API void gdefcore_routes_free(GDEFCORE_Routes * routes, void * bytes);
 
 #ifdef __cplusplus

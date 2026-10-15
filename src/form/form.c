@@ -114,9 +114,10 @@ typedef struct Opened {
 } Opened;
 
 typedef struct Seg {
-  char * text;
+  char * text; /* a literal, or the capture name when named */
   size_t len;
-  int wild;
+  int wild;  /* matches any one segment: `*` or a named segment */
+  int named; /* `:name`: wild, and captures under text */
 } Seg;
 
 typedef struct Route {
@@ -129,9 +130,22 @@ typedef struct Route {
   int score;
   size_t index;
   GDEFCORE_Route_Fn fn;
+  GDEFCORE_Route_Call_Fn cfn;
   void * data;
   Seg * segs;
   size_t nsegs;
+  char * permission;
+  size_t permission_len;
+  char * title;
+  size_t title_len;
+  int kind;
+  char * parent;
+  size_t parent_len;
+  int is_default;
+  /* A default tab also answers its parent's path, and only exactly. */
+  Seg * alt;
+  size_t nalt;
+  int alt_score;
 } Route;
 
 struct GDEFCORE_Routes {
@@ -139,6 +153,8 @@ struct GDEFCORE_Routes {
   Route * routes;
   size_t nroutes;
   size_t cap;
+  GDEFCORE_Route_Check_Fn check;
+  void * check_data;
 };
 
 static GDEFCORE_Result from_gsec(GSEC_Result rc) {
@@ -2347,20 +2363,37 @@ static void seg_free(const GDEFCORE_Allocator * alloc, Seg * segs, size_t n) {
   gcu_allocator_free(alloc, segs);
 }
 
+/* A pattern segment `:name` (named mode only) matches one segment and
+ * captures it. `why` receives a reason when the pattern is refused. */
+static int name_char_ok(char c, int first) {
+  if (c >= 'a' && c <= 'z') {
+    return 1;
+  }
+  return !first && ((c >= '0' && c <= '9') || c == '_');
+}
+
 static GDEFCORE_Result split_path(const GDEFCORE_Allocator * alloc,
-    const char * path, size_t path_len, Seg ** out, size_t * out_n, int * score) {
+    const char * path, size_t path_len, int named, Seg ** out, size_t * out_n,
+    int * score, const char ** why) {
   size_t i = 0;
   size_t n = 0;
   size_t cap = 0;
+  size_t ncaps = 0;
   Seg * segs = NULL;
   int exact = 0;
   if (path == NULL || path_len == 0 || path[0] != '/') {
+    if (why != NULL) {
+      *why = "path must start with /";
+    }
     return GDEFCORE_ERR_INVALID;
   }
   while (i < path_len) {
     size_t start;
     size_t len;
+    size_t k;
     Seg * next;
+    int is_named;
+    const char * reason = NULL;
     if (path[i] == '/') {
       i += 1;
       continue;
@@ -2370,6 +2403,37 @@ static GDEFCORE_Result split_path(const GDEFCORE_Allocator * alloc,
       i += 1;
     }
     len = i - start;
+    is_named = named && path[start] == ':';
+    if (is_named) {
+      if (len == 1) {
+        reason = "empty capture name";
+      } else if (len - 1 > GDEFCORE_ROUTE_NAME_MAX) {
+        reason = "capture name too long";
+      } else {
+        for (k = 1; k < len && reason == NULL; k++) {
+          if (!name_char_ok(path[start + k], k == 1)) {
+            reason = "capture name must be [a-z][a-z0-9_]*";
+          }
+        }
+      }
+      for (k = 0; k < n && reason == NULL; k++) {
+        if (segs[k].named && span_eq(segs[k].text, segs[k].len, path + start + 1,
+                                 len - 1)) {
+          reason = "repeated capture name";
+        }
+      }
+      if (reason == NULL && ncaps == GDEFCORE_ROUTE_CAPTURE_MAX) {
+        reason = "too many captures";
+      }
+      if (reason != NULL) {
+        seg_free(alloc, segs, n);
+        if (why != NULL) {
+          *why = reason;
+        }
+        return GDEFCORE_ERR_INVALID;
+      }
+      ncaps += 1;
+    }
     if (n == cap) {
       cap = cap == 0 ? 4 : cap * 2;
       next = (Seg *)gcu_allocator_realloc(alloc, segs, cap * sizeof *segs);
@@ -2379,8 +2443,13 @@ static GDEFCORE_Result split_path(const GDEFCORE_Allocator * alloc,
       }
       segs = next;
     }
+    if (is_named) {
+      start += 1;
+      len -= 1;
+    }
     segs[n].len = len;
-    segs[n].wild = len == 1 && path[start] == '*';
+    segs[n].named = is_named;
+    segs[n].wild = is_named || (len == 1 && path[start] == '*');
     segs[n].text = (char *)gcu_allocator_malloc(alloc, len == 0 ? 1 : len);
     if (segs[n].text == NULL) {
       seg_free(alloc, segs, n);
@@ -2400,27 +2469,34 @@ static GDEFCORE_Result split_path(const GDEFCORE_Allocator * alloc,
   return GDEFCORE_OK;
 }
 
-static int route_matches(const Route * route, const Seg * req, size_t nreq) {
+static int segs_match(const Seg * pat, size_t npat, const Seg * req) {
   size_t i;
-  if (route->nsegs > nreq) {
-    return 0;
-  }
-  for (i = 0; i < route->nsegs; i++) {
-    if (route->segs[i].wild) {
+  for (i = 0; i < npat; i++) {
+    if (pat[i].wild) {
       continue;
     }
-    if (!span_eq(route->segs[i].text, route->segs[i].len, req[i].text,
-            req[i].len)) {
+    if (!span_eq(pat[i].text, pat[i].len, req[i].text, req[i].len)) {
       return 0;
     }
   }
   return 1;
 }
 
+static int route_matches(const Route * route, const Seg * req, size_t nreq) {
+  if (route->nsegs > nreq) {
+    return 0;
+  }
+  return segs_match(route->segs, route->nsegs, req);
+}
+
 static void route_clear(const GDEFCORE_Allocator * alloc, Route * route) {
   gcu_allocator_free(alloc, route->machine);
   gcu_allocator_free(alloc, route->path);
+  gcu_allocator_free(alloc, route->permission);
+  gcu_allocator_free(alloc, route->title);
+  gcu_allocator_free(alloc, route->parent);
   seg_free(alloc, route->segs, route->nsegs);
+  seg_free(alloc, route->alt, route->nalt);
   memset(route, 0, sizeof *route);
 }
 
@@ -2461,15 +2537,353 @@ void gdefcore_routes_free(GDEFCORE_Routes * routes, void * bytes) {
   gcu_allocator_free(routes->alloc, bytes);
 }
 
+/* An error text "<what>: <machine> <path>; <machine> <path>" naming both
+ * routes. Failure to allocate it is not a reason to change the answer. */
+static void route_error(const GDEFCORE_Allocator * alloc, char ** out_error,
+    size_t * out_error_len, const char * what, const char * m1, size_t m1_len,
+    const char * p1, size_t p1_len, const char * m2, size_t m2_len,
+    const char * p2, size_t p2_len) {
+  size_t what_len = strlen(what);
+  size_t n = what_len + 2 + m1_len + 1 + p1_len;
+  size_t at;
+  char * text;
+  if (out_error == NULL) {
+    return;
+  }
+  if (m2 != NULL) {
+    n += 2 + m2_len + 1 + p2_len;
+  }
+  text = (char *)gcu_allocator_malloc(alloc, n + 1);
+  if (text == NULL) {
+    return;
+  }
+  memcpy(text, what, what_len);
+  memcpy(text + what_len, ": ", 2);
+  at = what_len + 2;
+  memcpy(text + at, m1, m1_len);
+  at += m1_len;
+  text[at++] = ' ';
+  memcpy(text + at, p1, p1_len);
+  at += p1_len;
+  if (m2 != NULL) {
+    memcpy(text + at, "; ", 2);
+    at += 2;
+    memcpy(text + at, m2, m2_len);
+    at += m2_len;
+    text[at++] = ' ';
+    memcpy(text + at, p2, p2_len);
+    at += p2_len;
+  }
+  text[at] = '\0';
+  *out_error = text;
+  if (out_error_len != NULL) {
+    *out_error_len = at;
+  }
+}
+
+static const Route * route_find(const GDEFCORE_Routes * routes,
+    const char * machine, size_t machine_len) {
+  size_t i;
+  for (i = 0; i < routes->nroutes; i++) {
+    if (span_eq(routes->routes[i].machine, routes->routes[i].machine_len, machine,
+            machine_len)) {
+      return &routes->routes[i];
+    }
+  }
+  return NULL;
+}
+
+/* Well-formed UTF-8 with no control character, no overlong form, no
+ * surrogate and nothing above U+10FFFF. */
+static int text_ok(const char * s, size_t n) {
+  size_t i = 0;
+  while (i < n) {
+    unsigned char c = (unsigned char)s[i];
+    size_t more;
+    uint32_t cp;
+    uint32_t min;
+    size_t k;
+    if (c < 0x20 || c == 0x7f) {
+      return 0;
+    }
+    if (c < 0x80) {
+      i += 1;
+      continue;
+    }
+    if (c >= 0xc2 && c <= 0xdf) {
+      more = 1;
+      cp = c & 0x1f;
+      min = 0x80;
+    } else if ((c & 0xf0) == 0xe0) {
+      more = 2;
+      cp = c & 0x0f;
+      min = 0x800;
+    } else if (c >= 0xf0 && c <= 0xf4) {
+      more = 3;
+      cp = c & 0x07;
+      min = 0x10000;
+    } else {
+      return 0;
+    }
+    if (i + more >= n) {
+      return 0;
+    }
+    for (k = 1; k <= more; k++) {
+      unsigned char d = (unsigned char)s[i + k];
+      if ((d & 0xc0) != 0x80) {
+        return 0;
+      }
+      cp = (cp << 6) | (d & 0x3f);
+    }
+    if (cp < min || cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff)) {
+      return 0;
+    }
+    i += more + 1;
+  }
+  return 1;
+}
+
+static char * dup_span(const GDEFCORE_Allocator * alloc, const char * s,
+    size_t n) {
+  char * out = (char *)gcu_allocator_malloc(alloc, n + 1);
+  if (out == NULL) {
+    return NULL;
+  }
+  if (n > 0) {
+    memcpy(out, s, n);
+  }
+  out[n] = '\0';
+  return out;
+}
+
+static GDEFCORE_Result seg_copy(const GDEFCORE_Allocator * alloc, const Seg * from,
+    size_t n, Seg ** out) {
+  Seg * segs;
+  size_t i;
+  *out = NULL;
+  if (n == 0) {
+    return GDEFCORE_OK;
+  }
+  segs = (Seg *)gcu_allocator_calloc(alloc, n, sizeof *segs);
+  if (segs == NULL) {
+    return GDEFCORE_ERR_OOM;
+  }
+  for (i = 0; i < n; i++) {
+    segs[i] = from[i];
+    segs[i].text = (char *)gcu_allocator_malloc(alloc, from[i].len == 0 ? 1 : from[i].len);
+    if (segs[i].text == NULL) {
+      seg_free(alloc, segs, i);
+      return GDEFCORE_ERR_OOM;
+    }
+    memcpy(segs[i].text, from[i].text, from[i].len);
+  }
+  *out = segs;
+  return GDEFCORE_OK;
+}
+
+/* The one place a route is validated and added. `named` is non-zero for
+ * gdefcore_route_add_spec(), which reads `:name`; the older call keeps `:`
+ * literal. Nothing is changed on any error. */
+static GDEFCORE_Result route_insert(GDEFCORE_Routes * routes,
+    const GDEFCORE_Route_Spec * spec, int named, char ** out_error,
+    size_t * out_error_len) {
+  const GDEFCORE_Allocator * alloc = routes->alloc;
+  const Route * old;
+  const Route * parent = NULL;
+  Route * next;
+  Seg * segs = NULL;
+  Seg * alt = NULL;
+  size_t nsegs = 0;
+  size_t i;
+  size_t j;
+  int score = 0;
+  const char * why = NULL;
+  GDEFCORE_Result rc;
+  old = route_find(routes, spec->machine, spec->machine_len);
+  if (old != NULL) {
+    if (out_error != NULL) {
+      /* The first line names the new route and the old path, the second the
+       * new route and the new path, as it always has. */
+      size_t n = spec->machine_len + 1 + old->path_len + 1 + spec->machine_len +
+                 1 + spec->path_len;
+      char * text = (char *)gcu_allocator_malloc(alloc, n + 1);
+      size_t at = 0;
+      if (text == NULL) {
+        return GDEFCORE_ERR_OOM;
+      }
+      memcpy(text, spec->machine, spec->machine_len);
+      at = spec->machine_len;
+      text[at++] = ' ';
+      memcpy(text + at, old->path, old->path_len);
+      at += old->path_len;
+      text[at++] = '\n';
+      memcpy(text + at, spec->machine, spec->machine_len);
+      at += spec->machine_len;
+      text[at++] = ' ';
+      memcpy(text + at, spec->path, spec->path_len);
+      text[n] = '\0';
+      *out_error = text;
+      if (out_error_len != NULL) {
+        *out_error_len = n;
+      }
+    }
+    return GDEFCORE_ERR_INVALID;
+  }
+  if (named && spec->path_len > GDEFCORE_ROUTE_PATH_MAX) {
+    route_error(alloc, out_error, out_error_len, "path too long", spec->machine,
+        spec->machine_len, "(path)", 6, NULL, 0, NULL, 0);
+    return GDEFCORE_ERR_INVALID;
+  }
+  rc = split_path(alloc, spec->path, spec->path_len, named, &segs, &nsegs, &score,
+      &why);
+  if (rc != GDEFCORE_OK) {
+    if (why != NULL) {
+      route_error(alloc, out_error, out_error_len, why, spec->machine,
+          spec->machine_len, spec->path, spec->path_len, NULL, 0, NULL, 0);
+    }
+    return rc;
+  }
+  why = NULL;
+  if (spec->kind != GDEFCORE_ROUTE_PAGE && spec->kind != GDEFCORE_ROUTE_TAB &&
+      spec->kind != GDEFCORE_ROUTE_ACTION) {
+    why = "unknown route kind";
+  } else if (spec->title_len > GDEFCORE_ROUTE_TITLE_MAX ||
+             (spec->title_len > 0 &&
+                 (spec->title == NULL || !text_ok(spec->title, spec->title_len)))) {
+    why = "title is not UTF-8 text of at most 256 bytes";
+  } else if (spec->permission_len > GDEFCORE_ROUTE_PERMISSION_MAX ||
+             (spec->permission_len > 0 &&
+                 (spec->permission == NULL ||
+                     !text_ok(spec->permission, spec->permission_len)))) {
+    why = "permission is not text of at most 256 bytes";
+  } else if (spec->is_default && spec->kind != GDEFCORE_ROUTE_TAB) {
+    why = "only a tab can be the default";
+  } else if (spec->kind != GDEFCORE_ROUTE_TAB && spec->parent_len > 0) {
+    why = "only a tab has a parent";
+  } else if (spec->kind == GDEFCORE_ROUTE_TAB &&
+             (spec->parent == NULL || spec->parent_len == 0)) {
+    why = "a tab needs a parent";
+  }
+  if (why != NULL) {
+    route_error(alloc, out_error, out_error_len, why, spec->machine,
+        spec->machine_len, spec->path, spec->path_len, NULL, 0, NULL, 0);
+    seg_free(alloc, segs, nsegs);
+    return GDEFCORE_ERR_INVALID;
+  }
+  if (spec->kind == GDEFCORE_ROUTE_TAB) {
+    parent = route_find(routes, spec->parent, spec->parent_len);
+    if (parent == NULL) {
+      route_error(alloc, out_error, out_error_len, "tab has no parent route",
+          spec->machine, spec->machine_len, spec->path, spec->path_len,
+          spec->parent, spec->parent_len, "(not registered)", 16);
+      seg_free(alloc, segs, nsegs);
+      return GDEFCORE_ERR_INVALID;
+    }
+    if (spec->is_default) {
+      for (i = 0; i < routes->nroutes; i++) {
+        const Route * r = &routes->routes[i];
+        if (r->is_default && span_eq(r->parent, r->parent_len, spec->parent,
+                                 spec->parent_len)) {
+          route_error(alloc, out_error, out_error_len,
+              "second default tab for one parent", spec->machine,
+              spec->machine_len, spec->path, spec->path_len, r->machine,
+              r->machine_len, r->path, r->path_len);
+          seg_free(alloc, segs, nsegs);
+          return GDEFCORE_ERR_INVALID;
+        }
+      }
+      for (i = 0; i < nsegs; i++) {
+        int found = 0;
+        if (!segs[i].named) {
+          continue;
+        }
+        for (j = 0; j < parent->nsegs; j++) {
+          if (parent->segs[j].named &&
+              span_eq(parent->segs[j].text, parent->segs[j].len, segs[i].text,
+                  segs[i].len)) {
+            found = 1;
+          }
+        }
+        if (!found) {
+          route_error(alloc, out_error, out_error_len,
+              "default tab captures a name its parent does not", spec->machine,
+              spec->machine_len, spec->path, spec->path_len, parent->machine,
+              parent->machine_len, parent->path, parent->path_len);
+          seg_free(alloc, segs, nsegs);
+          return GDEFCORE_ERR_INVALID;
+        }
+      }
+      rc = seg_copy(alloc, parent->segs, parent->nsegs, &alt);
+      if (rc != GDEFCORE_OK) {
+        seg_free(alloc, segs, nsegs);
+        return rc;
+      }
+    }
+  }
+  if (routes->nroutes == routes->cap) {
+    size_t cap = routes->cap == 0 ? 4 : routes->cap * 2;
+    next = (Route *)gcu_allocator_realloc(alloc, routes->routes,
+        cap * sizeof *next);
+    if (next == NULL) {
+      seg_free(alloc, segs, nsegs);
+      seg_free(alloc, alt, parent != NULL ? parent->nsegs : 0);
+      return GDEFCORE_ERR_OOM;
+    }
+    routes->routes = next;
+    routes->cap = cap;
+    if (parent != NULL) {
+      /* The table moved. */
+      parent = route_find(routes, spec->parent, spec->parent_len);
+    }
+  }
+  next = &routes->routes[routes->nroutes];
+  memset(next, 0, sizeof *next);
+  next->machine = dup_span(alloc, spec->machine, spec->machine_len);
+  next->path = dup_span(alloc, spec->path, spec->path_len);
+  next->permission = dup_span(alloc, spec->permission, spec->permission_len);
+  next->title = dup_span(alloc, spec->title, spec->title_len);
+  next->parent = dup_span(alloc, spec->parent, spec->parent_len);
+  if (next->machine == NULL || next->path == NULL || next->permission == NULL ||
+      next->title == NULL || next->parent == NULL) {
+    seg_free(alloc, segs, nsegs);
+    seg_free(alloc, alt, parent != NULL ? parent->nsegs : 0);
+    gcu_allocator_free(alloc, next->machine);
+    gcu_allocator_free(alloc, next->path);
+    gcu_allocator_free(alloc, next->permission);
+    gcu_allocator_free(alloc, next->title);
+    gcu_allocator_free(alloc, next->parent);
+    memset(next, 0, sizeof *next);
+    return GDEFCORE_ERR_OOM;
+  }
+  next->machine_len = spec->machine_len;
+  next->path_len = spec->path_len;
+  next->permission_len = spec->permission_len;
+  next->title_len = spec->title_len;
+  next->parent_len = spec->parent_len;
+  next->weight = spec->weight;
+  next->after = spec->after ? 1 : 0;
+  next->score = score;
+  next->index = routes->nroutes;
+  next->fn = spec->fn;
+  next->cfn = spec->call_fn;
+  next->data = spec->data;
+  next->segs = segs;
+  next->nsegs = nsegs;
+  next->kind = spec->kind;
+  next->is_default = spec->is_default ? 1 : 0;
+  if (alt != NULL) {
+    next->alt = alt;
+    next->nalt = parent->nsegs;
+    next->alt_score = parent->score + 1;
+  }
+  routes->nroutes += 1;
+  return GDEFCORE_OK;
+}
+
 GDEFCORE_Result gdefcore_route_add(GDEFCORE_Routes * routes, const char * machine,
     size_t machine_len, const char * path, size_t path_len, int weight, int after,
     GDEFCORE_Route_Fn fn, void * data, char ** out_error, size_t * out_error_len) {
-  size_t i;
-  Route * next;
-  Seg * segs = NULL;
-  size_t nsegs = 0;
-  int score = 0;
-  GDEFCORE_Result rc;
+  GDEFCORE_Route_Spec spec;
   if (out_error != NULL) {
     *out_error = NULL;
   }
@@ -2479,80 +2893,156 @@ GDEFCORE_Result gdefcore_route_add(GDEFCORE_Routes * routes, const char * machin
   if (routes == NULL || fn == NULL || machine == NULL || machine_len == 0) {
     return GDEFCORE_ERR_INVALID;
   }
-  for (i = 0; i < routes->nroutes; i++) {
-    if (span_eq(routes->routes[i].machine, routes->routes[i].machine_len,
-            machine, machine_len)) {
-      if (out_error != NULL) {
-        const Route * old = &routes->routes[i];
-        size_t n = machine_len + 1 + old->path_len + 1 + machine_len + 1 +
-                   path_len;
-        char * text = (char *)gcu_allocator_malloc(routes->alloc, n + 1);
-        if (text == NULL) {
-          return GDEFCORE_ERR_OOM;
-        }
-        memcpy(text, machine, machine_len);
-        text[machine_len] = ' ';
-        memcpy(text + machine_len + 1, old->path, old->path_len);
-        text[machine_len + 1 + old->path_len] = '\n';
-        memcpy(text + machine_len + 1 + old->path_len + 1, machine, machine_len);
-        text[machine_len + 1 + old->path_len + 1 + machine_len] = ' ';
-        memcpy(text + machine_len + 1 + old->path_len + 1 + machine_len + 1, path,
-            path_len);
-        text[n] = '\0';
-        *out_error = text;
-        if (out_error_len != NULL) {
-          *out_error_len = n;
-        }
-      }
-      return GDEFCORE_ERR_INVALID;
-    }
+  memset(&spec, 0, sizeof spec);
+  spec.size = sizeof spec;
+  spec.machine = machine;
+  spec.machine_len = machine_len;
+  spec.path = path;
+  spec.path_len = path_len;
+  spec.weight = weight;
+  spec.after = after;
+  spec.fn = fn;
+  spec.data = data;
+  return route_insert(routes, &spec, 0, out_error, out_error_len);
+}
+
+GDEFCORE_Result gdefcore_route_add_spec(GDEFCORE_Routes * routes,
+    const GDEFCORE_Route_Spec * spec, char ** out_error, size_t * out_error_len) {
+  if (out_error != NULL) {
+    *out_error = NULL;
   }
-  rc = split_path(routes->alloc, path, path_len, &segs, &nsegs, &score);
-  if (rc != GDEFCORE_OK) {
-    return rc;
+  if (out_error_len != NULL) {
+    *out_error_len = 0;
   }
-  if (routes->nroutes == routes->cap) {
-    size_t cap = routes->cap == 0 ? 4 : routes->cap * 2;
-    next = (Route *)gcu_allocator_realloc(routes->alloc, routes->routes,
-        cap * sizeof *next);
-    if (next == NULL) {
-      seg_free(routes->alloc, segs, nsegs);
-      return GDEFCORE_ERR_OOM;
-    }
-    routes->routes = next;
-    routes->cap = cap;
+  if (routes == NULL || spec == NULL || spec->size != sizeof *spec ||
+      spec->machine == NULL || spec->machine_len == 0 || spec->path == NULL ||
+      ((spec->fn == NULL) == (spec->call_fn == NULL))) {
+    return GDEFCORE_ERR_INVALID;
   }
-  next = &routes->routes[routes->nroutes];
-  memset(next, 0, sizeof *next);
-  next->machine = (char *)gcu_allocator_malloc(routes->alloc, machine_len + 1);
-  next->path = (char *)gcu_allocator_malloc(routes->alloc, path_len + 1);
-  if (next->machine == NULL || next->path == NULL) {
-    gcu_allocator_free(routes->alloc, next->machine);
-    gcu_allocator_free(routes->alloc, next->path);
-    seg_free(routes->alloc, segs, nsegs);
-    return GDEFCORE_ERR_OOM;
+  return route_insert(routes, spec, 1, out_error, out_error_len);
+}
+
+GDEFCORE_Result gdefcore_routes_set_check(GDEFCORE_Routes * routes,
+    GDEFCORE_Route_Check_Fn fn, void * data) {
+  if (routes == NULL) {
+    return GDEFCORE_ERR_INVALID;
   }
-  memcpy(next->machine, machine, machine_len);
-  next->machine[machine_len] = '\0';
-  next->machine_len = machine_len;
-  memcpy(next->path, path, path_len);
-  next->path[path_len] = '\0';
-  next->path_len = path_len;
-  next->weight = weight;
-  next->after = after ? 1 : 0;
-  next->score = score;
-  next->index = routes->nroutes;
-  next->fn = fn;
-  next->data = data;
-  next->segs = segs;
-  next->nsegs = nsegs;
-  routes->nroutes += 1;
+  routes->check = fn;
+  routes->check_data = data;
   return GDEFCORE_OK;
 }
 
+/* What a call knows: the segments of the pattern that matched and the
+ * request's own. Lives on dispatch's stack. */
+typedef struct CallState {
+  const Seg * pat;
+  size_t npat;
+  const Seg * req;
+} CallState;
+
+int gdefcore_route_call_capture(const GDEFCORE_Route_Call * call,
+    const char * name, size_t name_len, const char ** out_value,
+    size_t * out_len) {
+  const CallState * st;
+  size_t i;
+  if (call == NULL || call->size != sizeof *call || call->internal == NULL ||
+      name == NULL || out_value == NULL || out_len == NULL) {
+    return 0;
+  }
+  st = (const CallState *)call->internal;
+  for (i = 0; i < st->npat; i++) {
+    if (st->pat[i].named &&
+        span_eq(st->pat[i].text, st->pat[i].len, name, name_len)) {
+      *out_value = st->req[i].text;
+      *out_len = st->req[i].len;
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static int tab_before(const Route * a, const Route * b) {
+  size_t n;
+  int c;
+  if (a->weight != b->weight) {
+    return a->weight < b->weight;
+  }
+  n = a->machine_len < b->machine_len ? a->machine_len : b->machine_len;
+  c = memcmp(a->machine, b->machine, n);
+  if (c != 0) {
+    return c < 0;
+  }
+  return a->machine_len < b->machine_len;
+}
+
+GDEFCORE_Result gdefcore_routes_tabs(GDEFCORE_Routes * routes, const char * parent,
+    size_t parent_len, GDEFCORE_Route_Info ** out, size_t * out_count) {
+  size_t i;
+  size_t n = 0;
+  const Route ** pick;
+  GDEFCORE_Route_Info * info;
+  if (routes == NULL || parent == NULL || out == NULL || out_count == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  *out = NULL;
+  *out_count = 0;
+  pick = (const Route **)gcu_allocator_malloc(routes->alloc,
+      (routes->nroutes == 0 ? 1 : routes->nroutes) * sizeof *pick);
+  if (pick == NULL) {
+    return GDEFCORE_ERR_OOM;
+  }
+  for (i = 0; i < routes->nroutes; i++) {
+    const Route * r = &routes->routes[i];
+    if (r->kind == GDEFCORE_ROUTE_TAB &&
+        span_eq(r->parent, r->parent_len, parent, parent_len)) {
+      size_t j = n++;
+      while (j > 0 && tab_before(r, pick[j - 1])) {
+        pick[j] = pick[j - 1];
+        j -= 1;
+      }
+      pick[j] = r;
+    }
+  }
+  if (n == 0) {
+    gcu_allocator_free(routes->alloc, pick);
+    return GDEFCORE_OK;
+  }
+  info = (GDEFCORE_Route_Info *)gcu_allocator_calloc(routes->alloc, n,
+      sizeof *info);
+  if (info == NULL) {
+    gcu_allocator_free(routes->alloc, pick);
+    return GDEFCORE_ERR_OOM;
+  }
+  for (i = 0; i < n; i++) {
+    info[i].size = sizeof info[i];
+    info[i].machine = pick[i]->machine;
+    info[i].machine_len = pick[i]->machine_len;
+    info[i].path = pick[i]->path;
+    info[i].path_len = pick[i]->path_len;
+    info[i].title = pick[i]->title;
+    info[i].title_len = pick[i]->title_len;
+    info[i].permission = pick[i]->permission;
+    info[i].permission_len = pick[i]->permission_len;
+    info[i].kind = pick[i]->kind;
+    info[i].is_default = pick[i]->is_default;
+    info[i].weight = pick[i]->weight;
+  }
+  gcu_allocator_free(routes->alloc, pick);
+  *out = info;
+  *out_count = n;
+  return GDEFCORE_OK;
+}
+
+typedef struct Cand {
+  size_t idx;
+  int score;
+  const Seg * pat;
+  size_t npat;
+} Cand;
+
 static void dispatch(GDEFCORE_Routes * routes, GDEFCORE_Request * request,
     const Seg * req, size_t nreq) {
-  size_t * order;
+  Cand * order;
   size_t n = 0;
   size_t i;
   size_t j;
@@ -2560,26 +3050,65 @@ static void dispatch(GDEFCORE_Routes * routes, GDEFCORE_Request * request,
   char * owned_res = NULL;
   size_t owned_len = 0;
   const GDEFCORE_Allocator * alloc = routes->alloc;
-  order = (size_t *)gcu_allocator_malloc(alloc,
+  order = (Cand *)gcu_allocator_malloc(alloc,
       (routes->nroutes == 0 ? 1 : routes->nroutes) * sizeof *order);
   if (order == NULL) {
     return;
   }
   for (i = 0; i < routes->nroutes; i++) {
-    if (route_matches(&routes->routes[i], req, nreq)) {
-      order[n++] = i;
+    const Route * r = &routes->routes[i];
+    Cand c;
+    c.idx = i;
+    if (route_matches(r, req, nreq)) {
+      c.score = r->score;
+      c.pat = r->segs;
+      c.npat = r->nsegs;
+    } else if (r->alt != NULL && r->nalt == nreq &&
+               segs_match(r->alt, r->nalt, req)) {
+      /* A default tab at its parent's path, ahead of the parent's handlers. */
+      c.score = r->alt_score;
+      c.pat = r->alt;
+      c.npat = r->nalt;
+    } else {
+      continue;
     }
+    if (r->permission_len > 0) {
+      /* The path matched. Whether the principal may is decided with the
+       * matched values in hand, and a refusal is a route that did not match:
+       * nothing is recorded, so the answer is a missing route's. */
+      GDEFCORE_Route_Call call;
+      CallState st;
+      int allowed = 0;
+      if (routes->check != NULL) {
+        st.pat = c.pat;
+        st.npat = c.npat;
+        st.req = req;
+        memset(&call, 0, sizeof call);
+        call.size = sizeof call;
+        call.request = request;
+        call.machine = r->machine;
+        call.machine_len = r->machine_len;
+        call.data = r->data;
+        call.internal = &st;
+        allowed = routes->check(&call, r->permission, r->permission_len,
+            routes->check_data);
+      }
+      if (!allowed) {
+        continue;
+      }
+    }
+    order[n++] = c;
   }
   for (i = 1; i < n; i++) {
-    size_t key = order[i];
+    Cand key = order[i];
     j = i;
     while (j > 0) {
-      const Route * a = &routes->routes[order[j - 1]];
-      const Route * b = &routes->routes[key];
+      const Route * a = &routes->routes[order[j - 1].idx];
+      const Route * b = &routes->routes[key.idx];
       int less = 0;
       if (a->weight > b->weight ||
-          (a->weight == b->weight && a->score < b->score) ||
-          (a->weight == b->weight && a->score == b->score &&
+          (a->weight == b->weight && order[j - 1].score < key.score) ||
+          (a->weight == b->weight && order[j - 1].score == key.score &&
               a->index > b->index)) {
         less = 1;
       }
@@ -2592,13 +3121,29 @@ static void dispatch(GDEFCORE_Routes * routes, GDEFCORE_Request * request,
     order[j] = key;
   }
   for (i = 0; i < n; i++) {
-    Route * route = &routes->routes[order[i]];
+    Route * route = &routes->routes[order[i].idx];
     const char * res;
     size_t res_len = 0;
     if (owned && !route->after) {
       continue;
     }
-    route->fn(request, route->machine, route->machine_len, route->data);
+    if (route->cfn != NULL) {
+      GDEFCORE_Route_Call call;
+      CallState st;
+      st.pat = order[i].pat;
+      st.npat = order[i].npat;
+      st.req = req;
+      memset(&call, 0, sizeof call);
+      call.size = sizeof call;
+      call.request = request;
+      call.machine = route->machine;
+      call.machine_len = route->machine_len;
+      call.data = route->data;
+      call.internal = &st;
+      route->cfn(&call);
+    } else {
+      route->fn(request, route->machine, route->machine_len, route->data);
+    }
     res = gdefcore_request_resolution(request, &res_len);
     if (!owned && res != NULL && res_len > 0) {
       owned_res = (char *)gcu_allocator_malloc(alloc, res_len);
@@ -2722,7 +3267,7 @@ GDEFCORE_Result gdefcore_form_resolve(GDEFCORE_Routes * routes,
   }
   if (routes != NULL && path != NULL && path_len > 0 && path[0] == '/') {
     alloc = routes->alloc;
-    rc = split_path(alloc, path, path_len, &segs, &nsegs, NULL);
+    rc = split_path(alloc, path, path_len, 0, &segs, &nsegs, NULL, NULL);
     if (rc != GDEFCORE_OK) {
       return rc;
     }
