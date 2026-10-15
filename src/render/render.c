@@ -68,13 +68,13 @@ static const char kLayoutBody[] =
     "<div class=\"side\"><%= region(\"side\") %></div>";
 static const char kEntityBody[] =
     "<% use title; use body; %>"
-    "<article class=\"post\"><h1><%= title.html %></h1>"
-    "<div class=\"body\"><%= body.html %></div></article>";
+    "<article class=\"post\"><h1><%= title %></h1>"
+    "<div class=\"body\"><%= body %></div></article>";
 static const char kRecentBody[] =
     "<% use title; use summary; %>"
-    "<article class=\"recent\"><h2><%= title.html %></h2>"
-    "<p><%= summary.html %></p></article>";
-static const char kFieldBody[] = "<% use value; %><%= value.html %>";
+    "<article class=\"recent\"><h2><%= title %></h2>"
+    "<p><%= summary %></p></article>";
+static const char kFieldBody[] = "<% use value; %><%= value %>";
 
 typedef struct TangBind {
   const char * name;
@@ -392,7 +392,10 @@ static GDEFCORE_Result template_body(GDEFCORE_Catalog * catalog,
 
 /*
  * unsafe: the pane template already escaped field values. The layout
- * pastes those bytes as trusted so the tags survive.
+ * pastes those bytes as trusted so the tags survive. This is the one
+ * trusted insertion in the render layer: every other value a template
+ * can print is bound HTML_ATTRIBUTE-tagged (see tang_job_run) and every
+ * byte pasted here came out of a template whose own values were.
  */
 static bool native_region(GLTANG_NativeCall * call, void * user) {
   RegionSet * set = (RegionSet *)user;
@@ -414,6 +417,90 @@ static bool native_region(GLTANG_NativeCall * call, void * user) {
     }
   }
   gltang_call_return_string(call, "", 0, GLTANG_UNICODE_STRING_TYPE_TRUSTED);
+  return true;
+}
+
+/* ASCII whitespace and controls: skipped before the scheme is read. */
+static int url_skippable(unsigned char c) {
+  return c <= 0x20 || c == 0x7f;
+}
+
+/* The bytes a URL parser drops wherever they occur. */
+static int url_dropped(unsigned char c) {
+  return c == '\t' || c == '\n' || c == '\r';
+}
+
+static int url_lower(unsigned char c) {
+  return c >= 'A' && c <= 'Z' ? c + ('a' - 'A') : c;
+}
+
+/*
+ * Whether `s` may be an href. The scheme is http, https or mailto, or the
+ * reference is relative. A network-path reference (`//host`, and the
+ * `/\host` forms a browser reads the same way) is not relative here.
+ */
+static int url_allowed(const char * s, size_t n) {
+  static const char * const ok[] = {"http", "https", "mailto"};
+  char head[8];
+  size_t i = 0;
+  size_t k = 0;
+  int long_head = 0;
+  while (i < n && url_skippable((unsigned char)s[i])) {
+    i += 1;
+  }
+  for (; i < n; i++) {
+    unsigned char c = (unsigned char)s[i];
+    if (url_dropped(c)) {
+      continue;
+    }
+    if (c == ':') {
+      size_t j;
+      for (j = 0; !long_head && j < sizeof ok / sizeof ok[0]; j++) {
+        if (k == strlen(ok[j]) && memcmp(head, ok[j], k) == 0) {
+          return 1;
+        }
+      }
+      return 0;
+    }
+    if (c == '/' || c == '?' || c == '#' || c == '\\') {
+      break;
+    }
+    if (k < sizeof head) {
+      head[k++] = (char)url_lower(c);
+    } else {
+      long_head = 1;
+    }
+  }
+  /* Relative. A reference that opens with two slashes is a network path. */
+  if (k == 0 && i < n && (s[i] == '/' || s[i] == '\\')) {
+    for (i += 1; i < n; i++) {
+      if (!url_dropped((unsigned char)s[i])) {
+        return !(s[i] == '/' || s[i] == '\\');
+      }
+    }
+  }
+  return 1;
+}
+
+/*
+ * url(x): x when it is safe in an href, else "#". The answer carries the
+ * HTML_ATTRIBUTE tag, so it is escaped in an attribute whatever it holds.
+ */
+static bool native_url(GLTANG_NativeCall * call, void * user) {
+  size_t n = 0;
+  const char * text;
+  (void)user;
+  text = gltang_call_count(call) == 1 &&
+          gltang_call_kind(call, 0) == GLTANG_KIND_STRING
+      ? gltang_call_text(call, 0, &n)
+      : NULL;
+  if (text == NULL || !url_allowed(text, n)) {
+    gltang_call_return_string(call, "#", 1,
+        GLTANG_UNICODE_STRING_TYPE_HTML_ATTRIBUTE);
+    return true;
+  }
+  gltang_call_return_string(call, text, n,
+      GLTANG_UNICODE_STRING_TYPE_HTML_ATTRIBUTE);
   return true;
 }
 
@@ -544,11 +631,21 @@ static GDEFCORE_Result tang_job_run(TangJob * job) {
   }
   for (i = 0; i < job->nbinds; i++) {
     const char * text = job->binds[i].text == NULL ? "" : job->binds[i].text;
+    /*
+     * A bound value came from a user, a field or a request: tag it for the
+     * strictest encoding, so a template that prints it bare is safe in
+     * element text and in either quote style of an attribute.
+     */
     if (gltang_library_add_string(lib, job->binds[i].name, text,
-            job->binds[i].len, GLTANG_UNICODE_STRING_TYPE_TRUSTED) != GLTANG_OK) {
+            job->binds[i].len, GLTANG_UNICODE_STRING_TYPE_HTML_ATTRIBUTE) !=
+        GLTANG_OK) {
       rc = GDEFCORE_ERR_INVALID;
       goto done;
     }
+  }
+  if (gltang_library_add_native(lib, "url", native_url, NULL) != GLTANG_OK) {
+    rc = GDEFCORE_ERR_INVALID;
+    goto done;
   }
   if (job->native != NULL &&
       gltang_library_add_native(lib, job->native_name, job->native,

@@ -500,7 +500,7 @@ TESTFLAGS := `PKG_CONFIG_PATH=$(PKG_CONFIG_LOOKUP_PATH) pkg-config --libs --cfla
 # coverage target does, because --coverage links the gcov runtime, whose
 # mangle_path check-symbols is right to reject in a shipping library and
 # wrong to reject in an instrumented one. Spelled as text's TEST_GATES is.
-TEST_GATES ?= check-symbols check-aliasing check-seams check-prefix check-labels check-access check-account check-inst check-subject check-form check-render check-erasure check-oracle check-readpaths check-tenant check-renderkey check-wait check-contexts check-bus check-defects
+TEST_GATES ?= check-symbols check-aliasing check-seams check-prefix check-labels check-access check-account check-inst check-subject check-form check-render check-erasure check-oracle check-readpaths check-tenant check-renderkey check-wait check-contexts check-bus check-defects check-safeout
 
 # Valgrind flags (exclude "still reachable" as it's not a leak)
 # --suppressions: see tests/valgrind.supp. It holds allocations that are
@@ -1616,7 +1616,7 @@ $(FUZZ_FLAGS_STAMP): force-flags
 	@printf '%s\n' '$(FUZZ_CC) $(FUZZ_CXX) $(FUZZ_SAN) $(FUZZ_LIB_FLAGS) $(FUZZ_BIN_FLAGS) $(INCLUDE) $(STOR_LIBS) $(CUTIL_LIBS) $(SEC_LIBS) $(TEXT_LIBS) $(REGEX_LIBS) $(LTANG_LIBS) $(ARC_LIBS) $(MEM_LIBS)' > $@.new
 	@cmp -s $@.new $@ 2>/dev/null && rm -f $@.new || mv -f $@.new $@
 
-.PHONY: check-seams check-prefix check-labels check-access check-account check-inst check-subject check-form check-render check-erasure check-oracle check-readpaths check-tenant check-renderkey check-wait check-contexts check-bus check-defects
+.PHONY: check-seams check-prefix check-labels check-access check-account check-inst check-subject check-form check-render check-erasure check-oracle check-readpaths check-tenant check-renderkey check-wait check-contexts check-bus check-defects check-safeout
 check-seams: ## Fail if a subsystem includes another's private header
 	@tools/check-seams.sh .
 check-prefix: ## Fail if a derived Defiant prefix collides or a dependency is out of order
@@ -1647,6 +1647,8 @@ check-bus: $(APP_DIR)/testBus$(EXE_EXTENSION) ## Bus as accelerator, with plants
 	@tools/check-bus.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX))
 check-defects: $(APP_DIR)/$(TARGET) ## Real-source plants under the revocation and form gates
 	@tools/check-defects.sh "$(MAKE)" "$(BUILD_DIR)" PREFIX="$(PREFIX)"
+check-safeout: $(APP_DIR)/testSafeout$(EXE_EXTENSION) ## Bound values inert by default, url(), the region paste; real-source plants
+	@tools/check-safeout.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX))
 check-subject: $(APP_DIR)/testSubject$(EXE_EXTENSION) ## Erasure survives restore, with a plant
 	@LD_LIBRARY_PATH="$(TEST_LD_PATH)" tools/check-subject.sh "$(APP_DIR)/testSubject$(EXE_EXTENSION)"
 check-form: $(APP_DIR)/testForm$(EXE_EXTENSION) ## A signed submit stores a draft, with a plant
