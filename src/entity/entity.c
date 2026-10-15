@@ -412,6 +412,12 @@ static int machine_ok(const char * s, size_t n) {
       dot = i;
       continue;
     }
+    /* A hyphen is allowed in the local part, after the dot and not first or
+     * last: `core.template-kind`. The module part keeps to letters, digits
+     * and underscore. */
+    if (c == '-' && dot != n && i > dot + 1 && i + 1 < n) {
+      continue;
+    }
     if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
             (c >= '0' && c <= '9') || c == '_')) {
       return 0;
@@ -5057,9 +5063,15 @@ GDEFCORE_Result gdefcore_changeset_parse(GDEFCORE_Catalog * catalog,
     }
   }
   for (i = 0; i < count; i++) {
+    /*
+     * `type/<name>/kind` says what a type is. `type/<name>/field/kind` is a
+     * field that happens to be called kind: the name between the slashes has
+     * no slash in it, which tells them apart.
+     */
     if (files[i].path_len >= 5 && memcmp(files[i].path, "type/", 5) == 0 &&
         files[i].path_len >= 10 &&
-        memcmp(files[i].path + files[i].path_len - 5, "/kind", 5) == 0) {
+        memcmp(files[i].path + files[i].path_len - 5, "/kind", 5) == 0 &&
+        memchr(files[i].path + 5, '/', files[i].path_len - 10) == NULL) {
       const char * name = files[i].path + 5;
       size_t name_len = files[i].path_len - 10;
       int kind;

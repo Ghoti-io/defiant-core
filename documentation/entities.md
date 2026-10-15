@@ -2,8 +2,10 @@
 
 **Status:** describes what shipped in milestone 1, story 7.
 
-A type is `core.<name>`, `site.<name>`, or `<module>.<name>`. It is content
-or configuration, and its fields are text, one value or many. Values sit
+A type is `core.<name>`, `site.<name>`, or `<module>.<name>`. The name part
+may hold letters, digits and underscore, and a hyphen that is neither first
+nor last (`core.template-kind`); the part before the dot has no hyphen. It is
+content or configuration, and its fields are text, one value or many. Values sit
 under a language in the revision's `lang` object. The built-in types are
 `core.entity_type` and `core.changeset`.
 
@@ -39,6 +41,10 @@ relative paths and UTF-8 bytes.
 | `entity/<id>/lang/<lang>/<field>/<index>` | one field value |
 | `type/<machine>/kind` | `content` or `config` |
 | `type/<machine>/field/<name>` | `required one`, `required many`, `optional one`, or `optional many` |
+
+A field may be called `kind`: `type/core.template/field/kind` is that field,
+and not the kind of a type called `core.template/field`. The parser takes
+`type/<machine>/kind` as a type's kind only when the machine name has no slash.
 
 Parsing that list is untrusted. `..`, an absolute path, a byte that is not
 UTF-8, and a public id that fails its check are refused. A failing check is

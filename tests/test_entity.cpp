@@ -270,6 +270,82 @@ TEST_F(Entity, FieldConstraints) {
   gdefcore_text_free(catalog_, pattern);
 }
 
+/* A field may be called kind: its file ends in /kind like a type's own. */
+TEST_F(Entity, FieldNamedKind) {
+  GDEFCORE_Field fields[2];
+  GDEFCORE_Changeset * changeset = NULL;
+  GDEFCORE_Changeset * parsed = NULL;
+  GDEFCORE_Patch * files = NULL;
+  size_t count = 0;
+  size_t nfields = 0;
+  int kind = 0;
+  fields[0] = TitleField();
+  fields[1] = TitleField();
+  fields[1].name = "kind";
+  fields[1].name_len = 4;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &changeset));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_changeset_define(changeset, "site.kinded", 11,
+          GDEFCORE_TYPE_CONFIG, fields, 2));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_serialize(changeset, &files, &count));
+  /* The wire form has both: the type's kind and a field of that name. */
+  bool type_kind = false;
+  bool field_kind = false;
+  for (size_t i = 0; i < count; i++) {
+    std::string path(files[i].path, files[i].path_len);
+    type_kind = type_kind || path == "type/site.kinded/kind";
+    field_kind = field_kind || path == "type/site.kinded/field/kind";
+  }
+  EXPECT_TRUE(type_kind);
+  EXPECT_TRUE(field_kind);
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_changeset_parse(catalog_, files, count, NULL, &parsed));
+  gdefcore_changeset_destroy(changeset);
+  gdefcore_patch_free(catalog_, files, count);
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(parsed, "site.kinded", 11));
+  gdefcore_changeset_destroy(parsed);
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_type_kind(catalog_, "site.kinded", 11, &kind));
+  EXPECT_EQ(GDEFCORE_TYPE_CONFIG, kind);
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_type_field_count(catalog_, "site.kinded", 11, &nfields));
+  EXPECT_EQ(2u, nfields);
+}
+
+/* A hyphen is allowed in the local part of a type name, and nowhere else. */
+TEST_F(Entity, HyphenInTypeName) {
+  GDEFCORE_Field field = TitleField();
+  GDEFCORE_Changeset * changeset = NULL;
+  GDEFCORE_Changeset * parsed = NULL;
+  GDEFCORE_Patch * files = NULL;
+  size_t count = 0;
+  int kind = 0;
+  EXPECT_EQ(GDEFCORE_OK,
+      gdefcore_type_define(catalog_, "site.a-b", 8, GDEFCORE_TYPE_CONFIG, &field, 1));
+  EXPECT_NE(GDEFCORE_OK,
+      gdefcore_type_define(catalog_, "site.-ab", 8, GDEFCORE_TYPE_CONFIG, &field, 1));
+  EXPECT_NE(GDEFCORE_OK,
+      gdefcore_type_define(catalog_, "site.ab-", 8, GDEFCORE_TYPE_CONFIG, &field, 1));
+  EXPECT_NE(GDEFCORE_OK,
+      gdefcore_type_define(catalog_, "si-te.ab", 8, GDEFCORE_TYPE_CONFIG, &field, 1));
+  /* Control: the name without a hyphen was always fine. */
+  EXPECT_EQ(GDEFCORE_OK,
+      gdefcore_type_define(catalog_, "site.ab", 7, GDEFCORE_TYPE_CONFIG, &field, 1));
+  /* And a changeset carries it through its wire form. */
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &changeset));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_changeset_define(changeset, "site.c-d", 8, GDEFCORE_TYPE_CONTENT,
+          &field, 1));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_serialize(changeset, &files, &count));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_changeset_parse(catalog_, files, count, NULL, &parsed));
+  gdefcore_changeset_destroy(changeset);
+  gdefcore_patch_free(catalog_, files, count);
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(parsed, "site.c-d", 8));
+  gdefcore_changeset_destroy(parsed);
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_type_kind(catalog_, "site.c-d", 8, &kind));
+  EXPECT_EQ(GDEFCORE_TYPE_CONTENT, kind);
+}
+
 TEST_F(Entity, DraftRoundTrip) {
   char id[GDEFCORE_PUBLIC_ID_LEN + 1];
   uint64_t row = 0;
