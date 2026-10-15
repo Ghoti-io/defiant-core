@@ -40,5 +40,6 @@
 #include <ghoti.io/defiant-core/request.h>
 #include <ghoti.io/defiant-core/sched.h>
 #include <ghoti.io/defiant-core/subject.h>
+#include <ghoti.io/defiant-core/template.h>
 
 #endif /* GHOTI_IO_GDEFCORE_DEFIANT_CORE_H */

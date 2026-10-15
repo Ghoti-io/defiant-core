@@ -2070,7 +2070,8 @@ GDEFCORE_Result gdefcore_access_render_key(GDEFCORE_Catalog * catalog,
   }
   tenant = gdefcore_catalog_tenant(catalog, &tenant_len);
   principal = gdefcore_request_principal(request, &principal_len);
-  if (read_principal && principal != NULL && principal_len > 0) {
+  if ((read_principal || gdefcore_request_principal_dependent(request)) &&
+      principal != NULL && principal_len > 0) {
     principal_text = principal;
     principal_text_len = principal_len;
   }

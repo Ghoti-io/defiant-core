@@ -21,8 +21,8 @@ call cannot leak. A literal in a template is trusted as it always was.
 
 The tag methods keep working. `.html` retags a value as plain HTML, which
 does not escape quotes, so it is for element text only. `.raw` turns the
-encoding off, and an editable template that uses it needs the `unsafe`
-marker. `.percent` and `.javascript` encode for a query string and for a
+encoding off, and a template that uses it needs the `unsafe` marker on the
+same line, or it does not validate (templates.md). `.percent` and `.javascript` encode for a query string and for a
 script string.
 
 The post body is escaped text, not markup: it is printed like any other
@@ -97,6 +97,19 @@ the changeset again. It still writes whichever of the theme, the view,
 the displays, and the anonymous grant are missing. Render never opens
 the archive: after install, the store is the only source.
 
-The changeset defines the types. The theme, the view and the displays
-are written after it applies, because an entity of a type cannot be
-saved in the same changeset that defines the type.
+The changeset defines the types, among them `core.template-kind`. The
+two kinds (`core.page` and `core.pane`), the templates, the theme, the view
+and the displays are written after it applies, because an entity of a type
+cannot be saved in the same changeset that defines the type. The kinds go
+first and each template carries its kind, because a template is validated
+against its kind as it is saved.
+
+## Kinds and contracts
+
+Every template has a kind, and render runs it against that kind's contract:
+the Tang library a template is handed holds the contract's names and nothing
+else. A value the host binds that the contract does not declare is not
+there; a function the contract does not name is not there; the engine's
+`math` and `random` are null. A template with no kind, or whose kind is not
+stored, is refused with the error a missing template gets. Kinds, layering,
+validation and the `unsafe` marker are in templates.md.

@@ -52,6 +52,16 @@ extern "C" {
 /** The type holds configuration. */
 #define GDEFCORE_TYPE_CONFIG 2
 
+/* The touch codes are bit flags, so a caller can test a set of them. */
+/** A touched entity was saved to the published projection. */
+#define GDEFCORE_TOUCH_SAVE 1
+/** A touched entity was saved to the draft projection only. */
+#define GDEFCORE_TOUCH_DRAFT 2
+/** A touched entity's draft is published by the changeset. */
+#define GDEFCORE_TOUCH_PUBLISH 4
+/** A touched entity is cleared by the changeset. */
+#define GDEFCORE_TOUCH_CLEAR 8
+
 /** A changeset that only changes content field values. */
 #define GDEFCORE_RISK_LOW 1
 /** A changeset that defines a type or touches configuration. */
@@ -617,6 +627,57 @@ GDEFCORE_API GDEFCORE_Catalog * gdefcore_changeset_catalog(
  */
 GDEFCORE_API GDEFCORE_Result gdefcore_changeset_add_confirm_line(
     GDEFCORE_Changeset * changeset, const char * line, size_t len);
+
+/**
+ * @brief The module host bound with gdefcore_catalog_bind_host(), or NULL.
+ *
+ * @param catalog The catalog. NULL returns NULL.
+ */
+GDEFCORE_API GDEFCORE_Host * gdefcore_catalog_host(
+    const GDEFCORE_Catalog * catalog);
+
+/**
+ * @brief How many entities the changeset writes: saves, drafts, publishes
+ * and clears. Type definitions and module operations are not counted.
+ */
+GDEFCORE_API size_t gdefcore_changeset_touched_count(
+    const GDEFCORE_Changeset * changeset);
+
+/**
+ * @brief One entity the changeset writes.
+ *
+ * @p out_id and @p out_type are borrowed from the changeset and are not
+ * NUL-terminated. @p out_op receives ::GDEFCORE_TOUCH_SAVE,
+ * ::GDEFCORE_TOUCH_DRAFT, ::GDEFCORE_TOUCH_PUBLISH or
+ * ::GDEFCORE_TOUCH_CLEAR. Any out pointer may be NULL.
+ *
+ * @return ::GDEFCORE_OK or ::GDEFCORE_ERR_INVALID for an index past the end.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_changeset_touched_at(
+    const GDEFCORE_Changeset * changeset, size_t index, const char ** out_id,
+    size_t * out_id_len, const char ** out_type, size_t * out_type_len,
+    int * out_op);
+
+/**
+ * @brief Why the last apply or preview refused, in words, or NULL.
+ *
+ * A template that fails validation is named here with its line and the
+ * offending name, one issue per line. Valid until the next apply, rebase, or
+ * destroy.
+ *
+ * @param out_len Receives the length. May be NULL.
+ */
+GDEFCORE_API const char * gdefcore_changeset_refusal(
+    const GDEFCORE_Changeset * changeset, size_t * out_len);
+
+/**
+ * @brief Record the refusal text. The bytes are copied; NULL clears it.
+ *
+ * For the subsystems that vet a changeset (templates). Not a way to refuse
+ * an apply: the caller returns its own result.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_changeset_set_refusal(
+    GDEFCORE_Changeset * changeset, const char * text, size_t len);
 
 #ifdef __cplusplus
 }

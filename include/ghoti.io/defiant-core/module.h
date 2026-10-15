@@ -473,6 +473,136 @@ GDEFCORE_API GDEFCORE_Result gdefcore_module_fire_write(GDEFCORE_Host * host,
     GDEFCORE_Request * request, GDEFCORE_Catalog * catalog, const char * hook,
     size_t hook_len, const GDEFCORE_Write_Hook * args);
 
+/** A contribution provider answers with text (also for `markup`). */
+#define GDEFCORE_CONTRIBUTION_TEXT 1
+/** A contribution provider answers with an integer. */
+#define GDEFCORE_CONTRIBUTION_INTEGER 2
+/** A contribution provider answers with a float. */
+#define GDEFCORE_CONTRIBUTION_FLOAT 3
+
+/**
+ * @brief What a contribution provider answers. Begins with @ref size.
+ *
+ * The provider sets @ref kind and the member that kind names. The bytes of
+ * @ref text are copied before the provider's caller returns, so a provider
+ * may point at its own stack.
+ */
+typedef struct GDEFCORE_Contribution_Value {
+  size_t size;        ///< Set by the caller of the provider.
+  int kind;           ///< ::GDEFCORE_CONTRIBUTION_TEXT, INTEGER or FLOAT.
+  const char * text;  ///< For TEXT. Valid UTF-8.
+  size_t text_len;    ///< Length of @ref text.
+  int64_t integer;    ///< For INTEGER.
+  double real;        ///< For FLOAT.
+} GDEFCORE_Contribution_Value;
+
+/**
+ * @brief A lazy provider of one contributed template variable.
+ *
+ * Called only when a template reaches the variable, with the request being
+ * rendered, so it is principal-aware and reads through the access filter. A
+ * result other than ::GDEFCORE_OK means "not available": the template sees
+ * null. @p request may be NULL when the render has none; a provider that
+ * needs a principal then answers not available.
+ */
+typedef GDEFCORE_Result (*GDEFCORE_Contribution_Fn)(GDEFCORE_Request * request,
+    void * user, GDEFCORE_Contribution_Value * out);
+
+/**
+ * @brief One variable a module adds to a template kind's contract.
+ *
+ * Begins with @ref size. @ref name is exactly `<module>.<name>` (AD-35; a
+ * hyphen in the module's name is an underscore here, because Tang cannot
+ * spell it) and is used in a template as `use m.count as count;`. @ref type is `text`,
+ * `markup` or `number`. `markup` is already-safe markup and is the one type
+ * a template prints unescaped: the module vouches for it. @ref principal_free
+ * says the answer does not depend on who is asking; when it is not set, a page
+ * that reads the variable is recorded as principal-dependent in the render key
+ * (AD-30). @ref weight, @ref before and @ref after order this module's
+ * contributions against other modules' as AD-10 orders hooks.
+ */
+typedef struct GDEFCORE_Module_Contribution {
+  size_t size;                  ///< `sizeof(GDEFCORE_Module_Contribution)`.
+  const char * kind;            ///< Template kind it contributes to.
+  size_t kind_len;              ///< Length of @ref kind.
+  const char * name;            ///< `<module>.<name>`.
+  size_t name_len;              ///< Length of @ref name.
+  const char * type;            ///< `text`, `markup` or `number`.
+  size_t type_len;              ///< Length of @ref type.
+  const char * description;     ///< Plain words for the editor. May be NULL.
+  size_t description_len;       ///< Length of @ref description.
+  GDEFCORE_Contribution_Fn provider; ///< Required.
+  void * user;                  ///< Passed back to @ref provider.
+  int principal_free;           ///< Non-zero: the answer ignores the principal.
+  int weight;                   ///< Tie break. Larger runs later.
+  const char * before;          ///< Run before this module. NULL if none.
+  size_t before_len;            ///< Length of @ref before.
+  const char * after;           ///< Run after this module. NULL if none.
+  size_t after_len;             ///< Length of @ref after.
+} GDEFCORE_Module_Contribution;
+
+/**
+ * @brief A contribution as the host holds it. Borrowed from the host, valid
+ * until it is destroyed.
+ */
+typedef struct GDEFCORE_Module_Contributed {
+  size_t size;                  ///< `sizeof(GDEFCORE_Module_Contributed)`.
+  const char * module;          ///< The contributing module.
+  size_t module_len;            ///< Length of @ref module.
+  const char * kind;            ///< Template kind.
+  size_t kind_len;              ///< Length of @ref kind.
+  const char * name;            ///< `<module>.<name>`.
+  size_t name_len;              ///< Length of @ref name.
+  const char * type;            ///< `text`, `markup` or `number`.
+  size_t type_len;              ///< Length of @ref type.
+  const char * description;     ///< Never NULL; may be empty.
+  size_t description_len;       ///< Length of @ref description.
+  GDEFCORE_Contribution_Fn provider; ///< The lazy provider.
+  void * user;                  ///< Its state.
+  int principal_free;           ///< As contributed.
+} GDEFCORE_Module_Contributed;
+
+/**
+ * @brief Register a contribution of the installed module @p module.
+ *
+ * The registration is code, not data: it lives with the host and says what
+ * the module can add. Whether it is in force for a tenant is decided when the
+ * contract is built, by whether the module is enabled. Contributing is
+ * additive: nothing here removes a contribution, so a module's disable is
+ * what ends it. Register while the host is being set up, with the modules
+ * installed and before requests are served: the registry is not locked.
+ *
+ * Refused with ::GDEFCORE_ERR_INVALID, and the error text from
+ * gdefcore_module_error(): the module is not installed, a field is malformed,
+ * @ref GDEFCORE_Module_Contribution::name is not under the module's name, or
+ * the same module already contributed that name to that kind (the message
+ * names both).
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_module_contribute(GDEFCORE_Host * host,
+    const char * module, size_t module_len,
+    const GDEFCORE_Module_Contribution * contribution);
+
+/**
+ * @brief The contributions to template kind @p kind of the modules enabled for
+ * @p tenant, in AD-10 order.
+ *
+ * Ordered by before and after relationships between the modules, then weight,
+ * then module name, then registration order. When @p projection is not NULL, its staged module enables and
+ * disables are applied first, so a preview sees the set the changeset would
+ * leave. A cycle is ::GDEFCORE_ERR_INVALID and the error text names both
+ * modules. Free @p out_items with gdefcore_module_contributions_free().
+ *
+ * @param out_items Receives an array of pointers; NULL when @p out_count is 0.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_module_contributions(
+    GDEFCORE_Host * host, const uint8_t * tenant, size_t tenant_len,
+    const GDEFCORE_Changeset * projection, const char * kind, size_t kind_len,
+    const GDEFCORE_Module_Contributed *** out_items, size_t * out_count);
+
+/** @brief Free the array from gdefcore_module_contributions(). NULL is ignored. */
+GDEFCORE_API void gdefcore_module_contributions_free(GDEFCORE_Host * host,
+    const GDEFCORE_Module_Contributed ** items);
+
 #ifdef __cplusplus
 }
 #endif

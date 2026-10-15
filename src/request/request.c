@@ -369,3 +369,13 @@ const char * gdefcore_request_resolution(const GDEFCORE_Request * request,
   }
   return request->resolution;
 }
+
+void gdefcore_request_mark_principal_dependent(GDEFCORE_Request * request) {
+  if (request != NULL) {
+    request->principal_dependent = 1;
+  }
+}
+
+int gdefcore_request_principal_dependent(const GDEFCORE_Request * request) {
+  return request != NULL && request->principal_dependent != 0;
+}

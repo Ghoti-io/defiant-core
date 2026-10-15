@@ -57,7 +57,9 @@ enum {
   kErrorMax = 512,
   kSkipMax = 1024,
   kTenantMax = 256,
-  kAlterMax = 4096
+  kAlterMax = 4096,
+  kContribMax = 64,
+  kContribText = 256
 };
 
 static const char kCoreToken[] = TOKEN_STR(GHOTIIO_DEFCORE_NAME);
@@ -148,6 +150,25 @@ typedef struct ChainNode {
   int mod_index;
 } ChainNode;
 
+/*
+ * One registered contribution to a template kind's contract. The public
+ * record points into the buffers beside it, so a pointer to it is stable for
+ * the life of the host: contributions are only ever added.
+ */
+typedef struct Contrib {
+  GDEFCORE_Module_Contributed pub;
+  char module[kNameMax + 1];
+  char kind[kNameMax + 1];
+  char name[kNameMax + 1];
+  char type[16];
+  char description[kContribText + 1];
+  char before[kNameMax + 1];
+  size_t before_len;
+  char after[kNameMax + 1];
+  size_t after_len;
+  int weight;
+} Contrib;
+
 typedef struct Chain {
   int used;
   uint8_t tenant[kTenantMax];
@@ -178,6 +199,8 @@ struct GDEFCORE_Host {
   size_t skipped_n;
   size_t skipped_count;
   int firing;
+  Contrib contribs[kContribMax];
+  size_t ncontribs;
 };
 
 struct GDEFCORE_Alter {
@@ -1172,6 +1195,317 @@ GDEFCORE_Result gdefcore_module_enabled(GDEFCORE_Host * host,
   *out_enabled = name_has(names, nnames, name, name_len) && mod != NULL &&
                  !mod->quarantined && (mod->native || mod->entry != NULL);
   return GDEFCORE_OK;
+}
+
+/* A dotted Tang identifier path: `m.count`, `m.a.b`. */
+static int path_ok(const char * s, size_t n) {
+  size_t i;
+  int start = 1;
+  if (s == NULL || n == 0 || n > kNameMax) {
+    return 0;
+  }
+  for (i = 0; i < n; i++) {
+    char c = s[i];
+    if (c == '.') {
+      if (start || i + 1 == n) {
+        return 0;
+      }
+      start = 1;
+      continue;
+    }
+    if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' ||
+            (!start && c >= '0' && c <= '9'))) {
+      return 0;
+    }
+    start = 0;
+  }
+  return 1;
+}
+
+/* Whether `name` is `<module>.<something>`, a hyphen of the module spelled _. */
+static int under_module(const char * name, size_t n, const char * module,
+    size_t mlen) {
+  size_t i;
+  if (n <= mlen + 1 || name[mlen] != '.') {
+    return 0;
+  }
+  for (i = 0; i < mlen; i++) {
+    char want = module[i] == '-' ? '_' : module[i];
+    if (name[i] != want) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static void set_error2(GDEFCORE_Host * host, const char * a, const char * b,
+    const char * c, const char * d, const char * e) {
+  char text[kErrorMax];
+  int n = snprintf(text, sizeof text, "%s%s%s%s%s", a, b, c, d, e);
+  if (n < 0) {
+    text[0] = '\0';
+  }
+  set_error(host, text);
+}
+
+GDEFCORE_Result gdefcore_module_contribute(GDEFCORE_Host * host,
+    const char * module, size_t module_len,
+    const GDEFCORE_Module_Contribution * c) {
+  Contrib * slot;
+  Mod * mod;
+  size_t i;
+  if (host == NULL || c == NULL || c->size < sizeof *c || c->kind == NULL ||
+      c->name == NULL || c->type == NULL || c->provider == NULL ||
+      !name_ok(module, module_len)) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  mod = find_mod(host, module, module_len);
+  if (mod == NULL) {
+    set_error(host, "Module is not installed.");
+    return GDEFCORE_ERR_INVALID;
+  }
+  if (!path_ok(c->kind, c->kind_len) || !path_ok(c->name, c->name_len) ||
+      !under_module(c->name, c->name_len, module, module_len) ||
+      memchr(c->name + module_len + 1, '.', c->name_len - module_len - 1) !=
+          NULL) {
+    set_error2(host, "A contribution of ", mod->name, " must be named ",
+        mod->name, ".<name>, letters, digits and underscore.");
+    return GDEFCORE_ERR_INVALID;
+  }
+  if (!((c->type_len == 4 && memcmp(c->type, "text", 4) == 0) ||
+          (c->type_len == 6 && memcmp(c->type, "markup", 6) == 0) ||
+          (c->type_len == 6 && memcmp(c->type, "number", 6) == 0))) {
+    set_error2(host, "A contributed variable is text, markup or number: ",
+        mod->name, "", "", "");
+    return GDEFCORE_ERR_INVALID;
+  }
+  if (c->description_len > kContribText ||
+      (c->description == NULL && c->description_len != 0) ||
+      (c->before_len > 0 && !name_ok(c->before, c->before_len)) ||
+      (c->after_len > 0 && !name_ok(c->after, c->after_len))) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  for (i = 0; i < host->ncontribs; i++) {
+    const Contrib * old = &host->contribs[i];
+    if (strlen(old->module) == module_len &&
+        memcmp(old->module, module, module_len) == 0 &&
+        strlen(old->kind) == c->kind_len &&
+        memcmp(old->kind, c->kind, c->kind_len) == 0 &&
+        strlen(old->name) == c->name_len &&
+        memcmp(old->name, c->name, c->name_len) == 0) {
+      set_error2(host, "Module ", old->module, " contributes ", old->name,
+          " to the same kind twice.");
+      return GDEFCORE_ERR_INVALID;
+    }
+  }
+  if (host->ncontribs >= kContribMax) {
+    set_error(host, "Too many contributions.");
+    return GDEFCORE_ERR_LIMIT;
+  }
+  slot = &host->contribs[host->ncontribs];
+  memset(slot, 0, sizeof *slot);
+  memcpy(slot->module, module, module_len);
+  memcpy(slot->kind, c->kind, c->kind_len);
+  memcpy(slot->name, c->name, c->name_len);
+  memcpy(slot->type, c->type, c->type_len);
+  if (c->description_len > 0) {
+    memcpy(slot->description, c->description, c->description_len);
+  }
+  if (c->before_len > 0) {
+    memcpy(slot->before, c->before, c->before_len);
+    slot->before_len = c->before_len;
+  }
+  if (c->after_len > 0) {
+    memcpy(slot->after, c->after, c->after_len);
+    slot->after_len = c->after_len;
+  }
+  slot->weight = c->weight;
+  slot->pub.size = sizeof slot->pub;
+  slot->pub.module = slot->module;
+  slot->pub.module_len = module_len;
+  slot->pub.kind = slot->kind;
+  slot->pub.kind_len = c->kind_len;
+  slot->pub.name = slot->name;
+  slot->pub.name_len = c->name_len;
+  slot->pub.type = slot->type;
+  slot->pub.type_len = c->type_len;
+  slot->pub.description = slot->description;
+  slot->pub.description_len = c->description_len;
+  slot->pub.provider = c->provider;
+  slot->pub.user = c->user;
+  slot->pub.principal_free = c->principal_free != 0;
+  host->ncontribs += 1;
+  set_error(host, NULL);
+  return GDEFCORE_OK;
+}
+
+/* The enabled set the tenant has, then the projection's operations. */
+static GDEFCORE_Result projected_names(GDEFCORE_Host * host,
+    const uint8_t * tenant, size_t tenant_len,
+    const GDEFCORE_Changeset * projection, Name * names, size_t * n) {
+  size_t i;
+  size_t ops;
+  GDEFCORE_Result rc = enabled_names(host, tenant, tenant_len, names, n);
+  if (rc != GDEFCORE_OK || projection == NULL) {
+    return rc;
+  }
+  ops = gdefcore_changeset_module_count(projection);
+  for (i = 0; i < ops; i++) {
+    const char * name = NULL;
+    size_t len = 0;
+    int enable = 0;
+    if (gdefcore_changeset_module_at(projection, i, &name, &len, &enable) !=
+        GDEFCORE_OK) {
+      return GDEFCORE_ERR_INTERNAL;
+    }
+    if (enable) {
+      rc = name_add(names, n, kModMax, name, len);
+      if (rc != GDEFCORE_OK) {
+        return rc;
+      }
+    } else {
+      name_remove(names, n, name, len);
+    }
+  }
+  return GDEFCORE_OK;
+}
+
+static int module_live(GDEFCORE_Host * host, const Name * names, size_t n,
+    const char * module) {
+  size_t len = strlen(module);
+  Mod * mod = find_mod(host, module, len);
+  return mod != NULL && name_has(names, n, module, len) && !mod->quarantined &&
+         (mod->native || mod->entry != NULL);
+}
+
+static int span_is(const char * a, size_t an, const char * b, size_t bn) {
+  return an == bn && (an == 0 || memcmp(a, b, an) == 0);
+}
+
+GDEFCORE_Result gdefcore_module_contributions(GDEFCORE_Host * host,
+    const uint8_t * tenant, size_t tenant_len,
+    const GDEFCORE_Changeset * projection, const char * kind, size_t kind_len,
+    const GDEFCORE_Module_Contributed *** out_items, size_t * out_count) {
+  typedef struct Node {
+    const Contrib * c;
+    int indeg;
+    int nsucc;
+    int succ[kContribMax];
+    int emitted;
+  } Node;
+  Name names[kModMax];
+  size_t nnames = 0;
+  Node * nodes;
+  const GDEFCORE_Module_Contributed ** out;
+  size_t n = 0;
+  size_t emitted = 0;
+  size_t i;
+  size_t j;
+  GDEFCORE_Result rc;
+  if (host == NULL || kind == NULL || out_items == NULL || out_count == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  *out_items = NULL;
+  *out_count = 0;
+  rc = projected_names(host, tenant, tenant_len, projection, names, &nnames);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  nodes = (Node *)gcu_allocator_calloc(host->alloc, kContribMax, sizeof *nodes);
+  out = (const GDEFCORE_Module_Contributed **)gcu_allocator_calloc(host->alloc,
+      kContribMax + 1, sizeof *out);
+  if (nodes == NULL || out == NULL) {
+    gcu_allocator_free(host->alloc, nodes);
+    gcu_allocator_free(host->alloc, out);
+    return GDEFCORE_ERR_OOM;
+  }
+  for (i = 0; i < host->ncontribs; i++) {
+    const Contrib * c = &host->contribs[i];
+    if (!span_is(c->kind, strlen(c->kind), kind, kind_len) ||
+        !module_live(host, names, nnames, c->module)) {
+      continue;
+    }
+    nodes[n++].c = c;
+  }
+  for (i = 0; i < n; i++) {
+    for (j = 0; j < n; j++) {
+      const Contrib * a = nodes[i].c;
+      const Contrib * b = nodes[j].c;
+      if (i == j || strcmp(a->module, b->module) == 0) {
+        continue;
+      }
+      /* a runs first when it says before b, or b says after a. */
+      if (span_is(a->before, a->before_len, b->module, strlen(b->module)) ||
+          span_is(b->after, b->after_len, a->module, strlen(a->module))) {
+        nodes[i].succ[nodes[i].nsucc++] = (int)j;
+        nodes[j].indeg += 1;
+      }
+    }
+  }
+  while (emitted < n) {
+    int pick = -1;
+    size_t s;
+    for (i = 0; i < n; i++) {
+      if (nodes[i].emitted || nodes[i].indeg != 0) {
+        continue;
+      }
+      if (pick < 0) {
+        pick = (int)i;
+        continue;
+      }
+      if (nodes[i].c->weight < nodes[pick].c->weight) {
+        pick = (int)i;
+      } else if (nodes[i].c->weight == nodes[pick].c->weight) {
+        int cmp = strcmp(nodes[i].c->module, nodes[pick].c->module);
+        if (cmp < 0) {
+          pick = (int)i;
+        }
+      }
+    }
+    if (pick < 0) {
+      const char * first = NULL;
+      const char * second = NULL;
+      for (i = 0; i < n; i++) {
+        if (nodes[i].emitted) {
+          continue;
+        }
+        if (first == NULL) {
+          first = nodes[i].c->module;
+        } else if (second == NULL && strcmp(first, nodes[i].c->module) != 0) {
+          second = nodes[i].c->module;
+        }
+      }
+      set_error2(host, "Contribution order cycled between ",
+          first == NULL ? "" : first, " and ", second == NULL ? "" : second,
+          ".");
+      gcu_allocator_free(host->alloc, nodes);
+      gcu_allocator_free(host->alloc, out);
+      return GDEFCORE_ERR_INVALID;
+    }
+    nodes[pick].emitted = 1;
+    out[emitted++] = &nodes[pick].c->pub;
+    for (s = 0; s < (size_t)nodes[pick].nsucc; s++) {
+      int to = nodes[pick].succ[s];
+      if (nodes[to].indeg > 0) {
+        nodes[to].indeg -= 1;
+      }
+    }
+  }
+  gcu_allocator_free(host->alloc, nodes);
+  if (n == 0) {
+    gcu_allocator_free(host->alloc, out);
+    out = NULL;
+  }
+  *out_items = out;
+  *out_count = n;
+  return GDEFCORE_OK;
+}
+
+void gdefcore_module_contributions_free(GDEFCORE_Host * host,
+    const GDEFCORE_Module_Contributed ** items) {
+  if (host != NULL && items != NULL) {
+    gcu_allocator_free(host->alloc, (void *)items);
+  }
 }
 
 const char * gdefcore_module_notice(const GDEFCORE_Host * host,

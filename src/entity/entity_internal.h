@@ -106,6 +106,7 @@ struct GDEFCORE_Changeset {
   GDEFCORE_Op * ops;
   size_t nops;
   GDEFCORE_Text conflict;
+  GDEFCORE_Text refusal;
   GDEFCORE_Text * lines;
   size_t nlines;
   int applied;

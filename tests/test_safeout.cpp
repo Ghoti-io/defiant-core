@@ -190,9 +190,27 @@ class SafeOut : public ::testing::Test {
     }
     gdefcore_ids_free(catalog_, ids, n);
     ASSERT_TRUE(have) << name;
-    GDEFCORE_Value values[2];
+    GDEFCORE_Value values[3];
     const char * name_slot = name;
     size_t name_len = strlen(name);
+    /* A template keeps the kind it has: it is a required field. */
+    std::string kind;
+    const char * kind_slot = NULL;
+    size_t kind_len = 0;
+    size_t nvalues = 2;
+    if (strcmp(type, "core.template") == 0) {
+      char ** kv = NULL;
+      size_t * kl = NULL;
+      size_t kc = 0;
+      ASSERT_EQ(GDEFCORE_OK,
+          gdefcore_entity_values(catalog_, NULL, GDEFCORE_VIEW_PUBLISHED, found,
+              GDEFCORE_PUBLIC_ID_LEN, "en", 2, "kind", 4, &kv, &kl, &kc));
+      ASSERT_EQ(1u, kc);
+      kind.assign(kv[0], kl[0]);
+      gdefcore_values_free(catalog_, kv, kl, kc);
+      kind_slot = kind.c_str();
+      kind_len = kind.size();
+    }
     std::vector<size_t> lens(count);
     for (size_t i = 0; i < count; i++) {
       lens[i] = strlen(texts[i]);
@@ -210,10 +228,21 @@ class SafeOut : public ::testing::Test {
     values[1].texts = texts;
     values[1].text_lens = lens.data();
     values[1].count = count;
+    if (kind_slot != NULL) {
+      memset(&values[2], 0, sizeof values[2]);
+      values[2].size = sizeof values[2];
+      values[2].field = "kind";
+      values[2].field_len = 4;
+      values[2].texts = &kind_slot;
+      values[2].text_lens = &kind_len;
+      values[2].count = 1;
+      nvalues = 3;
+    }
     GDEFCORE_Changeset * cs = NULL;
     ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
     ASSERT_EQ(GDEFCORE_OK,
-        gdefcore_entity_save(cs, found, GDEFCORE_PUBLIC_ID_LEN, "en", 2, values, 2));
+        gdefcore_entity_save(cs, found, GDEFCORE_PUBLIC_ID_LEN, "en", 2, values,
+            nvalues));
     ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, type, strlen(type)));
     gdefcore_changeset_destroy(cs);
   }
@@ -238,6 +267,21 @@ class SafeOut : public ::testing::Test {
     return Show(anon_, alias.c_str(), rc);
   }
 
+  /* A bare template, run with no kind and so with no validation. */
+  std::string Scope(const char * source) {
+    char * bytes = NULL;
+    size_t n = 0;
+    std::string page;
+    EXPECT_EQ(GDEFCORE_OK,
+        gdefcore_render_scope(catalog_, source, strlen(source),
+            GDEFCORE_RENDER_PAGE_FUEL, &bytes, &n));
+    if (bytes != NULL) {
+      page.assign(bytes, n);
+    }
+    gdefcore_text_free(catalog_, bytes);
+    return page;
+  }
+
   std::string Show(GDEFCORE_Request * request, const char * path,
       GDEFCORE_Result * rc) {
     char * bytes = NULL;
@@ -257,7 +301,12 @@ class SafeOut : public ::testing::Test {
 };
 
 
-const char * const kLead = "<% use title; use body; use url; %>";
+/*
+ * The marker is on the lead's line, so every template here may print .raw: the
+ * leak controls below need it, and a template without the marker is refused.
+ */
+const char * const kLead =
+    "<% use title; use body; use url; /* unsafe: the controls print .raw */ %>";
 
 std::string Text(const char * expr) {
   return std::string(kLead) + "[<%= " + expr + " %>]";
@@ -450,7 +499,8 @@ TEST_F(SafeOut, BuiltinPost) {
   EXPECT_EQ(std::string::npos, page.find("<script"));
   EXPECT_EQ(std::string::npos, page.find("<img"));
   /* Control: the same post through a template that prints .raw leaks. */
-  SetTemplate("entity", "<% use title; use body; %><h1><%= title.raw %></h1>");
+  SetTemplate("entity",
+      "<% use title; use body; /* unsafe: control */ %><h1><%= title.raw %></h1>");
   page = Show(anon_, "hostile", &rc);
   EXPECT_NE(std::string::npos, page.find("<h1><script>t</script></h1>"));
 }
@@ -472,7 +522,7 @@ TEST_F(SafeOut, BuiltinRecent) {
   EXPECT_EQ(std::string::npos, page.find("<img"));
   /* Control. */
   SetTemplate("recent",
-      "<% use title; use summary; %><h2><%= title.raw %></h2><p><%= summary.raw %></p>");
+      "<% use title; use summary; /* unsafe: control */ %><h2><%= title.raw %></h2><p><%= summary.raw %></p>");
   page = Show(anon_, "/", &rc);
   EXPECT_NE(std::string::npos, page.find("<h2><script>t</script></h2>"));
   EXPECT_NE(std::string::npos, page.find("<p><img src=x onerror=1></p>"));
@@ -489,7 +539,7 @@ TEST_F(SafeOut, BuiltinField) {
   ASSERT_EQ(GDEFCORE_OK, rc);
   EXPECT_NE(std::string::npos, page.find("&lt;script&gt;t&lt;/script&gt;"));
   EXPECT_EQ(std::string::npos, page.find("<script"));
-  SetTemplate("field", "<% use value; %><%= value.raw %>");
+  SetTemplate("field", "<% use value; /* unsafe: control */ %><%= value.raw %>");
   page = Show(anon_, "f", &rc);
   EXPECT_NE(std::string::npos, page.find("<script>t</script>"));
 }
@@ -598,9 +648,14 @@ TEST_F(SafeOut, UrlStaysEscaped) {
   EXPECT_NE(std::string::npos, page.find("<a href=\"#\">x</a>"));
   page = Post(Href("url(null)").c_str(), "https://a/", "b");
   EXPECT_NE(std::string::npos, page.find("<a href=\"#\">x</a>"));
-  page = Post(Href("url()").c_str(), "https://a/", "b");
+  /*
+   * A wrong argument count is not a template the contract allows (url takes
+   * one), so these two reach the native through a bare scope, which is not
+   * validated, and the native still answers "#".
+   */
+  page = Scope("<% use url; %><a href=\"<%= url() %>\">x</a>");
   EXPECT_NE(std::string::npos, page.find("<a href=\"#\">x</a>"));
-  page = Post(Href("url(title, title)").c_str(), "https://a/", "b");
+  page = Scope("<% use url; %><a href=\"<%= url(\"https://a/\", \"b\") %>\">x</a>");
   EXPECT_NE(std::string::npos, page.find("<a href=\"#\">x</a>"));
   /* Control: the same template with a string argument passes the URL. */
   page = Post(Href("url(title)").c_str(), "https://a/", "b");

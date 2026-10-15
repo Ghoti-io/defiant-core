@@ -258,6 +258,10 @@
 #define gdefcore_request_id GHOTIIO_DEFCORE(gdefcore_request_id)
 #define gdefcore_request_note GHOTIIO_DEFCORE(gdefcore_request_note)
 #define gdefcore_request_principal GHOTIIO_DEFCORE(gdefcore_request_principal)
+#define gdefcore_request_mark_principal_dependent                              \
+  GHOTIIO_DEFCORE(gdefcore_request_mark_principal_dependent)
+#define gdefcore_request_principal_dependent                                   \
+  GHOTIIO_DEFCORE(gdefcore_request_principal_dependent)
 #define gdefcore_request_resolution GHOTIIO_DEFCORE(gdefcore_request_resolution)
 #define gdefcore_request_set_acting_principal                                  \
   GHOTIIO_DEFCORE(gdefcore_request_set_acting_principal)
@@ -320,6 +324,48 @@
   GHOTIIO_DEFCORE(gdefcore_type_field_personal)
 #define gdefcore_type_kind GHOTIIO_DEFCORE(gdefcore_type_kind)
 #define gdefcore_values_free GHOTIIO_DEFCORE(gdefcore_values_free)
+
+#define gdefcore_catalog_host GHOTIIO_DEFCORE(gdefcore_catalog_host)
+#define gdefcore_changeset_touched_count \
+  GHOTIIO_DEFCORE(gdefcore_changeset_touched_count)
+#define gdefcore_changeset_touched_at \
+  GHOTIIO_DEFCORE(gdefcore_changeset_touched_at)
+#define gdefcore_changeset_refusal GHOTIIO_DEFCORE(gdefcore_changeset_refusal)
+#define gdefcore_changeset_set_refusal \
+  GHOTIIO_DEFCORE(gdefcore_changeset_set_refusal)
+
+#define gdefcore_module_contribute GHOTIIO_DEFCORE(gdefcore_module_contribute)
+#define gdefcore_module_contributions \
+  GHOTIIO_DEFCORE(gdefcore_module_contributions)
+#define gdefcore_module_contributions_free \
+  GHOTIIO_DEFCORE(gdefcore_module_contributions_free)
+
+#define gdefcore_template_contract_open \
+  GHOTIIO_DEFCORE(gdefcore_template_contract_open)
+#define gdefcore_template_contract_close \
+  GHOTIIO_DEFCORE(gdefcore_template_contract_close)
+#define gdefcore_template_contract_version \
+  GHOTIIO_DEFCORE(gdefcore_template_contract_version)
+#define gdefcore_template_contract_var_count \
+  GHOTIIO_DEFCORE(gdefcore_template_contract_var_count)
+#define gdefcore_template_contract_var_at \
+  GHOTIIO_DEFCORE(gdefcore_template_contract_var_at)
+#define gdefcore_template_contract_var \
+  GHOTIIO_DEFCORE(gdefcore_template_contract_var)
+#define gdefcore_template_contract_fn_count \
+  GHOTIIO_DEFCORE(gdefcore_template_contract_fn_count)
+#define gdefcore_template_contract_fn_at \
+  GHOTIIO_DEFCORE(gdefcore_template_contract_fn_at)
+#define gdefcore_template_validate GHOTIIO_DEFCORE(gdefcore_template_validate)
+#define gdefcore_template_preview GHOTIIO_DEFCORE(gdefcore_template_preview)
+#define gdefcore_template_vet GHOTIIO_DEFCORE(gdefcore_template_vet)
+#define gdefcore_template_report_count \
+  GHOTIIO_DEFCORE(gdefcore_template_report_count)
+#define gdefcore_template_report_at GHOTIIO_DEFCORE(gdefcore_template_report_at)
+#define gdefcore_template_report_text \
+  GHOTIIO_DEFCORE(gdefcore_template_report_text)
+#define gdefcore_template_report_free \
+  GHOTIIO_DEFCORE(gdefcore_template_report_free)
 
 /// @endcond
 

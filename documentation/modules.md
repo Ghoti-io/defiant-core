@@ -18,6 +18,16 @@ Module example enhances missing, which is not installed.
 
 The name and the target are the ones in the manifest.
 
+## Template contributions
+
+A module can add variables to a template kind's contract with
+`gdefcore_module_contribute()`: a name `<module>.<name>`, a type (`text`,
+`markup` or `number`), a lazy provider and a `principal_free` flag. The
+registration is code held by the host. A contribution is in force for a tenant
+while the module is enabled, and is ordered against other modules' as hooks
+are (before and after, then weight, then module name). Disabling the module
+ends it. templates.md has the rest.
+
 ## Hooks
 
 A hook is an event, an alter, or a decision.

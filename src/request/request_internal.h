@@ -54,6 +54,7 @@ struct GDEFCORE_Request {
   size_t nnotes;
   char * resolution;
   size_t resolution_len;
+  int principal_dependent;
   const GDEFCORE_Allocator * allocator;
 };
 

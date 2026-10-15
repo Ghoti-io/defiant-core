@@ -29,6 +29,7 @@
 #include <ghoti.io/defiant-core/access.h>
 #include <ghoti.io/defiant-core/entity.h>
 #include <ghoti.io/defiant-core/module.h>
+#include <ghoti.io/defiant-core/template.h>
 
 #include <ghoti.io/cutil/allocator.h>
 #include <ghoti.io/defiant-storage/projection.h>
@@ -2514,6 +2515,7 @@ static void changeset_free_ops(GDEFCORE_Changeset * cs) {
   cs->lines = NULL;
   cs->nlines = 0;
   text_clear(cs->catalog->alloc, &cs->conflict);
+  text_clear(cs->catalog->alloc, &cs->refusal);
   text_clear(cs->catalog->alloc, &cs->actor);
 }
 
@@ -4121,6 +4123,15 @@ GDEFCORE_Result gdefcore_changeset_apply(GDEFCORE_Changeset * changeset,
       }
     }
   }
+  /*
+   * Templates are checked against the contract in force once the changeset's
+   * module operations have been applied (AD-16: a failing template refuses the
+   * changeset). This is the second check; the first is the preview.
+   */
+  rc = gdefcore_template_vet(changeset);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
   if (gdefcore_changeset_module_count(changeset) > 0) {
     if (changeset->catalog->host == NULL) {
       return GDEFCORE_ERR_INVALID;
@@ -4237,6 +4248,98 @@ GDEFCORE_Result gdefcore_changeset_apply(GDEFCORE_Changeset * changeset,
   return GDEFCORE_OK;
 }
 
+GDEFCORE_Host * gdefcore_catalog_host(const GDEFCORE_Catalog * catalog) {
+  return catalog == NULL ? NULL : catalog->host;
+}
+
+static int touch_op(int kind) {
+  return kind == GDEFCORE_OP_SAVE || kind == GDEFCORE_OP_DRAFT ||
+         kind == GDEFCORE_OP_PUBLISH || kind == GDEFCORE_OP_CLEAR;
+}
+
+size_t gdefcore_changeset_touched_count(const GDEFCORE_Changeset * changeset) {
+  size_t i;
+  size_t n = 0;
+  if (changeset == NULL) {
+    return 0;
+  }
+  for (i = 0; i < changeset->nops; i++) {
+    if (touch_op(changeset->ops[i].kind)) {
+      n += 1;
+    }
+  }
+  return n;
+}
+
+GDEFCORE_Result gdefcore_changeset_touched_at(
+    const GDEFCORE_Changeset * changeset, size_t index, const char ** out_id,
+    size_t * out_id_len, const char ** out_type, size_t * out_type_len,
+    int * out_op) {
+  size_t i;
+  size_t seen = 0;
+  if (changeset == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  for (i = 0; i < changeset->nops; i++) {
+    const GDEFCORE_Op * op = &changeset->ops[i];
+    if (!touch_op(op->kind)) {
+      continue;
+    }
+    if (seen == index) {
+      if (out_id != NULL) {
+        *out_id = op->id.p;
+      }
+      if (out_id_len != NULL) {
+        *out_id_len = op->id.n;
+      }
+      if (out_type != NULL) {
+        *out_type = op->type_name.p;
+      }
+      if (out_type_len != NULL) {
+        *out_type_len = op->type_name.n;
+      }
+      if (out_op != NULL) {
+        *out_op = op->kind == GDEFCORE_OP_SAVE    ? GDEFCORE_TOUCH_SAVE
+                  : op->kind == GDEFCORE_OP_DRAFT ? GDEFCORE_TOUCH_DRAFT
+                  : op->kind == GDEFCORE_OP_PUBLISH ? GDEFCORE_TOUCH_PUBLISH
+                                                    : GDEFCORE_TOUCH_CLEAR;
+      }
+      return GDEFCORE_OK;
+    }
+    seen += 1;
+  }
+  return GDEFCORE_ERR_INVALID;
+}
+
+const char * gdefcore_changeset_refusal(const GDEFCORE_Changeset * changeset,
+    size_t * out_len) {
+  if (changeset == NULL || changeset->refusal.p == NULL) {
+    if (out_len != NULL) {
+      *out_len = 0;
+    }
+    return NULL;
+  }
+  if (out_len != NULL) {
+    *out_len = changeset->refusal.n;
+  }
+  return changeset->refusal.p;
+}
+
+GDEFCORE_Result gdefcore_changeset_set_refusal(GDEFCORE_Changeset * changeset,
+    const char * text, size_t len) {
+  if (changeset == NULL || (text == NULL && len != 0)) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  text_clear(changeset->catalog->alloc, &changeset->refusal);
+  if (text == NULL) {
+    return GDEFCORE_OK;
+  }
+  return text_set(changeset->catalog->alloc, &changeset->refusal, text, len) ==
+                 GDEFCORE_OK
+      ? GDEFCORE_OK
+      : GDEFCORE_ERR_OOM;
+}
+
 const char * gdefcore_changeset_conflict(const GDEFCORE_Changeset * changeset,
     size_t * out_len) {
   if (changeset == NULL || changeset->conflict.p == NULL) {
@@ -4274,6 +4377,7 @@ GDEFCORE_Result gdefcore_changeset_rebase(GDEFCORE_Changeset * changeset) {
     }
   }
   text_clear(changeset->catalog->alloc, &changeset->conflict);
+  text_clear(changeset->catalog->alloc, &changeset->refusal);
   return GDEFCORE_OK;
 }
 

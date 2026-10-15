@@ -32,6 +32,9 @@
 #include "render_internal.h"
 
 #include <ghoti.io/defiant-core/access.h>
+#include <ghoti.io/defiant-core/module.h>
+#include <ghoti.io/defiant-core/request.h>
+#include <ghoti.io/defiant-core/template.h>
 #include <ghoti.io/cutil/allocator.h>
 #include <ghoti.io/cutil/fiber.h>
 #include <ghoti.io/archive/reader.h>
@@ -60,7 +63,8 @@
 static const char kBreak[] = "<!--break-->";
 static const char kWrap[] = "use pane;\nprint(pane());\n";
 static const char kConfirm[] =
-    "core.display\ncore.template\ncore.theme\ncore.view\nsite.post";
+    "core.display\ncore.template\ncore.template-kind\ncore.theme\ncore.view\n"
+    "site.post";
 
 static const char kLayoutBody[] =
     "<% use region; %>"
@@ -75,6 +79,25 @@ static const char kRecentBody[] =
     "<article class=\"recent\"><h2><%= title %></h2>"
     "<p><%= summary %></p></article>";
 static const char kFieldBody[] = "<% use value; %><%= value %>";
+
+/*
+ * The built-in kinds and the contract each template really uses. A page
+ * layout calls region() and may call url(); a pane reads title, body,
+ * summary or value, and may call url(). A pane is one kind, not three, so
+ * its contract is the union: each pane binds the subset its renderer has.
+ */
+static const char * const kPageVars[] = {NULL};
+static const char * const kPageFns[] = {"region 1", "url 1"};
+static const char * const kPaneVars[] = {
+    "title text The title of the post being shown.",
+    "body text The body of the post being shown. It is text: printing it "
+    "escapes it.",
+    "summary text The summary of a post in a list: its summary field, else the "
+    "text before the break marker, else its first 600 characters. The "
+    "recent-posts view binds it.",
+    "value text The value of one field of the post being shown. A field pane "
+    "binds it."};
+static const char * const kPaneFns[] = {"url 1"};
 
 typedef struct TangBind {
   const char * name;
@@ -569,6 +592,8 @@ static void region_clear(RegionSet * set) {
 
 typedef struct {
   GDEFCORE_Catalog * catalog;
+  GDEFCORE_Request * request;
+  const GDEFCORE_Contract * contract;
   const char * source;
   size_t source_len;
   uint64_t scope_fuel;
@@ -587,6 +612,226 @@ static GDEFCORE_Result tang_refusal(GLTANG_Result result) {
   return result == GLTANG_ERR_LIMIT ? GDEFCORE_ERR_LIMIT : GDEFCORE_ERR_FORMAT;
 }
 
+/* A contributed variable, called lazily by the engine. */
+typedef struct Adapter {
+  GDEFCORE_Request * request;
+  const GDEFCORE_Module_Contributed * item;
+} Adapter;
+
+/*
+ * Called when a `use` reaches a contributed variable, and never otherwise.
+ * Whether a page depends on its principal is observed here, while it renders
+ * (AD-30): a variable that is not principal_free marks the request, so the
+ * render key carries the principal.
+ */
+static bool contrib_factory(void * user, GLTANG_HostValue * out) {
+  Adapter * a = (Adapter *)user;
+  GDEFCORE_Contribution_Value v;
+  int markup = a->item->type_len == 6 && memcmp(a->item->type, "markup", 6) == 0;
+  int number = a->item->type_len == 6 && memcmp(a->item->type, "number", 6) == 0;
+  if (!a->item->principal_free) {
+    gdefcore_request_mark_principal_dependent(a->request);
+  }
+  memset(&v, 0, sizeof v);
+  v.size = sizeof v;
+  if (a->item->provider(a->request, a->item->user, &v) != GDEFCORE_OK) {
+    return false;
+  }
+  memset(out, 0, sizeof *out);
+  if (!number && v.kind == GDEFCORE_CONTRIBUTION_TEXT && v.text != NULL) {
+    out->kind = GLTANG_HOST_STRING;
+    out->text = v.text;
+    out->length = v.text_len;
+    /* markup is the one trusted type; text is as inert as a field. */
+    out->encoding = markup ? GLTANG_UNICODE_STRING_TYPE_TRUSTED
+                           : GLTANG_UNICODE_STRING_TYPE_HTML_ATTRIBUTE;
+    return true;
+  }
+  if (number && v.kind == GDEFCORE_CONTRIBUTION_INTEGER) {
+    out->kind = GLTANG_HOST_INTEGER;
+    out->integer = v.integer;
+    return true;
+  }
+  if (number && v.kind == GDEFCORE_CONTRIBUTION_FLOAT) {
+    out->kind = GLTANG_HOST_FLOAT;
+    out->number = v.real;
+    return true;
+  }
+  return false;
+}
+
+typedef struct Group {
+  char name[65];
+  GLTANG_Library * lib;
+} Group;
+
+static void groups_release(Group * groups, size_t n) {
+  size_t i;
+  for (i = 0; i < n; i++) {
+    gltang_library_release(groups[i].lib);
+  }
+}
+
+/*
+ * The library handed to a template holds the contract's names and nothing
+ * else: the values the host bound that the contract declares, the functions
+ * it declares, the lazy contributed variables, and null for the engine's own
+ * `math` and `random`, which a library shadows.
+ */
+static GDEFCORE_Result build_library(TangJob * job, GLTANG_Library ** out_lib,
+    Adapter ** out_adapters) {
+  const GDEFCORE_Contract * c = job->contract;
+  GLTANG_Library * lib = NULL;
+  Adapter * adapters = NULL;
+  Group * groups = NULL;
+  size_t ngroups = 0;
+  size_t nvars;
+  size_t nfns;
+  size_t used = 0;
+  size_t i;
+  int has_math = 0;
+  int has_random = 0;
+  GDEFCORE_Contract_Var probe;
+  GDEFCORE_Result rc = GDEFCORE_ERR_INVALID;
+  *out_lib = NULL;
+  *out_adapters = NULL;
+  if (gltang_library_create(NULL, &lib) != GLTANG_OK) {
+    return GDEFCORE_ERR_OOM;
+  }
+  if (c == NULL) {
+    /* A bare scope has no kind: it may build an href, and read nothing. */
+    if (gltang_library_add_native(lib, "url", native_url, NULL) != GLTANG_OK ||
+        gltang_library_add_null(lib, "math") != GLTANG_OK ||
+        gltang_library_add_null(lib, "random") != GLTANG_OK) {
+      goto fail;
+    }
+    *out_lib = lib;
+    return GDEFCORE_OK;
+  }
+  nvars = gdefcore_template_contract_var_count(c);
+  nfns = gdefcore_template_contract_fn_count(c);
+  for (i = 0; i < job->nbinds; i++) {
+    GDEFCORE_Contract_Var v;
+    const char * text = job->binds[i].text == NULL ? "" : job->binds[i].text;
+    if (gdefcore_template_contract_var(c, job->binds[i].name,
+            strlen(job->binds[i].name), &v) != GDEFCORE_OK ||
+        v.contributed != NULL) {
+      continue;
+    }
+    /*
+     * A bound value came from a user, a field or a request: tag it for the
+     * strictest encoding, so a template that prints it bare is safe in
+     * element text and in either quote style of an attribute.
+     */
+    if (gltang_library_add_string(lib, job->binds[i].name, text,
+            job->binds[i].len, GLTANG_UNICODE_STRING_TYPE_HTML_ATTRIBUTE) !=
+        GLTANG_OK) {
+      goto fail;
+    }
+  }
+  for (i = 0; i < nfns; i++) {
+    GDEFCORE_Contract_Fn f;
+    if (gdefcore_template_contract_fn_at(c, i, &f) != GDEFCORE_OK) {
+      goto fail;
+    }
+    if (f.name_len == 3 && memcmp(f.name, "url", 3) == 0) {
+      if (gltang_library_add_native(lib, "url", native_url, NULL) != GLTANG_OK) {
+        goto fail;
+      }
+    } else if (job->native != NULL && job->native_name != NULL &&
+               f.name_len == strlen(job->native_name) &&
+               memcmp(f.name, job->native_name, f.name_len) == 0) {
+      if (gltang_library_add_native(lib, job->native_name, job->native,
+              job->native_user) != GLTANG_OK) {
+        goto fail;
+      }
+    }
+  }
+  adapters = (Adapter *)calloc(nvars == 0 ? 1 : nvars, sizeof *adapters);
+  groups = (Group *)calloc(nvars == 0 ? 1 : nvars, sizeof *groups);
+  if (adapters == NULL || groups == NULL) {
+    rc = GDEFCORE_ERR_OOM;
+    goto fail;
+  }
+  for (i = 0; i < nvars; i++) {
+    GDEFCORE_Contract_Var v;
+    const char * dot;
+    size_t head;
+    size_t g;
+    if (gdefcore_template_contract_var_at(c, i, &v) != GDEFCORE_OK) {
+      goto fail;
+    }
+    if (v.contributed == NULL) {
+      continue;
+    }
+    /* `m.count` is the library `m` holding the factory `count`. */
+    dot = (const char *)memchr(v.name, '.', v.name_len);
+    if (dot == NULL || (size_t)(dot - v.name) >= sizeof groups[0].name) {
+      goto fail;
+    }
+    head = (size_t)(dot - v.name);
+    for (g = 0; g < ngroups; g++) {
+      if (strlen(groups[g].name) == head && memcmp(groups[g].name, v.name, head) == 0) {
+        break;
+      }
+    }
+    if (g == ngroups) {
+      memcpy(groups[g].name, v.name, head);
+      groups[g].name[head] = '\0';
+      if (gltang_library_create(groups[g].name, &groups[g].lib) != GLTANG_OK) {
+        goto fail;
+      }
+      ngroups += 1;
+    }
+    adapters[used].request = job->request;
+    adapters[used].item = v.contributed;
+    {
+      char local[65];
+      size_t local_len = v.name_len - head - 1;
+      if (local_len >= sizeof local) {
+        goto fail;
+      }
+      memcpy(local, dot + 1, local_len);
+      local[local_len] = '\0';
+      if (gltang_library_add_factory(groups[g].lib, local, contrib_factory,
+              &adapters[used]) != GLTANG_OK) {
+        goto fail;
+      }
+    }
+    used += 1;
+  }
+  for (i = 0; i < ngroups; i++) {
+    if (gltang_library_add_library(lib, groups[i].lib) != GLTANG_OK) {
+      goto fail;
+    }
+    has_math = has_math || strcmp(groups[i].name, "math") == 0;
+    has_random = has_random || strcmp(groups[i].name, "random") == 0;
+  }
+  groups_release(groups, ngroups);
+  free(groups);
+  groups = NULL;
+  has_math = has_math ||
+             gdefcore_template_contract_var(c, "math", 4, &probe) == GDEFCORE_OK;
+  has_random = has_random ||
+               gdefcore_template_contract_var(c, "random", 6, &probe) ==
+                   GDEFCORE_OK;
+  if ((!has_math && gltang_library_add_null(lib, "math") != GLTANG_OK) ||
+      (!has_random && gltang_library_add_null(lib, "random") != GLTANG_OK)) {
+    goto fail;
+  }
+  *out_lib = lib;
+  *out_adapters = adapters;
+  return GDEFCORE_OK;
+fail:
+  if (groups != NULL) {
+    groups_release(groups, ngroups);
+    free(groups);
+  }
+  free(adapters);
+  gltang_library_release(lib);
+  return rc == GDEFCORE_ERR_OOM ? rc : GDEFCORE_ERR_INVALID;
+}
+
 static GDEFCORE_Result tang_job_run(TangJob * job) {
   GDEFCORE_Catalog * catalog = job->catalog;
   char * source_z = NULL;
@@ -595,6 +840,8 @@ static GDEFCORE_Result tang_job_run(TangJob * job) {
   GLTANG_Program * body = NULL;
   GLTANG_Program * wrap = NULL;
   GLTANG_Library * lib = NULL;
+  GLTANG_Library * plumbing = NULL;
+  Adapter * adapters = NULL;
   GDEFCORE_RenderCtx * ctx = NULL;
   char * rendered = NULL;
   size_t rendered_len = 0;
@@ -602,7 +849,6 @@ static GDEFCORE_Result tang_job_run(TangJob * job) {
   GLTANG_Result step;
   GLTANG_ParseError error;
   uint64_t ceiling;
-  size_t i;
   source_z = (char *)malloc(job->source_len + 1);
   if (source_z == NULL) {
     return GDEFCORE_ERR_OOM;
@@ -625,36 +871,21 @@ static GDEFCORE_Result tang_job_run(TangJob * job) {
     rc = tang_refusal(step);
     goto done;
   }
-  if (gltang_library_create(NULL, &lib) != GLTANG_OK) {
+  rc = build_library(job, &lib, &adapters);
+  if (rc != GDEFCORE_OK) {
+    goto done;
+  }
+  /*
+   * The template that runs the body is plumbing, not part of the contract: it
+   * lives in a layer of the wrapper program, which the body cannot reach.
+   */
+  if (gltang_library_create(NULL, &plumbing) != GLTANG_OK) {
     rc = GDEFCORE_ERR_OOM;
     goto done;
   }
-  for (i = 0; i < job->nbinds; i++) {
-    const char * text = job->binds[i].text == NULL ? "" : job->binds[i].text;
-    /*
-     * A bound value came from a user, a field or a request: tag it for the
-     * strictest encoding, so a template that prints it bare is safe in
-     * element text and in either quote style of an attribute.
-     */
-    if (gltang_library_add_string(lib, job->binds[i].name, text,
-            job->binds[i].len, GLTANG_UNICODE_STRING_TYPE_HTML_ATTRIBUTE) !=
-        GLTANG_OK) {
-      rc = GDEFCORE_ERR_INVALID;
-      goto done;
-    }
-  }
-  if (gltang_library_add_native(lib, "url", native_url, NULL) != GLTANG_OK) {
-    rc = GDEFCORE_ERR_INVALID;
-    goto done;
-  }
-  if (job->native != NULL &&
-      gltang_library_add_native(lib, job->native_name, job->native,
-          job->native_user) != GLTANG_OK) {
-    rc = GDEFCORE_ERR_INVALID;
-    goto done;
-  }
-  if (gltang_library_add_template(lib, "pane", body, job->scope_fuel,
-          GLTANG_SCOPE_SEGMENTS) != GLTANG_OK) {
+  if (gltang_library_add_template(plumbing, "pane", body, job->scope_fuel,
+          GLTANG_SCOPE_SEGMENTS) != GLTANG_OK ||
+      gltang_program_set_libraries(wrap, plumbing) != GLTANG_OK) {
     rc = GDEFCORE_ERR_INVALID;
     goto done;
   }
@@ -678,6 +909,8 @@ done:
   gltang_buffer_free(rendered);
   gdefcore_render_ctx_close(ctx);
   gltang_library_release(lib);
+  gltang_library_release(plumbing);
+  free(adapters);
   gltang_program_release(wrap);
   gltang_program_release(body);
   gltang_tree_destroy(wrap_tree);
@@ -715,16 +948,20 @@ static GDEFCORE_Result side_stack_run(TangJob * job) {
 #endif
 }
 
-static GDEFCORE_Result tang_run(GDEFCORE_Catalog * catalog, const char * source,
-    size_t source_len, uint64_t scope_fuel, const TangBind * binds, size_t nbinds,
-    GLTANG_NativeFn native, void * native_user, const char * native_name,
-    char ** out, size_t * out_len) {
+static GDEFCORE_Result tang_run(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Request * request, const GDEFCORE_Contract * contract,
+    const char * source, size_t source_len, uint64_t scope_fuel,
+    const TangBind * binds, size_t nbinds, GLTANG_NativeFn native,
+    void * native_user, const char * native_name, char ** out,
+    size_t * out_len) {
   TangJob job;
   if (catalog == NULL || source == NULL || out == NULL || out_len == NULL ||
       scope_fuel == 0) {
     return GDEFCORE_ERR_INVALID;
   }
   job.catalog = catalog;
+  job.request = request;
+  job.contract = contract;
   job.source = source;
   job.source_len = source_len;
   job.scope_fuel = scope_fuel;
@@ -770,20 +1007,71 @@ static GDEFCORE_Result access_copy(GDEFCORE_Catalog * catalog,
   return rc;
 }
 
-static GDEFCORE_Result render_one(GDEFCORE_Catalog * catalog,
-    const char * tmpl, size_t tmpl_len, uint64_t fuel, const TangBind * binds,
-    size_t nbinds, char ** html, size_t * html_len) {
-  char * body = NULL;
-  size_t body_len = 0;
+/*
+ * A template's body and its kind. A template with no kind is refused the way
+ * a template that is not there is: the same error.
+ */
+static GDEFCORE_Result template_load(GDEFCORE_Catalog * catalog, const char * name,
+    size_t name_len, char ** body, size_t * body_len, char ** kind,
+    size_t * kind_len) {
+  char id[GDEFCORE_PUBLIC_ID_LEN + 1];
   GDEFCORE_Result rc;
-  rc = template_body(catalog, tmpl, tmpl_len, &body, &body_len);
+  *body = NULL;
+  *kind = NULL;
+  rc = find_named(catalog, "core.template", 13, name, name_len, id);
   if (rc != GDEFCORE_OK) {
     return rc;
   }
-  rc = tang_run(catalog, body, body_len, fuel, binds, nbinds, NULL, NULL, NULL,
-      html, html_len);
+  rc = config_text(catalog, id, "body", 1, body, body_len);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  rc = config_text(catalog, id, "kind", 1, kind, kind_len);
+  if (rc != GDEFCORE_OK || *kind_len == 0) {
+    gdefcore_text_free(catalog, *body);
+    gdefcore_text_free(catalog, *kind);
+    *body = NULL;
+    *kind = NULL;
+    return rc == GDEFCORE_OK ? GDEFCORE_ERR_INVALID : rc;
+  }
+  return GDEFCORE_OK;
+}
+
+/* Run the stored template @p tmpl under the contract of its kind. */
+static GDEFCORE_Result render_template(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Request * request, const char * tmpl, size_t tmpl_len,
+    uint64_t fuel, const TangBind * binds, size_t nbinds, GLTANG_NativeFn native,
+    void * native_user, const char * native_name, char ** html,
+    size_t * html_len) {
+  char * body = NULL;
+  char * kind = NULL;
+  size_t body_len = 0;
+  size_t kind_len = 0;
+  GDEFCORE_Contract * contract = NULL;
+  GDEFCORE_Result rc;
+  rc = template_load(catalog, tmpl, tmpl_len, &body, &body_len, &kind, &kind_len);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  rc = gdefcore_template_contract_open(catalog, NULL, kind, kind_len, &contract,
+      NULL);
+  if (rc == GDEFCORE_OK) {
+    rc = tang_run(catalog, request, contract, body, body_len, fuel, binds, nbinds,
+        native, native_user, native_name, html, html_len);
+  } else if (rc != GDEFCORE_ERR_OOM) {
+    rc = GDEFCORE_ERR_INVALID;
+  }
+  gdefcore_template_contract_close(contract);
   gdefcore_text_free(catalog, body);
+  gdefcore_text_free(catalog, kind);
   return rc;
+}
+
+static GDEFCORE_Result render_one(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Request * request, const char * tmpl, size_t tmpl_len, uint64_t fuel,
+    const TangBind * binds, size_t nbinds, char ** html, size_t * html_len) {
+  return render_template(catalog, request, tmpl, tmpl_len, fuel, binds, nbinds,
+      NULL, NULL, NULL, html, html_len);
 }
 
 static GDEFCORE_Result render_entity_pane(GDEFCORE_Catalog * catalog,
@@ -831,7 +1119,8 @@ static GDEFCORE_Result render_entity_pane(GDEFCORE_Catalog * catalog,
   binds[1].name = "body";
   binds[1].text = shown;
   binds[1].len = shown_len;
-  rc = render_one(catalog, tmpl, tmpl_len, fuel, binds, 2, html, html_len);
+  rc = render_one(catalog, request, tmpl, tmpl_len, fuel, binds, 2, html,
+      html_len);
   gdefcore_text_free(catalog, title);
   gdefcore_text_free(catalog, shown);
   return rc;
@@ -865,7 +1154,7 @@ static GDEFCORE_Result render_field_pane(GDEFCORE_Catalog * catalog,
   bind.name = "value";
   bind.text = value == NULL ? "" : value;
   bind.len = value_len;
-  rc = render_one(catalog, "field", 5, fuel, &bind, 1, html, html_len);
+  rc = render_one(catalog, request, "field", 5, fuel, &bind, 1, html, html_len);
   gdefcore_text_free(catalog, value);
   return rc;
 }
@@ -1025,7 +1314,8 @@ static GDEFCORE_Result render_view_pane(GDEFCORE_Catalog * catalog,
     binds[1].name = "summary";
     binds[1].text = sum;
     binds[1].len = sum_len;
-    rc = render_one(catalog, tmpl, tmpl_len, fuel, binds, 2, &piece, &piece_len);
+    rc = render_one(catalog, request, tmpl, tmpl_len, fuel, binds, 2, &piece,
+        &piece_len);
     if (rc != GDEFCORE_OK) {
       goto piece_done;
     }
@@ -1124,8 +1414,6 @@ static GDEFCORE_Result render_display(GDEFCORE_Catalog * catalog,
   size_t count = 0;
   size_t i;
   RegionSet regions;
-  char * layout_body = NULL;
-  size_t layout_body_len = 0;
   GDEFCORE_Result rc;
   memset(&regions, 0, sizeof regions);
   rc = find_named(catalog, "core.display", 12, name, name_len, id);
@@ -1188,14 +1476,9 @@ static GDEFCORE_Result render_display(GDEFCORE_Catalog * catalog,
       goto done;
     }
   }
-  rc = template_body(catalog, layout, layout_len, &layout_body, &layout_body_len);
-  if (rc != GDEFCORE_OK) {
-    goto done;
-  }
-  rc = tang_run(catalog, layout_body, layout_body_len, fuel, NULL, 0,
+  rc = render_template(catalog, request, layout, layout_len, fuel, NULL, 0,
       native_region, &regions, "region", out, out_len);
 done:
-  gdefcore_text_free(catalog, layout_body);
   gdefcore_values_free(catalog, panes, lens, count);
   gdefcore_text_free(catalog, layout);
   region_clear(&regions);
@@ -1208,8 +1491,8 @@ GDEFCORE_Result gdefcore_render_scope(GDEFCORE_Catalog * catalog,
   if (out_bytes == NULL || out_len == NULL) {
     return GDEFCORE_ERR_INVALID;
   }
-  return tang_run(catalog, source, source_len, scope_fuel, NULL, 0, NULL, NULL,
-      NULL, out_bytes, out_len);
+  return tang_run(catalog, NULL, NULL, source, source_len, scope_fuel, NULL, 0,
+      NULL, NULL, NULL, out_bytes, out_len);
 }
 
 GDEFCORE_Result gdefcore_render_page(GDEFCORE_Catalog * catalog,
@@ -1785,22 +2068,97 @@ static GDEFCORE_Result ensure_display(GDEFCORE_Catalog * catalog,
 
 static GDEFCORE_Result grant_posts(GDEFCORE_Catalog * catalog);
 
+/* A kind and its base contract, unless a kind of that name is stored. */
+static GDEFCORE_Result ensure_kind(GDEFCORE_Catalog * catalog, const char * name,
+    const char * label, const char * const * vars, size_t nvars,
+    const char * const * fns, size_t nfns) {
+  char id[GDEFCORE_PUBLIC_ID_LEN + 1];
+  GDEFCORE_Value values[5];
+  const char * texts[3];
+  size_t lens[3];
+  size_t vlens[8];
+  size_t flens[8];
+  size_t nvalues = 3;
+  size_t i;
+  GDEFCORE_Result rc = find_named(catalog, GDEFCORE_TEMPLATE_KIND_TYPE,
+      sizeof GDEFCORE_TEMPLATE_KIND_TYPE - 1, name, strlen(name), id);
+  if (rc == GDEFCORE_OK) {
+    return GDEFCORE_OK;
+  }
+  if (rc != GDEFCORE_ERR_INVALID || nvars > 8 || nfns > 8) {
+    return rc == GDEFCORE_ERR_INVALID ? GDEFCORE_ERR_LIMIT : rc;
+  }
+  texts[0] = name;
+  lens[0] = strlen(name);
+  texts[1] = label;
+  lens[1] = strlen(label);
+  texts[2] = "1";
+  lens[2] = 1;
+  set_value(&values[0], "name", &texts[0], &lens[0], 1);
+  set_value(&values[1], "label", &texts[1], &lens[1], 1);
+  set_value(&values[2], "version", &texts[2], &lens[2], 1);
+  for (i = 0; i < nvars; i++) {
+    vlens[i] = strlen(vars[i]);
+  }
+  for (i = 0; i < nfns; i++) {
+    flens[i] = strlen(fns[i]);
+  }
+  if (nvars > 0) {
+    set_value(&values[nvalues++], "variables", vars, vlens, nvars);
+  }
+  if (nfns > 0) {
+    set_value(&values[nvalues++], "functions", fns, flens, nfns);
+  }
+  return save_entity(catalog, GDEFCORE_TEMPLATE_KIND_TYPE,
+      values, nvalues, 1);
+}
+
+/* A template of a kind, unless a template of that name is stored. */
+static GDEFCORE_Result ensure_template(GDEFCORE_Catalog * catalog,
+    const char * name, const char * body, const char * kind) {
+  char id[GDEFCORE_PUBLIC_ID_LEN + 1];
+  GDEFCORE_Value values[3];
+  const char * texts[3];
+  size_t lens[3];
+  GDEFCORE_Result rc =
+      find_named(catalog, "core.template", 13, name, strlen(name), id);
+  if (rc == GDEFCORE_OK) {
+    return GDEFCORE_OK;
+  }
+  if (rc != GDEFCORE_ERR_INVALID) {
+    return rc;
+  }
+  texts[0] = name;
+  lens[0] = strlen(name);
+  texts[1] = body;
+  lens[1] = strlen(body);
+  texts[2] = kind;
+  lens[2] = strlen(kind);
+  set_value(&values[0], "name", &texts[0], &lens[0], 1);
+  set_value(&values[1], "body", &texts[1], &lens[1], 1);
+  set_value(&values[2], "kind", &texts[2], &lens[2], 1);
+  return save_entity(catalog, "core.template", values, 3, 1);
+}
+
 static GDEFCORE_Result write_kit(GDEFCORE_Catalog * catalog) {
   char id[GDEFCORE_PUBLIC_ID_LEN + 1];
   GDEFCORE_Result rc;
-  rc = ensure_named(catalog, "core.template", 13, "layout", 6, "body",
-      kLayoutBody);
+  /* The kinds first: a template is validated against its kind as it is saved. */
+  rc = ensure_kind(catalog, "core.page", "Page layout", kPageVars, 0, kPageFns, 2);
   if (rc == GDEFCORE_OK) {
-    rc = ensure_named(catalog, "core.template", 13, "entity", 6, "body",
-        kEntityBody);
+    rc = ensure_kind(catalog, "core.pane", "Pane", kPaneVars, 4, kPaneFns, 1);
   }
   if (rc == GDEFCORE_OK) {
-    rc = ensure_named(catalog, "core.template", 13, "recent", 6, "body",
-        kRecentBody);
+    rc = ensure_template(catalog, "layout", kLayoutBody, "core.page");
   }
   if (rc == GDEFCORE_OK) {
-    rc = ensure_named(catalog, "core.template", 13, "field", 5, "body",
-        kFieldBody);
+    rc = ensure_template(catalog, "entity", kEntityBody, "core.pane");
+  }
+  if (rc == GDEFCORE_OK) {
+    rc = ensure_template(catalog, "recent", kRecentBody, "core.pane");
+  }
+  if (rc == GDEFCORE_OK) {
+    rc = ensure_template(catalog, "field", kFieldBody, "core.pane");
   }
   if (rc == GDEFCORE_OK) {
     rc = ensure_named(catalog, "core.theme", 10, "base", 4, NULL, NULL);
@@ -1866,7 +2224,8 @@ GDEFCORE_Result gdefcore_render_kit(GDEFCORE_Catalog * catalog, uint8_t ** out_b
     size_t * out_len) {
   GDEFCORE_Changeset * cs = NULL;
   GDEFCORE_Field post[3];
-  GDEFCORE_Field tmpl[2];
+  GDEFCORE_Field tmpl[3];
+  GDEFCORE_Field kinds[5];
   GDEFCORE_Field theme[1];
   GDEFCORE_Field view[5];
   GDEFCORE_Field display[3];
@@ -1886,6 +2245,12 @@ GDEFCORE_Result gdefcore_render_kit(GDEFCORE_Catalog * catalog, uint8_t ** out_b
   set_field(&post[2], "summary", 0, 0);
   set_field(&tmpl[0], "name", 1, 0);
   set_field(&tmpl[1], "body", 1, 0);
+  set_field(&tmpl[2], "kind", 1, 0);
+  set_field(&kinds[0], "name", 1, 0);
+  set_field(&kinds[1], "label", 1, 0);
+  set_field(&kinds[2], "version", 1, 0);
+  set_field(&kinds[3], "variables", 0, 1);
+  set_field(&kinds[4], "functions", 0, 1);
   set_field(&theme[0], "name", 1, 0);
   set_field(&view[0], "name", 1, 0);
   set_field(&view[1], "type", 1, 0);
@@ -1905,7 +2270,11 @@ GDEFCORE_Result gdefcore_render_kit(GDEFCORE_Catalog * catalog, uint8_t ** out_b
       3);
   if (rc == GDEFCORE_OK) {
     rc = gdefcore_changeset_define(cs, "core.template", 13, GDEFCORE_TYPE_CONFIG,
-        tmpl, 2);
+        tmpl, 3);
+  }
+  if (rc == GDEFCORE_OK) {
+    rc = gdefcore_changeset_define(cs, GDEFCORE_TEMPLATE_KIND_TYPE,
+        sizeof GDEFCORE_TEMPLATE_KIND_TYPE - 1, GDEFCORE_TYPE_CONFIG, kinds, 5);
   }
   if (rc == GDEFCORE_OK) {
     rc = gdefcore_changeset_define(cs, "core.theme", 10, GDEFCORE_TYPE_CONFIG,

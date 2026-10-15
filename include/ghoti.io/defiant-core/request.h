@@ -256,6 +256,26 @@ GDEFCORE_API GDEFCORE_Result gdefcore_request_set_resolution(
 GDEFCORE_API const char * gdefcore_request_resolution(
     const GDEFCORE_Request * request, size_t * out_len);
 
+/**
+ * @brief Record that what this request renders depends on its principal.
+ *
+ * Whether the principal belongs in the render key (AD-30) is observed while
+ * rendering, never declared. A template that evaluates a contributed
+ * variable that is not `principal_free` calls this. The mark stays until the
+ * request is destroyed. NULL is ignored.
+ */
+GDEFCORE_API void gdefcore_request_mark_principal_dependent(
+    GDEFCORE_Request * request);
+
+/**
+ * @brief Whether rendering this request has observed a dependence on the
+ * principal. gdefcore_access_render_key() reads this.
+ *
+ * @return 1 when marked, 0 when not or when @p request is NULL.
+ */
+GDEFCORE_API int gdefcore_request_principal_dependent(
+    const GDEFCORE_Request * request);
+
 #ifdef __cplusplus
 }
 #endif
