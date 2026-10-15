@@ -74,3 +74,13 @@ module's compiled filter is also keyed by the hash of that module's
 bytes, not its name. Two principals with the same grants and an `own`
 condition get different keys. Two with the same grants and only `any`
 conditions get the same key.
+
+## Holding a permission
+
+`gdefcore_access_permits()` answers whether the request's principal holds a
+permission, named by its action. Granting does not change: the declared
+permission is granted to a role by its label, and a principal holds what the
+roles it has, `authenticated` and `anonymous` hold. A name nobody declared and
+a permission nobody was granted are both "not held", admin included. The
+permission to edit templates of a kind, `core.template.edit.<kind>`, is
+declared this way (templates.md).

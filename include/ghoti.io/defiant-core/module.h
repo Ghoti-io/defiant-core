@@ -473,6 +473,26 @@ GDEFCORE_API GDEFCORE_Result gdefcore_module_fire_write(GDEFCORE_Host * host,
     GDEFCORE_Request * request, GDEFCORE_Catalog * catalog, const char * hook,
     size_t hook_len, const GDEFCORE_Write_Hook * args);
 
+/**
+ * @brief Fire a decision hook as a veto.
+ *
+ * For an operation that something else has already allowed (a permission the
+ * principal holds): every subscriber answers allow, deny or no opinion, and
+ * @p out_vetoed is 1 when at least one answered deny (any deny wins, AD-10)
+ * and 0 otherwise. No subscribers, or subscribers with no opinion, leave the
+ * operation standing; AD-10's "otherwise deny" is what the permission being
+ * absent already does. A subscriber that fails fails the call and nothing is
+ * allowed. A subscriber that traps is a failure, never a skip.
+ *
+ * @param args Begins with `size_t size`, or NULL.
+ * @param out_vetoed Receives 0 or 1. Required.
+ * @return ::GDEFCORE_OK, or the failure of a subscriber, or
+ *   ::GDEFCORE_ERR_INVALID.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_module_fire_veto(GDEFCORE_Host * host,
+    GDEFCORE_Request * request, GDEFCORE_Catalog * catalog, const char * hook,
+    size_t hook_len, const void * args, int * out_vetoed);
+
 /** A contribution provider answers with text (also for `markup`). */
 #define GDEFCORE_CONTRIBUTION_TEXT 1
 /** A contribution provider answers with an integer. */

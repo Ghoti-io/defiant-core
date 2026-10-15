@@ -4084,6 +4084,18 @@ GDEFCORE_Result gdefcore_changeset_apply(GDEFCORE_Changeset * changeset,
   if (changeset == NULL || changeset->applied) {
     return GDEFCORE_ERR_INVALID;
   }
+  /*
+   * Who may edit a template is decided first, before the confirmation, the
+   * conflict check or the validation can say anything about it: a principal
+   * who may not edit gets the same answer whatever the template holds. A
+   * changeset with no request is the operator's, and is not asked.
+   */
+  if (changeset->request != NULL) {
+    rc = gdefcore_template_authorize(changeset, changeset->request);
+    if (rc != GDEFCORE_OK) {
+      return rc;
+    }
+  }
   rc = gdefcore_changeset_rate(changeset, &risk);
   if (rc != GDEFCORE_OK) {
     return rc;
@@ -4220,6 +4232,13 @@ GDEFCORE_Result gdefcore_changeset_apply(GDEFCORE_Changeset * changeset,
   {
     GDEFCORE_Result grant_rc = gdefcore_access_commit_staged(changeset);
     GDEFCORE_Result first = grant_rc;
+    {
+      /* A kind this changeset defined has its edit permission as it exists. */
+      GDEFCORE_Result declared = gdefcore_template_declare_touched(changeset);
+      if (declared != GDEFCORE_OK && first == GDEFCORE_OK) {
+        first = declared;
+      }
+    }
     if (changeset->catalog->host != NULL) {
       GDEFCORE_Result hook_rc = GDEFCORE_OK;
       if (gdefcore_changeset_module_count(changeset) > 0) {

@@ -50,6 +50,13 @@ Apply fires `presave`, `validate`, then `save` or `delete`, then
 write. `after-commit` runs only after the write has committed, and its
 failure does not roll the write back.
 
+`template-write` is a decision hook fired by apply before the write, for each
+`core.template` a request's changeset writes (templates.md). It is fired as a
+veto, `gdefcore_module_fire_veto()`: an operation something else has already
+allowed, here the permission to edit a kind of template, is refused when any
+subscriber denies and stands when none does. A subscriber with no opinion is
+not a deny there. The subscriber is handed a `GDEFCORE_Template_Write_Hook`.
+
 On a read, a failing event or alter is skipped, counted, and named. A
 failing decision fails the call. An access-relevant subscriber fails the
 call when it fails. An access contribution from a subscriber that did not

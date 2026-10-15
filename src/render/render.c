@@ -48,6 +48,7 @@
 #include <ghoti.io/runtime-core/runtime-core.h>
 #include <ghoti.io/runtime-heap/runtime-heap.h>
 
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -411,6 +412,25 @@ static GDEFCORE_Result template_body(GDEFCORE_Catalog * catalog,
     return rc;
   }
   return config_text(catalog, id, "body", 1, body, body_len);
+}
+
+/*
+ * The fragments this process has offered to a shared cache. A host that keeps
+ * a shared fragment cache stores exactly the fragments counted here; a
+ * fragment rendered under any overlay but `live` (a preview) is never one.
+ */
+static atomic_uint_fast64_t g_shareable;
+
+static int fragment_offer(const char * overlay, size_t overlay_len) {
+  if (!gdefcore_access_shared_cache(overlay, overlay_len)) {
+    return 0;
+  }
+  atomic_fetch_add_explicit(&g_shareable, 1, memory_order_relaxed);
+  return 1;
+}
+
+uint64_t gdefcore_render_shareable_count(void) {
+  return (uint64_t)atomic_load_explicit(&g_shareable, memory_order_relaxed);
 }
 
 /*
@@ -1058,6 +1078,9 @@ static GDEFCORE_Result render_template(GDEFCORE_Catalog * catalog,
   if (rc == GDEFCORE_OK) {
     rc = tang_run(catalog, request, contract, body, body_len, fuel, binds, nbinds,
         native, native_user, native_name, html, html_len);
+    if (rc == GDEFCORE_OK) {
+      (void)fragment_offer("live", 4);
+    }
   } else if (rc != GDEFCORE_ERR_OOM) {
     rc = GDEFCORE_ERR_INVALID;
   }
@@ -1482,6 +1505,120 @@ done:
   gdefcore_values_free(catalog, panes, lens, count);
   gdefcore_text_free(catalog, layout);
   region_clear(&regions);
+  return rc;
+}
+
+/* region("main") in a preview: a marked stand-in, since there is no page. */
+static bool native_region_sample(GLTANG_NativeCall * call, void * user) {
+  char out[160];
+  size_t n = 0;
+  size_t o = 0;
+  size_t i;
+  const char * name = gltang_call_text(call, 0, &n);
+  static const char head[] = "<div class=\"sample\">Sample region ";
+  (void)user;
+  memcpy(out, head, sizeof head - 1);
+  o = sizeof head - 1;
+  for (i = 0; name != NULL && i < n && o + 8 < sizeof out - 8; i++) {
+    unsigned char c = (unsigned char)name[i];
+    if (c == '<' || c == '>' || c == '&' || c == '"' || c == '\'' || c < 0x20) {
+      out[o++] = '?';
+    } else {
+      out[o++] = (char)c;
+    }
+  }
+  memcpy(out + o, "</div>", 6);
+  o += 6;
+  gltang_call_return_string(call, out, o, GLTANG_UNICODE_STRING_TYPE_TRUSTED);
+  return true;
+}
+
+GDEFCORE_Result gdefcore_render_sample(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Request * request, const char * kind, size_t kind_len,
+    const char * body, size_t body_len, const char * overlay,
+    size_t overlay_len, uint64_t scope_fuel, char ** out_bytes, size_t * out_len,
+    int * out_shareable) {
+  GDEFCORE_Contract * contract = NULL;
+  TangBind * binds = NULL;
+  char ** texts = NULL;
+  size_t nbinds = 0;
+  size_t nvars;
+  size_t i;
+  int has_region = 0;
+  GDEFCORE_Result rc;
+  if (catalog == NULL || request == NULL || kind == NULL || kind_len == 0 ||
+      (body == NULL && body_len != 0) || out_bytes == NULL || out_len == NULL ||
+      scope_fuel == 0) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  if (out_shareable != NULL) {
+    *out_shareable = 0;
+  }
+  /* A principal who may not edit this kind gets what a missing kind gets. */
+  if (!gdefcore_template_may_edit(catalog, request, kind, kind_len)) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  rc = gdefcore_template_contract_open(catalog, NULL, kind, kind_len, &contract,
+      NULL);
+  if (rc != GDEFCORE_OK) {
+    return rc == GDEFCORE_ERR_OOM ? rc : GDEFCORE_ERR_INVALID;
+  }
+  nvars = gdefcore_template_contract_var_count(contract);
+  binds = (TangBind *)calloc(nvars == 0 ? 1 : nvars, sizeof *binds);
+  texts = (char **)calloc(nvars == 0 ? 1 : nvars, sizeof *texts);
+  if (binds == NULL || texts == NULL) {
+    rc = GDEFCORE_ERR_OOM;
+    goto done;
+  }
+  for (i = 0; i < nvars; i++) {
+    GDEFCORE_Contract_Var v;
+    size_t text_len;
+    if (gdefcore_template_contract_var_at(contract, i, &v) != GDEFCORE_OK) {
+      rc = GDEFCORE_ERR_INTERNAL;
+      goto done;
+    }
+    if (v.contributed != NULL) {
+      continue;
+    }
+    text_len = 7 + v.name_len;
+    texts[nbinds] = (char *)malloc(text_len + 1);
+    if (texts[nbinds] == NULL) {
+      rc = GDEFCORE_ERR_OOM;
+      goto done;
+    }
+    memcpy(texts[nbinds], "Sample ", 7);
+    memcpy(texts[nbinds] + 7, v.name, v.name_len);
+    texts[nbinds][text_len] = '\0';
+    binds[nbinds].name = v.name;
+    binds[nbinds].text = texts[nbinds];
+    binds[nbinds].len = text_len;
+    nbinds += 1;
+  }
+  for (i = 0; i < gdefcore_template_contract_fn_count(contract); i++) {
+    GDEFCORE_Contract_Fn f;
+    if (gdefcore_template_contract_fn_at(contract, i, &f) == GDEFCORE_OK &&
+        f.name_len == 6 && memcmp(f.name, "region", 6) == 0) {
+      has_region = 1;
+    }
+  }
+  rc = tang_run(catalog, request, contract, body == NULL ? "" : body, body_len,
+      scope_fuel, binds, nbinds, has_region ? native_region_sample : NULL, NULL,
+      has_region ? "region" : NULL, out_bytes, out_len);
+  if (rc == GDEFCORE_OK) {
+    int shared = fragment_offer(overlay, overlay_len);
+    if (out_shareable != NULL) {
+      *out_shareable = shared;
+    }
+  }
+done:
+  if (texts != NULL) {
+    for (i = 0; i < nvars; i++) {
+      free(texts[i]);
+    }
+  }
+  free(texts);
+  free(binds);
+  gdefcore_template_contract_close(contract);
   return rc;
 }
 
@@ -2224,7 +2361,7 @@ GDEFCORE_Result gdefcore_render_kit(GDEFCORE_Catalog * catalog, uint8_t ** out_b
     size_t * out_len) {
   GDEFCORE_Changeset * cs = NULL;
   GDEFCORE_Field post[3];
-  GDEFCORE_Field tmpl[3];
+  GDEFCORE_Field tmpl[5];
   GDEFCORE_Field kinds[5];
   GDEFCORE_Field theme[1];
   GDEFCORE_Field view[5];
@@ -2246,6 +2383,8 @@ GDEFCORE_Result gdefcore_render_kit(GDEFCORE_Catalog * catalog, uint8_t ** out_b
   set_field(&tmpl[0], "name", 1, 0);
   set_field(&tmpl[1], "body", 1, 0);
   set_field(&tmpl[2], "kind", 1, 0);
+  set_field(&tmpl[3], "attached", 0, 0);
+  set_field(&tmpl[4], "classification", 0, 0);
   set_field(&kinds[0], "name", 1, 0);
   set_field(&kinds[1], "label", 1, 0);
   set_field(&kinds[2], "version", 1, 0);
@@ -2270,7 +2409,7 @@ GDEFCORE_Result gdefcore_render_kit(GDEFCORE_Catalog * catalog, uint8_t ** out_b
       3);
   if (rc == GDEFCORE_OK) {
     rc = gdefcore_changeset_define(cs, "core.template", 13, GDEFCORE_TYPE_CONFIG,
-        tmpl, 3);
+        tmpl, 5);
   }
   if (rc == GDEFCORE_OK) {
     rc = gdefcore_changeset_define(cs, GDEFCORE_TEMPLATE_KIND_TYPE,

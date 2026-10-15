@@ -2346,7 +2346,7 @@ static GDEFCORE_Result call_subscriber(GDEFCORE_Host * host, ChainNode * node,
 static GDEFCORE_Result fire_at(GDEFCORE_Host * host, GDEFCORE_Request * request,
     GDEFCORE_Catalog * catalog, const char * hook, size_t hook_len, int kind,
     const void * args, GDEFCORE_Alter * alter, int * out_decision,
-    int skip_soft) {
+    int skip_soft, int * out_deny_vote) {
   const uint8_t * tenant;
   size_t tenant_len = 0;
   uint64_t epoch = 0;
@@ -2355,6 +2355,9 @@ static GDEFCORE_Result fire_at(GDEFCORE_Host * host, GDEFCORE_Request * request,
   int any_deny = 0;
   int any_allow = 0;
   GDEFCORE_Result rc = GDEFCORE_OK;
+  if (out_deny_vote != NULL) {
+    *out_deny_vote = 0;
+  }
   if (host == NULL || request == NULL || catalog == NULL || hook == NULL ||
       hook_len == 0) {
     return GDEFCORE_ERR_INVALID;
@@ -2419,6 +2422,9 @@ static GDEFCORE_Result fire_at(GDEFCORE_Host * host, GDEFCORE_Request * request,
       any_allow = 1;
     }
   }
+  if (out_deny_vote != NULL) {
+    *out_deny_vote = any_deny;
+  }
   if (kind == GDEFCORE_HOOK_DECISION) {
     if (any_deny) {
       *out_decision = GDEFCORE_DECISION_DENY;
@@ -2443,7 +2449,7 @@ GDEFCORE_Result gdefcore_hook_fire(GDEFCORE_Host * host,
     return GDEFCORE_ERR_INVALID;
   }
   return fire_at(host, request, catalog, hook, hook_len, kind, args, alter,
-      out_decision, 1);
+      out_decision, 1, NULL);
 }
 
 size_t gdefcore_hook_skipped(const GDEFCORE_Host * host) {
@@ -2575,7 +2581,7 @@ GDEFCORE_Result gdefcore_module_fire_write(GDEFCORE_Host * host,
     return GDEFCORE_ERR_INVALID;
   }
   rc = fire_at(host, request, catalog, hook, hook_len, chain->kind, args, NULL,
-      &decision, 0);
+      &decision, 0, NULL);
   if (rc != GDEFCORE_OK) {
     return rc;
   }
@@ -2583,5 +2589,24 @@ GDEFCORE_Result gdefcore_module_fire_write(GDEFCORE_Host * host,
       decision == GDEFCORE_DECISION_DENY) {
     return GDEFCORE_ERR_INVALID;
   }
+  return GDEFCORE_OK;
+}
+
+GDEFCORE_Result gdefcore_module_fire_veto(GDEFCORE_Host * host,
+    GDEFCORE_Request * request, GDEFCORE_Catalog * catalog, const char * hook,
+    size_t hook_len, const void * args, int * out_vetoed) {
+  int decision = GDEFCORE_DECISION_NONE;
+  int denied = 0;
+  GDEFCORE_Result rc;
+  if (out_vetoed == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  *out_vetoed = 0;
+  rc = fire_at(host, request, catalog, hook, hook_len, GDEFCORE_HOOK_DECISION,
+      args, NULL, &decision, 0, &denied);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  *out_vetoed = denied;
   return GDEFCORE_OK;
 }

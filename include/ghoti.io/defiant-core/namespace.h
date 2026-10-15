@@ -101,6 +101,7 @@
 #define gdefcore_access_role_grants GHOTIIO_DEFCORE(gdefcore_access_role_grants)
 #define gdefcore_access_role_id GHOTIIO_DEFCORE(gdefcore_access_role_id)
 #define gdefcore_access_roles GHOTIIO_DEFCORE(gdefcore_access_roles)
+#define gdefcore_access_permits GHOTIIO_DEFCORE(gdefcore_access_permits)
 #define gdefcore_access_shared_cache                                           \
   GHOTIIO_DEFCORE(gdefcore_access_shared_cache)
 #define gdefcore_access_stage_module_permission                                \
@@ -224,6 +225,7 @@
 #define gdefcore_module_enable GHOTIIO_DEFCORE(gdefcore_module_enable)
 #define gdefcore_module_enabled GHOTIIO_DEFCORE(gdefcore_module_enabled)
 #define gdefcore_module_error GHOTIIO_DEFCORE(gdefcore_module_error)
+#define gdefcore_module_fire_veto GHOTIIO_DEFCORE(gdefcore_module_fire_veto)
 #define gdefcore_module_fire_write GHOTIIO_DEFCORE(gdefcore_module_fire_write)
 #define gdefcore_module_install_guest                                          \
   GHOTIIO_DEFCORE(gdefcore_module_install_guest)
@@ -244,6 +246,9 @@
 #define gdefcore_render_page GHOTIIO_DEFCORE(gdefcore_render_page)
 #define gdefcore_render_pane_at GHOTIIO_DEFCORE(gdefcore_render_pane_at)
 #define gdefcore_render_regions GHOTIIO_DEFCORE(gdefcore_render_regions)
+#define gdefcore_render_sample GHOTIIO_DEFCORE(gdefcore_render_sample)
+#define gdefcore_render_shareable_count \
+  GHOTIIO_DEFCORE(gdefcore_render_shareable_count)
 #define gdefcore_render_scope GHOTIIO_DEFCORE(gdefcore_render_scope)
 #define gdefcore_render_view_define GHOTIIO_DEFCORE(gdefcore_render_view_define)
 #define gdefcore_request_acting_principal                                      \
@@ -359,6 +364,14 @@
 #define gdefcore_template_validate GHOTIIO_DEFCORE(gdefcore_template_validate)
 #define gdefcore_template_preview GHOTIIO_DEFCORE(gdefcore_template_preview)
 #define gdefcore_template_vet GHOTIIO_DEFCORE(gdefcore_template_vet)
+#define gdefcore_template_authorize GHOTIIO_DEFCORE(gdefcore_template_authorize)
+#define gdefcore_template_declare_touched \
+  GHOTIIO_DEFCORE(gdefcore_template_declare_touched)
+#define gdefcore_template_edit_label GHOTIIO_DEFCORE(gdefcore_template_edit_label)
+#define gdefcore_template_edit_name GHOTIIO_DEFCORE(gdefcore_template_edit_name)
+#define gdefcore_template_kind_declare \
+  GHOTIIO_DEFCORE(gdefcore_template_kind_declare)
+#define gdefcore_template_may_edit GHOTIIO_DEFCORE(gdefcore_template_may_edit)
 #define gdefcore_template_report_count \
   GHOTIIO_DEFCORE(gdefcore_template_report_count)
 #define gdefcore_template_report_at GHOTIIO_DEFCORE(gdefcore_template_report_at)

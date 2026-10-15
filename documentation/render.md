@@ -113,3 +113,11 @@ there; a function the contract does not name is not there; the engine's
 `math` and `random` are null. A template with no kind, or whose kind is not
 stored, is refused with the error a missing template gets. Kinds, layering,
 validation and the `unsafe` marker are in templates.md.
+
+## The editor's preview
+
+`gdefcore_render_sample()` runs a body that is not stored as a template of a
+kind, against sample data, under an overlay that no shared cache may keep. See
+"Previewing an edited body" in templates.md. A `core.template` also carries
+two optional fields, `attached` (a public id) and `classification` (text),
+which a module's `template-write` decision can refine edits by.

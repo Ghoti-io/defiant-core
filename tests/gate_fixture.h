@@ -728,6 +728,35 @@ inline Obs Observe(World & w, const std::string & who, const Ask & ask) {
         ListLine(w, who, "site.note", "secret", w.secrets[0], "title");
   }
   o.kv["g:render-key"] = KeyLine(w, who);
+  {
+    /* The permission to edit templates is held by nobody here, and a preview
+     * of a body is the answer a missing kind gets. */
+    static const char kEdit[] = "core.template.edit.core.pane";
+    static const char kBody[] = "<p>sweep</p>";
+    char * bytes = (char *)0x1;
+    size_t n = 99;
+    int shareable = 99;
+    GDEFCORE_Result rc;
+    Fresh f(w, who);
+    Note("gdefcore_access_permits");
+    o.kv["g:permits"] = "held=" +
+        std::to_string(gdefcore_access_permits(w.site.catalog, f.req, kEdit,
+            strlen(kEdit))) + Diag(w, f.req);
+    Note("gdefcore_template_may_edit");
+    o.kv["g:may-edit"] = "held=" +
+        std::to_string(gdefcore_template_may_edit(w.site.catalog, f.req,
+            "core.pane", 9)) + Diag(w, f.req);
+    Note("gdefcore_render_sample");
+    rc = gdefcore_render_sample(w.site.catalog, f.req, "core.pane", 9, kBody,
+        strlen(kBody), "preview", 7, GDEFCORE_RENDER_PAGE_FUEL, &bytes, &n,
+        &shareable);
+    o.kv["g:render-sample"] = "rc=" + Rc(rc) +
+        (bytes == (char *)0x1 && n == 99 ? " untouched" : " WROTE") +
+        " shareable=" + std::to_string(shareable) + Diag(w, f.req);
+    if (rc == GDEFCORE_OK) {
+      gdefcore_text_free(w.site.catalog, bytes);
+    }
+  }
   if (ask.posts) {
     o.kv["g:list.posts"] = ListLine(w, who, "site.post", NULL, "", NULL);
     o.kv["g:list.posts.title"] =

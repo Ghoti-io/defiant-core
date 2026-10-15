@@ -2202,6 +2202,32 @@ done:
   return rc;
 }
 
+int gdefcore_access_permits(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Request * request, const char * permission, size_t permission_len) {
+  Grant grants[kGrantMax];
+  size_t ngrants = 0;
+  int read_principal = 0;
+  size_t i;
+  if (catalog == NULL || request == NULL || permission == NULL ||
+      permission_len == 0) {
+    return 0;
+  }
+  if (ensure(catalog) != GDEFCORE_OK) {
+    return 0;
+  }
+  if (load_effective(catalog, request, grants, kGrantMax, &ngrants,
+          &read_principal) != GDEFCORE_OK) {
+    return 0;
+  }
+  for (i = 0; i < ngrants; i++) {
+    if (same(grants[i].action, grants[i].action_len, permission,
+            permission_len)) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
 int gdefcore_access_shared_cache(const char * overlay, size_t overlay_len) {
   if (overlay == NULL || overlay_len == 0) {
     return 1;

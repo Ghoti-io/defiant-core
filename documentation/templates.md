@@ -1,6 +1,8 @@
 # Templates: kinds, contracts and validation
 
-A template is a `core.template` entity: a `name`, a `body` and a `kind`. The
+A template is a `core.template` entity: a `name`, a `body` and a `kind`, and
+optionally an `attached` entity (a public id) and a `classification` (text a
+module may refine edits by). The
 kind says what the template may use. A template that names anything outside
 its kind's contract does not validate, and a template that does not validate
 is not stored.
@@ -184,6 +186,83 @@ A change to a template takes effect on the next request. The render reads the
 store every time; there is no compiled-template cache in this story. One
 added later is keyed by the render key and by the template's revision.
 
+## Who may edit a template
+
+Editing a template needs two things, and both must hold.
+
+**The permission of its kind.** Defining a kind declares the permission
+`core.template.edit.<kind>` (`core.template.edit.core.pane`), labelled in
+plain words, "Edit templates of kind Pane", from the kind's own label, and
+grouped under the module that owns the kind: the part of its machine name
+before the first dot. A kind that a changeset saves has its permission declared
+as that changeset commits, and the kit's two kinds have theirs. It is granted
+to nobody, admin included, until a changeset grants it, like any permission
+(`gdefcore_access_grant()` with the label). Kind labels should be unique: the
+permission's label is how it is granted, and a second kind with the same label
+shares the first one's grant. Moving a template to another kind needs the
+permission of both kinds, and the template is validated against the new
+kind's contract.
+
+**No subscriber denies.** The write of a `core.template` runs the decision
+hook `template-write`. A module subscribes as a decision and is handed a
+`GDEFCORE_Template_Write_Hook`: the template's id and name, its kind after the
+write and before it, the entity it is attached to and that entity's type, and
+its classification. It answers allow, deny or no opinion. Any deny refuses the
+write (AD-10). The permission is the allow: a hook set with no deny, or only
+no opinions, leaves the write standing, which is how AD-10's "otherwise deny"
+is met. A subscriber that fails or traps fails the request; it is not
+skipped. The refusal is the fixed sentence `That edit is not allowed.`, never
+the module's reason, so a refusal does not teach an editor what the module
+knows.
+
+```c
+/* deny edits of page templates unless the classification is the principal's */
+static GDEFCORE_Result judge(GDEFCORE_Request * request, const void * args,
+    GDEFCORE_Alter * alter, GDEFCORE_Hook_Out * out, void * user) {
+  const GDEFCORE_Template_Write_Hook * a = args;
+  out->decision = GDEFCORE_DECISION_NONE;
+  if (a->kind_len == 9 && memcmp(a->kind, "core.page", 9) == 0 &&
+      !classification_granted(request, a->classification, a->classification_len)) {
+    out->decision = GDEFCORE_DECISION_DENY;
+  }
+  return GDEFCORE_OK;
+}
+```
+
+**Where it is checked.** `gdefcore_changeset_apply()` calls
+`gdefcore_template_authorize()` before it does anything else, for a changeset
+that has a request (`gdefcore_changeset_set_request()`): the principal is the
+request's. A changeset with no request is the operator's, such as the kit
+install or a tool run with the changeset API, and is not asked. A refusal is
+`GDEFCORE_ERR_INVALID`, the code a principal gets for an id it may not see,
+and writes nothing. It is checked before the confirmation, the conflict check
+and validation, so what a principal may not edit says the same thing whatever
+it holds. A revert (`gdefcore_changeset_revert()`) is a changeset and is
+checked the same way.
+
+**Which kinds a principal may see.** `gdefcore_template_may_edit()` answers
+whether the principal holds a kind's permission; a kind that does not exist,
+and one nobody granted, give the same answer. An editor lists only kinds for
+which it is true, and answers for any other kind's templates as it answers for
+a missing one (AD-11).
+
+## Previewing an edited body
+
+`gdefcore_render_sample()` renders a body as a template of a kind, against
+sample data, without storing it. Each base variable is bound to `Sample
+<name>`, `region(x)` gives a marked stand-in, and a module's contributed
+variable runs its real provider with the request. The kind's contract is the
+library, as for a stored template. It is for a principal who may edit the kind
+and gives `GDEFCORE_ERR_INVALID` to any other.
+
+It takes an overlay. A fragment under any overlay but `live` must not enter a
+shared cache (`gdefcore_access_shared_cache()`), and an editor passes
+`preview`. `gdefcore_render_shareable_count()` counts the fragments the
+process has offered to a shared cache: a render of a stored template offers
+one, a preview offers none. Only a difference between two reads means
+anything. This core has no fragment cache of its own; the count is the
+instrument that shows a host's cache what it may keep.
+
 ## Public functions
 
 | Function | Purpose |
@@ -196,3 +275,8 @@ added later is keyed by the render key and by the template's revision.
 | `gdefcore_module_contribute`, `gdefcore_module_contributions(_free)` | A module's contributions. |
 | `gdefcore_request_mark_principal_dependent`, `gdefcore_request_principal_dependent` | The observed dependence the render key reads. |
 | `gdefcore_changeset_touched_count/_at`, `gdefcore_changeset_refusal`, `gdefcore_changeset_set_refusal`, `gdefcore_catalog_host` | Reading a changeset and its refusal. |
+| `gdefcore_template_edit_name/_label`, `gdefcore_template_kind_declare`, `gdefcore_template_declare_touched` | The permission a kind declares. |
+| `gdefcore_template_may_edit`, `gdefcore_template_authorize` | Who may edit; what apply asks. |
+| `gdefcore_module_fire_veto` | A decision hook as a veto: any deny wins, no opinion stands. |
+| `gdefcore_access_permits` | Whether a request's principal holds a permission by its action. |
+| `gdefcore_render_sample`, `gdefcore_render_shareable_count` | The editor's preview, and the shared-cache count. |

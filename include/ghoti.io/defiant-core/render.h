@@ -78,6 +78,48 @@ GDEFCORE_API GDEFCORE_Result gdefcore_render_scope(GDEFCORE_Catalog * catalog,
     char ** out_bytes, size_t * out_len);
 
 /**
+ * @brief Render @p body as a template of @p kind against sample data.
+ *
+ * For an editor's preview. Every variable the kind's base declares is bound
+ * to the text `Sample <name>`, `region(x)` gives a marked stand-in, and a
+ * module's contributed variable is its real lazy provider, called with
+ * @p request. The body is not stored and nothing is written. It is rendered
+ * under the contract of @p kind exactly as a stored template is.
+ *
+ * @p overlay names the render. A fragment rendered under any overlay but
+ * `live` (NULL and empty are `live`) must not enter a shared cache
+ * (gdefcore_access_shared_cache()); @p out_shareable receives whether this
+ * one may, and gdefcore_render_shareable_count() counts the ones that may. An
+ * editor passes an overlay of its own, `preview`.
+ *
+ * A principal who does not hold the edit permission of @p kind
+ * (gdefcore_template_may_edit()) gets ::GDEFCORE_ERR_INVALID, the same as a
+ * kind that does not exist. A body that does not parse, or that fails at run
+ * time, returns the error and writes no bytes.
+ *
+ * Free @p out_bytes with gdefcore_text_free(). Not written on failure.
+ *
+ * @param scope_fuel The budget of the template. Zero is
+ *   ::GDEFCORE_ERR_INVALID.
+ * @param out_shareable May be NULL.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_render_sample(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Request * request, const char * kind, size_t kind_len,
+    const char * body, size_t body_len, const char * overlay,
+    size_t overlay_len, uint64_t scope_fuel, char ** out_bytes, size_t * out_len,
+    int * out_shareable);
+
+/**
+ * @brief How many fragments this process has offered to a shared cache.
+ *
+ * A render of a stored template is offered under the `live` overlay. A
+ * gdefcore_render_sample() under any other overlay is not offered, and a
+ * counter that moves across one is a fragment that would be cached for
+ * everyone. Only a difference between two reads means anything.
+ */
+GDEFCORE_API uint64_t gdefcore_render_shareable_count(void);
+
+/**
  * @brief The Post starter kit as a tar archive.
  *
  * One member, named `changeset`. The catalog is not modified. Free

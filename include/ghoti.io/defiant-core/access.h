@@ -252,6 +252,22 @@ GDEFCORE_API GDEFCORE_Result gdefcore_access_list(GDEFCORE_Catalog * catalog,
     char *** out_ids, size_t * out_count);
 
 /**
+ * @brief Whether the request's principal holds the permission called
+ * @p permission.
+ *
+ * A permission is named by its action, for example
+ * `core.template.edit.core.pane`. It is held when a role the principal has
+ * (or the `authenticated` or `anonymous` state) was granted a declared
+ * permission with that action. A name nobody declared is not held, and a
+ * permission nobody was granted is not held by admin either. A failure to
+ * read the grants is "not held".
+ *
+ * @return 1 when held, else 0.
+ */
+GDEFCORE_API int gdefcore_access_permits(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Request * request, const char * permission, size_t permission_len);
+
+/**
  * @brief The render key for this request.
  *
  * The edition is empty. @p overlay NULL or `live` is the live overlay. A
