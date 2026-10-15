@@ -234,6 +234,13 @@
 #define gdefcore_module_mark_entered                                           \
   GHOTIIO_DEFCORE(gdefcore_module_mark_entered)
 #define gdefcore_module_notice GHOTIIO_DEFCORE(gdefcore_module_notice)
+#define gdefcore_module_add_routes GHOTIIO_DEFCORE(gdefcore_module_add_routes)
+#define gdefcore_module_declared_free \
+  GHOTIIO_DEFCORE(gdefcore_module_declared_free)
+#define gdefcore_module_links GHOTIIO_DEFCORE(gdefcore_module_links)
+#define gdefcore_module_routes GHOTIIO_DEFCORE(gdefcore_module_routes)
+#define gdefcore_module_settings GHOTIIO_DEFCORE(gdefcore_module_settings)
+#define gdefcore_module_variables GHOTIIO_DEFCORE(gdefcore_module_variables)
 #define gdefcore_module_service GHOTIIO_DEFCORE(gdefcore_module_service)
 #define gdefcore_module_text_free GHOTIIO_DEFCORE(gdefcore_module_text_free)
 #define gdefcore_module_vet GHOTIIO_DEFCORE(gdefcore_module_vet)

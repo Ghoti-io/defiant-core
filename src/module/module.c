@@ -49,7 +49,7 @@ enum {
   kModMax = 64,
   kRelMax = 8,
   kSubMax = 16,
-  kSvcMax = 4,
+  kSvcMax = 16,
   kPermMax = 8,
   kChainMax = 32,
   kNodeMax = 64,
@@ -138,6 +138,7 @@ typedef struct Mod {
   size_t nservices;
   Perm perms[kPermMax];
   size_t nperms;
+  Decl * decl;
 } Mod;
 
 typedef struct ChainNode {
@@ -201,6 +202,7 @@ struct GDEFCORE_Host {
   int firing;
   Contrib contribs[kContribMax];
   size_t ncontribs;
+  Decl * retired;
 };
 
 struct GDEFCORE_Alter {
@@ -247,6 +249,24 @@ static void set_error(GDEFCORE_Host * host, const char * text) {
   host->error[n] = '\0';
   host->error_n = n;
 }
+
+/*
+ * A Decl a reload replaces may still be pointed at by an enumeration someone
+ * holds, so it is kept on the host's list and freed with the host.
+ */
+static void retire_decl(GDEFCORE_Host * host, Decl * decl) {
+  if (decl == NULL) {
+    return;
+  }
+  decl->next = host->retired;
+  host->retired = decl;
+}
+
+static GDEFCORE_Result projected_names(GDEFCORE_Host * host,
+    const uint8_t * tenant, size_t tenant_len,
+    const GDEFCORE_Changeset * projection, Name * names, size_t * n);
+static GDEFCORE_Result validate_declared(GDEFCORE_Host * host,
+    const Name * names, size_t nnames, int local);
 
 static int name_ok(const char * s, size_t n) {
   size_t i;
@@ -650,7 +670,6 @@ static GDEFCORE_Result copy_manifest(GDEFCORE_Host * host, Mod * mod,
     const GDEFCORE_Module_Manifest * src) {
   GDEFCORE_Module_Manifest man;
   size_t i;
-  (void)host;
   if (src == NULL || src->size < sizeof(size_t)) {
     set_error(host, "Module manifest is missing.");
     return GDEFCORE_ERR_INVALID;
@@ -819,6 +838,27 @@ static GDEFCORE_Result copy_manifest(GDEFCORE_Host * host, Mod * mod,
     mod->perms[mod->nperms].condition = perm.condition;
     mod->nperms += 1;
   }
+  {
+    DeclSvc svcs[kSvcMax];
+    Decl * decl = NULL;
+    char text[kErrorMax];
+    GDEFCORE_Result rc;
+    for (i = 0; i < mod->nservices; i++) {
+      svcs[i].name = mod->services[i].name;
+      svcs[i].name_len = mod->services[i].name_len;
+      svcs[i].version = mod->services[i].version;
+      svcs[i].table = mod->services[i].table;
+    }
+    text[0] = '\0';
+    rc = gdefcore_decl_build(host->alloc, mod->name, mod->name_len, &man, svcs,
+        mod->nservices, &decl, text, sizeof text);
+    if (rc != GDEFCORE_OK) {
+      set_error(host, text);
+      return rc;
+    }
+    retire_decl(host, mod->decl);
+    mod->decl = decl;
+  }
   mod->loaded = 1;
   return GDEFCORE_OK;
 }
@@ -872,6 +912,8 @@ static GDEFCORE_Result call_entry(GDEFCORE_Host * host, Mod * mod) {
     mod->nrels = 0;
     mod->nservices = 0;
     mod->nperms = 0;
+    gdefcore_decl_free(mod->decl);
+    mod->decl = NULL;
     return rc;
   }
   if (clear_rc != GDEFCORE_OK) {
@@ -909,8 +951,10 @@ static GDEFCORE_Result open_native(GDEFCORE_Host * host, Mod * mod) {
 
 static void clear_mod(Mod * mod) {
   close_mod(mod);
+  gdefcore_decl_free(mod->decl);
   memset(mod, 0, sizeof *mod);
 }
+
 
 static GDEFCORE_Result adopt(GDEFCORE_Host * host, Mod * filled) {
   if (find_mod(host, filled->name, filled->name_len) != NULL) {
@@ -1024,6 +1068,12 @@ void gdefcore_host_destroy(GDEFCORE_Host * host) {
   }
   for (i = 0; i < host->nmods; i++) {
     close_mod(&host->mods[i]);
+    gdefcore_decl_free(host->mods[i].decl);
+  }
+  while (host->retired != NULL) {
+    Decl * next = host->retired->next;
+    gdefcore_decl_free(host->retired);
+    host->retired = next;
   }
   gcu_allocator_free(host->alloc, host);
 }
@@ -1097,6 +1147,7 @@ GDEFCORE_Result gdefcore_module_install_guest(GDEFCORE_Host * host,
     Mod * existing = find_mod(host, mod.name, mod.name_len);
     if (existing != NULL) {
       if (!existing->native && existing->entry == NULL) {
+        retire_decl(host, existing->decl);
         *existing = mod;
         existing->used = 1;
         set_error(host, NULL);
@@ -1129,6 +1180,23 @@ static GDEFCORE_Result stage_named(GDEFCORE_Host * host,
   if (find_mod(host, name, name_len) == NULL) {
     set_error(host, "Module is not installed.");
     return GDEFCORE_ERR_INVALID;
+  }
+  if (enable) {
+    /* The module's own declarations, by themselves: a name outside its prefix,
+     * a table that is malformed, a handler that is not its own. What they
+     * refer to in other modules is judged when the changeset is applied,
+     * against the site the whole changeset leaves, because the changeset may
+     * enable the other module too, in whatever order. A refusal stages
+     * nothing. */
+    Name only[1];
+    GDEFCORE_Result rc;
+    memcpy(only[0].text, name, name_len);
+    only[0].text[name_len] = '\0';
+    only[0].len = name_len;
+    rc = validate_declared(host, only, 1, 1);
+    if (rc != GDEFCORE_OK) {
+      return rc;
+    }
   }
   return gdefcore_changeset_stage_module(changeset, name, name_len, enable);
 }
@@ -1382,21 +1450,326 @@ static int span_is(const char * a, size_t an, const char * b, size_t bn) {
   return an == bn && (an == 0 || memcmp(a, b, an) == 0);
 }
 
+/* Raw bytes, shorter first when one is a prefix of the other. */
+static int span_cmp(const char * a, size_t an, const char * b, size_t bn) {
+  size_t n = an < bn ? an : bn;
+  int c = n == 0 ? 0 : memcmp(a, b, n);
+  if (c != 0) {
+    return c;
+  }
+  return an < bn ? -1 : (an > bn ? 1 : 0);
+}
+
+/*
+ * The modules in force for @p names, in AD-10 order: a subscription that says
+ * `before` or `after` against another module in force puts the two in that
+ * order, and among modules nothing constrains the module name decides, as raw
+ * bytes. Registration order never does. Hook orders are decided one hook at a
+ * time, so two hooks can ask for opposite orders; the declarations take one
+ * order for all of them, and where the relationships loop the lowest name
+ * among the modules left goes first, which is a rule that does not depend on
+ * how the host was built up.
+ */
+static int mod_name_less(const Mod * a, const Mod * b) {
+  return span_cmp(a->name, a->name_len, b->name, b->name_len) < 0;
+}
+
+static size_t order_live(GDEFCORE_Host * host, const Name * names,
+    size_t nnames, Mod ** out) {
+  Mod * live[kModMax];
+  unsigned char before[kModMax][kModMax];
+  unsigned char done[kModMax];
+  size_t n = 0;
+  size_t i;
+  size_t j;
+  size_t k;
+  size_t step;
+  memset(before, 0, sizeof before);
+  memset(done, 0, sizeof done);
+  for (i = 0; i < host->nmods; i++) {
+    Mod * mod = &host->mods[i];
+    if (!mod->used || mod->quarantined || !(mod->native || mod->entry != NULL) ||
+        !name_has(names, nnames, mod->name, mod->name_len)) {
+      continue;
+    }
+    live[n++] = mod;
+  }
+  for (i = 0; i < n; i++) {
+    for (k = 0; k < live[i]->nsubs; k++) {
+      const Sub * sub = &live[i]->subs[k];
+      for (j = 0; j < n; j++) {
+        if (j == i) {
+          continue;
+        }
+        if (sub->before_len > 0 &&
+            span_is(sub->before, sub->before_len, live[j]->name,
+                live[j]->name_len)) {
+          before[i][j] = 1;
+        }
+        if (sub->after_len > 0 &&
+            span_is(sub->after, sub->after_len, live[j]->name,
+                live[j]->name_len)) {
+          before[j][i] = 1;
+        }
+      }
+    }
+  }
+  for (step = 0; step < n; step++) {
+    int pick = -1;
+    int lowest = -1;
+    for (i = 0; i < n; i++) {
+      int ready = 1;
+      if (done[i]) {
+        continue;
+      }
+      for (j = 0; j < n; j++) {
+        if (!done[j] && j != i && before[j][i]) {
+          ready = 0;
+        }
+      }
+      if (ready && (pick < 0 || mod_name_less(live[i], live[pick]))) {
+        pick = (int)i;
+      }
+      if (lowest < 0 || mod_name_less(live[i], live[lowest])) {
+        lowest = (int)i;
+      }
+    }
+    if (pick < 0) {
+      pick = lowest;
+    }
+    done[pick] = 1;
+    out[step] = live[pick];
+  }
+  return n;
+}
+
+/* The declarations of the modules in force, in module order. Free the array
+ * with the host allocator. */
+static GDEFCORE_Result decl_refs(GDEFCORE_Host * host, const Name * names,
+    size_t nnames, DeclRef ** out, size_t * out_n) {
+  Mod * ordered[kModMax];
+  size_t n = order_live(host, names, nnames, ordered);
+  size_t i;
+  size_t at = 0;
+  DeclRef * refs =
+      (DeclRef *)gcu_allocator_calloc(host->alloc, n + 1, sizeof *refs);
+  if (refs == NULL) {
+    return GDEFCORE_ERR_OOM;
+  }
+  for (i = 0; i < n; i++) {
+    if (ordered[i]->decl != NULL) {
+      refs[at++].decl = ordered[i]->decl;
+    }
+  }
+  *out = refs;
+  *out_n = at;
+  return GDEFCORE_OK;
+}
+
+static GDEFCORE_Result enumerate_refs(GDEFCORE_Host * host,
+    const uint8_t * tenant, size_t tenant_len,
+    const GDEFCORE_Changeset * projection, DeclRef ** refs, size_t * n) {
+  Name names[kModMax];
+  size_t nnames = 0;
+  GDEFCORE_Result rc;
+  *refs = NULL;
+  *n = 0;
+  if (host == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  rc = projected_names(host, tenant, tenant_len, projection, names, &nnames);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  return decl_refs(host, names, nnames, refs, n);
+}
+
+GDEFCORE_Result gdefcore_module_routes(GDEFCORE_Host * host,
+    const uint8_t * tenant, size_t tenant_len,
+    const GDEFCORE_Changeset * projection,
+    const GDEFCORE_Module_Declared_Route *** out_items, size_t * out_count) {
+  DeclRef * refs;
+  size_t n;
+  GDEFCORE_Result rc;
+  if (out_items == NULL || out_count == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  *out_items = NULL;
+  *out_count = 0;
+  rc = enumerate_refs(host, tenant, tenant_len, projection, &refs, &n);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  rc = gdefcore_decl_routes(host->alloc, refs, n, out_items, out_count);
+  gcu_allocator_free(host->alloc, refs);
+  return rc;
+}
+
+GDEFCORE_Result gdefcore_module_links(GDEFCORE_Host * host,
+    const uint8_t * tenant, size_t tenant_len,
+    const GDEFCORE_Changeset * projection,
+    const GDEFCORE_Module_Declared_Link *** out_items, size_t * out_count) {
+  DeclRef * refs;
+  size_t n;
+  GDEFCORE_Result rc;
+  if (out_items == NULL || out_count == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  *out_items = NULL;
+  *out_count = 0;
+  rc = enumerate_refs(host, tenant, tenant_len, projection, &refs, &n);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  rc = gdefcore_decl_links(host->alloc, refs, n, out_items, out_count);
+  gcu_allocator_free(host->alloc, refs);
+  return rc;
+}
+
+GDEFCORE_Result gdefcore_module_settings(GDEFCORE_Host * host,
+    const uint8_t * tenant, size_t tenant_len,
+    const GDEFCORE_Changeset * projection,
+    const GDEFCORE_Module_Declared_Setting *** out_items, size_t * out_count) {
+  DeclRef * refs;
+  size_t n;
+  GDEFCORE_Result rc;
+  if (out_items == NULL || out_count == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  *out_items = NULL;
+  *out_count = 0;
+  rc = enumerate_refs(host, tenant, tenant_len, projection, &refs, &n);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  rc = gdefcore_decl_settings(host->alloc, refs, n, out_items, out_count);
+  gcu_allocator_free(host->alloc, refs);
+  return rc;
+}
+
+GDEFCORE_Result gdefcore_module_variables(GDEFCORE_Host * host,
+    const uint8_t * tenant, size_t tenant_len,
+    const GDEFCORE_Changeset * projection,
+    const GDEFCORE_Module_Contributed *** out_items, size_t * out_count) {
+  DeclRef * refs;
+  size_t n;
+  GDEFCORE_Result rc;
+  if (out_items == NULL || out_count == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  *out_items = NULL;
+  *out_count = 0;
+  rc = enumerate_refs(host, tenant, tenant_len, projection, &refs, &n);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  rc = gdefcore_decl_variables(host->alloc, refs, n, out_items, out_count);
+  gcu_allocator_free(host->alloc, refs);
+  return rc;
+}
+
+void gdefcore_module_declared_free(GDEFCORE_Host * host, const void * items) {
+  if (host != NULL && items != NULL) {
+    gcu_allocator_free(host->alloc, (void *)items);
+  }
+}
+
+GDEFCORE_Result gdefcore_module_add_routes(GDEFCORE_Host * host,
+    const uint8_t * tenant, size_t tenant_len,
+    const GDEFCORE_Changeset * projection, GDEFCORE_Routes * routes,
+    char ** out_error, size_t * out_error_len) {
+  DeclRef * refs;
+  size_t n;
+  GDEFCORE_Result rc;
+  if (out_error != NULL) {
+    *out_error = NULL;
+  }
+  if (out_error_len != NULL) {
+    *out_error_len = 0;
+  }
+  if (routes == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  rc = enumerate_refs(host, tenant, tenant_len, projection, &refs, &n);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  rc = gdefcore_decl_add_routes(host->alloc, refs, n, routes, out_error,
+      out_error_len, NULL, 0);
+  gcu_allocator_free(host->alloc, refs);
+  return rc;
+}
+
+/*
+ * Whether the modules in @p names, taken together, declare a site that holds
+ * together. The host's error names the entry and its module.
+ */
+static GDEFCORE_Result validate_declared(GDEFCORE_Host * host,
+    const Name * names, size_t nnames, int local) {
+  DeclRef * refs = NULL;
+  size_t n = 0;
+  size_t r;
+  size_t v;
+  size_t c;
+  char text[kErrorMax];
+  GDEFCORE_Result rc = decl_refs(host, names, nnames, &refs, &n);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  text[0] = '\0';
+  if (n > 0 && gdefcore_decl_validate(refs, n, local, text, sizeof text)) {
+    set_error(host, text);
+    gcu_allocator_free(host->alloc, refs);
+    return GDEFCORE_ERR_INVALID;
+  }
+  /* A variable declared in a manifest and contributed in code is two
+   * registrations of one name. */
+  for (r = 0; r < n; r++) {
+    const Decl * d = refs[r].decl;
+    for (v = 0; v < d->nvars; v++) {
+      const GDEFCORE_Module_Contributed * var = &d->vars[v].pub;
+      for (c = 0; c < host->ncontribs; c++) {
+        const Contrib * old = &host->contribs[c];
+        if (span_is(old->module, strlen(old->module), var->module,
+                var->module_len) &&
+            span_is(old->kind, strlen(old->kind), var->kind, var->kind_len) &&
+            span_is(old->name, strlen(old->name), var->name, var->name_len)) {
+          set_error2(host, "Module ", d->module, ": template variable ",
+              old->name, " is declared in the manifest and also contributed in "
+                         "code.");
+          gcu_allocator_free(host->alloc, refs);
+          return GDEFCORE_ERR_INVALID;
+        }
+      }
+    }
+  }
+  gcu_allocator_free(host->alloc, refs);
+  return GDEFCORE_OK;
+}
+
+/* A candidate of one kind: a contribution registered in code or declared in a
+ * manifest, as the ordering sees it. */
+typedef struct CNode {
+  const GDEFCORE_Module_Contributed * pub;
+  int weight;
+  const char * before;
+  size_t before_len;
+  const char * after;
+  size_t after_len;
+  int indeg;
+  int emitted;
+} CNode;
+
 GDEFCORE_Result gdefcore_module_contributions(GDEFCORE_Host * host,
     const uint8_t * tenant, size_t tenant_len,
     const GDEFCORE_Changeset * projection, const char * kind, size_t kind_len,
     const GDEFCORE_Module_Contributed *** out_items, size_t * out_count) {
-  typedef struct Node {
-    const Contrib * c;
-    int indeg;
-    int nsucc;
-    int succ[kContribMax];
-    int emitted;
-  } Node;
   Name names[kModMax];
   size_t nnames = 0;
-  Node * nodes;
+  CNode * nodes;
+  unsigned char * adj;
   const GDEFCORE_Module_Contributed ** out;
+  size_t bound;
   size_t n = 0;
   size_t emitted = 0;
   size_t i;
@@ -1411,9 +1784,15 @@ GDEFCORE_Result gdefcore_module_contributions(GDEFCORE_Host * host,
   if (rc != GDEFCORE_OK) {
     return rc;
   }
-  nodes = (Node *)gcu_allocator_calloc(host->alloc, kContribMax, sizeof *nodes);
+  bound = host->ncontribs;
+  for (i = 0; i < host->nmods; i++) {
+    if (host->mods[i].used && host->mods[i].decl != NULL) {
+      bound += host->mods[i].decl->nvars;
+    }
+  }
+  nodes = (CNode *)gcu_allocator_calloc(host->alloc, bound + 1, sizeof *nodes);
   out = (const GDEFCORE_Module_Contributed **)gcu_allocator_calloc(host->alloc,
-      kContribMax + 1, sizeof *out);
+      bound + 1, sizeof *out);
   if (nodes == NULL || out == NULL) {
     gcu_allocator_free(host->alloc, nodes);
     gcu_allocator_free(host->alloc, out);
@@ -1425,20 +1804,55 @@ GDEFCORE_Result gdefcore_module_contributions(GDEFCORE_Host * host,
         !module_live(host, names, nnames, c->module)) {
       continue;
     }
-    nodes[n++].c = c;
+    nodes[n].pub = &c->pub;
+    nodes[n].weight = c->weight;
+    nodes[n].before = c->before;
+    nodes[n].before_len = c->before_len;
+    nodes[n].after = c->after;
+    nodes[n].after_len = c->after_len;
+    n += 1;
+  }
+  /* What manifests declare: no weight and no relationships, so they order by
+   * module name and, within a module, by kind and name. */
+  for (i = 0; i < host->nmods; i++) {
+    const Decl * d = host->mods[i].decl;
+    if (!host->mods[i].used || d == NULL ||
+        !module_live(host, names, nnames, host->mods[i].name)) {
+      continue;
+    }
+    for (j = 0; j < d->nvars; j++) {
+      const GDEFCORE_Module_Contributed * v = &d->vars[j].pub;
+      if (!span_is(v->kind, v->kind_len, kind, kind_len)) {
+        continue;
+      }
+      nodes[n].pub = v;
+      nodes[n].before = "";
+      nodes[n].after = "";
+      n += 1;
+    }
+  }
+  adj = (unsigned char *)gcu_allocator_calloc(host->alloc, n * n + 1, 1);
+  if (adj == NULL) {
+    gcu_allocator_free(host->alloc, nodes);
+    gcu_allocator_free(host->alloc, out);
+    return GDEFCORE_ERR_OOM;
   }
   for (i = 0; i < n; i++) {
     for (j = 0; j < n; j++) {
-      const Contrib * a = nodes[i].c;
-      const Contrib * b = nodes[j].c;
-      if (i == j || strcmp(a->module, b->module) == 0) {
+      const CNode * a = &nodes[i];
+      const CNode * b = &nodes[j];
+      if (i == j || span_is(a->pub->module, a->pub->module_len, b->pub->module,
+                        b->pub->module_len)) {
         continue;
       }
       /* a runs first when it says before b, or b says after a. */
-      if (span_is(a->before, a->before_len, b->module, strlen(b->module)) ||
-          span_is(b->after, b->after_len, a->module, strlen(a->module))) {
-        nodes[i].succ[nodes[i].nsucc++] = (int)j;
-        nodes[j].indeg += 1;
+      if (span_is(a->before, a->before_len, b->pub->module,
+              b->pub->module_len) ||
+          span_is(b->after, b->after_len, a->pub->module, a->pub->module_len)) {
+        if (!adj[i * n + j]) {
+          adj[i * n + j] = 1;
+          nodes[j].indeg += 1;
+        }
       }
     }
   }
@@ -1453,44 +1867,48 @@ GDEFCORE_Result gdefcore_module_contributions(GDEFCORE_Host * host,
         pick = (int)i;
         continue;
       }
-      if (nodes[i].c->weight < nodes[pick].c->weight) {
+      if (nodes[i].weight < nodes[pick].weight) {
         pick = (int)i;
-      } else if (nodes[i].c->weight == nodes[pick].c->weight) {
-        int cmp = strcmp(nodes[i].c->module, nodes[pick].c->module);
+      } else if (nodes[i].weight == nodes[pick].weight) {
+        int cmp = span_cmp(nodes[i].pub->module, nodes[i].pub->module_len,
+            nodes[pick].pub->module, nodes[pick].pub->module_len);
         if (cmp < 0) {
           pick = (int)i;
         }
       }
     }
     if (pick < 0) {
-      const char * first = NULL;
-      const char * second = NULL;
+      const GDEFCORE_Module_Contributed * first = NULL;
+      const GDEFCORE_Module_Contributed * second = NULL;
       for (i = 0; i < n; i++) {
         if (nodes[i].emitted) {
           continue;
         }
         if (first == NULL) {
-          first = nodes[i].c->module;
-        } else if (second == NULL && strcmp(first, nodes[i].c->module) != 0) {
-          second = nodes[i].c->module;
+          first = nodes[i].pub;
+        } else if (second == NULL &&
+                   !span_is(first->module, first->module_len,
+                       nodes[i].pub->module, nodes[i].pub->module_len)) {
+          second = nodes[i].pub;
         }
       }
       set_error2(host, "Contribution order cycled between ",
-          first == NULL ? "" : first, " and ", second == NULL ? "" : second,
-          ".");
+          first == NULL ? "" : first->module, " and ",
+          second == NULL ? "" : second->module, ".");
+      gcu_allocator_free(host->alloc, adj);
       gcu_allocator_free(host->alloc, nodes);
       gcu_allocator_free(host->alloc, out);
       return GDEFCORE_ERR_INVALID;
     }
     nodes[pick].emitted = 1;
-    out[emitted++] = &nodes[pick].c->pub;
-    for (s = 0; s < (size_t)nodes[pick].nsucc; s++) {
-      int to = nodes[pick].succ[s];
-      if (nodes[to].indeg > 0) {
-        nodes[to].indeg -= 1;
+    out[emitted++] = nodes[pick].pub;
+    for (s = 0; s < n; s++) {
+      if (adj[(size_t)pick * n + s] && nodes[s].indeg > 0) {
+        nodes[s].indeg -= 1;
       }
     }
   }
+  gcu_allocator_free(host->alloc, adj);
   gcu_allocator_free(host->alloc, nodes);
   if (n == 0) {
     gcu_allocator_free(host->alloc, out);
@@ -1931,6 +2349,15 @@ GDEFCORE_Result gdefcore_module_vet(GDEFCORE_Host * host,
     if (rc != GDEFCORE_OK) {
       return rc;
     }
+  }
+  rc = validate_declared(host, names, nnames, 0);
+  if (rc != GDEFCORE_OK) {
+    size_t text_len = 0;
+    const char * text = gdefcore_module_error(host, &text_len);
+    if (text != NULL) {
+      (void)gdefcore_changeset_set_refusal(changeset, text, text_len);
+    }
+    return rc;
   }
   host->pending_valid = 1;
   return GDEFCORE_OK;

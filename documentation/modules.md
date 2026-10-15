@@ -28,6 +28,93 @@ while the module is enabled, and is ordered against other modules' as hooks
 are (before and after, then weight, then module name). Disabling the module
 ends it. templates.md has the rest.
 
+## Declared tables
+
+A manifest can declare four tables besides its hooks, services and permissions:
+**routes**, **menu links**, **settings** and **template variables**. They are
+appended to `GDEFCORE_Module_Manifest` (AD-4): a module built against an older
+header fills a shorter prefix, and the host reads only the prefix, so such a
+module declares none and works as before. Each entry is size-prefixed.
+
+| Table | Entry | What it says |
+| --- | --- | --- |
+| routes | `GDEFCORE_Module_Route` | machine name, path pattern with named segments, weight, after, permission, title, kind (page, tab or action), parent, default flag, admin flag, handler |
+| menu links | `GDEFCORE_Module_Link` | machine name, menu name, label, target route, weight, parent link, link kind |
+| settings | `GDEFCORE_Module_Setting` | machine name, type (`text`, `number`, `boolean`), default (as text), label, description, environment-local flag, group |
+| template variables | `GDEFCORE_Module_Variable` | template kind, name, type (`text`, `markup`, `number`), description, provider, principal-free flag |
+
+This is declaration only. There is no menu entity here, no stored setting value
+and no menu rendering.
+
+**Names.** Every machine name is `<module>.<name>` (AD-35), lowercase letters,
+digits, `.`, `_` and `-`, at most 128 bytes. A template variable is
+`<module>.<name>` as for `gdefcore_module_contribute()` (a hyphen of the module
+is spelled `_`, and there is no further dot). A name outside the module's prefix
+is an error that names the module and the entry. A name declared twice is an
+error too. Because every name is under its module's prefix, two modules cannot
+declare one name; the clash that can happen across modules is a second default
+tab for one parent, and a route already in the table that receives them.
+
+**Handlers and providers are services.** A route names its handler, and a
+variable its provider, by the name of a service the same module declares in its
+`services`. The service's table is a `GDEFCORE_Module_Route_Handler`
+(version `GDEFCORE_MODULE_ROUTE_HANDLER_VERSION`) holding a
+`GDEFCORE_Route_Call_Fn` and the route's data pointer, or a
+`GDEFCORE_Module_Variable_Provider` (version
+`GDEFCORE_MODULE_VARIABLE_PROVIDER_VERSION`) holding a
+`GDEFCORE_Contribution_Fn` and its state. A native library and a guest declare
+them the same way, and the host reads them from the same copy of the manifest
+`gdefcore_module_service()` reads. The service has to be the declaring
+module's own: a service of another module under the name is not it. A missing
+service, another version, or a table without the function is an error naming
+the route or the variable.
+
+**Validation.** `gdefcore_module_enable()` checks the module's own tables by
+themselves, and stages nothing when they are wrong (a name outside the prefix,
+a malformed field, a handler that is not the module's own, a title that is not
+UTF-8, a pattern the route table would refuse, a second default tab among its
+own routes). The references that leave the module (a tab's parent route, a menu
+link's route and parent link, a default tab against another module's) are
+judged at apply, against the site the whole changeset leaves, because the
+changeset may enable the other module too, in any order, and may disable one
+that the first still needs. `gdefcore_changeset_apply()` refuses the changeset
+with the module, the entry and the reason in `gdefcore_changeset_refusal()`.
+The checks are: an orphan tab; two default tabs for one parent; a menu link
+whose route, parent link or menu does not match, or that is its own ancestor; a
+setting whose default is not a valid value of its type; a template variable for
+a kind that does not exist (the kind is read from the store); and a name a
+kind's base already has. The route rules are the route table's own: the
+declared routes are added to a scratch table for the check.
+
+**Order.** The enumerations list the enabled modules in AD-10 order: a
+subscription's `before` and `after` against another enabled module put the two
+in that order; the module name, as raw bytes, decides among the rest.
+Registration order never does, and neither does the order modules were
+installed or enabled in. Hook orders are decided one hook at a time, so two
+hooks may ask for opposite orders; the declarations take one order for all of
+them, and where the relationships loop the lowest name among the modules left
+goes first. Within a module each table is in machine-name order (template
+variables by kind, then name). Enabling a module twice, or disabling and
+enabling it, leaves the same enumerations.
+
+**Enumeration.** `gdefcore_module_routes()`, `_links()`, `_settings()` and
+`_variables()` return what the modules enabled for a tenant declared, in that
+order. A changeset passed as the projection shows the site it would leave. The
+routes come as `GDEFCORE_Route_Spec`s with the handler resolved, ready for
+`gdefcore_route_add_spec()`; `gdefcore_module_add_routes()` adds them all to a
+`GDEFCORE_Routes`, a tab after its parent. The variables are the records
+`gdefcore_module_contributions()` returns for their kind, so a template's
+contract includes them while the module is enabled. A module that is
+quarantined declares nothing.
+
+**Limits.** At most 64 routes, 64 links, 64 settings and 32 variables per
+manifest, and 16 services (it was 4: a module with a handler, a provider and a
+service of its own needs more). A string past 64 KiB, or a table with a count
+and no data, is refused when the module is installed. The other limits are
+checked when the module is enabled: 128 bytes for a machine name, 256 for a
+label or title or permission, 2048 for a path, 1024 for a description or a
+default value.
+
 ## Hooks
 
 A hook is an event, an alter, or a decision.
@@ -80,4 +167,6 @@ does not parse Wasm bytecode and does not depend on `lang-wasm`.
 
 An optional capability is a named, versioned function table. Lookup
 returns the table, or NULL when the module is not enabled or the version
-does not match. The host does not search for the functions.
+does not match. The host does not search for the functions. A route
+handler and a template variable's provider are such tables (see Declared
+tables).

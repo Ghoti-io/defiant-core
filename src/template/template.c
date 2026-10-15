@@ -1760,6 +1760,50 @@ GDEFCORE_Result gdefcore_template_preview(GDEFCORE_Changeset * changeset,
     }
     gdefcore_ids_free(catalog, ids, count);
   }
+  /* 4. A variable a module declares in its manifest, for a kind that does
+   * not exist. Only for a module this changeset enables: one already enabled
+   * was judged when it was. */
+  if (rc == GDEFCORE_OK && gdefcore_changeset_module_count(changeset) > 0 &&
+      gdefcore_catalog_host(catalog) != NULL) {
+    const GDEFCORE_Module_Contributed ** items = NULL;
+    size_t nitems = 0;
+    size_t tenant_len = 0;
+    const uint8_t * tenant = gdefcore_catalog_tenant(catalog, &tenant_len);
+    GDEFCORE_Host * host = gdefcore_catalog_host(catalog);
+    rc = gdefcore_module_variables(host, tenant, tenant_len, changeset, &items,
+        &nitems);
+    for (i = 0; rc == GDEFCORE_OK && i < nitems; i++) {
+      const GDEFCORE_Module_Contributed * v = items[i];
+      char id[GDEFCORE_PUBLIC_ID_LEN + 1];
+      size_t k;
+      size_t ops = gdefcore_changeset_module_count(changeset);
+      int enabling = 0;
+      for (k = 0; k < ops; k++) {
+        const char * mname = NULL;
+        size_t mlen = 0;
+        int enable = 0;
+        if (gdefcore_changeset_module_at(changeset, k, &mname, &mlen, &enable) ==
+                GDEFCORE_OK &&
+            enable && span_eq(mname, mlen, v->module, v->module_len)) {
+          enabling = 1;
+        }
+      }
+      if (!enabling) {
+        continue;
+      }
+      rc = find_named(catalog, changeset, GDEFCORE_TEMPLATE_KIND_TYPE, v->kind,
+          v->kind_len, id);
+      if (rc == GDEFCORE_ERR_INVALID) {
+        rc = report_add(rep, GDEFCORE_ISSUE_KIND, "", 0, 0, 0, v->kind,
+            v->kind_len,
+            "Module %.*s declares template variable %.*s for kind %.*s, which "
+            "does not exist.",
+            (int)v->module_len, v->module, (int)v->name_len, v->name,
+            (int)v->kind_len, v->kind);
+      }
+    }
+    gdefcore_module_declared_free(host, items);
+  }
   if (rc == GDEFCORE_OK) {
     rc = report_finish(rep);
   }

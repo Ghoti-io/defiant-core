@@ -37,6 +37,7 @@
 #include <ghoti.io/defiant-core/allocator.h>
 #include <ghoti.io/defiant-core/core.h>
 #include <ghoti.io/defiant-core/entity.h>
+#include <ghoti.io/defiant-core/form.h>
 #include <ghoti.io/defiant-core/request.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -190,6 +191,206 @@ typedef struct GDEFCORE_Module_Perm {
   size_t field_len;         ///< Length of @ref field.
 } GDEFCORE_Module_Perm;
 
+/** A contribution provider answers with text (also for `markup`). */
+#define GDEFCORE_CONTRIBUTION_TEXT 1
+/** A contribution provider answers with an integer. */
+#define GDEFCORE_CONTRIBUTION_INTEGER 2
+/** A contribution provider answers with a float. */
+#define GDEFCORE_CONTRIBUTION_FLOAT 3
+
+/**
+ * @brief What a contribution provider answers. Begins with @ref size.
+ *
+ * The provider sets @ref kind and the member that kind names. The bytes of
+ * @ref text are copied before the provider's caller returns, so a provider
+ * may point at its own stack.
+ */
+typedef struct GDEFCORE_Contribution_Value {
+  size_t size;        ///< Set by the caller of the provider.
+  int kind;           ///< ::GDEFCORE_CONTRIBUTION_TEXT, INTEGER or FLOAT.
+  const char * text;  ///< For TEXT. Valid UTF-8.
+  size_t text_len;    ///< Length of @ref text.
+  int64_t integer;    ///< For INTEGER.
+  double real;        ///< For FLOAT.
+} GDEFCORE_Contribution_Value;
+
+/**
+ * @brief A lazy provider of one contributed template variable.
+ *
+ * Called only when a template reaches the variable, with the request being
+ * rendered, so it is principal-aware and reads through the access filter. A
+ * result other than ::GDEFCORE_OK means "not available": the template sees
+ * null. @p request may be NULL when the render has none; a provider that
+ * needs a principal then answers not available.
+ */
+typedef GDEFCORE_Result (*GDEFCORE_Contribution_Fn)(GDEFCORE_Request * request,
+    void * user, GDEFCORE_Contribution_Value * out);
+
+/**
+ * @name Declared tables
+ *
+ * A manifest can declare four tables: routes, menu links, settings and
+ * template variables. They are appended to the manifest (AD-4): a module that
+ * fills a shorter prefix declares none. The host copies them when the module
+ * is installed, validates them when the module is enabled (the enable
+ * changeset is refused, naming the entry and the module), and enumerates what
+ * the enabled modules declared, in one total order: the modules in AD-10 order
+ * (before and after relationships of their subscriptions, then module name),
+ * then each table by machine name.
+ * @{
+ */
+
+/** Longest machine name of a declared route, link or setting, in bytes. */
+#define GDEFCORE_MODULE_DECL_NAME_MAX 128
+/** Longest label of a link or a setting, in bytes. */
+#define GDEFCORE_MODULE_DECL_LABEL_MAX 256
+/** Longest description or default value, in bytes. */
+#define GDEFCORE_MODULE_DECL_TEXT_MAX 1024
+/** Most routes one manifest declares. */
+#define GDEFCORE_MODULE_ROUTES_MAX 64
+/** Most menu links one manifest declares. */
+#define GDEFCORE_MODULE_LINKS_MAX 64
+/** Most settings one manifest declares. */
+#define GDEFCORE_MODULE_SETTINGS_MAX 64
+/** Most template variables one manifest declares. */
+#define GDEFCORE_MODULE_VARIABLES_MAX 32
+
+/** The version of a route handler service table. */
+#define GDEFCORE_MODULE_ROUTE_HANDLER_VERSION 1
+/** The version of a template variable provider service table. */
+#define GDEFCORE_MODULE_VARIABLE_PROVIDER_VERSION 1
+
+/**
+ * @brief The table a route's handler service carries. Begins with @ref size.
+ *
+ * A route names its handler by a service name its module also declares
+ * (GDEFCORE_Module_Service, version ::GDEFCORE_MODULE_ROUTE_HANDLER_VERSION),
+ * and that service's @c table points at one of these. A native module and a
+ * guest declare it the same way. Dispatch calls @ref call_fn with the call
+ * and, in the call, @ref data as the call's data pointer.
+ */
+typedef struct GDEFCORE_Module_Route_Handler {
+  size_t size;                    ///< `sizeof(GDEFCORE_Module_Route_Handler)`.
+  GDEFCORE_Route_Call_Fn call_fn; ///< The handler. Required.
+  void * data;                    ///< The route's data pointer.
+} GDEFCORE_Module_Route_Handler;
+
+/**
+ * @brief The table a template variable's provider service carries. Begins
+ * with @ref size.
+ *
+ * The variable names its provider by a service name its module also declares
+ * (version ::GDEFCORE_MODULE_VARIABLE_PROVIDER_VERSION). The provider is lazy
+ * and is called as a contribution's is (GDEFCORE_Contribution_Fn).
+ */
+typedef struct GDEFCORE_Module_Variable_Provider {
+  size_t size;                     ///< `sizeof(...)` for this build.
+  GDEFCORE_Contribution_Fn provider; ///< The provider. Required.
+  void * user;                     ///< Passed back to @ref provider.
+} GDEFCORE_Module_Variable_Provider;
+
+/**
+ * @brief A route a module declares. Begins with @ref size.
+ *
+ * The fields are those of GDEFCORE_Route_Spec, except that the handler is a
+ * service name. @ref name is `<module>.<name>` (AD-35). A tab names its
+ * @ref parent, which an enabled module declares, and a default tab is the
+ * default of that parent. @ref admin marks a route the admin directory lists.
+ */
+typedef struct GDEFCORE_Module_Route {
+  size_t size;                ///< `sizeof(GDEFCORE_Module_Route)`.
+  const char * name;          ///< Machine name `<module>.<name>`.
+  size_t name_len;            ///< Length of @ref name.
+  const char * path;          ///< Pattern, `/a/:name/*/b`.
+  size_t path_len;            ///< Length of @ref path.
+  int weight;                 ///< Lowest runs first.
+  int after;                  ///< Non-zero: runs after another handler owns.
+  const char * permission;    ///< Permission name, or NULL for none.
+  size_t permission_len;      ///< Length of @ref permission.
+  const char * title;         ///< UTF-8 title for menus, or NULL.
+  size_t title_len;           ///< Length of @ref title.
+  int kind;                   ///< ::GDEFCORE_ROUTE_PAGE, _TAB or _ACTION.
+  const char * parent;        ///< Parent route machine name, for a tab.
+  size_t parent_len;          ///< Length of @ref parent.
+  int is_default;             ///< Non-zero: the default tab of @ref parent.
+  int admin;                  ///< Non-zero: an admin route.
+  const char * handler;       ///< Name of the module's handler service.
+  size_t handler_len;         ///< Length of @ref handler.
+} GDEFCORE_Module_Route;
+
+/**
+ * @brief A menu link a module declares. Begins with @ref size.
+ *
+ * The menu entity is not part of this: a link only says which menu it wants
+ * to be in, what it is called and where it goes.
+ */
+typedef struct GDEFCORE_Module_Link {
+  size_t size;                ///< `sizeof(GDEFCORE_Module_Link)`.
+  const char * name;          ///< Machine name `<module>.<name>`.
+  size_t name_len;            ///< Length of @ref name.
+  const char * menu;          ///< Menu name, such as `main` or `admin`.
+  size_t menu_len;            ///< Length of @ref menu.
+  const char * label;         ///< UTF-8 label. Required.
+  size_t label_len;           ///< Length of @ref label.
+  const char * route;         ///< Target route machine name. Required.
+  size_t route_len;           ///< Length of @ref route.
+  int weight;                 ///< Lowest first.
+  const char * parent;        ///< Parent link machine name, or NULL.
+  size_t parent_len;          ///< Length of @ref parent.
+  int kind;                   ///< ::GDEFCORE_ROUTE_PAGE, _TAB or _ACTION.
+} GDEFCORE_Module_Link;
+
+/**
+ * @brief A setting a module declares. Begins with @ref size.
+ *
+ * Declaration only: values and the settings page are not part of this.
+ * @ref type is `text`, `number` or `boolean`; @ref default_value is that
+ * type's text (a decimal number, or `true` or `false`).
+ */
+typedef struct GDEFCORE_Module_Setting {
+  size_t size;                ///< `sizeof(GDEFCORE_Module_Setting)`.
+  const char * name;          ///< Machine name `<module>.<name>`.
+  size_t name_len;            ///< Length of @ref name.
+  const char * type;          ///< `text`, `number` or `boolean`.
+  size_t type_len;            ///< Length of @ref type.
+  const char * default_value; ///< Default, as text. May be empty.
+  size_t default_len;         ///< Length of @ref default_value.
+  const char * label;         ///< UTF-8 label. Required.
+  size_t label_len;           ///< Length of @ref label.
+  const char * description;   ///< Plain words. May be NULL.
+  size_t description_len;     ///< Length of @ref description.
+  int environment_local;      ///< Non-zero: never imported, never exported.
+  const char * group;         ///< Group name for the settings page, or NULL.
+  size_t group_len;           ///< Length of @ref group.
+} GDEFCORE_Module_Setting;
+
+/**
+ * @brief A template variable a module declares. Begins with @ref size.
+ *
+ * What gdefcore_module_contribute() takes as code is declared here as data:
+ * @ref name is `<module>.<name>` (a hyphen of the module spelled `_`),
+ * @ref type is `text`, `markup` or `number`, and the provider is a service
+ * (see GDEFCORE_Module_Variable_Provider). The enumeration reports it as a
+ * GDEFCORE_Module_Contributed, and gdefcore_module_contributions() includes
+ * it while the module is enabled.
+ */
+typedef struct GDEFCORE_Module_Variable {
+  size_t size;                ///< `sizeof(GDEFCORE_Module_Variable)`.
+  const char * kind;          ///< Template kind it contributes to.
+  size_t kind_len;            ///< Length of @ref kind.
+  const char * name;          ///< `<module>.<name>`.
+  size_t name_len;            ///< Length of @ref name.
+  const char * type;          ///< `text`, `markup` or `number`.
+  size_t type_len;            ///< Length of @ref type.
+  const char * description;   ///< Plain words for the editor. May be NULL.
+  size_t description_len;     ///< Length of @ref description.
+  const char * provider;      ///< Name of the module's provider service.
+  size_t provider_len;        ///< Length of @ref provider.
+  int principal_free;         ///< Non-zero: the answer ignores the principal.
+} GDEFCORE_Module_Variable;
+
+/** @} */
+
 /**
  * @brief What `gdefcore_module_manifest` returns. Begins with @ref size.
  *
@@ -213,6 +414,14 @@ typedef struct GDEFCORE_Module_Manifest {
   size_t nservices;                         ///< How many services.
   const GDEFCORE_Module_Perm * perms;       ///< Declared permissions. May be NULL.
   size_t nperms;                            ///< How many permissions.
+  const GDEFCORE_Module_Route * routes;     ///< Declared routes. May be NULL.
+  size_t nroutes;                           ///< How many routes.
+  const GDEFCORE_Module_Link * links;       ///< Declared menu links. May be NULL.
+  size_t nlinks;                            ///< How many links.
+  const GDEFCORE_Module_Setting * settings; ///< Declared settings. May be NULL.
+  size_t nsettings;                         ///< How many settings.
+  const GDEFCORE_Module_Variable * variables; ///< Declared template variables.
+  size_t nvariables;                        ///< How many variables.
 } GDEFCORE_Module_Manifest;
 
 /** The entry a native module exports and a guest hands to the host. */
@@ -493,41 +702,6 @@ GDEFCORE_API GDEFCORE_Result gdefcore_module_fire_veto(GDEFCORE_Host * host,
     GDEFCORE_Request * request, GDEFCORE_Catalog * catalog, const char * hook,
     size_t hook_len, const void * args, int * out_vetoed);
 
-/** A contribution provider answers with text (also for `markup`). */
-#define GDEFCORE_CONTRIBUTION_TEXT 1
-/** A contribution provider answers with an integer. */
-#define GDEFCORE_CONTRIBUTION_INTEGER 2
-/** A contribution provider answers with a float. */
-#define GDEFCORE_CONTRIBUTION_FLOAT 3
-
-/**
- * @brief What a contribution provider answers. Begins with @ref size.
- *
- * The provider sets @ref kind and the member that kind names. The bytes of
- * @ref text are copied before the provider's caller returns, so a provider
- * may point at its own stack.
- */
-typedef struct GDEFCORE_Contribution_Value {
-  size_t size;        ///< Set by the caller of the provider.
-  int kind;           ///< ::GDEFCORE_CONTRIBUTION_TEXT, INTEGER or FLOAT.
-  const char * text;  ///< For TEXT. Valid UTF-8.
-  size_t text_len;    ///< Length of @ref text.
-  int64_t integer;    ///< For INTEGER.
-  double real;        ///< For FLOAT.
-} GDEFCORE_Contribution_Value;
-
-/**
- * @brief A lazy provider of one contributed template variable.
- *
- * Called only when a template reaches the variable, with the request being
- * rendered, so it is principal-aware and reads through the access filter. A
- * result other than ::GDEFCORE_OK means "not available": the template sees
- * null. @p request may be NULL when the render has none; a provider that
- * needs a principal then answers not available.
- */
-typedef GDEFCORE_Result (*GDEFCORE_Contribution_Fn)(GDEFCORE_Request * request,
-    void * user, GDEFCORE_Contribution_Value * out);
-
 /**
  * @brief One variable a module adds to a template kind's contract.
  *
@@ -622,6 +796,132 @@ GDEFCORE_API GDEFCORE_Result gdefcore_module_contributions(
 /** @brief Free the array from gdefcore_module_contributions(). NULL is ignored. */
 GDEFCORE_API void gdefcore_module_contributions_free(GDEFCORE_Host * host,
     const GDEFCORE_Module_Contributed ** items);
+
+/**
+ * @brief A route as the enumeration reports it. Begins with @ref size.
+ *
+ * @ref spec is ready for gdefcore_route_add_spec(): the handler is resolved
+ * through the module's service and the text is borrowed from the host. It is
+ * valid until the matching gdefcore_module_declared_free() call, and the text
+ * pointers until the host is destroyed.
+ */
+typedef struct GDEFCORE_Module_Declared_Route {
+  size_t size;                ///< `sizeof(GDEFCORE_Module_Declared_Route)`.
+  const char * module;        ///< The declaring module.
+  size_t module_len;          ///< Length of @ref module.
+  int admin;                  ///< Non-zero: an admin route.
+  GDEFCORE_Route_Spec spec;   ///< The route, ready to add.
+} GDEFCORE_Module_Declared_Route;
+
+/** @brief A menu link as the enumeration reports it. Borrowed from the host. */
+typedef struct GDEFCORE_Module_Declared_Link {
+  size_t size;                ///< `sizeof(GDEFCORE_Module_Declared_Link)`.
+  const char * module;        ///< The declaring module.
+  size_t module_len;          ///< Length of @ref module.
+  const char * name;          ///< Machine name.
+  size_t name_len;            ///< Length of @ref name.
+  const char * menu;          ///< Menu name.
+  size_t menu_len;            ///< Length of @ref menu.
+  const char * label;         ///< Label.
+  size_t label_len;           ///< Length of @ref label.
+  const char * route;         ///< Target route machine name.
+  size_t route_len;           ///< Length of @ref route.
+  int weight;                 ///< Lowest first.
+  const char * parent;        ///< Parent link, or "".
+  size_t parent_len;          ///< Length of @ref parent.
+  int kind;                   ///< ::GDEFCORE_ROUTE_PAGE, _TAB or _ACTION.
+} GDEFCORE_Module_Declared_Link;
+
+/** @brief A setting as the enumeration reports it. Borrowed from the host. */
+typedef struct GDEFCORE_Module_Declared_Setting {
+  size_t size;                ///< `sizeof(GDEFCORE_Module_Declared_Setting)`.
+  const char * module;        ///< The declaring module.
+  size_t module_len;          ///< Length of @ref module.
+  const char * name;          ///< Machine name.
+  size_t name_len;            ///< Length of @ref name.
+  const char * type;          ///< `text`, `number` or `boolean`.
+  size_t type_len;            ///< Length of @ref type.
+  const char * default_value; ///< The default, as text. Never NULL.
+  size_t default_len;         ///< Length of @ref default_value.
+  const char * label;         ///< Label.
+  size_t label_len;           ///< Length of @ref label.
+  const char * description;   ///< Never NULL; may be empty.
+  size_t description_len;     ///< Length of @ref description.
+  int environment_local;      ///< Non-zero: never imported or exported.
+  const char * group;         ///< Never NULL; may be empty.
+  size_t group_len;           ///< Length of @ref group.
+} GDEFCORE_Module_Declared_Setting;
+
+/**
+ * @brief The routes the modules enabled for @p tenant declare.
+ *
+ * In one total order: modules in AD-10 order, then machine name. When
+ * @p projection is not NULL, its staged module enables and disables are
+ * applied first, so a preview sees the set the changeset would leave. The
+ * enumeration does not depend on the order modules were installed or enabled,
+ * on enabling twice, or on enabling again after a disable. A quarantined
+ * module declares nothing. Free @p out_items with
+ * gdefcore_module_declared_free().
+ *
+ * @param out_items Receives an array of pointers; NULL when @p out_count is 0.
+ * @return ::GDEFCORE_OK, ::GDEFCORE_ERR_INVALID or ::GDEFCORE_ERR_OOM.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_module_routes(GDEFCORE_Host * host,
+    const uint8_t * tenant, size_t tenant_len,
+    const GDEFCORE_Changeset * projection,
+    const GDEFCORE_Module_Declared_Route *** out_items, size_t * out_count);
+
+/** @brief The menu links of the enabled modules. As gdefcore_module_routes(). */
+GDEFCORE_API GDEFCORE_Result gdefcore_module_links(GDEFCORE_Host * host,
+    const uint8_t * tenant, size_t tenant_len,
+    const GDEFCORE_Changeset * projection,
+    const GDEFCORE_Module_Declared_Link *** out_items, size_t * out_count);
+
+/** @brief The settings of the enabled modules. As gdefcore_module_routes(). */
+GDEFCORE_API GDEFCORE_Result gdefcore_module_settings(GDEFCORE_Host * host,
+    const uint8_t * tenant, size_t tenant_len,
+    const GDEFCORE_Changeset * projection,
+    const GDEFCORE_Module_Declared_Setting *** out_items, size_t * out_count);
+
+/**
+ * @brief The template variables the enabled modules declare in their
+ * manifests, of every kind, ordered by module, then kind, then name.
+ *
+ * These are the records gdefcore_module_contributions() returns for a kind, so
+ * a template's contract includes them while the module is enabled. Variables
+ * registered in code with gdefcore_module_contribute() are not listed here.
+ * As gdefcore_module_routes() otherwise.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_module_variables(GDEFCORE_Host * host,
+    const uint8_t * tenant, size_t tenant_len,
+    const GDEFCORE_Changeset * projection,
+    const GDEFCORE_Module_Contributed *** out_items, size_t * out_count);
+
+/**
+ * @brief Free an array from gdefcore_module_routes(), _links(), _settings() or
+ * _variables(). NULL is ignored.
+ */
+GDEFCORE_API void gdefcore_module_declared_free(GDEFCORE_Host * host,
+    const void * items);
+
+/**
+ * @brief Add every enabled module's routes to @p routes, in enumeration order.
+ *
+ * A tab is added after its parent; otherwise the order is that of
+ * gdefcore_module_routes(). Each route is added with its handler resolved
+ * through the declaring module's service, so dispatch calls the module's
+ * function with the route's capture accessors and permission check. A route
+ * that clashes with one already in @p routes is an error that names both
+ * (as gdefcore_route_add_spec() does) and, because a route table never loses
+ * a route, the routes added before it stay. Free @p out_error with
+ * gdefcore_routes_free().
+ *
+ * @return ::GDEFCORE_OK, ::GDEFCORE_ERR_INVALID or ::GDEFCORE_ERR_OOM.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_module_add_routes(GDEFCORE_Host * host,
+    const uint8_t * tenant, size_t tenant_len,
+    const GDEFCORE_Changeset * projection, GDEFCORE_Routes * routes,
+    char ** out_error, size_t * out_error_len);
 
 #ifdef __cplusplus
 }

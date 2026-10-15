@@ -101,14 +101,96 @@ static const GDEFCORE_Module_Sub kSub = {sizeof(GDEFCORE_Module_Sub),
     "example.alter", 13, GDEFCORE_HOOK_ALTER, 0, 0, NULL, 0, NULL, 0,
     example_alter, NULL};
 
-static const GDEFCORE_Module_Service kSvc = {sizeof(GDEFCORE_Module_Service),
-    "example.api", 11, 1, &kApi};
+/*
+ * The declared tables (story 5 of the site-admin epic). The handler runs for
+ * the routes below; it owns the request, and records the capture `id` and its
+ * own data pointer, so a test can see that the call reached this function
+ * with both whether the module was loaded natively or handed over as a guest.
+ */
+static const char kHandlerData[] = "example-handler-data";
+
+static void example_route(const GDEFCORE_Route_Call * call) {
+  const char * id = NULL;
+  size_t id_len = 0;
+  gdefcore_request_set_resolution(call->request, call->machine,
+      call->machine_len);
+  if (gdefcore_route_call_capture(call, "id", 2, &id, &id_len)) {
+    gdefcore_request_set_note(call->request, "example.id", 10, id, id_len);
+  }
+  gdefcore_request_set_note(call->request, "example.data", 12,
+      (const char *)call->data, strlen((const char *)call->data));
+}
+
+static GDEFCORE_Result example_count(GDEFCORE_Request * request, void * user,
+    GDEFCORE_Contribution_Value * out) {
+  (void)request;
+  (void)user;
+  out->kind = GDEFCORE_CONTRIBUTION_INTEGER;
+  out->integer = 42;
+  return GDEFCORE_OK;
+}
+
+static const GDEFCORE_Module_Route_Handler kHandler = {
+    sizeof(GDEFCORE_Module_Route_Handler), example_route,
+    (void *)kHandlerData};
+
+static const GDEFCORE_Module_Variable_Provider kProvider = {
+    sizeof(GDEFCORE_Module_Variable_Provider), example_count, NULL};
+
+#define XS(text) text, sizeof(text) - 1
+
+static const GDEFCORE_Module_Service kSvcs[] = {
+    {sizeof(GDEFCORE_Module_Service), XS("example.api"), 1, &kApi},
+    {sizeof(GDEFCORE_Module_Service), XS("example.handler"),
+        GDEFCORE_MODULE_ROUTE_HANDLER_VERSION, &kHandler},
+    {sizeof(GDEFCORE_Module_Service), XS("example.provider"),
+        GDEFCORE_MODULE_VARIABLE_PROVIDER_VERSION, &kProvider}};
+
+static const GDEFCORE_Module_Route kRoutes[] = {
+    {sizeof(GDEFCORE_Module_Route), XS("example.settings"), XS("/admin/example"),
+        0, 0, XS("administer example"), XS("Example settings"),
+        GDEFCORE_ROUTE_PAGE, NULL, 0, 0, 1, XS("example.handler")},
+    {sizeof(GDEFCORE_Module_Route), XS("example.node.view"),
+        XS("/example/:id/view"), 0, 0, XS("view example"), XS("View"),
+        GDEFCORE_ROUTE_TAB,
+        XS("example.node"), 1, 0, XS("example.handler")},
+    {sizeof(GDEFCORE_Module_Route), XS("example.node.edit"),
+        XS("/example/:id/edit"), 0, 0, XS("edit example"), XS("Edit"),
+        GDEFCORE_ROUTE_TAB, XS("example.node"), 0, 0, XS("example.handler")},
+    {sizeof(GDEFCORE_Module_Route), XS("example.node"), XS("/example/:id"), 0,
+        0, XS("view example"), XS("Example"), GDEFCORE_ROUTE_PAGE, NULL, 0, 0,
+        0, XS("example.handler")},
+    {sizeof(GDEFCORE_Module_Route), XS("example.add"), XS("/example/add"), 0, 0,
+        XS("add example"), XS("Add example"), GDEFCORE_ROUTE_ACTION, NULL, 0, 0,
+        0, XS("example.handler")}};
+
+static const GDEFCORE_Module_Link kLinks[] = {
+    {sizeof(GDEFCORE_Module_Link), XS("example.link.home"), XS("main"),
+        XS("Example"), XS("example.node"), 0, NULL, 0, GDEFCORE_ROUTE_PAGE},
+    {sizeof(GDEFCORE_Module_Link), XS("example.link.edit"), XS("main"),
+        XS("Edit example"), XS("example.node.edit"), 1, XS("example.link.home"),
+        GDEFCORE_ROUTE_TAB},
+    {sizeof(GDEFCORE_Module_Link), XS("example.link.admin"), XS("admin"),
+        XS("Example"), XS("example.settings"), 5, NULL, 0,
+        GDEFCORE_ROUTE_PAGE}};
+
+static const GDEFCORE_Module_Setting kSettings[] = {
+    {sizeof(GDEFCORE_Module_Setting), XS("example.limit"), XS("number"),
+        XS("10"), XS("Limit"), XS("How many to show."), 0, XS("general")},
+    {sizeof(GDEFCORE_Module_Setting), XS("example.key"), XS("text"), NULL, 0,
+        XS("Key"), XS("An API key, local to this site."), 1, XS("keys")},
+    {sizeof(GDEFCORE_Module_Setting), XS("example.greeting"), XS("text"),
+        XS("hello"), XS("Greeting"), NULL, 0, 0, NULL, 0}};
+
+static const GDEFCORE_Module_Variable kVariables[] = {
+    {sizeof(GDEFCORE_Module_Variable), XS("core.page"), XS("example.count"),
+        XS("number"), XS("How many examples."), XS("example.provider"), 1}};
 
 static const char kToken[] = EXAMPLE_STR(GHOTIIO_DEFCORE_NAME);
 
 static const GDEFCORE_Module_Manifest kManifest = {sizeof(GDEFCORE_Module_Manifest),
     kToken, sizeof kToken - 1, "example", 7, "Example", 7, &kRel, 1, &kSub, 1,
-    &kSvc, 1, NULL, 0};
+    kSvcs, 3, NULL, 0, kRoutes, 5, kLinks, 3, kSettings, 3, kVariables, 1};
 
 EXAMPLE_EXPORT const GDEFCORE_Module_Manifest * gdefcore_module_manifest(void) {
   return &kManifest;
