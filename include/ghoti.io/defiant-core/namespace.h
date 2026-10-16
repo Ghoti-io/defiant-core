@@ -188,6 +188,7 @@
 #define gdefcore_changeset_rate GHOTIIO_DEFCORE(gdefcore_changeset_rate)
 #define gdefcore_changeset_rebase GHOTIIO_DEFCORE(gdefcore_changeset_rebase)
 #define gdefcore_changeset_revert GHOTIIO_DEFCORE(gdefcore_changeset_revert)
+#define gdefcore_changeset_revert_to GHOTIIO_DEFCORE(gdefcore_changeset_revert_to)
 #define gdefcore_changeset_serialize                                           \
   GHOTIIO_DEFCORE(gdefcore_changeset_serialize)
 #define gdefcore_changeset_enforce_access \
@@ -205,6 +206,8 @@
 #define gdefcore_entity_create GHOTIIO_DEFCORE(gdefcore_entity_create)
 #define gdefcore_entity_ids GHOTIIO_DEFCORE(gdefcore_entity_ids)
 #define gdefcore_entity_publish GHOTIIO_DEFCORE(gdefcore_entity_publish)
+#define gdefcore_entity_unpublish GHOTIIO_DEFCORE(gdefcore_entity_unpublish)
+#define gdefcore_entity_activate GHOTIIO_DEFCORE(gdefcore_entity_activate)
 #define gdefcore_entity_revision GHOTIIO_DEFCORE(gdefcore_entity_revision)
 #define gdefcore_entity_revision_at                                            \
   GHOTIIO_DEFCORE(gdefcore_entity_revision_at)

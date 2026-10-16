@@ -53,14 +53,20 @@ extern "C" {
 #define GDEFCORE_TYPE_CONFIG 2
 
 /* The touch codes are bit flags, so a caller can test a set of them. */
-/** A touched entity was saved to the published projection. */
+/** A touched entity gets a new revision that is made active and published.
+ * A revert reports this too: it is a save of an earlier revision's content. */
 #define GDEFCORE_TOUCH_SAVE 1
-/** A touched entity was saved to the draft projection only. */
+/** A touched entity gets a new revision that is not made active (the first
+ * revision of an entity is, but stays unpublished). */
 #define GDEFCORE_TOUCH_DRAFT 2
-/** A touched entity's draft is published by the changeset. */
+/** A touched entity's head revision is made active and published. */
 #define GDEFCORE_TOUCH_PUBLISH 4
 /** A touched entity is cleared by the changeset. */
 #define GDEFCORE_TOUCH_CLEAR 8
+/** A touched entity is unpublished. Its active revision does not change. */
+#define GDEFCORE_TOUCH_UNPUBLISH 16
+/** A touched entity has another existing revision made active. */
+#define GDEFCORE_TOUCH_ACTIVATE 32
 
 /** A changeset that only changes content field values. */
 #define GDEFCORE_RISK_LOW 1
@@ -374,6 +380,30 @@ GDEFCORE_API GDEFCORE_Result gdefcore_entity_publish(
     GDEFCORE_Changeset * changeset, const char * id, size_t id_len);
 
 /**
+ * @brief Stage clearing the published flag.
+ *
+ * Apply does not append a revision and does not move the active revision, so
+ * the entity keeps its content and its creator and readers stop seeing it.
+ * Unpublishing an entity that is not published is allowed and writes only a
+ * new version (see gdefcore_entity_version()).
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_entity_unpublish(
+    GDEFCORE_Changeset * changeset, const char * id, size_t id_len);
+
+/**
+ * @brief Stage making revision @p seq the active revision.
+ *
+ * Apply does not append a revision and leaves the published flag alone. The
+ * revision must exist, and any personal value in it must be sealed (an
+ * old revision written before values were sealed cannot be made active).
+ * This is also how a cleared entity is brought back. ::GDEFCORE_ERR_INVALID
+ * for a sequence that is not a recorded revision.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_entity_activate(
+    GDEFCORE_Changeset * changeset, const char * id, size_t id_len,
+    uint64_t seq);
+
+/**
  * @brief The entity's version: a counter that every write touching the
  * entity bumps, including a publish, an unpublish, an activate and a clear,
  * none of which moves the latest revision sequence.
@@ -508,13 +538,30 @@ GDEFCORE_API GDEFCORE_Result gdefcore_changeset_base_seq(
     uint64_t * out_seq);
 
 /**
- * @brief A new changeset that restores the previous revision.
+ * @brief A new changeset that restores the revision before the active one.
  *
- * Sequence 1 clears the published row and the current draft fields. The
- * document stays readable. The caller applies the result.
+ * That is a new revision, a copy of the revision numbered one less than the
+ * active revision, which becomes active; the published flag is unchanged.
+ * When the active revision is the first, the changeset clears the entity
+ * instead (the published flag, the active revision and the head revision's
+ * projection; every recorded revision stays). An entity with no active
+ * revision is ::GDEFCORE_ERR_INVALID. The caller applies the result.
  */
 GDEFCORE_API GDEFCORE_Result gdefcore_changeset_revert(
     GDEFCORE_Catalog * catalog, const char * id, size_t id_len,
+    const char * actor, size_t actor_len, GDEFCORE_Changeset ** out_changeset);
+
+/**
+ * @brief A new changeset that appends a copy of revision @p seq and makes the
+ * copy active, leaving the published flag as it is.
+ *
+ * Unlike gdefcore_changeset_revert() this names its target and never clears.
+ * The new revision's creator is @p actor. Any personal value in revision
+ * @p seq must be sealed. ::GDEFCORE_ERR_INVALID for a sequence that is not a
+ * recorded revision. The caller applies the result.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_changeset_revert_to(
+    GDEFCORE_Catalog * catalog, const char * id, size_t id_len, uint64_t seq,
     const char * actor, size_t actor_len, GDEFCORE_Changeset ** out_changeset);
 
 /**
@@ -730,8 +777,8 @@ GDEFCORE_API GDEFCORE_Host * gdefcore_catalog_host(
     const GDEFCORE_Catalog * catalog);
 
 /**
- * @brief How many entities the changeset writes: saves, drafts, publishes
- * and clears. Type definitions and module operations are not counted.
+ * @brief How many entities the changeset writes: saves, drafts, publishes,
+ * unpublishes, activates, reverts and clears. Type definitions and module operations are not counted.
  */
 GDEFCORE_API size_t gdefcore_changeset_touched_count(
     const GDEFCORE_Changeset * changeset);
@@ -741,8 +788,9 @@ GDEFCORE_API size_t gdefcore_changeset_touched_count(
  *
  * @p out_id and @p out_type are borrowed from the changeset and are not
  * NUL-terminated. @p out_op receives ::GDEFCORE_TOUCH_SAVE,
- * ::GDEFCORE_TOUCH_DRAFT, ::GDEFCORE_TOUCH_PUBLISH or
- * ::GDEFCORE_TOUCH_CLEAR. Any out pointer may be NULL.
+ * ::GDEFCORE_TOUCH_DRAFT, ::GDEFCORE_TOUCH_PUBLISH,
+ * ::GDEFCORE_TOUCH_CLEAR, ::GDEFCORE_TOUCH_UNPUBLISH or
+ * ::GDEFCORE_TOUCH_ACTIVATE. Any out pointer may be NULL.
  *
  * @return ::GDEFCORE_OK or ::GDEFCORE_ERR_INVALID for an index past the end.
  */

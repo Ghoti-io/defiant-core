@@ -1652,7 +1652,8 @@ GDEFCORE_Result gdefcore_template_preview(GDEFCORE_Changeset * changeset,
   if (rc == GDEFCORE_OK &&
       (gdefcore_changeset_module_count(changeset) > 0 ||
           touches_type(changeset, GDEFCORE_TEMPLATE_KIND_TYPE,
-              GDEFCORE_TOUCH_SAVE | GDEFCORE_TOUCH_PUBLISH))) {
+              GDEFCORE_TOUCH_SAVE | GDEFCORE_TOUCH_PUBLISH |
+                  GDEFCORE_TOUCH_ACTIVATE))) {
     char ** ids = NULL;
     size_t count = 0;
     rc = gdefcore_entity_ids(catalog, GDEFCORE_TEMPLATE_TYPE,
@@ -1831,9 +1832,11 @@ GDEFCORE_Result gdefcore_template_vet(GDEFCORE_Changeset * changeset) {
   }
   /* Most changesets write no template and change no module: nothing to read. */
   if (!touches_type(changeset, GDEFCORE_TEMPLATE_TYPE,
-          GDEFCORE_TOUCH_SAVE | GDEFCORE_TOUCH_DRAFT | GDEFCORE_TOUCH_PUBLISH) &&
+          GDEFCORE_TOUCH_SAVE | GDEFCORE_TOUCH_DRAFT | GDEFCORE_TOUCH_PUBLISH |
+              GDEFCORE_TOUCH_ACTIVATE) &&
       !touches_type(changeset, GDEFCORE_TEMPLATE_KIND_TYPE,
-          GDEFCORE_TOUCH_SAVE | GDEFCORE_TOUCH_PUBLISH) &&
+          GDEFCORE_TOUCH_SAVE | GDEFCORE_TOUCH_PUBLISH |
+              GDEFCORE_TOUCH_ACTIVATE) &&
       gdefcore_changeset_module_count(changeset) == 0) {
     return GDEFCORE_OK;
   }
@@ -1989,7 +1992,8 @@ GDEFCORE_Result gdefcore_template_declare_touched(
         type == NULL ||
         !span_eq(type, type_len, GDEFCORE_TEMPLATE_KIND_TYPE,
             sizeof GDEFCORE_TEMPLATE_KIND_TYPE - 1) ||
-        (op != GDEFCORE_TOUCH_SAVE && op != GDEFCORE_TOUCH_PUBLISH) ||
+        (op != GDEFCORE_TOUCH_SAVE && op != GDEFCORE_TOUCH_PUBLISH &&
+            op != GDEFCORE_TOUCH_ACTIVATE) ||
         gdefcore_id_canonical(id, id_len, canon) != GDEFCORE_OK) {
       continue;
     }

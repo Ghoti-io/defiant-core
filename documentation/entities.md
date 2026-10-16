@@ -58,15 +58,31 @@ keeps its own creator.
 | `gdefcore_entity_save` ("save and publish") | yes | moves | the new one | 1 | +1 |
 | `gdefcore_entity_save_draft` | yes | moves | unchanged; the entity's first revision becomes active | unchanged | +1 |
 | `gdefcore_entity_publish` | none | unchanged | the head | 1 | +1 |
+| `gdefcore_entity_unpublish` | none | unchanged | unchanged | 0 | +1 |
+| `gdefcore_entity_activate(seq)` | none | unchanged (the head is restored if a clear removed it and `seq` is the head) | `seq` | unchanged | +1 |
+| `gdefcore_changeset_revert_to(seq)` | yes, a copy of `seq` | moves | the copy | unchanged | +1 |
+| `gdefcore_changeset_revert` (legacy) | as `revert_to(active - 1)`; a clear when the active revision is the first | | | | |
 | clear (a revert of the first revision) | none | `d:` removed | none, `a:` removed | 0 | +1 |
 | type definition | yes | moves | the new one | 1 | +1 |
 
-A draft never moves the active revision; only a save, a publish and (see
-below) an activate or a revert do. The one exception is an entity's first
+A draft never moves the active revision; only a save, a publish, an activate
+and a revert do. Publishing and activating are different acts: a publish makes
+the head active *and* sets the flag; an activate moves the pointer to any
+recorded revision and leaves the flag alone, and an unpublish clears the flag
+and leaves the pointer. A revert is a save of an earlier revision's content
+that leaves the flag alone, so reverting an unpublished entity does not
+publish it. An activate, like a revert, refuses a revision that holds a
+personal value that is not sealed (a revision written before the field was
+personal): it would put plaintext in front of readers without a new revision. The one exception is an entity's first
 revision, which becomes active while staying unpublished, so that the entity
 has content and a creator for a condition to read. A clear keeps every revision,
 the `ra` lines, the public id and the creator; it empties the projections and
-clears the flag.
+clears the flag. There is no hard delete: erasure is by key (AD-19), not by
+deleting records. A cleared entity has no active revision, so a field-conditioned
+`update` grant cannot hold on it, and only an unconditioned permission to
+activate can bring it back (an activate of the head also restores the head
+projection, so it can be published; an activate of an older revision does not,
+and a revert to it, which writes a revision, does).
 
 A row in the index with no `s` row is a store written before the record
 existed. Nothing is released and nothing migrates it: every call that needs the
@@ -85,7 +101,12 @@ both projections in one port write and increments the epoch in that write.
 A port error aborts the write.
 
 Serializing a changeset yields `defiant-changeset/1`: an ordered list of
-relative paths and UTF-8 bytes.
+relative paths and UTF-8 bytes. The `revert`, `unpublish` and `activate` words
+and the `ver` and `target` files are additions to `/1`: a reader from before them
+refuses the unknown word or file as corrupt. An `unpublish` and an `activate`
+carry no values; `publish` carries them for the diff but apply publishes the head
+as the store has it, not what the patch says it is. A patch made against a
+version the entity has since left is a conflict, whatever the epoch says.
 
 | Path | Bytes |
 | --- | --- |
@@ -94,7 +115,9 @@ relative paths and UTF-8 bytes.
 | `actor` | optional canonical public id |
 | `entity/<id>/type` | the entity's machine name |
 | `entity/<id>/base` | the decimal sequence the save was prepared against |
-| `entity/<id>/op` | `save` or `clear` |
+| `entity/<id>/ver` | the decimal version of the entity the change was staged against (optional; absent means the version at parse time) |
+| `entity/<id>/op` | `save`, `draft`, `publish`, `revert`, `unpublish`, `activate` or `clear` |
+| `entity/<id>/target` | the decimal sequence an `activate` makes active |
 | `entity/<id>/lang/<lang>/<field>/<index>` | one field value |
 | `type/<machine>/kind` | `content` or `config` |
 | `type/<machine>/field/<name>` | `required one`, `required many`, `optional one`, or `optional many` |

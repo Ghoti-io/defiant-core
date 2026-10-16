@@ -1344,6 +1344,18 @@ static int state_next(EntState * st, const StateStep * step) {
       st->pub = 1;
       moves = 1;
       break;
+    case GDEFCORE_OP_REVERT:
+      /* A copy of an earlier revision becomes active; the flag is not the
+       * revert's to change. */
+      moves = 1;
+      break;
+    case GDEFCORE_OP_ACTIVATE:
+      moves = 1;
+      break;
+    case GDEFCORE_OP_UNPUBLISH:
+      /* The active revision stays where it is. */
+      st->pub = 0;
+      return 0;
     case GDEFCORE_OP_CLEAR:
       st->pub = 0;
       st->has_act = 0;
@@ -2300,6 +2312,9 @@ static GDEFCORE_Result read_proj_cols(GDEFCORE_Catalog * cat,
   return GDEFCORE_OK;
 }
 
+static GDEFCORE_Result rev_doc(GDEFCORE_Catalog * cat, uint64_t row,
+    uint64_t seq, GDEFCORE_Doc * doc);
+
 GDEFCORE_Result gdefcore_catalog_open(GDEFSTOR_Store * store,
     const uint8_t * tenant, size_t tenant_len, const GDEFCORE_Limits * limits,
     const GDEFCORE_Allocator * allocator, GDEFCORE_Catalog ** out_catalog) {
@@ -3151,6 +3166,16 @@ static GDEFCORE_Result stage_values(GDEFCORE_Changeset * changeset,
       goto done;
     }
     op->base_seq = high;
+    {
+      EntState st;
+      rc = state_load(cat, row, &st);
+      if (rc != GDEFCORE_OK) {
+        doc_free(cat->alloc, &tentative);
+        goto done;
+      }
+      op->base_ver = st.ver;
+      op->have_ver = 1;
+    }
     rc = read_proj_doc(cat, "a:", type_name, type_len, row, &op->base, NULL);
     if (rc == GDEFCORE_ERR_INVALID) {
       rc = GDEFCORE_OK;
@@ -3276,6 +3301,19 @@ GDEFCORE_Result gdefcore_entity_publish(GDEFCORE_Changeset * changeset,
   op->have_row = 1;
   op->base_seq = seq;
   op->type_kind = kind;
+  {
+    EntState st;
+    rc = state_load(cat, row, &st);
+    if (rc != GDEFCORE_OK) {
+      op_free(cat->alloc, op);
+      changeset->nops -= 1;
+      gcu_allocator_free(cat->alloc, type_name);
+      gcu_allocator_free(cat->alloc, machine);
+      return rc;
+    }
+    op->base_ver = st.ver;
+    op->have_ver = 1;
+  }
   if (text_set(cat->alloc, &op->id, canon, GDEFCORE_PUBLIC_ID_LEN) !=
           GDEFCORE_OK ||
       text_set(cat->alloc, &op->type_name, type_name, type_len) !=
@@ -3300,6 +3338,128 @@ GDEFCORE_Result gdefcore_entity_publish(GDEFCORE_Changeset * changeset,
     changeset->nops -= 1;
   }
   return rc;
+}
+
+/*
+ * Stage an operation on an entity's record that carries no field values of
+ * its own: unpublish, or activate @p target. The changeset holds the active
+ * revision as its base and, for an activate, the target revision as what it
+ * stages, so the diff, the template vet and the personal-value check see the
+ * change as the changeset leaves it.
+ */
+static GDEFCORE_Result stage_record_op(GDEFCORE_Changeset * changeset,
+    const char * id, size_t id_len, int kind, uint64_t target) {
+  char canon[GDEFCORE_PUBLIC_ID_LEN + 1];
+  GDEFCORE_Catalog * cat;
+  GDEFCORE_Op * op = NULL;
+  char * type_name = NULL;
+  size_t type_len = 0;
+  char * machine = NULL;
+  size_t machine_len = 0;
+  GDEFCORE_Decl * decls = NULL;
+  size_t ndecls = 0;
+  GDEFCORE_Doc staged;
+  GDEFCORE_Doc base;
+  EntState st;
+  uint64_t row = 0;
+  uint64_t high = 0;
+  int type_kind = 0;
+  GDEFCORE_Result rc;
+  if (changeset == NULL || changeset->applied) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  if (gdefcore_id_canonical(id, id_len, canon) != GDEFCORE_OK) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  if (find_op_id(changeset, canon, GDEFCORE_PUBLIC_ID_LEN) != NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  cat = changeset->catalog;
+  memset(&staged, 0, sizeof staged);
+  memset(&base, 0, sizeof base);
+  rc = lookup_id(cat, canon, GDEFCORE_PUBLIC_ID_LEN, &row, &type_name,
+      &type_len, &machine, &machine_len);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  rc = load_type(cat, type_name, type_len, &type_kind, &decls, &ndecls, NULL,
+      NULL, NULL);
+  if (rc == GDEFCORE_OK) {
+    rc = state_load(cat, row, &st);
+  }
+  if (rc == GDEFCORE_OK) {
+    rc = read_high(cat, row, &high);
+  }
+  if (rc == GDEFCORE_OK) {
+    rc = read_proj_doc(cat, "a:", type_name, type_len, row, &base, NULL);
+    if (rc == GDEFCORE_ERR_INVALID) {
+      rc = GDEFCORE_OK;
+    }
+  }
+  if (rc == GDEFCORE_OK && kind == GDEFCORE_OP_ACTIVATE) {
+    /* The revision must be one that was recorded, and any personal value in
+     * it must be sealed: an old revision from before values were sealed
+     * cannot be made the content the entity is. */
+    if (target == 0 || target > high) {
+      rc = GDEFCORE_ERR_INVALID;
+    } else {
+      rc = rev_doc(cat, row, target, &staged);
+      if (rc == GDEFCORE_OK && !doc_personal_sealed(&staged, decls, ndecls)) {
+        rc = GDEFCORE_ERR_INVALID;
+      }
+    }
+  } else if (rc == GDEFCORE_OK) {
+    rc = doc_clone(cat->alloc, &base, &staged);
+  }
+  if (rc == GDEFCORE_OK) {
+    rc = add_op(changeset, &op);
+  }
+  if (rc != GDEFCORE_OK) {
+    doc_free(cat->alloc, &staged);
+    doc_free(cat->alloc, &base);
+    decls_free(cat->alloc, decls, ndecls);
+    gcu_allocator_free(cat->alloc, type_name);
+    gcu_allocator_free(cat->alloc, machine);
+    return rc;
+  }
+  op->kind = kind;
+  op->staged = staged;
+  op->base = base;
+  op->decls = decls;
+  op->ndecls = ndecls;
+  op->row = row;
+  op->have_row = 1;
+  op->base_seq = high;
+  op->base_ver = st.ver;
+  op->have_ver = 1;
+  op->target_seq = target;
+  op->type_kind = type_kind;
+  if (text_set(cat->alloc, &op->id, canon, GDEFCORE_PUBLIC_ID_LEN) !=
+          GDEFCORE_OK ||
+      text_set(cat->alloc, &op->type_name, type_name, type_len) !=
+          GDEFCORE_OK ||
+      (machine != NULL &&
+          text_set(cat->alloc, &op->machine, machine, machine_len) !=
+              GDEFCORE_OK)) {
+    op_free(cat->alloc, op);
+    changeset->nops -= 1;
+    gcu_allocator_free(cat->alloc, type_name);
+    gcu_allocator_free(cat->alloc, machine);
+    return GDEFCORE_ERR_OOM;
+  }
+  gcu_allocator_free(cat->alloc, type_name);
+  gcu_allocator_free(cat->alloc, machine);
+  return GDEFCORE_OK;
+}
+
+GDEFCORE_Result gdefcore_entity_unpublish(GDEFCORE_Changeset * changeset,
+    const char * id, size_t id_len) {
+  return stage_record_op(changeset, id, id_len, GDEFCORE_OP_UNPUBLISH, 0);
+}
+
+GDEFCORE_Result gdefcore_entity_activate(GDEFCORE_Changeset * changeset,
+    const char * id, size_t id_len, uint64_t seq) {
+  return stage_record_op(changeset, id, id_len, GDEFCORE_OP_ACTIVATE, seq);
 }
 
 static GDEFCORE_Result revision_text(GDEFCORE_Catalog * catalog, const char * id,
@@ -4135,6 +4295,43 @@ static GDEFCORE_Result note_actor(GDEFCORE_Catalog * cat, GDEFSTOR_Write * write
       write, "ra", 2, row_text, rn, &column, 1));
 }
 
+static size_t revision_lines(const char * text, size_t n);
+static int revision_line(const char * text, size_t n, size_t index,
+    uint64_t * out_seq, const char ** out_actor, size_t * out_actor_len);
+
+/* The creator recorded for revision @p seq of @p row, or NULL (allocated). */
+static GDEFCORE_Result revision_creator(GDEFCORE_Catalog * cat, uint64_t row,
+    uint64_t seq, char ** out, size_t * out_n) {
+  char * text = NULL;
+  size_t n = 0;
+  size_t lines;
+  size_t i;
+  GDEFCORE_Result rc = actor_load(cat, row, &text, &n);
+  *out = NULL;
+  *out_n = 0;
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  lines = revision_lines(text, n);
+  for (i = 0; i < lines; i++) {
+    uint64_t line_seq = 0;
+    const char * who = NULL;
+    size_t who_n = 0;
+    if (revision_line(text, n, i, &line_seq, &who, &who_n) &&
+        line_seq == seq && who != NULL && who_n > 0) {
+      *out = dup_span(cat->alloc, who, who_n);
+      if (*out == NULL) {
+        rc = GDEFCORE_ERR_OOM;
+      } else {
+        *out_n = who_n;
+      }
+      break;
+    }
+  }
+  gcu_allocator_free(cat->alloc, text);
+  return rc;
+}
+
 static GDEFCORE_Result apply_op(GDEFCORE_Catalog * cat, GDEFSTOR_Write * write,
     RowCursor * cursor, GDEFCORE_Op * op, const char * actor, size_t actor_len,
     ActorLog * log) {
@@ -4202,6 +4399,74 @@ static GDEFCORE_Result apply_op(GDEFCORE_Catalog * cat, GDEFSTOR_Write * write,
       }
       gcu_allocator_free(cat->alloc, head_lang);
       gcu_allocator_free(cat->alloc, head_actor);
+      if (rc == GDEFCORE_OK) {
+        rc = put_state(write, op->row, &st);
+      }
+      return rc;
+    }
+    if (op->kind == GDEFCORE_OP_UNPUBLISH) {
+      (void)state_next(&st, &step);
+      return put_state(write, op->row, &st);
+    }
+    if (op->kind == GDEFCORE_OP_ACTIVATE) {
+      /* The revision is read again from the store, not taken from the
+       * changeset, and its personal values must still be sealed. */
+      GDEFCORE_Doc doc;
+      char * doc_text = NULL;
+      size_t doc_text_len = 0;
+      char * who = NULL;
+      size_t who_len = 0;
+      uint64_t high = 0;
+      memset(&doc, 0, sizeof doc);
+      rc = read_high(cat, op->row, &high);
+      if (rc == GDEFCORE_OK && (op->target_seq == 0 || op->target_seq > high)) {
+        rc = GDEFCORE_ERR_INVALID;
+      }
+      if (rc == GDEFCORE_OK) {
+        rc = rev_doc(cat, op->row, op->target_seq, &doc);
+      }
+      if (rc == GDEFCORE_OK &&
+          !doc_personal_sealed(&doc, op->decls, op->ndecls)) {
+        rc = GDEFCORE_ERR_INVALID;
+      }
+      if (rc == GDEFCORE_OK) {
+        rc = doc_json(cat->alloc, &doc, &doc_text, &doc_text_len);
+      }
+      if (rc == GDEFCORE_OK) {
+        rc = revision_creator(cat, op->row, op->target_seq, &who, &who_len);
+      }
+      doc_free(cat->alloc, &doc);
+      if (rc == GDEFCORE_OK) {
+        step.seq = op->target_seq;
+        (void)state_next(&st, &step);
+        rc = put_entity_proj(write, "a:", op->type_name.p, op->type_name.n,
+            op->row, op->target_seq, op->id.p, op->id.n, doc_text,
+            doc_text_len, who, who_len);
+      }
+      if (rc == GDEFCORE_OK && op->target_seq == high) {
+        /* The head projection is the head revision's copy and a clear removed
+         * it. Making the head active again puts it back, so the entity can
+         * be published without a new revision. */
+        char * head_lang = NULL;
+        size_t head_lang_len = 0;
+        uint64_t head_seq = 0;
+        char * head_actor = NULL;
+        size_t head_actor_len = 0;
+        GDEFCORE_Result have = read_proj_cols(cat, "d:", op->type_name.p,
+            op->type_name.n, op->row, &head_lang, &head_lang_len, &head_seq,
+            &head_actor, &head_actor_len);
+        gcu_allocator_free(cat->alloc, head_lang);
+        gcu_allocator_free(cat->alloc, head_actor);
+        if (have == GDEFCORE_ERR_INVALID) {
+          rc = put_entity_proj(write, "d:", op->type_name.p, op->type_name.n,
+              op->row, op->target_seq, op->id.p, op->id.n, doc_text,
+              doc_text_len, who, who_len);
+        } else if (have != GDEFCORE_OK) {
+          rc = have;
+        }
+      }
+      gcu_allocator_free(cat->alloc, doc_text);
+      gcu_allocator_free(cat->alloc, who);
       if (rc == GDEFCORE_OK) {
         rc = put_state(write, op->row, &st);
       }
@@ -4334,7 +4599,8 @@ static GDEFCORE_Result authorize_writes(GDEFCORE_Changeset * changeset) {
         memcmp(type, GDEFCORE_TEMPLATE_TYPE, type_len) == 0) {
       continue;
     }
-    action = op == GDEFCORE_TOUCH_PUBLISH ? "publish"
+    action = op == GDEFCORE_TOUCH_PUBLISH || op == GDEFCORE_TOUCH_UNPUBLISH
+                 ? "publish"
              : op == GDEFCORE_TOUCH_CLEAR ? "delete"
                                           : "update";
     if (gdefcore_id_canonical(id, id_len, canon) != GDEFCORE_OK) {
@@ -4417,6 +4683,19 @@ GDEFCORE_Result gdefcore_changeset_module_at(const GDEFCORE_Changeset * changese
 
 static int module_op_kind(int kind) {
   return kind == GDEFCORE_OP_ENABLE || kind == GDEFCORE_OP_DISABLE;
+}
+
+/* An operation that appends a revision. */
+static int revision_op(int kind) {
+  return kind == GDEFCORE_OP_SAVE || kind == GDEFCORE_OP_DRAFT ||
+         kind == GDEFCORE_OP_REVERT;
+}
+
+/* An operation the write-path hooks are told about. Unpublish and activate
+ * write no revision and no values, and have no hook of their own. */
+static int hooked_op(int kind) {
+  return revision_op(kind) || kind == GDEFCORE_OP_CLEAR ||
+         kind == GDEFCORE_OP_PUBLISH;
 }
 
 static GDEFCORE_Result fire_named(GDEFCORE_Changeset * changeset,
@@ -4505,6 +4784,19 @@ GDEFCORE_Result gdefcore_changeset_apply(GDEFCORE_Changeset * changeset,
         return name_list(changeset);
       }
     }
+    if (op->have_ver) {
+      /* Every write that touches the entity moves its version, including
+       * the ones that move no revision (a publish, an unpublish, an
+       * activate, a clear). */
+      EntState st;
+      rc = state_load(changeset->catalog, op->row, &st);
+      if (rc != GDEFCORE_OK) {
+        return rc;
+      }
+      if (st.ver != op->base_ver) {
+        return name_list(changeset);
+      }
+    }
   }
   /*
    * Templates are checked against the contract in force once the changeset's
@@ -4545,8 +4837,7 @@ GDEFCORE_Result gdefcore_changeset_apply(GDEFCORE_Changeset * changeset,
     if (module_op_kind(op->kind)) {
       continue;
     }
-    if (op->kind == GDEFCORE_OP_SAVE || op->kind == GDEFCORE_OP_CLEAR ||
-        op->kind == GDEFCORE_OP_DRAFT || op->kind == GDEFCORE_OP_PUBLISH) {
+    if (hooked_op(op->kind)) {
       rc = fire_named(changeset, op, GDEFCORE_HOOK_PRESAVE);
       if (rc == GDEFCORE_OK) {
         rc = fire_named(changeset, op, GDEFCORE_HOOK_VALIDATE);
@@ -4556,8 +4847,7 @@ GDEFCORE_Result gdefcore_changeset_apply(GDEFCORE_Changeset * changeset,
       rc = apply_op(changeset->catalog, write, &cursor, op, changeset->actor.p,
           changeset->actor.n, &noted);
     }
-    if (rc == GDEFCORE_OK &&
-        (op->kind == GDEFCORE_OP_SAVE || op->kind == GDEFCORE_OP_DRAFT)) {
+    if (rc == GDEFCORE_OK && revision_op(op->kind)) {
       rc = fire_named(changeset, op, GDEFCORE_HOOK_SAVE);
       if (rc == GDEFCORE_OK) {
         rc = fire_named(changeset, op, GDEFCORE_HOOK_REVISION);
@@ -4622,8 +4912,7 @@ GDEFCORE_Result gdefcore_changeset_apply(GDEFCORE_Changeset * changeset,
       }
       for (i = 0; i < changeset->nops; i++) {
         GDEFCORE_Op * op = &changeset->ops[i];
-        if (op->kind == GDEFCORE_OP_SAVE || op->kind == GDEFCORE_OP_CLEAR ||
-            op->kind == GDEFCORE_OP_DRAFT || op->kind == GDEFCORE_OP_PUBLISH) {
+        if (hooked_op(op->kind)) {
           hook_rc = fire_named(changeset, op, GDEFCORE_HOOK_AFTER_COMMIT);
           if (hook_rc != GDEFCORE_OK && first == GDEFCORE_OK) {
             first = hook_rc;
@@ -4644,7 +4933,9 @@ GDEFCORE_Host * gdefcore_catalog_host(const GDEFCORE_Catalog * catalog) {
 
 static int touch_op(int kind) {
   return kind == GDEFCORE_OP_SAVE || kind == GDEFCORE_OP_DRAFT ||
-         kind == GDEFCORE_OP_PUBLISH || kind == GDEFCORE_OP_CLEAR;
+         kind == GDEFCORE_OP_PUBLISH || kind == GDEFCORE_OP_CLEAR ||
+         kind == GDEFCORE_OP_UNPUBLISH || kind == GDEFCORE_OP_ACTIVATE ||
+         kind == GDEFCORE_OP_REVERT;
 }
 
 size_t gdefcore_changeset_touched_count(const GDEFCORE_Changeset * changeset) {
@@ -4689,10 +4980,17 @@ GDEFCORE_Result gdefcore_changeset_touched_at(
         *out_type_len = op->type_name.n;
       }
       if (out_op != NULL) {
+        /* A revert is a save of an earlier revision's content: it reports as
+         * one, so that what reads the touched list for content (the template
+         * vet) keeps seeing it. */
         *out_op = op->kind == GDEFCORE_OP_SAVE    ? GDEFCORE_TOUCH_SAVE
+                  : op->kind == GDEFCORE_OP_REVERT ? GDEFCORE_TOUCH_SAVE
                   : op->kind == GDEFCORE_OP_DRAFT ? GDEFCORE_TOUCH_DRAFT
                   : op->kind == GDEFCORE_OP_PUBLISH ? GDEFCORE_TOUCH_PUBLISH
-                                                    : GDEFCORE_TOUCH_CLEAR;
+                  : op->kind == GDEFCORE_OP_UNPUBLISH
+                      ? GDEFCORE_TOUCH_UNPUBLISH
+                  : op->kind == GDEFCORE_OP_ACTIVATE ? GDEFCORE_TOUCH_ACTIVATE
+                                                     : GDEFCORE_TOUCH_CLEAR;
       }
       return GDEFCORE_OK;
     }
@@ -4765,6 +5063,14 @@ GDEFCORE_Result gdefcore_changeset_rebase(GDEFCORE_Changeset * changeset) {
     if (rc != GDEFCORE_OK) {
       return rc;
     }
+    if (changeset->ops[i].have_ver) {
+      EntState st;
+      rc = state_load(changeset->catalog, changeset->ops[i].row, &st);
+      if (rc != GDEFCORE_OK) {
+        return rc;
+      }
+      changeset->ops[i].base_ver = st.ver;
+    }
   }
   text_clear(changeset->catalog->alloc, &changeset->conflict);
   text_clear(changeset->catalog->alloc, &changeset->refusal);
@@ -4823,9 +5129,14 @@ static GDEFCORE_Result rev_doc(GDEFCORE_Catalog * cat, uint64_t row,
   return rc;
 }
 
-GDEFCORE_Result gdefcore_changeset_revert(GDEFCORE_Catalog * catalog,
-    const char * id, size_t id_len, const char * actor, size_t actor_len,
-    GDEFCORE_Changeset ** out_changeset) {
+/*
+ * A changeset that appends a copy of an earlier revision and makes the copy
+ * active, leaving the flag alone. With no explicit target it restores the
+ * revision before the active one, and clears when the active one is the first.
+ */
+static GDEFCORE_Result revert_changeset(GDEFCORE_Catalog * catalog,
+    const char * id, size_t id_len, int explicit_target, uint64_t target,
+    const char * actor, size_t actor_len, GDEFCORE_Changeset ** out_changeset) {
   GDEFCORE_Changeset * cs = NULL;
   GDEFCORE_Op * op;
   char canon[GDEFCORE_PUBLIC_ID_LEN + 1];
@@ -4839,8 +5150,11 @@ GDEFCORE_Result gdefcore_changeset_revert(GDEFCORE_Catalog * catalog,
   int kind = 0;
   GDEFCORE_Decl * decls = NULL;
   size_t ndecls = 0;
+  GDEFCORE_Doc active;
+  EntState st;
   GDEFCORE_Result rc;
-  if (gdefcore_id_canonical(id, id_len, canon) != GDEFCORE_OK) {
+  if (catalog == NULL || out_changeset == NULL ||
+      gdefcore_id_canonical(id, id_len, canon) != GDEFCORE_OK) {
     return GDEFCORE_ERR_INVALID;
   }
   rc = gdefcore_changeset_prepare(catalog, actor, actor_len, &cs);
@@ -4853,89 +5167,93 @@ GDEFCORE_Result gdefcore_changeset_revert(GDEFCORE_Catalog * catalog,
     gdefcore_changeset_destroy(cs);
     return rc;
   }
-  {
-    GDEFCORE_Doc published;
-    memset(&published, 0, sizeof published);
-    rc = read_proj_doc(catalog, "a:", type_name, type_len, row, &published, &seq);
-    if (rc != GDEFCORE_OK) {
-      gcu_allocator_free(catalog->alloc, type_name);
-      gcu_allocator_free(catalog->alloc, machine);
-      gdefcore_changeset_destroy(cs);
-      return rc;
+  memset(&active, 0, sizeof active);
+  rc = state_load(catalog, row, &st);
+  if (rc == GDEFCORE_OK) {
+    rc = read_proj_doc(catalog, "a:", type_name, type_len, row, &active, &seq);
+    /* The legacy form needs an active revision to step back from; naming the
+     * target does not (it is how a cleared entity is restored). */
+    if (rc == GDEFCORE_ERR_INVALID && explicit_target) {
+      rc = GDEFCORE_OK;
     }
+  }
+  if (rc == GDEFCORE_OK) {
     rc = load_type(catalog, type_name, type_len, &kind, &decls, &ndecls, NULL,
         NULL, NULL);
-    if (rc != GDEFCORE_OK) {
-      doc_free(catalog->alloc, &published);
-      gcu_allocator_free(catalog->alloc, type_name);
-      gcu_allocator_free(catalog->alloc, machine);
-      gdefcore_changeset_destroy(cs);
-      return rc;
-    }
+  }
+  if (rc == GDEFCORE_OK) {
     rc = read_high(catalog, row, &high);
-    if (rc != GDEFCORE_OK) {
-      doc_free(catalog->alloc, &published);
-      decls_free(catalog->alloc, decls, ndecls);
-      gcu_allocator_free(catalog->alloc, type_name);
-      gcu_allocator_free(catalog->alloc, machine);
-      gdefcore_changeset_destroy(cs);
-      return rc;
-    }
+  }
+  if (rc == GDEFCORE_OK && explicit_target && (target == 0 || target > high)) {
+    rc = GDEFCORE_ERR_INVALID;
+  }
+  if (rc == GDEFCORE_OK) {
     rc = add_op(cs, &op);
-    if (rc != GDEFCORE_OK) {
-      doc_free(catalog->alloc, &published);
-      decls_free(catalog->alloc, decls, ndecls);
-      gcu_allocator_free(catalog->alloc, type_name);
-      gcu_allocator_free(catalog->alloc, machine);
-      gdefcore_changeset_destroy(cs);
-      return rc;
-    }
-    op->have_row = 1;
-    op->row = row;
-    op->base_seq = high;
-    op->type_kind = kind;
-    op->decls = decls;
-    op->ndecls = ndecls;
-    op->base = published;
-    if (text_set(catalog->alloc, &op->id, canon, GDEFCORE_PUBLIC_ID_LEN) !=
-            GDEFCORE_OK ||
-        text_set(catalog->alloc, &op->type_name, type_name, type_len) !=
-            GDEFCORE_OK) {
-      gcu_allocator_free(catalog->alloc, type_name);
-      gcu_allocator_free(catalog->alloc, machine);
-      gdefcore_changeset_destroy(cs);
-      return GDEFCORE_ERR_OOM;
-    }
-    if (machine != NULL &&
-        text_set(catalog->alloc, &op->machine, machine, machine_len) !=
-            GDEFCORE_OK) {
-      gcu_allocator_free(catalog->alloc, type_name);
-      gcu_allocator_free(catalog->alloc, machine);
-      gdefcore_changeset_destroy(cs);
-      return GDEFCORE_ERR_OOM;
-    }
-    if (seq <= 1) {
-      op->kind = GDEFCORE_OP_CLEAR;
-    } else {
-      op->kind = GDEFCORE_OP_SAVE;
-      rc = rev_doc(catalog, row, seq - 1, &op->staged);
-      if (rc == GDEFCORE_OK && !doc_personal_sealed(&op->staged, decls, ndecls)) {
-        rc = GDEFCORE_ERR_INVALID;
-      }
-      if (rc != GDEFCORE_OK) {
-        gcu_allocator_free(catalog->alloc, type_name);
-        gcu_allocator_free(catalog->alloc, machine);
-        gdefcore_changeset_destroy(cs);
-        return rc;
-      }
-    }
+  }
+  if (rc != GDEFCORE_OK) {
+    doc_free(catalog->alloc, &active);
+    decls_free(catalog->alloc, decls, ndecls);
     gcu_allocator_free(catalog->alloc, type_name);
     gcu_allocator_free(catalog->alloc, machine);
-    *out_changeset = cs;
-    return GDEFCORE_OK;
+    gdefcore_changeset_destroy(cs);
+    return rc;
   }
+  op->have_row = 1;
+  op->row = row;
+  op->base_seq = high;
+  op->base_ver = st.ver;
+  op->have_ver = 1;
+  op->type_kind = kind;
+  op->decls = decls;
+  op->ndecls = ndecls;
+  op->base = active;
+  if (text_set(catalog->alloc, &op->id, canon, GDEFCORE_PUBLIC_ID_LEN) !=
+          GDEFCORE_OK ||
+      text_set(catalog->alloc, &op->type_name, type_name, type_len) !=
+          GDEFCORE_OK ||
+      (machine != NULL &&
+          text_set(catalog->alloc, &op->machine, machine, machine_len) !=
+              GDEFCORE_OK)) {
+    gcu_allocator_free(catalog->alloc, type_name);
+    gcu_allocator_free(catalog->alloc, machine);
+    gdefcore_changeset_destroy(cs);
+    return GDEFCORE_ERR_OOM;
+  }
+  if (!explicit_target && seq <= 1) {
+    op->kind = GDEFCORE_OP_CLEAR;
+  } else {
+    op->kind = GDEFCORE_OP_REVERT;
+    op->target_seq = explicit_target ? target : seq - 1;
+    rc = rev_doc(catalog, row, op->target_seq, &op->staged);
+    if (rc == GDEFCORE_OK && !doc_personal_sealed(&op->staged, decls, ndecls)) {
+      rc = GDEFCORE_ERR_INVALID;
+    }
+    if (rc != GDEFCORE_OK) {
+      gcu_allocator_free(catalog->alloc, type_name);
+      gcu_allocator_free(catalog->alloc, machine);
+      gdefcore_changeset_destroy(cs);
+      return rc;
+    }
+  }
+  gcu_allocator_free(catalog->alloc, type_name);
+  gcu_allocator_free(catalog->alloc, machine);
+  *out_changeset = cs;
+  return GDEFCORE_OK;
 }
 
+GDEFCORE_Result gdefcore_changeset_revert(GDEFCORE_Catalog * catalog,
+    const char * id, size_t id_len, const char * actor, size_t actor_len,
+    GDEFCORE_Changeset ** out_changeset) {
+  return revert_changeset(catalog, id, id_len, 0, 0, actor, actor_len,
+      out_changeset);
+}
+
+GDEFCORE_Result gdefcore_changeset_revert_to(GDEFCORE_Catalog * catalog,
+    const char * id, size_t id_len, uint64_t seq, const char * actor,
+    size_t actor_len, GDEFCORE_Changeset ** out_changeset) {
+  return revert_changeset(catalog, id, id_len, 1, seq, actor, actor_len,
+      out_changeset);
+}
 
 static GDEFCORE_Result patch_add(const GDEFCORE_Allocator * alloc,
     GDEFCORE_Patch ** files, size_t * count, const char * path,
@@ -5114,6 +5432,45 @@ GDEFCORE_Result gdefcore_changeset_serialize(const GDEFCORE_Changeset * changese
     if (rc != GDEFCORE_OK) {
       break;
     }
+    if (op->have_ver) {
+      /* The version the op was staged against: a patch made against a
+       * version the entity has since left is a conflict, as a stale base
+       * sequence is. */
+      char ver[32];
+      size_t vn = 0;
+      if (!u64_put(op->base_ver, ver, sizeof ver, &vn)) {
+        rc = GDEFCORE_ERR_LIMIT;
+        break;
+      }
+      kn = snprintf(path, sizeof path, "entity/%.*s/ver", (int)op->id.n,
+          op->id.p);
+      if (kn <= 0 || (size_t)kn >= sizeof path) {
+        rc = GDEFCORE_ERR_LIMIT;
+        break;
+      }
+      rc = patch_add(alloc, &files, &count, path, ver, vn);
+      if (rc != GDEFCORE_OK) {
+        break;
+      }
+    }
+    if (op->kind == GDEFCORE_OP_ACTIVATE) {
+      char target[32];
+      size_t tn = 0;
+      if (!u64_put(op->target_seq, target, sizeof target, &tn)) {
+        rc = GDEFCORE_ERR_LIMIT;
+        break;
+      }
+      kn = snprintf(path, sizeof path, "entity/%.*s/target", (int)op->id.n,
+          op->id.p);
+      if (kn <= 0 || (size_t)kn >= sizeof path) {
+        rc = GDEFCORE_ERR_LIMIT;
+        break;
+      }
+      rc = patch_add(alloc, &files, &count, path, target, tn);
+      if (rc != GDEFCORE_OK) {
+        break;
+      }
+    }
     kn = snprintf(path, sizeof path, "entity/%.*s/op", (int)op->id.n, op->id.p);
     if (kn <= 0 || (size_t)kn >= sizeof path) {
       rc = GDEFCORE_ERR_LIMIT;
@@ -5121,6 +5478,10 @@ GDEFCORE_Result gdefcore_changeset_serialize(const GDEFCORE_Changeset * changese
     }
     if (op->kind == GDEFCORE_OP_CLEAR) {
       rc = patch_add(alloc, &files, &count, path, "clear", 5);
+    } else if (op->kind == GDEFCORE_OP_UNPUBLISH) {
+      rc = patch_add(alloc, &files, &count, path, "unpublish", 9);
+    } else if (op->kind == GDEFCORE_OP_ACTIVATE) {
+      rc = patch_add(alloc, &files, &count, path, "activate", 8);
     } else {
       const char * word = "save";
       size_t word_n = 4;
@@ -5131,6 +5492,9 @@ GDEFCORE_Result gdefcore_changeset_serialize(const GDEFCORE_Changeset * changese
       } else if (op->kind == GDEFCORE_OP_PUBLISH) {
         word = "publish";
         word_n = 7;
+      } else if (op->kind == GDEFCORE_OP_REVERT) {
+        word = "revert";
+        word_n = 6;
       }
       rc = patch_add(alloc, &files, &count, path, word, word_n);
       size_t fi;
@@ -5494,6 +5858,8 @@ GDEFCORE_Result gdefcore_changeset_parse(GDEFCORE_Catalog * catalog,
         int known = span_eq(suffix, suffix_len, "/type", 5) ||
                     span_eq(suffix, suffix_len, "/base", 5) ||
                     span_eq(suffix, suffix_len, "/op", 3) ||
+                    span_eq(suffix, suffix_len, "/ver", 4) ||
+                    span_eq(suffix, suffix_len, "/target", 7) ||
                     (suffix_len >= 6 && memcmp(suffix, "/lang/", 6) == 0);
         if (!known) {
           return GDEFCORE_ERR_CORRUPT;
@@ -5706,6 +6072,7 @@ GDEFCORE_Result gdefcore_changeset_parse(GDEFCORE_Catalog * catalog,
     size_t machine_len = 0;
     uint64_t row = 0;
     const GDEFCORE_Patch * base_file;
+    const GDEFCORE_Patch * ver_file;
     if (files[i].path_len < 12 || memcmp(files[i].path, "entity/", 7) != 0) {
       continue;
     }
@@ -5775,6 +6142,18 @@ GDEFCORE_Result gdefcore_changeset_parse(GDEFCORE_Catalog * catalog,
       op->row = row;
       op->type_kind = kind;
       op->base = published;
+      {
+        EntState st;
+        rc = state_load(catalog, row, &st);
+        if (rc != GDEFCORE_OK) {
+          gcu_allocator_free(catalog->alloc, type_name);
+          gcu_allocator_free(catalog->alloc, machine);
+          gdefcore_changeset_destroy(cs);
+          return rc;
+        }
+        op->base_ver = st.ver;
+        op->have_ver = 1;
+      }
       if (text_set(catalog->alloc, &op->id, canon, GDEFCORE_PUBLIC_ID_LEN) !=
               GDEFCORE_OK ||
           text_set(catalog->alloc, &op->type_name, type_name, type_len) !=
@@ -5795,14 +6174,64 @@ GDEFCORE_Result gdefcore_changeset_parse(GDEFCORE_Catalog * catalog,
         gdefcore_changeset_destroy(cs);
         return GDEFCORE_ERR_CORRUPT;
       }
+      ver_file = find_entity_tail(files, count, canon, "/ver", 4);
+      if (ver_file != NULL &&
+          !u64_get((const char *)ver_file->bytes, ver_file->len,
+              &op->base_ver)) {
+        gdefcore_changeset_destroy(cs);
+        return GDEFCORE_ERR_CORRUPT;
+      }
+    } else if (span_eq((const char *)files[i].bytes, files[i].len, "unpublish",
+                   9) ||
+               span_eq((const char *)files[i].bytes, files[i].len, "activate",
+                   8)) {
+      /* No values: the op is staged by the public call, so it takes the same
+       * checks, then the patch's own base and version are put back on it. */
+      int activating =
+          span_eq((const char *)files[i].bytes, files[i].len, "activate", 8);
+      const GDEFCORE_Patch * target_file =
+          find_entity_tail(files, count, canon, "/target", 7);
+      uint64_t target = 0;
+      GDEFCORE_Op * op;
+      gcu_allocator_free(catalog->alloc, type_name);
+      gcu_allocator_free(catalog->alloc, machine);
+      if (base_file == NULL ||
+          (activating &&
+              (target_file == NULL ||
+                  !u64_get((const char *)target_file->bytes, target_file->len,
+                      &target)))) {
+        gdefcore_changeset_destroy(cs);
+        return GDEFCORE_ERR_CORRUPT;
+      }
+      rc = activating
+          ? gdefcore_entity_activate(cs, canon, GDEFCORE_PUBLIC_ID_LEN, target)
+          : gdefcore_entity_unpublish(cs, canon, GDEFCORE_PUBLIC_ID_LEN);
+      op = rc == GDEFCORE_OK ? find_op_id(cs, canon, GDEFCORE_PUBLIC_ID_LEN)
+                             : NULL;
+      if (op == NULL ||
+          !u64_get((const char *)base_file->bytes, base_file->len,
+              &op->base_seq)) {
+        gdefcore_changeset_destroy(cs);
+        return rc != GDEFCORE_OK ? rc : GDEFCORE_ERR_CORRUPT;
+      }
+      ver_file = find_entity_tail(files, count, canon, "/ver", 4);
+      if (ver_file != NULL &&
+          !u64_get((const char *)ver_file->bytes, ver_file->len,
+              &op->base_ver)) {
+        gdefcore_changeset_destroy(cs);
+        return GDEFCORE_ERR_CORRUPT;
+      }
     } else if (span_eq((const char *)files[i].bytes, files[i].len, "save", 4) ||
         span_eq((const char *)files[i].bytes, files[i].len, "draft", 5) ||
-        span_eq((const char *)files[i].bytes, files[i].len, "publish", 7)) {
+        span_eq((const char *)files[i].bytes, files[i].len, "publish", 7) ||
+        span_eq((const char *)files[i].bytes, files[i].len, "revert", 6)) {
       GDEFCORE_Op * op;
       int drafted = span_eq((const char *)files[i].bytes, files[i].len, "draft",
           5);
       int publishing =
           span_eq((const char *)files[i].bytes, files[i].len, "publish", 7);
+      int reverting =
+          span_eq((const char *)files[i].bytes, files[i].len, "revert", 6);
       gcu_allocator_free(catalog->alloc, type_name);
       gcu_allocator_free(catalog->alloc, machine);
       cs->accept_sealed = 1;
@@ -5823,6 +6252,15 @@ GDEFCORE_Result gdefcore_changeset_parse(GDEFCORE_Catalog * catalog,
         op->kind = GDEFCORE_OP_DRAFT;
       } else if (publishing) {
         op->kind = GDEFCORE_OP_PUBLISH;
+      } else if (reverting) {
+        op->kind = GDEFCORE_OP_REVERT;
+      }
+      ver_file = find_entity_tail(files, count, canon, "/ver", 4);
+      if (ver_file != NULL &&
+          !u64_get((const char *)ver_file->bytes, ver_file->len,
+              &op->base_ver)) {
+        gdefcore_changeset_destroy(cs);
+        return GDEFCORE_ERR_CORRUPT;
       }
     } else {
       gcu_allocator_free(catalog->alloc, type_name);

@@ -1471,6 +1471,69 @@ TEST_F(Erasure, PlaintextHistoryIsNotRestored) {
   EXPECT_EQ(published, Stored(entity, GDEFCORE_VIEW_PUBLISHED));
 }
 
+/* Making an old revision the active one puts its content in front of the
+ * entity's readers without a new revision, so it is held to the same rule as
+ * a revert: a revision from before the field was personal, which holds
+ * plaintext, cannot be made active, whether the changeset is staged by the
+ * call, applied, or read from a patch. A revision whose personal value is
+ * sealed can, and then reads as that ciphertext. */
+TEST_F(Erasure, PlaintextRevisionIsNotActivated) {
+  GDEFCORE_Field field;
+  GDEFCORE_Changeset * cs = NULL;
+  GDEFCORE_Value value;
+  const char * slot = NULL;
+  size_t slot_len = 0;
+  char entity[GDEFCORE_PUBLIC_ID_LEN + 1];
+  size_t revisions;
+  std::string stored;
+  memset(&field, 0, sizeof field);
+  field.size = sizeof field;
+  field.name = kField;
+  field.name_len = strlen(kField);
+  field.required = 1;
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_type_define(catalog_, "site.late", 9, GDEFCORE_TYPE_CONTENT,
+          &field, 1));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_entity_create(catalog_, "site.late", 9, entity, NULL));
+  for (const char * text : {"plain-one", "plain-two"}) {
+    OneValue(&value, kField, text, &slot, &slot_len);
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_entity_save(cs, entity, strlen(entity), "en", 2, &value, 1));
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, NULL, 0));
+    gdefcore_changeset_destroy(cs);
+  }
+  /* control, before the field is personal: the activate is allowed */
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
+  EXPECT_EQ(GDEFCORE_OK,
+      gdefcore_entity_activate(cs, entity, strlen(entity), 1));
+  gdefcore_changeset_destroy(cs);
+  /* The field becomes personal. */
+  field.personal = 1;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_changeset_define(cs, "site.late", 9, GDEFCORE_TYPE_CONTENT,
+          &field, 1));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, "site.late", 9));
+  gdefcore_changeset_destroy(cs);
+  revisions = Revisions(entity);
+  stored = Stored(entity, GDEFCORE_VIEW_PUBLISHED);
+  ASSERT_EQ("plain-two", stored);
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
+  EXPECT_NE(GDEFCORE_OK, gdefcore_entity_activate(cs, entity, strlen(entity), 1));
+  EXPECT_NE(GDEFCORE_OK, gdefcore_entity_activate(cs, entity, strlen(entity), 2));
+  gdefcore_changeset_destroy(cs);
+  /* nor can it be restored under another name */
+  cs = NULL;
+  EXPECT_NE(GDEFCORE_OK,
+      gdefcore_changeset_revert_to(catalog_, entity, strlen(entity), 1, NULL, 0,
+          &cs));
+  gdefcore_changeset_destroy(cs);
+  EXPECT_EQ(revisions, Revisions(entity));
+  EXPECT_EQ(stored, Stored(entity, GDEFCORE_VIEW_PUBLISHED));
+}
+
 /* A patch is untrusted input. Parsed under the same rule: its personal value
  * is accepted only when it is sealed, and a patch that carries plaintext for
  * a personal field is refused. */

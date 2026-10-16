@@ -19,6 +19,19 @@
 #   creator-mutable             Revisions.TheCreatorIsSetOnceAtTheFirstRevision
 #   old-shape-read-unpublished  Revisions.AnOldShapedStoreIsCorruptNotUnpublished
 #
+#   unpublish-clears-pointer     Revisions.UnpublishClearsTheFlagAndNothingElse
+#   activate-moves-flag          Revisions.ActivateMovesThePointerAndNothingElse
+#   activate-publisher-creator   Revisions.ActivateMovesThePointerAndNothingElse
+#   activate-unrecorded          Revisions.ActivateNeedsARecordedRevision
+#   activate-cleared-no-head     Revisions.ActivateBringsBackAClearedEntity
+#   revert-publishes             Revisions.RevertToCopiesATargetAndKeepsTheFlag
+#   revert-writes-no-revision    Revisions.RevertToCopiesATargetAndKeepsTheFlag
+#   legacy-revert-from-head      Revisions.TheLegacyRevertStepsBackFromTheActiveRevision
+#   stale-version-accepted       Revisions.AStalePatchOfTheNewOperationsIsAConflict
+#   patch-drops-version          Revisions.TheNewOperationsRoundTripThroughAPatch
+#   (activate-skips-sealed-check is in check-erasure.sh, which owns the
+#    personal-value fixtures: Erasure.PlaintextRevisionIsNotActivated)
+#
 # Every test has a control (the same call on the other side of the rule
 # answers differently), so a plant turning one red is a test seeing the
 # defect, not a build failure. Later tasks of the story add their plants here.
@@ -133,5 +146,102 @@ plant old-shape-read-unpublished $ENT testRevisions \
     return rc;
   }
   if (!col_find(proj, "pub", 3, &val, &vlen) || vlen != 1 ||'
+
+# Plant 13: an unpublish also forgets which revision the entity is.
+plant unpublish-clears-pointer $ENT testRevisions \
+  'Revisions.UnpublishClearsTheFlagAndNothingElse' \
+  '      /* The active revision stays where it is. */
+      st->pub = 0;
+      return 0;' \
+  '      /* The active revision stays where it is. */
+      st->pub = 0;
+      st->has_act = 0;
+      return 0;'
+
+# Plant 14: an activate also publishes.
+plant activate-moves-flag $ENT testRevisions \
+  'Revisions.ActivateMovesThePointerAndNothingElse' \
+  '    case GDEFCORE_OP_ACTIVATE:
+      moves = 1;' \
+  '    case GDEFCORE_OP_ACTIVATE:
+      st->pub = 1;
+      moves = 1;'
+
+# Plant 15: an activated revision is credited to whoever activated it.
+plant activate-publisher-creator $ENT testRevisions \
+  'Revisions.ActivateMovesThePointerAndNothingElse' \
+  '            op->row, op->target_seq, op->id.p, op->id.n, doc_text,
+            doc_text_len, who, who_len);
+      }
+      if (rc == GDEFCORE_OK && op->target_seq == high) {' \
+  '            op->row, op->target_seq, op->id.p, op->id.n, doc_text,
+            doc_text_len, actor, actor_len);
+      }
+      if (rc == GDEFCORE_OK && op->target_seq == high) {'
+
+# Plant 16: a sequence that was never recorded is accepted (the call does not
+# look the revision up, and apply reads whatever is not there as empty).
+plant activate-unrecorded $ENT testRevisions \
+  'Revisions.ActivateNeedsARecordedRevision' \
+  '    if (target == 0 || target > high) {
+      rc = GDEFCORE_ERR_INVALID;
+    } else {
+      rc = rev_doc(cat, row, target, &staged);' \
+  '    if (0) {
+      rc = GDEFCORE_ERR_INVALID;
+    } else {
+      rc = GDEFCORE_OK;
+      (void)rev_doc(cat, row, target, &staged);' \
+  '      if (rc == GDEFCORE_OK && (op->target_seq == 0 || op->target_seq > high)) {
+        rc = GDEFCORE_ERR_INVALID;
+      }
+      if (rc == GDEFCORE_OK) {
+        rc = rev_doc(cat, op->row, op->target_seq, &doc);
+      }' \
+  '      if (rc == GDEFCORE_OK) {
+        (void)rev_doc(cat, op->row, op->target_seq, &doc);
+      }'
+
+# Plant 17: making the head active again does not put its projection back.
+plant activate-cleared-no-head $ENT testRevisions \
+  'Revisions.ActivateBringsBackAClearedEntity' \
+  '      if (rc == GDEFCORE_OK && op->target_seq == high) {' \
+  '      if (0 && rc == GDEFCORE_OK && op->target_seq == high) {'
+
+# Plant 18: a revert sets the published flag (not the revert is to set).
+plant revert-publishes $ENT testRevisions \
+  'Revisions.RevertToCopiesATargetAndKeepsTheFlag' \
+  '    case GDEFCORE_OP_REVERT:' \
+  '    case GDEFCORE_OP_REVERT:
+      st->pub = 1;'
+
+# Plant 19: a revert with a target moves the pointer and writes no revision.
+plant revert-writes-no-revision $ENT testRevisions \
+  'Revisions.RevertToCopiesATargetAndKeepsTheFlag' \
+  '    op->kind = GDEFCORE_OP_REVERT;
+    op->target_seq = explicit_target ? target : seq - 1;' \
+  '    op->kind = explicit_target ? GDEFCORE_OP_ACTIVATE : GDEFCORE_OP_REVERT;
+    op->target_seq = explicit_target ? target : seq - 1;'
+
+# Plant 20: the legacy revert steps back from the head, not from the active
+# revision.
+plant legacy-revert-from-head $ENT testRevisions \
+  'Revisions.TheLegacyRevertStepsBackFromTheActiveRevision' \
+  '    op->target_seq = explicit_target ? target : seq - 1;' \
+  '    op->target_seq = explicit_target ? target : high - 1;'
+
+# Plant 21: a changeset staged against a version the entity has left applies.
+plant stale-version-accepted $ENT testRevisions \
+  'Revisions.AStalePatchOfTheNewOperationsIsAConflict' \
+  '      if (st.ver != op->base_ver) {' \
+  '      if (0) {'
+
+# Plant 22: a serialized changeset does not carry the version it was staged at.
+plant patch-drops-version $ENT testRevisions \
+  'Revisions.TheNewOperationsRoundTripThroughAPatch' \
+  '    if (op->have_ver) {
+      /* The version the op was staged against: a patch made against a' \
+  '    if (0 && op->have_ver) {
+      /* The version the op was staged against: a patch made against a'
 
 plant_finish

@@ -141,6 +141,46 @@ class Revisions : public ::testing::Test {
     gdefcore_changeset_destroy(cs);
   }
 
+  GDEFCORE_Result Unpublish(const std::string & actor, const std::string & id) {
+    GDEFCORE_Changeset * cs = Prepare(actor);
+    GDEFCORE_Result rc = gdefcore_entity_unpublish(cs, id.c_str(), id.size());
+    if (rc == GDEFCORE_OK) {
+      rc = gdefcore_changeset_apply(cs, NULL, 0);
+    }
+    gdefcore_changeset_destroy(cs);
+    return rc;
+  }
+
+  GDEFCORE_Result Activate(const std::string & actor, const std::string & id,
+      uint64_t seq) {
+    GDEFCORE_Changeset * cs = Prepare(actor);
+    GDEFCORE_Result rc = gdefcore_entity_activate(cs, id.c_str(), id.size(), seq);
+    if (rc == GDEFCORE_OK) {
+      rc = gdefcore_changeset_apply(cs, NULL, 0);
+    }
+    gdefcore_changeset_destroy(cs);
+    return rc;
+  }
+
+  GDEFCORE_Result RevertTo(const std::string & actor, const std::string & id,
+      uint64_t seq) {
+    GDEFCORE_Changeset * cs = NULL;
+    GDEFCORE_Result rc = gdefcore_changeset_revert_to(catalog_, id.c_str(),
+        id.size(), seq, actor.empty() ? NULL : actor.c_str(), actor.size(), &cs);
+    if (rc == GDEFCORE_OK) {
+      rc = gdefcore_changeset_apply(cs, NULL, 0);
+    }
+    gdefcore_changeset_destroy(cs);
+    return rc;
+  }
+
+  size_t Count(const std::string & id) {
+    size_t n = 99;
+    EXPECT_EQ(GDEFCORE_OK,
+        gdefcore_entity_revision_count(catalog_, id.c_str(), id.size(), &n));
+    return n;
+  }
+
   /* An entity with one revision is cleared by reverting it. */
   void Clear(const std::string & id) {
     GDEFCORE_Changeset * cs = NULL;
@@ -547,6 +587,271 @@ TEST_F(Revisions, TheRecordSurvivesASnapshotRoundTrip) {
   gdefcore_catalog_destroy(cat2);
   gdefstor_store_destroy(copy);
   gdefstor_bytes_free(NULL, bytes);
+}
+
+TEST_F(Revisions, UnpublishClearsTheFlagAndNothingElse) {
+  std::string id = Create();
+  Save(alice_, id, "one");
+  Save(bob_, id, "two");
+  ASSERT_TRUE(Published(id));
+  uint64_t version = Version(id);
+  ASSERT_EQ(GDEFCORE_OK, Unpublish(carol_, id));
+  EXPECT_FALSE(Published(id));
+  /* the content, the pointer, the history and the people stay */
+  EXPECT_EQ(2u, Active(id));
+  EXPECT_EQ(2u, Head(id));
+  EXPECT_EQ(2u, Count(id));
+  EXPECT_EQ(alice_, Creator(id));
+  EXPECT_EQ(bob_, Actor(id));
+  EXPECT_EQ("two", Title(GDEFCORE_VIEW_ACTIVE, id));
+  EXPECT_EQ("two", Title(GDEFCORE_VIEW_DRAFT, id));
+  EXPECT_EQ(version + 1, Version(id));
+  /* but readers no longer see it */
+  EXPECT_EQ("<none>", Title(GDEFCORE_VIEW_PUBLISHED, id));
+  /* control: publishing the head brings the same content back */
+  Publish("", id);
+  EXPECT_EQ("two", Title(GDEFCORE_VIEW_PUBLISHED, id));
+  EXPECT_EQ(version + 2, Version(id));
+}
+
+TEST_F(Revisions, ActivateMovesThePointerAndNothingElse) {
+  std::string id = Create();
+  Save(alice_, id, "one");
+  Save(bob_, id, "two");
+  uint64_t version = Version(id);
+  ASSERT_EQ(GDEFCORE_OK, Activate(carol_, id, 1));
+  EXPECT_EQ(1u, Active(id));
+  EXPECT_EQ(2u, Head(id));
+  EXPECT_EQ(2u, Count(id));            /* no revision was written */
+  EXPECT_TRUE(Published(id));          /* the flag is not the activate's */
+  EXPECT_EQ("one", Title(GDEFCORE_VIEW_ACTIVE, id));
+  EXPECT_EQ("one", Title(GDEFCORE_VIEW_PUBLISHED, id));
+  EXPECT_EQ("two", Title(GDEFCORE_VIEW_DRAFT, id));
+  /* the revision keeps its own creator: not the one who activated it */
+  EXPECT_EQ(alice_, Actor(id));
+  EXPECT_EQ(alice_, Creator(id));
+  EXPECT_EQ(version + 1, Version(id));
+  auto a = Raw("a:site.note", RowOf(id));
+  EXPECT_EQ("1", a["seq"]);
+  /* control: and back to the head */
+  ASSERT_EQ(GDEFCORE_OK, Activate(carol_, id, 2));
+  EXPECT_EQ("two", Title(GDEFCORE_VIEW_PUBLISHED, id));
+  EXPECT_EQ(bob_, Actor(id));
+  /* an unpublished entity stays unpublished */
+  std::string draft = Create();
+  Draft(alice_, draft, "d1");
+  Draft(alice_, draft, "d2");
+  ASSERT_EQ(GDEFCORE_OK, Activate("", draft, 2));
+  EXPECT_FALSE(Published(draft));
+  EXPECT_EQ(2u, Active(draft));
+}
+
+TEST_F(Revisions, ActivateNeedsARecordedRevision) {
+  std::string id = Create();
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, Activate("", id, 1));  /* none yet */
+  Save(alice_, id, "one");
+  Save(alice_, id, "two");
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, Activate("", id, 0));
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, Activate("", id, 3));
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, Activate("", id, 1000));
+  EXPECT_EQ(2u, Active(id));
+  /* control: the same call on a recorded one */
+  EXPECT_EQ(GDEFCORE_OK, Activate("", id, 1));
+  /* a malformed id and a missing entity */
+  GDEFCORE_Changeset * cs = Prepare("");
+  EXPECT_NE(GDEFCORE_OK, gdefcore_entity_activate(cs, "nope", 4, 1));
+  gdefcore_changeset_destroy(cs);
+}
+
+TEST_F(Revisions, ActivateBringsBackAClearedEntity) {
+  std::string one = Create();
+  Save(alice_, one, "only");
+  Clear(one);                  /* the first revision: a real clear */
+  ASSERT_EQ(0u, Active(one));
+  ASSERT_FALSE(Published(one));
+  uint64_t version = Version(one);
+  ASSERT_EQ(GDEFCORE_OK, Activate("", one, 1));
+  EXPECT_EQ(1u, Active(one));
+  EXPECT_EQ(version + 1, Version(one));
+  EXPECT_FALSE(Published(one));        /* the clear's flag is still down */
+  EXPECT_EQ("only", Title(GDEFCORE_VIEW_ACTIVE, one));
+  EXPECT_EQ("<none>", Title(GDEFCORE_VIEW_PUBLISHED, one));
+  EXPECT_EQ(alice_, Actor(one));
+  /* the head is the revision again, so it can be published */
+  EXPECT_EQ("only", Title(GDEFCORE_VIEW_DRAFT, one));
+  Publish("", one);
+  EXPECT_EQ("only", Title(GDEFCORE_VIEW_PUBLISHED, one));
+}
+
+TEST_F(Revisions, RevertToCopiesATargetAndKeepsTheFlag) {
+  std::string id = Create();
+  Save(alice_, id, "one");
+  Save(bob_, id, "two");
+  uint64_t version = Version(id);
+  ASSERT_EQ(GDEFCORE_OK, RevertTo(carol_, id, 1));
+  EXPECT_EQ(3u, Head(id));
+  EXPECT_EQ(3u, Count(id));            /* a revert writes a revision */
+  EXPECT_EQ(3u, Active(id));
+  EXPECT_EQ("one", Title(GDEFCORE_VIEW_ACTIVE, id));
+  EXPECT_EQ("one", Title(GDEFCORE_VIEW_DRAFT, id));
+  /* the copy is a new revision, so its creator is the one who reverted */
+  EXPECT_EQ(carol_, Actor(id));
+  EXPECT_EQ(alice_, Creator(id));
+  EXPECT_TRUE(Published(id));
+  EXPECT_EQ(version + 1, Version(id));
+  /* control: the flag is the revert's to leave alone, down as well as up */
+  std::string draft = Create();
+  Draft(alice_, draft, "d1");
+  Draft(alice_, draft, "d2");
+  ASSERT_FALSE(Published(draft));
+  ASSERT_EQ(GDEFCORE_OK, RevertTo(bob_, draft, 1));
+  EXPECT_FALSE(Published(draft));
+  EXPECT_EQ(3u, Active(draft));
+  EXPECT_EQ("d1", Title(GDEFCORE_VIEW_ACTIVE, draft));
+  /* a target that was not recorded */
+  GDEFCORE_Changeset * cs = NULL;
+  EXPECT_EQ(GDEFCORE_ERR_INVALID,
+      gdefcore_changeset_revert_to(catalog_, id.c_str(), id.size(), 0, NULL, 0, &cs));
+  EXPECT_EQ(GDEFCORE_ERR_INVALID,
+      gdefcore_changeset_revert_to(catalog_, id.c_str(), id.size(), 9, NULL, 0, &cs));
+}
+
+TEST_F(Revisions, TheLegacyRevertStepsBackFromTheActiveRevision) {
+  std::string id = Create();
+  Save(alice_, id, "one");
+  Save(bob_, id, "two");
+  Save(carol_, id, "three");
+  Clear(id);                           /* revision 4: a copy of 2 */
+  EXPECT_EQ(4u, Head(id));
+  EXPECT_EQ("two", Title(GDEFCORE_VIEW_ACTIVE, id));
+  /* with the pointer moved back, it steps back from where the pointer is */
+  ASSERT_EQ(GDEFCORE_OK, Activate("", id, 2));
+  Clear(id);                           /* a copy of 1 */
+  EXPECT_EQ(5u, Head(id));
+  EXPECT_EQ("one", Title(GDEFCORE_VIEW_ACTIVE, id));
+  /* and it needs an active revision to step back from */
+  std::string none = Create();
+  GDEFCORE_Changeset * cs = NULL;
+  EXPECT_EQ(GDEFCORE_ERR_INVALID,
+      gdefcore_changeset_revert(catalog_, none.c_str(), none.size(), NULL, 0, &cs));
+}
+
+TEST_F(Revisions, TheNewOperationsRoundTripThroughAPatch) {
+  std::string id = Create();
+  Save(alice_, id, "one");
+  Save(bob_, id, "two");
+  /* serialize -> parse -> apply gives what applying the original gives */
+  for (int which = 0; which < 3; which++) {
+    GDEFCORE_Changeset * cs = Prepare(carol_);
+    const char * word = "unpublish";
+    if (which == 0) {
+      ASSERT_EQ(GDEFCORE_OK, gdefcore_entity_unpublish(cs, id.c_str(), id.size()));
+    } else if (which == 1) {
+      word = "activate";
+      ASSERT_EQ(GDEFCORE_OK, gdefcore_entity_activate(cs, id.c_str(), id.size(), 1));
+    } else {
+      word = "revert";
+      gdefcore_changeset_destroy(cs);
+      ASSERT_EQ(GDEFCORE_OK,
+          gdefcore_changeset_revert_to(catalog_, id.c_str(), id.size(), 1,
+              carol_.c_str(), carol_.size(), &cs));
+    }
+    GDEFCORE_Patch * files = NULL;
+    size_t count = 0;
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_serialize(cs, &files, &count));
+    bool saw_op = false;
+    bool saw_ver = false;
+    for (size_t i = 0; i < count; i++) {
+      std::string path(files[i].path, files[i].path_len);
+      std::string bytes((const char *)files[i].bytes, files[i].len);
+      if (path == "entity/" + id + "/op") {
+        saw_op = bytes == word;
+      }
+      if (path == "entity/" + id + "/ver") {
+        saw_ver = true;
+      }
+    }
+    EXPECT_TRUE(saw_op) << word;
+    EXPECT_TRUE(saw_ver) << word;
+    GDEFCORE_Changeset * parsed = NULL;
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_parse(catalog_, files, count, NULL, &parsed))
+        << word;
+    gdefcore_patch_free(catalog_, files, count);
+    gdefcore_changeset_destroy(cs);
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(parsed, NULL, 0)) << word;
+    gdefcore_changeset_destroy(parsed);
+    if (which == 0) {
+      EXPECT_FALSE(Published(id));
+      Publish("", id);
+    } else if (which == 1) {
+      EXPECT_EQ(1u, Active(id));
+      EXPECT_EQ("one", Title(GDEFCORE_VIEW_ACTIVE, id));
+    } else {
+      EXPECT_EQ(3u, Head(id));
+      EXPECT_EQ(3u, Count(id));
+      EXPECT_EQ("one", Title(GDEFCORE_VIEW_ACTIVE, id));
+    }
+  }
+}
+
+TEST_F(Revisions, AStalePatchOfTheNewOperationsIsAConflict) {
+  std::string id = Create();
+  Save(alice_, id, "one");
+  Save(bob_, id, "two");
+  GDEFCORE_Changeset * cs = Prepare("");
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_entity_activate(cs, id.c_str(), id.size(), 1));
+  GDEFCORE_Patch * files = NULL;
+  size_t count = 0;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_serialize(cs, &files, &count));
+  gdefcore_changeset_destroy(cs);
+  /* the same patch, as it would be if the entity's version were one behind:
+   * the epoch is the patch's own (so the epoch check cannot be what refuses) */
+  int edited = 0;
+  for (size_t i = 0; i < count; i++) {
+    std::string path(files[i].path, files[i].path_len);
+    if (path == "entity/" + id + "/ver") {
+      ASSERT_EQ(1u, files[i].len);
+      files[i].bytes[0] = '0';
+      edited++;
+    }
+  }
+  ASSERT_EQ(1, edited);
+  GDEFCORE_Changeset * parsed = NULL;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_parse(catalog_, files, count, NULL, &parsed));
+  EXPECT_NE(GDEFCORE_OK, gdefcore_changeset_apply(parsed, NULL, 0));
+  EXPECT_EQ(2u, Active(id));            /* nothing was written */
+  /* control: rebased onto the entity as it is, the same changeset applies */
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_rebase(parsed));
+  EXPECT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(parsed, NULL, 0));
+  EXPECT_EQ(1u, Active(id));
+  gdefcore_changeset_destroy(parsed);
+  gdefcore_patch_free(catalog_, files, count);
+}
+
+TEST_F(Revisions, TheTouchedListNamesTheNewOperations) {
+  std::string id = Create();
+  Save(alice_, id, "one");
+  Save(alice_, id, "two");
+  const int want[3] = {GDEFCORE_TOUCH_UNPUBLISH, GDEFCORE_TOUCH_ACTIVATE,
+      GDEFCORE_TOUCH_SAVE};
+  for (int which = 0; which < 3; which++) {
+    GDEFCORE_Changeset * cs = Prepare("");
+    if (which == 0) {
+      ASSERT_EQ(GDEFCORE_OK, gdefcore_entity_unpublish(cs, id.c_str(), id.size()));
+    } else if (which == 1) {
+      ASSERT_EQ(GDEFCORE_OK, gdefcore_entity_activate(cs, id.c_str(), id.size(), 1));
+    } else {
+      gdefcore_changeset_destroy(cs);
+      ASSERT_EQ(GDEFCORE_OK,
+          gdefcore_changeset_revert_to(catalog_, id.c_str(), id.size(), 1, NULL, 0, &cs));
+    }
+    EXPECT_EQ(1u, gdefcore_changeset_touched_count(cs));
+    int op = 0;
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_changeset_touched_at(cs, 0, NULL, NULL, NULL, NULL, &op));
+    EXPECT_EQ(want[which], op);
+    gdefcore_changeset_destroy(cs);
+  }
 }
 
 int main(int argc, char ** argv) {

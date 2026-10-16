@@ -15,6 +15,7 @@
 #   principal-not-recorded        Templates.PrincipalKey
 #   key-ignores-observed-principal Templates.PrincipalKey
 #   unsafe-marker-check-removed   Templates.Unsafe
+#   activate-not-vetted           Templates.ActivateIsVetted
 #
 # and six more that stand behind a matrix row each: the engine's own math is
 # no longer shadowed, the plumbing template is reachable from a template, the
@@ -130,5 +131,15 @@ plant hyphen-refused-in-type-name src/entity/entity.c testEntity \
       continue;
     }" \
   '    (void)dot;'
+
+# Plant 13: a changeset that only activates an old template revision is not
+# vetted, so a revision that no longer builds becomes the template.
+plant activate-not-vetted src/template/template.c testTemplates \
+  'Templates.ActivateIsVetted' \
+  '  if (!touches_type(changeset, GDEFCORE_TEMPLATE_TYPE,
+          GDEFCORE_TOUCH_SAVE | GDEFCORE_TOUCH_DRAFT | GDEFCORE_TOUCH_PUBLISH |
+              GDEFCORE_TOUCH_ACTIVATE) &&' \
+  '  if (!touches_type(changeset, GDEFCORE_TEMPLATE_TYPE,
+          GDEFCORE_TOUCH_SAVE | GDEFCORE_TOUCH_DRAFT | GDEFCORE_TOUCH_PUBLISH) &&'
 
 plant_finish

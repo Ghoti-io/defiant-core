@@ -37,7 +37,10 @@ enum {
   GDEFCORE_OP_ENABLE = 4,
   GDEFCORE_OP_DISABLE = 5,
   GDEFCORE_OP_DRAFT = 6,
-  GDEFCORE_OP_PUBLISH = 7
+  GDEFCORE_OP_PUBLISH = 7,
+  GDEFCORE_OP_UNPUBLISH = 8,
+  GDEFCORE_OP_ACTIVATE = 9,
+  GDEFCORE_OP_REVERT = 10
 };
 
 typedef struct GDEFCORE_Text {
@@ -86,6 +89,9 @@ typedef struct GDEFCORE_Op {
   GDEFCORE_Doc staged;
   GDEFCORE_Doc base;
   uint64_t base_seq;
+  uint64_t base_ver;   /* the entity's version when the op was staged */
+  int have_ver;
+  uint64_t target_seq; /* the revision an activate makes active */
   GDEFCORE_Decl * decls;
   size_t ndecls;
 } GDEFCORE_Op;

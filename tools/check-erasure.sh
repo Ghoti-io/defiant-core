@@ -82,7 +82,7 @@ for t in Erasure.Scanner Erasure.Channels Erasure.Sweep Erasure.SnapshotCarriesN
     Erasure.EntitySavePersonal Erasure.RevertKeepsCiphertext \
     Erasure.ParsePersonalPatch Erasure.PlaintextHistoryIsNotRestored \
     Erasure.FormSubjectRoute Erasure.FormUnknownSubject \
-    Erasure.FormSubjectBinding; do
+    Erasure.FormSubjectBinding Erasure.PlaintextRevisionIsNotActivated; do
   if ! run_test "$SCRATCH/control" "$t"; then
     printf 'check-erasure: %s failed on the real tree\n' "$t" >&2
     tail -30 "$SCRATCH/control.run" >&2
@@ -325,6 +325,21 @@ plant restore-skips-sealed-check src/entity/entity.c Erasure.PlaintextHistoryIsN
   '      if (decl == NULL || 1) {
         continue;
       }'
+
+# 10a. An activate makes an old revision the entity's content without asking
+#      whether its personal values are sealed (the check is at the call and
+#      again at apply, where the revision is read from the store).
+plant activate-skips-sealed-check src/entity/entity.c Erasure.PlaintextRevisionIsNotActivated \
+  '      rc = rev_doc(cat, row, target, &staged);
+      if (rc == GDEFCORE_OK && !doc_personal_sealed(&staged, decls, ndecls)) {
+        rc = GDEFCORE_ERR_INVALID;
+      }' \
+  '      rc = rev_doc(cat, row, target, &staged);' \
+  '      if (rc == GDEFCORE_OK &&
+          !doc_personal_sealed(&doc, op->decls, op->ndecls)) {
+        rc = GDEFCORE_ERR_INVALID;
+      }' \
+  '      (void)op->decls;'
 
 # 10b. The seal takes a text that is already sealed (what the form tree shows
 #      for a personal field) and seals it a second time.
