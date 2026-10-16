@@ -1007,10 +1007,13 @@ bool Model(const Person & p, int op, char group, const std::string & actor,
   unsigned need = 0;
   switch (op) {
     case kOpUpdate:
-      /* A condition that reads the entity reads the published projection, and
-       * a draft that was never published has none (nor an actor). */
-      mine = !draft && (((p.roles & kRoleGroupA) && group == 'a') ||
-                           ((p.roles & kRoleOwn) && own) || group == 'b');
+      /* The actor is the first revision's, which is active even while the
+       * entity is unpublished, so `own` holds on a draft. A field condition
+       * still reads the published projection, which a draft that was never
+       * published does not have. */
+      mine = (!draft && (((p.roles & kRoleGroupA) && group == 'a') ||
+                            group == 'b')) ||
+             ((p.roles & kRoleOwn) && own);
       need = kCeilUpdate;
       break;
     case kOpPublish:

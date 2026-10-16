@@ -1192,6 +1192,173 @@ static GDEFCORE_Result put_u64_col(GDEFSTOR_Write * write, const char * type,
       entity_len, &column, 1));
 }
 
+/*
+ * The entity record, projection `s`, keyed by the decimal row. It holds what
+ * the revisions do not: whether the public may see the entity (`pub`), which
+ * revision it currently is (`act`, absent when none), a counter bumped by
+ * every write that touches it (`ver`), and who created it (`creator`, set at
+ * the first revision and never again). The head revision is `w`; `d:<type>`
+ * is a copy of the head and `a:<type>` of the active revision.
+ *
+ * A row in the index `i` with no `s` is a store written before the record
+ * existed. Nothing is released and nothing migrates it: it is refused as
+ * corrupt rather than read as an unpublished entity, which would hide every
+ * entity in it without a word.
+ */
+typedef struct EntState {
+  int pub;
+  int has_act;
+  uint64_t act;
+  uint64_t ver;
+  char creator[GDEFCORE_PUBLIC_ID_LEN + 1];
+  size_t creator_len;
+} EntState;
+
+static GDEFCORE_Result state_load(GDEFCORE_Catalog * cat, uint64_t row,
+    EntState * out) {
+  char text[32];
+  size_t n = 0;
+  GDEFSTOR_Projection * proj = NULL;
+  const uint8_t * val = NULL;
+  size_t vlen = 0;
+  GDEFCORE_Result rc;
+  memset(out, 0, sizeof *out);
+  if (!u64_put(row, text, sizeof text, &n)) {
+    return GDEFCORE_ERR_LIMIT;
+  }
+  rc = proj_get(cat, "s", 1, text, n, &proj);
+  if (rc == GDEFCORE_ERR_INVALID) {
+    return GDEFCORE_ERR_CORRUPT;
+  }
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  if (!col_find(proj, "pub", 3, &val, &vlen) || vlen != 1 ||
+      (val[0] != '0' && val[0] != '1') ||
+      !col_find(proj, "ver", 3, &val, &vlen) ||
+      !u64_get((const char *)val, vlen, &out->ver)) {
+    gdefstor_projection_free(proj);
+    return GDEFCORE_ERR_CORRUPT;
+  }
+  (void)col_find(proj, "pub", 3, &val, &vlen);
+  out->pub = val[0] == '1';
+  if (col_find(proj, "act", 3, &val, &vlen)) {
+    if (!u64_get((const char *)val, vlen, &out->act)) {
+      gdefstor_projection_free(proj);
+      return GDEFCORE_ERR_CORRUPT;
+    }
+    out->has_act = 1;
+  }
+  if (col_find(proj, "creator", 7, &val, &vlen)) {
+    if (vlen == 0 || vlen > GDEFCORE_PUBLIC_ID_LEN) {
+      gdefstor_projection_free(proj);
+      return GDEFCORE_ERR_CORRUPT;
+    }
+    memcpy(out->creator, val, vlen);
+    out->creator_len = vlen;
+  }
+  gdefstor_projection_free(proj);
+  return GDEFCORE_OK;
+}
+
+/* The one place the entity record is written. Every branch of apply ends
+ * here, so none of them can forget it. */
+static GDEFCORE_Result put_state(GDEFSTOR_Write * write, uint64_t row,
+    const EntState * st) {
+  char row_text[32];
+  char act_text[32];
+  char ver_text[32];
+  size_t rn = 0;
+  size_t an = 0;
+  size_t vn = 0;
+  GDEFSTOR_Column columns[4];
+  size_t n = 0;
+  if (!u64_put(row, row_text, sizeof row_text, &rn) ||
+      !u64_put(st->ver, ver_text, sizeof ver_text, &vn) ||
+      (st->has_act && !u64_put(st->act, act_text, sizeof act_text, &an))) {
+    return GDEFCORE_ERR_LIMIT;
+  }
+  memset(columns, 0, sizeof columns);
+  columns[n].name = "pub";
+  columns[n].name_len = 3;
+  columns[n].value = (const uint8_t *)(st->pub ? "1" : "0");
+  columns[n].value_len = 1;
+  n += 1;
+  columns[n].name = "ver";
+  columns[n].name_len = 3;
+  columns[n].value = (const uint8_t *)ver_text;
+  columns[n].value_len = vn;
+  n += 1;
+  if (st->has_act) {
+    columns[n].name = "act";
+    columns[n].name_len = 3;
+    columns[n].value = (const uint8_t *)act_text;
+    columns[n].value_len = an;
+    n += 1;
+  }
+  if (st->creator_len > 0) {
+    columns[n].name = "creator";
+    columns[n].name_len = 7;
+    columns[n].value = (const uint8_t *)st->creator;
+    columns[n].value_len = st->creator_len;
+    n += 1;
+  }
+  return map_stor(gdefstor_projection_put(write, "s", 1, row_text, rn, columns,
+      n));
+}
+
+/*
+ * What the entity record becomes when an operation applies. @p seq is the
+ * revision the operation wrote, or the head revision it publishes. @p first
+ * is set when that revision is the entity's first, which is the only time a
+ * creator is recorded.
+ */
+typedef struct StateStep {
+  int kind;
+  uint64_t seq;
+  int first;
+  const char * actor;
+  size_t actor_len;
+} StateStep;
+
+/* Whether the step leaves the active revision pointing at @p step->seq. */
+static int state_next(EntState * st, const StateStep * step) {
+  int moves = 0;
+  st->ver += 1;
+  if (step->first && st->creator_len == 0 && step->actor != NULL &&
+      step->actor_len > 0 && step->actor_len <= GDEFCORE_PUBLIC_ID_LEN) {
+    memcpy(st->creator, step->actor, step->actor_len);
+    st->creator_len = step->actor_len;
+  }
+  switch (step->kind) {
+    case GDEFCORE_OP_SAVE:
+      st->pub = 1;
+      moves = 1;
+      break;
+    case GDEFCORE_OP_DRAFT:
+      /* A draft never moves the pointer. The entity's first revision is the
+       * exception, so that it has a revision for a condition to read. */
+      moves = step->first;
+      break;
+    case GDEFCORE_OP_PUBLISH:
+      st->pub = 1;
+      moves = 1;
+      break;
+    case GDEFCORE_OP_CLEAR:
+      st->pub = 0;
+      st->has_act = 0;
+      st->act = 0;
+      return 0;
+    default:
+      return 0;
+  }
+  if (moves) {
+    st->has_act = 1;
+    st->act = step->seq;
+  }
+  return moves;
+}
+
 typedef struct RowCursor {
   uint64_t next;
   int loaded;
@@ -2072,6 +2239,67 @@ static GDEFCORE_Result read_proj_doc(GDEFCORE_Catalog * cat, const char * prefix
   return GDEFCORE_OK;
 }
 
+/* A projection row's raw columns: the document text, its sequence and the
+ * actor it was written with (NULL when none). The texts are allocated. */
+static GDEFCORE_Result read_proj_cols(GDEFCORE_Catalog * cat,
+    const char * prefix, const char * type, size_t type_len, uint64_t row,
+    char ** out_lang, size_t * out_lang_len, uint64_t * out_seq,
+    char ** out_actor, size_t * out_actor_len) {
+  char type_buf[160];
+  char row_text[32];
+  size_t rn = 0;
+  int kn;
+  GDEFSTOR_Projection * proj = NULL;
+  const uint8_t * val = NULL;
+  size_t vlen = 0;
+  GDEFCORE_Result rc;
+  *out_lang = NULL;
+  *out_lang_len = 0;
+  *out_seq = 0;
+  *out_actor = NULL;
+  *out_actor_len = 0;
+  if (!u64_put(row, row_text, sizeof row_text, &rn)) {
+    return GDEFCORE_ERR_LIMIT;
+  }
+  kn = snprintf(type_buf, sizeof type_buf, "%s%.*s", prefix, (int)type_len, type);
+  if (kn <= 0 || (size_t)kn >= sizeof type_buf) {
+    return GDEFCORE_ERR_LIMIT;
+  }
+  rc = proj_get(cat, type_buf, (size_t)kn, row_text, rn, &proj);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  if (!col_find(proj, "lang", 4, &val, &vlen)) {
+    gdefstor_projection_free(proj);
+    return GDEFCORE_ERR_CORRUPT;
+  }
+  *out_lang = dup_span(cat->alloc, (const char *)val, vlen);
+  if (*out_lang == NULL) {
+    gdefstor_projection_free(proj);
+    return GDEFCORE_ERR_OOM;
+  }
+  *out_lang_len = vlen;
+  if (!col_find(proj, "seq", 3, &val, &vlen) ||
+      !u64_get((const char *)val, vlen, out_seq)) {
+    gdefstor_projection_free(proj);
+    gcu_allocator_free(cat->alloc, *out_lang);
+    *out_lang = NULL;
+    return GDEFCORE_ERR_CORRUPT;
+  }
+  if (col_find(proj, "actor", 5, &val, &vlen) && vlen > 0) {
+    *out_actor = dup_span(cat->alloc, (const char *)val, vlen);
+    if (*out_actor == NULL) {
+      gdefstor_projection_free(proj);
+      gcu_allocator_free(cat->alloc, *out_lang);
+      *out_lang = NULL;
+      return GDEFCORE_ERR_OOM;
+    }
+    *out_actor_len = vlen;
+  }
+  gdefstor_projection_free(proj);
+  return GDEFCORE_OK;
+}
+
 GDEFCORE_Result gdefcore_catalog_open(GDEFSTOR_Store * store,
     const uint8_t * tenant, size_t tenant_len, const GDEFCORE_Limits * limits,
     const GDEFCORE_Allocator * allocator, GDEFCORE_Catalog ** out_catalog) {
@@ -2188,12 +2416,27 @@ static GDEFCORE_Result write_type_row(GDEFCORE_Catalog * cat,
   rc = append_rev(write, seq, row, use_id, use_id_len, "core.entity_type", 16,
       lang, lang_len);
   if (rc == GDEFCORE_OK) {
-    rc = put_entity_proj(write, "p:", "core.entity_type", 16, row, seq, use_id,
+    rc = put_entity_proj(write, "a:", "core.entity_type", 16, row, seq, use_id,
         use_id_len, lang, lang_len, NULL, 0);
   }
   if (rc == GDEFCORE_OK) {
     rc = put_entity_proj(write, "d:", "core.entity_type", 16, row, seq, use_id,
         use_id_len, lang, lang_len, NULL, 0);
+  }
+  if (rc == GDEFCORE_OK) {
+    /* A type is configuration: published, and the revision it was just given. */
+    EntState st;
+    memset(&st, 0, sizeof st);
+    if (!is_new) {
+      rc = state_load(cat, row, &st);
+    }
+    if (rc == GDEFCORE_OK) {
+      st.pub = 1;
+      st.has_act = 1;
+      st.act = seq;
+      st.ver += 1;
+      rc = put_state(write, row, &st);
+    }
   }
   if (rc == GDEFCORE_OK) {
     rc = put_meta(write, name, name_len, kind, fields, fields_len, use_id,
@@ -2483,6 +2726,12 @@ GDEFCORE_Result gdefcore_entity_create(GDEFCORE_Catalog * catalog,
     } else {
       rc = put_u64_col(write, "w", 1, row_text, rn, "seq", 0);
     }
+  }
+  if (rc == GDEFCORE_OK) {
+    /* Not published, no active revision, version 0, no creator yet. */
+    EntState st;
+    memset(&st, 0, sizeof st);
+    rc = put_state(write, row, &st);
   }
   if (rc != GDEFCORE_OK) {
     gdefstor_write_abort(write);
@@ -2837,11 +3086,11 @@ static GDEFCORE_Result stage_values(GDEFCORE_Changeset * changeset,
     if (draft) {
       rc = read_proj_doc(cat, "d:", type_name, type_len, row, &tentative, NULL);
       if (rc == GDEFCORE_ERR_INVALID) {
-        rc = read_proj_doc(cat, "p:", type_name, type_len, row, &tentative,
+        rc = read_proj_doc(cat, "a:", type_name, type_len, row, &tentative,
             NULL);
       }
     } else {
-      rc = read_proj_doc(cat, "p:", type_name, type_len, row, &tentative, NULL);
+      rc = read_proj_doc(cat, "a:", type_name, type_len, row, &tentative, NULL);
     }
     if (rc == GDEFCORE_ERR_INVALID) {
       rc = GDEFCORE_OK;
@@ -2902,7 +3151,7 @@ static GDEFCORE_Result stage_values(GDEFCORE_Changeset * changeset,
       goto done;
     }
     op->base_seq = high;
-    rc = read_proj_doc(cat, "p:", type_name, type_len, row, &op->base, NULL);
+    rc = read_proj_doc(cat, "a:", type_name, type_len, row, &op->base, NULL);
     if (rc == GDEFCORE_ERR_INVALID) {
       rc = GDEFCORE_OK;
     }
@@ -3040,7 +3289,7 @@ GDEFCORE_Result gdefcore_entity_publish(GDEFCORE_Changeset * changeset,
     gcu_allocator_free(cat->alloc, machine);
     return GDEFCORE_ERR_OOM;
   }
-  rc = read_proj_doc(cat, "p:", type_name, type_len, row, &op->base, NULL);
+  rc = read_proj_doc(cat, "a:", type_name, type_len, row, &op->base, NULL);
   gcu_allocator_free(cat->alloc, type_name);
   gcu_allocator_free(cat->alloc, machine);
   if (rc == GDEFCORE_ERR_INVALID) {
@@ -3293,7 +3542,8 @@ GDEFCORE_Result gdefcore_entity_values(GDEFCORE_Catalog * catalog,
   GDEFCORE_Result rc;
   if (catalog == NULL || out_texts == NULL || out_lens == NULL ||
       out_count == NULL ||
-      (view != GDEFCORE_VIEW_PUBLISHED && view != GDEFCORE_VIEW_DRAFT)) {
+      (view != GDEFCORE_VIEW_PUBLISHED && view != GDEFCORE_VIEW_DRAFT &&
+          view != GDEFCORE_VIEW_ACTIVE)) {
     return GDEFCORE_ERR_INVALID;
   }
   if (gdefcore_id_canonical(id, id_len, canon) != GDEFCORE_OK) {
@@ -3319,7 +3569,21 @@ GDEFCORE_Result gdefcore_entity_values(GDEFCORE_Catalog * catalog,
   if (rc != GDEFCORE_OK) {
     return rc;
   }
-  rc = read_proj_doc(catalog, view == GDEFCORE_VIEW_DRAFT ? "d:" : "p:",
+  {
+    EntState st;
+    rc = state_load(catalog, row, &st);
+    if (rc != GDEFCORE_OK) {
+      gcu_allocator_free(catalog->alloc, type_name);
+      return rc;
+    }
+    /* A reader's view is the active revision, and only while the flag is
+     * set. The unpublished entity answers as one that is not there. */
+    if (view == GDEFCORE_VIEW_PUBLISHED && !st.pub) {
+      gcu_allocator_free(catalog->alloc, type_name);
+      return GDEFCORE_ERR_INVALID;
+    }
+  }
+  rc = read_proj_doc(catalog, view == GDEFCORE_VIEW_DRAFT ? "d:" : "a:",
       type_name, type_len, row, &doc, NULL);
   gcu_allocator_free(catalog->alloc, type_name);
   if (rc != GDEFCORE_OK) {
@@ -3902,59 +4166,99 @@ static GDEFCORE_Result apply_op(GDEFCORE_Catalog * cat, GDEFSTOR_Write * write,
     gcu_allocator_free(cat->alloc, existing_id);
     return rc;
   }
-  if (op->kind == GDEFCORE_OP_PUBLISH) {
-    char * lang = NULL;
-    size_t lang_len = 0;
+  {
+    EntState st;
+    StateStep step;
+    int moves;
+    rc = state_load(cat, op->row, &st);
+    if (rc != GDEFCORE_OK) {
+      return rc;
+    }
+    memset(&step, 0, sizeof step);
+    step.kind = op->kind;
+    step.actor = actor;
+    step.actor_len = actor_len;
+    if (op->kind == GDEFCORE_OP_PUBLISH) {
+      /* Publishing copies the head as the store has it, not as a changeset
+       * (which may have been parsed from a patch) says it is. The revision
+       * keeps its own creator; the publisher is not recorded on it. */
+      char * head_lang = NULL;
+      size_t head_lang_len = 0;
+      uint64_t head_seq = 0;
+      char * head_actor = NULL;
+      size_t head_actor_len = 0;
+      rc = read_proj_cols(cat, "d:", op->type_name.p, op->type_name.n, op->row,
+          &head_lang, &head_lang_len, &head_seq, &head_actor, &head_actor_len);
+      if (rc == GDEFCORE_OK && head_seq != op->base_seq) {
+        rc = GDEFCORE_ERR_CORRUPT;
+      }
+      step.seq = head_seq;
+      if (rc == GDEFCORE_OK) {
+        moves = state_next(&st, &step);
+        rc = put_entity_proj(write, "a:", op->type_name.p, op->type_name.n,
+            op->row, head_seq, op->id.p, op->id.n, head_lang, head_lang_len,
+            head_actor, head_actor_len);
+        (void)moves;
+      }
+      gcu_allocator_free(cat->alloc, head_lang);
+      gcu_allocator_free(cat->alloc, head_actor);
+      if (rc == GDEFCORE_OK) {
+        rc = put_state(write, op->row, &st);
+      }
+      return rc;
+    }
+    if (op->kind == GDEFCORE_OP_CLEAR) {
+      (void)state_next(&st, &step);
+      rc = delete_entity_proj(write, "a:", op->type_name.p, op->type_name.n,
+          op->row);
+      if (rc == GDEFCORE_OK) {
+        rc = delete_entity_proj(write, "d:", op->type_name.p, op->type_name.n,
+            op->row);
+      }
+      if (rc == GDEFCORE_OK) {
+        rc = put_state(write, op->row, &st);
+      }
+      return rc;
+    }
+    if (op->base_seq == UINT64_MAX) {
+      return GDEFCORE_ERR_LIMIT;
+    }
+    seq = op->base_seq + 1;
+    step.seq = seq;
+    step.first = seq == 1;
+    moves = state_next(&st, &step);
     rc = doc_json(cat->alloc, &op->staged, &lang, &lang_len);
+    if (rc != GDEFCORE_OK) {
+      return rc;
+    }
+    rc = append_rev(write, seq, op->row, op->id.p, op->id.n, op->type_name.p,
+        op->type_name.n, lang, lang_len);
     if (rc == GDEFCORE_OK) {
-      rc = put_entity_proj(write, "p:", op->type_name.p, op->type_name.n,
-          op->row, op->base_seq, op->id.p, op->id.n, lang, lang_len, actor,
-          actor_len);
+      rc = note_actor(cat, write, log, op->row, seq, actor, actor_len);
+    }
+    if (rc == GDEFCORE_OK && moves) {
+      rc = put_entity_proj(write, "a:", op->type_name.p, op->type_name.n,
+          op->row, seq, op->id.p, op->id.n, lang, lang_len, actor, actor_len);
+    }
+    if (rc == GDEFCORE_OK) {
+      rc = put_entity_proj(write, "d:", op->type_name.p, op->type_name.n,
+          op->row, seq, op->id.p, op->id.n, lang, lang_len, actor, actor_len);
+    }
+    if (rc == GDEFCORE_OK) {
+      char row_text[32];
+      size_t rn = 0;
+      if (!u64_put(op->row, row_text, sizeof row_text, &rn)) {
+        rc = GDEFCORE_ERR_LIMIT;
+      } else {
+        rc = put_u64_col(write, "w", 1, row_text, rn, "seq", seq);
+      }
+    }
+    if (rc == GDEFCORE_OK) {
+      rc = put_state(write, op->row, &st);
     }
     gcu_allocator_free(cat->alloc, lang);
     return rc;
   }
-  if (op->kind == GDEFCORE_OP_CLEAR) {
-    rc = delete_entity_proj(write, "p:", op->type_name.p, op->type_name.n,
-        op->row);
-    if (rc == GDEFCORE_OK) {
-      rc = delete_entity_proj(write, "d:", op->type_name.p, op->type_name.n,
-          op->row);
-    }
-    return rc;
-  }
-  if (op->base_seq == UINT64_MAX) {
-    return GDEFCORE_ERR_LIMIT;
-  }
-  seq = op->base_seq + 1;
-  rc = doc_json(cat->alloc, &op->staged, &lang, &lang_len);
-  if (rc != GDEFCORE_OK) {
-    return rc;
-  }
-  rc = append_rev(write, seq, op->row, op->id.p, op->id.n, op->type_name.p,
-      op->type_name.n, lang, lang_len);
-  if (rc == GDEFCORE_OK) {
-    rc = note_actor(cat, write, log, op->row, seq, actor, actor_len);
-  }
-  if (rc == GDEFCORE_OK && op->kind != GDEFCORE_OP_DRAFT) {
-    rc = put_entity_proj(write, "p:", op->type_name.p, op->type_name.n, op->row,
-        seq, op->id.p, op->id.n, lang, lang_len, actor, actor_len);
-  }
-  if (rc == GDEFCORE_OK) {
-    rc = put_entity_proj(write, "d:", op->type_name.p, op->type_name.n, op->row,
-        seq, op->id.p, op->id.n, lang, lang_len, actor, actor_len);
-  }
-  if (rc == GDEFCORE_OK) {
-    char row_text[32];
-    size_t rn = 0;
-    if (!u64_put(op->row, row_text, sizeof row_text, &rn)) {
-      rc = GDEFCORE_ERR_LIMIT;
-    } else {
-      rc = put_u64_col(write, "w", 1, row_text, rn, "seq", seq);
-    }
-  }
-  gcu_allocator_free(cat->alloc, lang);
-  return rc;
 }
 
 const uint8_t * gdefcore_catalog_tenant(const GDEFCORE_Catalog * catalog,
@@ -4552,7 +4856,7 @@ GDEFCORE_Result gdefcore_changeset_revert(GDEFCORE_Catalog * catalog,
   {
     GDEFCORE_Doc published;
     memset(&published, 0, sizeof published);
-    rc = read_proj_doc(catalog, "p:", type_name, type_len, row, &published, &seq);
+    rc = read_proj_doc(catalog, "a:", type_name, type_len, row, &published, &seq);
     if (rc != GDEFCORE_OK) {
       gcu_allocator_free(catalog->alloc, type_name);
       gcu_allocator_free(catalog->alloc, machine);
@@ -5447,7 +5751,7 @@ GDEFCORE_Result gdefcore_changeset_parse(GDEFCORE_Catalog * catalog,
         return rc;
       }
       memset(&published, 0, sizeof published);
-      rc = read_proj_doc(catalog, "p:", type_name, type_len, row, &published,
+      rc = read_proj_doc(catalog, "a:", type_name, type_len, row, &published,
           &seq);
       if (rc == GDEFCORE_ERR_INVALID) {
         rc = GDEFCORE_OK;
@@ -5640,19 +5944,37 @@ GDEFCORE_Result gdefcore_entity_type(GDEFCORE_Catalog * catalog,
   return GDEFCORE_OK;
 }
 
+/* The row, type and record of an entity, for the accessors below. */
+static GDEFCORE_Result entity_record(GDEFCORE_Catalog * catalog, const char * id,
+    size_t id_len, uint64_t * out_row, char ** out_type, size_t * out_type_len,
+    EntState * out_state) {
+  char canon[GDEFCORE_PUBLIC_ID_LEN + 1];
+  GDEFCORE_Result rc;
+  if (gdefcore_id_canonical(id, id_len, canon) != GDEFCORE_OK) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  rc = lookup_id(catalog, canon, GDEFCORE_PUBLIC_ID_LEN, out_row, out_type,
+      out_type_len, NULL, NULL);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  rc = state_load(catalog, *out_row, out_state);
+  if (rc != GDEFCORE_OK && out_type != NULL) {
+    gcu_allocator_free(catalog->alloc, *out_type);
+    *out_type = NULL;
+  }
+  return rc;
+}
+
 GDEFCORE_Result gdefcore_entity_actor(GDEFCORE_Catalog * catalog,
     const char * id, size_t id_len, char ** out_actor, size_t * out_len) {
-  char canon[GDEFCORE_PUBLIC_ID_LEN + 1];
-  char type_buf[160];
-  char row_text[32];
-  size_t rn = 0;
   uint64_t row = 0;
   char * type_name = NULL;
   size_t type_len = 0;
-  int kn;
-  GDEFSTOR_Projection * proj = NULL;
-  const uint8_t * val = NULL;
-  size_t vlen = 0;
+  EntState st;
+  char * lang = NULL;
+  size_t lang_len = 0;
+  uint64_t seq = 0;
   GDEFCORE_Result rc;
   if (catalog == NULL || out_actor == NULL) {
     return GDEFCORE_ERR_INVALID;
@@ -5661,86 +5983,98 @@ GDEFCORE_Result gdefcore_entity_actor(GDEFCORE_Catalog * catalog,
   if (out_len != NULL) {
     *out_len = 0;
   }
-  if (gdefcore_id_canonical(id, id_len, canon) != GDEFCORE_OK) {
-    return GDEFCORE_ERR_INVALID;
-  }
-  rc = lookup_id(catalog, canon, GDEFCORE_PUBLIC_ID_LEN, &row, &type_name,
-      &type_len, NULL, NULL);
+  rc = entity_record(catalog, id, id_len, &row, &type_name, &type_len, &st);
   if (rc != GDEFCORE_OK) {
     return rc;
   }
-  if (!u64_put(row, row_text, sizeof row_text, &rn)) {
+  if (!st.has_act) {
     gcu_allocator_free(catalog->alloc, type_name);
-    return GDEFCORE_ERR_LIMIT;
+    return GDEFCORE_OK;
   }
-  kn = snprintf(type_buf, sizeof type_buf, "p:%.*s", (int)type_len, type_name);
+  rc = read_proj_cols(catalog, "a:", type_name, type_len, row, &lang,
+      &lang_len, &seq, out_actor, out_len == NULL ? &lang_len : out_len);
   gcu_allocator_free(catalog->alloc, type_name);
-  if (kn <= 0 || (size_t)kn >= sizeof type_buf) {
-    return GDEFCORE_ERR_LIMIT;
-  }
-  rc = proj_get(catalog, type_buf, (size_t)kn, row_text, rn, &proj);
+  gcu_allocator_free(catalog->alloc, lang);
   if (rc == GDEFCORE_ERR_INVALID) {
     return GDEFCORE_OK;
   }
+  return rc;
+}
+
+GDEFCORE_Result gdefcore_entity_creator(GDEFCORE_Catalog * catalog,
+    const char * id, size_t id_len, char ** out_creator, size_t * out_len) {
+  uint64_t row = 0;
+  EntState st;
+  GDEFCORE_Result rc;
+  if (catalog == NULL || out_creator == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  *out_creator = NULL;
+  if (out_len != NULL) {
+    *out_len = 0;
+  }
+  rc = entity_record(catalog, id, id_len, &row, NULL, NULL, &st);
   if (rc != GDEFCORE_OK) {
     return rc;
   }
-  if (col_find(proj, "actor", 5, &val, &vlen) && vlen > 0) {
-    *out_actor = dup_span(catalog->alloc, (const char *)val, vlen);
-    if (*out_actor == NULL) {
-      gdefstor_projection_free(proj);
+  if (st.creator_len > 0) {
+    *out_creator = dup_span(catalog->alloc, st.creator, st.creator_len);
+    if (*out_creator == NULL) {
       return GDEFCORE_ERR_OOM;
     }
     if (out_len != NULL) {
-      *out_len = vlen;
+      *out_len = st.creator_len;
     }
   }
-  gdefstor_projection_free(proj);
   return GDEFCORE_OK;
 }
 
 GDEFCORE_Result gdefcore_entity_state(GDEFCORE_Catalog * catalog,
     const char * id, size_t id_len, int * out_state) {
-  char canon[GDEFCORE_PUBLIC_ID_LEN + 1];
-  char type_buf[160];
-  char row_text[32];
-  size_t rn = 0;
   uint64_t row = 0;
-  char * type_name = NULL;
-  size_t type_len = 0;
-  int kn;
-  GDEFSTOR_Projection * proj = NULL;
+  EntState st;
   GDEFCORE_Result rc;
   if (catalog == NULL || out_state == NULL) {
     return GDEFCORE_ERR_INVALID;
   }
-  if (gdefcore_id_canonical(id, id_len, canon) != GDEFCORE_OK) {
+  rc = entity_record(catalog, id, id_len, &row, NULL, NULL, &st);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  *out_state = st.pub ? GDEFCORE_STATE_PUBLISHED : GDEFCORE_STATE_DRAFT;
+  return GDEFCORE_OK;
+}
+
+GDEFCORE_Result gdefcore_entity_version(GDEFCORE_Catalog * catalog,
+    const char * id, size_t id_len, uint64_t * out_version) {
+  uint64_t row = 0;
+  EntState st;
+  GDEFCORE_Result rc;
+  if (catalog == NULL || out_version == NULL) {
     return GDEFCORE_ERR_INVALID;
   }
-  rc = lookup_id(catalog, canon, GDEFCORE_PUBLIC_ID_LEN, &row, &type_name,
-      &type_len, NULL, NULL);
+  rc = entity_record(catalog, id, id_len, &row, NULL, NULL, &st);
   if (rc != GDEFCORE_OK) {
     return rc;
   }
-  if (!u64_put(row, row_text, sizeof row_text, &rn)) {
-    gcu_allocator_free(catalog->alloc, type_name);
-    return GDEFCORE_ERR_LIMIT;
+  *out_version = st.ver;
+  return GDEFCORE_OK;
+}
+
+GDEFCORE_Result gdefcore_entity_active_revision(GDEFCORE_Catalog * catalog,
+    const char * id, size_t id_len, int * out_has, uint64_t * out_seq) {
+  uint64_t row = 0;
+  EntState st;
+  GDEFCORE_Result rc;
+  if (catalog == NULL || out_has == NULL || out_seq == NULL) {
+    return GDEFCORE_ERR_INVALID;
   }
-  kn = snprintf(type_buf, sizeof type_buf, "p:%.*s", (int)type_len, type_name);
-  gcu_allocator_free(catalog->alloc, type_name);
-  if (kn <= 0 || (size_t)kn >= sizeof type_buf) {
-    return GDEFCORE_ERR_LIMIT;
-  }
-  rc = proj_get(catalog, type_buf, (size_t)kn, row_text, rn, &proj);
-  if (rc == GDEFCORE_ERR_INVALID) {
-    *out_state = GDEFCORE_STATE_DRAFT;
-    return GDEFCORE_OK;
-  }
+  rc = entity_record(catalog, id, id_len, &row, NULL, NULL, &st);
   if (rc != GDEFCORE_OK) {
     return rc;
   }
-  gdefstor_projection_free(proj);
-  *out_state = GDEFCORE_STATE_PUBLISHED;
+  *out_has = st.has_act;
+  *out_seq = st.has_act ? st.act : 0;
   return GDEFCORE_OK;
 }
 

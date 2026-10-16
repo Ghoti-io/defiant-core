@@ -1218,7 +1218,7 @@ TEST_F(Entity, ActorOnProjection) {
   gdefcore_changeset_destroy(changeset);
   snprintf(row_text, sizeof row_text, "%llu", (unsigned long long)row);
   ASSERT_EQ(GDEFSTOR_OK,
-      gdefstor_projection_get(store_, kTenant, 1, "p:site.note", 11, row_text,
+      gdefstor_projection_get(store_, kTenant, 1, "a:site.note", 11, row_text,
           strlen(row_text), &projection));
   for (i = 0; i < gdefstor_projection_column_count(projection); i++) {
     GDEFSTOR_Column column;

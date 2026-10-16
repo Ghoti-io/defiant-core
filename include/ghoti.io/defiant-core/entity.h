@@ -67,10 +67,14 @@ extern "C" {
 /** A changeset that defines a type or touches configuration. */
 #define GDEFCORE_RISK_HIGH 2
 
-/** Read the published projection. */
+/** Read the active revision, but only while the entity is published. This is
+ * what a reader sees; an unpublished entity has no such view. */
 #define GDEFCORE_VIEW_PUBLISHED 1
-/** Read the draft projection. */
+/** Read the head revision: the latest, which may be a draft not yet active. */
 #define GDEFCORE_VIEW_DRAFT 2
+/** Read the active revision whether or not the entity is published. This is
+ * the revision the entity currently is, and what a condition reads. */
+#define GDEFCORE_VIEW_ACTIVE 3
 
 /** Caps for the changeset parser and for field values. */
 typedef struct GDEFCORE_Limits {
@@ -315,6 +319,12 @@ GDEFCORE_API GDEFCORE_Result gdefcore_changeset_define(
 /**
  * @brief Stage field values. A rejected save leaves the changeset unchanged.
  *
+ * Apply appends a revision, makes it the active revision and sets the
+ * published flag: this is the system's "save and publish", used for
+ * configuration and by every caller that has no draft step. A path that
+ * separates the acts uses gdefcore_entity_save_draft() and
+ * gdefcore_entity_publish().
+ *
  * @p lang is required: non-empty, at most 35 bytes, ASCII letters, digits
  * and hyphens. An undeclared field or a missing required field stages
  * nothing. A value for a personal field is ::GDEFCORE_ERR_INVALID and stages
@@ -341,10 +351,12 @@ GDEFCORE_API GDEFCORE_Result gdefcore_changeset_accept_sealed(
     GDEFCORE_Changeset * changeset);
 
 /**
- * @brief Stage field values onto the draft projection only.
+ * @brief Stage field values as a new revision that is not made active.
  *
- * Apply appends a revision and updates the draft. The published projection
- * is left as it was. The arguments are the same as gdefcore_entity_save().
+ * Apply appends a revision, which becomes the head. The active revision and
+ * the published flag are left as they were, except that an entity's first
+ * revision becomes its active revision (unpublished), so that the entity has
+ * a creator and content for a condition to read. The arguments are the same as gdefcore_entity_save().
  */
 GDEFCORE_API GDEFCORE_Result gdefcore_entity_save_draft(
     GDEFCORE_Changeset * changeset, const char * id, size_t id_len,
@@ -352,12 +364,37 @@ GDEFCORE_API GDEFCORE_Result gdefcore_entity_save_draft(
     size_t value_count);
 
 /**
- * @brief Stage a copy of the draft projection onto the published one.
+ * @brief Stage publishing the head revision: set the published flag and make
+ * the head revision active.
  *
- * Apply does not append a revision. An entity with no draft writes nothing.
+ * Apply does not append a revision, and the revision keeps the creator it was
+ * written with. An entity with no head revision writes nothing.
  */
 GDEFCORE_API GDEFCORE_Result gdefcore_entity_publish(
     GDEFCORE_Changeset * changeset, const char * id, size_t id_len);
+
+/**
+ * @brief The entity's version: a counter that every write touching the
+ * entity bumps, including a publish, an unpublish, an activate and a clear,
+ * none of which moves the latest revision sequence.
+ *
+ * Starts at 0 at gdefcore_entity_create(). A caller that remembers a fact
+ * about an entity keys it on this, not on gdefcore_entity_revision(). A row
+ * with no entity record is ::GDEFCORE_ERR_CORRUPT.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_entity_version(
+    GDEFCORE_Catalog * catalog, const char * id, size_t id_len,
+    uint64_t * out_version);
+
+/**
+ * @brief The active revision's sequence.
+ *
+ * @p out_has is 0 and @p out_seq is 0 when the entity has no active revision
+ * (nothing saved yet, or cleared). A missing id is ::GDEFCORE_ERR_INVALID.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_entity_active_revision(
+    GDEFCORE_Catalog * catalog, const char * id, size_t id_len, int * out_has,
+    uint64_t * out_seq);
 
 /**
  * @brief The latest revision sequence, or 0 when the entity has none.
@@ -619,26 +656,47 @@ GDEFCORE_API GDEFCORE_Result gdefcore_entity_type(GDEFCORE_Catalog * catalog,
     const char * id, size_t id_len, char ** out_type, size_t * out_len);
 
 /**
- * @brief The actor stored on the published revision, or NULL when there is none.
+ * @brief The creator of the active revision (the revision's own creator), or
+ * NULL when there is none.
  *
- * An entity with no actor is not anyone's own. A missing id is
- * ::GDEFCORE_ERR_INVALID. Free @p out_actor with gdefcore_text_free().
+ * This is the principal that wrote the revision the entity currently is, set
+ * when the revision was written and never taken from the publisher. It is not
+ * the entity's creator (see gdefcore_entity_creator()): an editor who saves
+ * someone's post is the creator of the revision they wrote, and of nothing
+ * else. It is read whether or not the entity is published. A missing id is
+ * ::GDEFCORE_ERR_INVALID. A row with no entity record is
+ * ::GDEFCORE_ERR_CORRUPT. Free @p out_actor with gdefcore_text_free().
  */
 GDEFCORE_API GDEFCORE_Result gdefcore_entity_actor(GDEFCORE_Catalog * catalog,
     const char * id, size_t id_len, char ** out_actor, size_t * out_len);
 
-/** The entity has no published projection (a draft, or nothing saved yet). */
+/**
+ * @brief The entity's creator, or NULL when there is none.
+ *
+ * The principal of the entity's first revision, recorded on the entity
+ * record at that revision and never changed: not by a later revision, a
+ * revert, an activate, a publish or a clear. An entity whose first revision
+ * had no actor has no creator, ever. `own` means this. A missing id is
+ * ::GDEFCORE_ERR_INVALID. A row with no entity record is
+ * ::GDEFCORE_ERR_CORRUPT. Free @p out_creator with gdefcore_text_free().
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_entity_creator(GDEFCORE_Catalog * catalog,
+    const char * id, size_t id_len, char ** out_creator, size_t * out_len);
+
+/** The entity is not published: readers do not see it. */
 #define GDEFCORE_STATE_DRAFT 1
-/** The entity has a published projection. */
+/** The entity is published: readers see its active revision. */
 #define GDEFCORE_STATE_PUBLISHED 2
 
 /**
- * @brief The projection state of an entity.
+ * @brief Whether the entity is published.
  *
- * ::GDEFCORE_STATE_PUBLISHED when the entity has a published projection,
- * whether or not a newer draft sits beside it; otherwise
- * ::GDEFCORE_STATE_DRAFT. A missing id is ::GDEFCORE_ERR_INVALID and
- * @p out_state is not written. Unfiltered, like gdefcore_entity_values().
+ * ::GDEFCORE_STATE_PUBLISHED when the entity's published flag is set, whether
+ * or not a newer draft sits beside its active revision; otherwise
+ * ::GDEFCORE_STATE_DRAFT, which includes an entity that was unpublished or
+ * cleared. A missing id is ::GDEFCORE_ERR_INVALID and @p out_state is not
+ * written. A row with no entity record is ::GDEFCORE_ERR_CORRUPT. Unfiltered,
+ * like gdefcore_entity_values().
  */
 GDEFCORE_API GDEFCORE_Result gdefcore_entity_state(GDEFCORE_Catalog * catalog,
     const char * id, size_t id_len, int * out_state);

@@ -69,13 +69,15 @@ refused at submit rather than sealed a second time.
 
 ## Draft and publish
 
-`gdefcore_form_submit` appends a revision and updates the draft
-projection only. The published projection is left as it was. A second
-submit whose base revision is no longer current is a conflict and
-writes nothing.
+`gdefcore_form_submit` appends a revision. It becomes the head, and the
+active revision and the published flag are left as they were (an entity's first
+revision is the exception: it becomes active, unpublished). A second submit
+whose base revision is no longer current is a conflict and writes nothing.
 
-`gdefcore_form_publish` copies that draft onto the published
-projection. `gdefcore_entity_save` still writes both projections.
+`gdefcore_form_publish` sets the published flag and makes the head revision
+active; the revision keeps the creator it was written with, so publishing does
+not make the publisher the author. `gdefcore_entity_save` appends a revision,
+makes it active and sets the flag.
 
 ## Aliases
 

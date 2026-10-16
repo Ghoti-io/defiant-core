@@ -67,9 +67,10 @@ of type `site.post` selects the post display. Anything else, including
 a path that does not resolve, writes no bytes. A request that may not
 read the entity gets that same error.
 
-Render reads the published projection. A view lists through the access
-filter and does not read revision documents. A draft has no published
-row, so it is absent.
+Render reads the active revision of a published entity. A view lists through
+the access filter and does not read revision documents. An unpublished entity
+has no reader's view, so it is absent; so is a newer draft beside the active
+revision, which readers never see.
 
 ## Summary
 

@@ -197,6 +197,10 @@
 #define gdefcore_changeset_stage_module                                        \
   GHOTIIO_DEFCORE(gdefcore_changeset_stage_module)
 #define gdefcore_entity_actor GHOTIIO_DEFCORE(gdefcore_entity_actor)
+#define gdefcore_entity_creator GHOTIIO_DEFCORE(gdefcore_entity_creator)
+#define gdefcore_entity_version GHOTIIO_DEFCORE(gdefcore_entity_version)
+#define gdefcore_entity_active_revision                                        \
+  GHOTIIO_DEFCORE(gdefcore_entity_active_revision)
 #define gdefcore_entity_state GHOTIIO_DEFCORE(gdefcore_entity_state)
 #define gdefcore_entity_create GHOTIIO_DEFCORE(gdefcore_entity_create)
 #define gdefcore_entity_ids GHOTIIO_DEFCORE(gdefcore_entity_ids)
