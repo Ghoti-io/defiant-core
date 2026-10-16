@@ -284,6 +284,16 @@ inline void EchoRoute(GDEFCORE_Request * request, const char * machine,
   gdefcore_request_set_resolution(request, id->data(), id->size());
 }
 
+/** A guarded route's handler: it owns the request and resolves to the id its
+ * `:id` segment holds. Reached only where the access check says yes. */
+inline void GuardRoute(const GDEFCORE_Route_Call * call) {
+  const char * value = NULL;
+  size_t n = 0;
+  if (gdefcore_route_call_capture(call, "id", 2, &value, &n)) {
+    gdefcore_request_set_resolution(call->request, value, n);
+  }
+}
+
 /** A route handler that sets nothing and falls through. */
 inline void DeclineRoute(GDEFCORE_Request * request, const char * machine,
     size_t machine_len, void * data) {
@@ -358,6 +368,27 @@ struct World {
     ASSERT_EQ(GDEFCORE_OK,
         gdefcore_route_add(routes, "decline", 7, "/dup-hidden", 11, 0, 0,
             DeclineRoute, NULL, &err, &err_len));
+    /* A route that is there only for a principal who holds `read` for the
+     * entity its :id names: the ready-made access check decides. */
+    {
+      GDEFCORE_Route_Spec spec;
+      memset(&spec, 0, sizeof spec);
+      spec.size = sizeof spec;
+      spec.machine = "guard";
+      spec.machine_len = 5;
+      spec.path = "/guard/:id";
+      spec.path_len = 10;
+      spec.call_fn = GuardRoute;
+      spec.permission = "read";
+      spec.permission_len = 4;
+      spec.entity_capture = "id";
+      spec.entity_capture_len = 2;
+      ASSERT_EQ(GDEFCORE_OK,
+          gdefcore_route_add_spec(routes, &spec, &err, &err_len));
+      ASSERT_EQ(GDEFCORE_OK,
+          gdefcore_routes_set_check(routes, gdefcore_access_route_check,
+              site.catalog));
+    }
   }
 
   GDEFCORE_Request * Req(const std::string & who = std::string()) {
@@ -707,6 +738,20 @@ inline std::string CondLine(World & w, const std::string & who,
          Diag(w, fresh.req);
 }
 
+/** gdefcore_access_can for one permission of one type, on an id (or none). */
+inline std::string CanLine(World & w, const std::string & who,
+    const std::string & id, const char * permission, const char * type) {
+  Fresh fresh(w, who);
+  int allowed = 99;
+  GDEFCORE_Result rc;
+  Note("gdefcore_access_can");
+  rc = gdefcore_access_can(w.site.catalog, fresh.req, permission,
+      strlen(permission), type, strlen(type), id.empty() ? NULL : id.c_str(),
+      &allowed);
+  return "rc=" + Rc(rc) + " allowed=" + std::to_string(allowed) +
+         Diag(w, fresh.req);
+}
+
 /** What to ask. */
 struct Ask {
   bool posts = false;                 ///< Ask the site.post surfaces too.
@@ -733,6 +778,10 @@ inline Obs Observe(World & w, const std::string & who, const Ask & ask) {
     o.kv[pre + "resolve.echo"] =
         ResolveLine(w, who, true, "/echo/" + name, true);
     o.kv[pre + "cond.false"] = CondLine(w, who, target, false);
+    o.kv[pre + "can.read"] = CanLine(w, who, target, "read", "site.note");
+    o.kv[pre + "can.update"] = CanLine(w, who, target, "update", "site.note");
+    o.kv[pre + "resolve.guard"] =
+        ResolveLine(w, who, true, "/guard/" + target, true);
     if (ask.cond_true) {
       o.kv[pre + "cond.true"] = CondLine(w, who, target, true);
     }
@@ -766,6 +815,9 @@ inline Obs Observe(World & w, const std::string & who, const Ask & ask) {
         ListLine(w, who, "site.note", "secret", w.secrets[0], "title");
   }
   o.kv["g:render-key"] = KeyLine(w, who);
+  o.kv["g:can-type.read"] = CanLine(w, who, std::string(), "read", "site.note");
+  o.kv["g:can-type.undeclared"] =
+      CanLine(w, who, std::string(), "frobnicate", "site.note");
   {
     /* The permission to edit templates is held by nobody here, and a preview
      * of a body is the answer a missing kind gets. */

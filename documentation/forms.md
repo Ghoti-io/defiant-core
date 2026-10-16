@@ -155,12 +155,27 @@ the same fields and these:
   weight order, then machine name, each with title, kind, default flag, path
   pattern, permission and weight. Free the array with `gdefcore_routes_free()`.
 
-**The access layer gap.** `access.h` offers no call that asks "does this
-principal hold permission P for entity E": a permission is evaluated only
-inside the filtered reads, whose answer is a field value or "not visible".
-So the route table does not check a permission itself; the caller supplies the
-check, which receives the captured entity id and may ask the filtered read
-(`gdefcore_access_read()`) whether the principal can see it. A public
-`gdefcore_access_can()` would let the check be one line; it is a widening of
-the access layer and is not made here.
+**Asking the access layer.** `gdefcore_access_can()` (access.md) is the one
+decision, and the route table uses it through a ready-made check:
+
+- `gdefcore_routes_set_check(routes, gdefcore_access_route_check, catalog)`
+  installs it. A route whose permission has no `entity_capture` asks the type
+  level question (`gdefcore_access_permits()`), as a check always could.
+- A route spec may name an `entity_capture`, one of the `:name` captures of
+  its pattern (an unknown name is refused when the route is added). The check
+  then reads that capture, takes it as an entity id, finds the entity's type
+  and asks `gdefcore_access_can()` whether the principal holds the permission
+  for that entity. A segment that is not an id, an entity that is not there,
+  one on which no grant holds, and a permission nobody declared are all one
+  answer: no, and so the route does not match and the request is answered as
+  for a path with no such route. A spec built before the field existed (its
+  size is `GDEFCORE_ROUTE_SPEC_SIZE_V1`) is accepted and names none. A module
+  manifest's route has the field too.
+- `gdefcore_routes_tabs_visible(routes, parent, len, page, &tabs, &n)` is
+  `gdefcore_routes_tabs()` without the tabs the check refuses. `page` is the
+  call of the page the tabs are drawn on (the handler's own call, which has
+  the captures), and each tab is asked exactly what dispatch would ask for it,
+  its permission and its entity capture, with the page's captures: so a menu
+  cannot show a tab dispatch would answer as not found, nor hide one it would
+  serve. Pass the same capture names in the page's pattern and the tabs'.
 

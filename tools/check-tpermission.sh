@@ -37,14 +37,13 @@ plant_control testTpermission 'TPerm.*'
 # permission of the template's kind.
 plant permission-not-checked src/template/template.c testTpermission \
   'TPerm.WriteNeedsThePermission TPerm.NewTemplateNeedsThePermissionOfItsKind' \
-  '    allowed = kind_len > 0 &&
-              gdefcore_template_may_edit(catalog, request, kind, kind_len);' \
+  '    allowed = kind_len > 0 && template_can(catalog, request, kind, kind_len, canon);' \
   '    allowed = kind_len > 0;'
 
 # Plant 2: moving a template needs the new kind's permission and not the old.
 plant old-kind-not-checked src/template/template.c testTpermission \
   'TPerm.MovingNeedsBothKinds' \
-  '      allowed = gdefcore_template_may_edit(catalog, request, old_kind, old_len);' \
+  '      allowed = template_can(catalog, request, old_kind, old_len, canon);' \
   '      allowed = 1;'
 
 # Plant 3: apply does not call the check.

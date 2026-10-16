@@ -2043,6 +2043,25 @@ static GDEFCORE_Result refuse_edit(GDEFCORE_Changeset * changeset,
   return rc;
 }
 
+/* May the request edit this template as a template of @p kind? Asked of
+ * gdefcore_access_can(), about this template entity, so the editor's answer is
+ * the route's and the tab's. A failure is a no. */
+static int template_can(GDEFCORE_Catalog * catalog, GDEFCORE_Request * request,
+    const char * kind, size_t kind_len, const char * template_id) {
+  char name[300];
+  size_t name_len = gdefcore_template_edit_name(kind, kind_len, name, sizeof name);
+  int allowed = 0;
+  if (name_len == 0) {
+    return 0;
+  }
+  if (gdefcore_access_can(catalog, request, name, name_len, GDEFCORE_TEMPLATE_TYPE,
+          sizeof GDEFCORE_TEMPLATE_TYPE - 1, template_id, &allowed) !=
+      GDEFCORE_OK) {
+    return 0;
+  }
+  return allowed;
+}
+
 GDEFCORE_Result gdefcore_template_authorize(GDEFCORE_Changeset * changeset,
     GDEFCORE_Request * request) {
   GDEFCORE_Catalog * catalog;
@@ -2133,11 +2152,11 @@ GDEFCORE_Result gdefcore_template_authorize(GDEFCORE_Changeset * changeset,
         return refuse_edit(changeset, GDEFCORE_ERR_OOM);
       }
     }
-    /* Permission first: the kind it is, and the kind it was. */
-    allowed = kind_len > 0 &&
-              gdefcore_template_may_edit(catalog, request, kind, kind_len);
+    /* Permission first: the kind it is, and the kind it was. The one
+     * decision every caller asks, about this template. */
+    allowed = kind_len > 0 && template_can(catalog, request, kind, kind_len, canon);
     if (allowed && old_len > 0 && !span_eq(kind, kind_len, old_kind, old_len)) {
-      allowed = gdefcore_template_may_edit(catalog, request, old_kind, old_len);
+      allowed = template_can(catalog, request, old_kind, old_len, canon);
     }
     if (allowed && host != NULL) {
       GDEFCORE_Template_Write_Hook args;

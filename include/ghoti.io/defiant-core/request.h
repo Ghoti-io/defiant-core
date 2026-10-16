@@ -295,6 +295,88 @@ GDEFCORE_API GDEFCORE_Result gdefcore_request_set_time(
  */
 GDEFCORE_API int64_t gdefcore_request_time(GDEFCORE_Request * request);
 
+/** Most decisions the request's memo holds before it starts over. */
+#define GDEFCORE_REQUEST_MEMO_MAX 256
+/** Most (entity, revision) pairs a request records as read. */
+#define GDEFCORE_REQUEST_READS_MAX 256
+
+/**
+ * @brief The answer remembered under @p key, if there is one.
+ *
+ * The request carries a small memo of decisions (gdefcore_access_can() keeps
+ * its answers here), so that a question asked twice in one request is
+ * answered once. The memo is the request's and nobody else's: no ambient
+ * state. It holds at most ::GDEFCORE_REQUEST_MEMO_MAX answers; the one after
+ * that discards them all and starts again, so memory is bounded and an answer
+ * is never wrong, only asked for again.
+ *
+ * @return 1 and @p out_value set on a hit, else 0.
+ */
+GDEFCORE_API int gdefcore_request_memo_get(GDEFCORE_Request * request,
+    const char * key, size_t key_len, int * out_value);
+
+/** @brief Remember @p value under @p key. A key already there is replaced. */
+GDEFCORE_API GDEFCORE_Result gdefcore_request_memo_put(
+    GDEFCORE_Request * request, const char * key, size_t key_len, int value);
+
+/**
+ * @brief What the memo holds and has done: entries now, hits, and the times it
+ * started over. Any out pointer may be NULL.
+ */
+GDEFCORE_API void gdefcore_request_memo_stats(const GDEFCORE_Request * request,
+    size_t * out_entries, uint64_t * out_hits, uint64_t * out_restarts);
+
+/**
+ * @brief Record that what this request rendered or decided read @p id at
+ * revision @p revision.
+ *
+ * This is the read set: gdefcore_access_render_key() puts it in the key when
+ * there is one, so a fragment that depended on an entity's state is a
+ * different fragment when the entity has changed. A pair already recorded is
+ * not recorded twice. At most ::GDEFCORE_REQUEST_READS_MAX pairs are kept;
+ * past that the set is marked overflowed, and the key says so.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_request_record_dependency(
+    GDEFCORE_Request * request, const char * id, size_t id_len,
+    uint64_t revision);
+
+/** @brief How many (entity, revision) pairs the request has recorded. */
+GDEFCORE_API size_t gdefcore_request_dependency_count(const GDEFCORE_Request * request);
+
+/**
+ * @brief One recorded pair, in the order recorded. @p out_id is borrowed and
+ * not NUL-terminated. Returns 1, or 0 for an index past the end.
+ */
+GDEFCORE_API int gdefcore_request_dependency_at(const GDEFCORE_Request * request,
+    size_t index, const char ** out_id, size_t * out_id_len,
+    uint64_t * out_revision);
+
+/** @brief Whether more pairs were read than the set keeps. */
+GDEFCORE_API int gdefcore_request_dependencies_overflowed(
+    const GDEFCORE_Request * request);
+
+/**
+ * @brief Give the request a budget of fuel, in units. Replaces any budget.
+ *
+ * A request has none until this is called, and then spends nothing it cannot
+ * be refused. Access spends it (gdefcore_access_can() documents the price).
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_request_set_fuel(
+    GDEFCORE_Request * request, uint64_t units);
+
+/**
+ * @brief Spend @p units. With no budget set, always succeeds.
+ *
+ * @return ::GDEFCORE_OK, or ::GDEFCORE_ERR_LIMIT when the budget is less than
+ *   @p units, in which case the budget is left empty and every later spend is
+ *   refused until a new budget is set.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_request_spend_fuel(
+    GDEFCORE_Request * request, uint64_t units);
+
+/** @brief The fuel left; UINT64_MAX when no budget was set. */
+GDEFCORE_API uint64_t gdefcore_request_fuel_left(const GDEFCORE_Request * request);
+
 #ifdef __cplusplus
 }
 #endif

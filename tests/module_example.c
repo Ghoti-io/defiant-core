@@ -149,20 +149,20 @@ static const GDEFCORE_Module_Service kSvcs[] = {
 static const GDEFCORE_Module_Route kRoutes[] = {
     {sizeof(GDEFCORE_Module_Route), XS("example.settings"), XS("/admin/example"),
         0, 0, XS("administer example"), XS("Example settings"),
-        GDEFCORE_ROUTE_PAGE, NULL, 0, 0, 1, XS("example.handler")},
+        GDEFCORE_ROUTE_PAGE, NULL, 0, 0, 1, XS("example.handler"), NULL, 0},
     {sizeof(GDEFCORE_Module_Route), XS("example.node.view"),
         XS("/example/:id/view"), 0, 0, XS("view example"), XS("View"),
         GDEFCORE_ROUTE_TAB,
-        XS("example.node"), 1, 0, XS("example.handler")},
+        XS("example.node"), 1, 0, XS("example.handler"), NULL, 0},
     {sizeof(GDEFCORE_Module_Route), XS("example.node.edit"),
         XS("/example/:id/edit"), 0, 0, XS("edit example"), XS("Edit"),
-        GDEFCORE_ROUTE_TAB, XS("example.node"), 0, 0, XS("example.handler")},
+        GDEFCORE_ROUTE_TAB, XS("example.node"), 0, 0, XS("example.handler"), NULL, 0},
     {sizeof(GDEFCORE_Module_Route), XS("example.node"), XS("/example/:id"), 0,
         0, XS("view example"), XS("Example"), GDEFCORE_ROUTE_PAGE, NULL, 0, 0,
-        0, XS("example.handler")},
+        0, XS("example.handler"), NULL, 0},
     {sizeof(GDEFCORE_Module_Route), XS("example.add"), XS("/example/add"), 0, 0,
         XS("add example"), XS("Add example"), GDEFCORE_ROUTE_ACTION, NULL, 0, 0,
-        0, XS("example.handler")}};
+        0, XS("example.handler"), NULL, 0}};
 
 static const GDEFCORE_Module_Link kLinks[] = {
     {sizeof(GDEFCORE_Module_Link), XS("example.link.home"), XS("main"),

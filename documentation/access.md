@@ -184,11 +184,78 @@ A grant is always for one type, and a condition that reads the entity's data
 bounds it, so a condition that names no type but reads a field is not high on
 that ground.
 
+## One can()
+
+`gdefcore_access_can(catalog, request, permission, type, entity_id, &allowed)`
+is the single answer to "may this principal do this to that". The write path
+(with `gdefcore_changeset_enforce_access()`), the route check
+(`gdefcore_access_route_check()`), the tab list (`gdefcore_routes_tabs_visible()`)
+and the template editor (`gdefcore_template_authorize()`) all ask it, so a
+button, the page behind it and the write it guards cannot disagree. It is the
+one evaluator: roles, then the grants of enabled modules, with conditions
+decided as for read, list and permits, and bounded by an acting principal's
+ceiling.
+
+- **With an entity**: allowed when a grant for the permission, on that type and
+  not on a field, holds on that entity. A permission nobody declared, an entity
+  that does not exist (or whose id is not one), an entity of another type, and
+  an entity on which no grant holds are one answer: not allowed, with
+  `GDEFCORE_OK`. It does not also require the principal to be able to *read*
+  the entity: a site that lets someone edit what they may not read has told
+  them, by the edit, that it is there; grant the read as well to avoid that. (It
+  was chosen over requiring the read because the template editor has always
+  worked on a grant to edit alone.) The permission `read` is the exception that
+  follows from what a read is: it is of the published projection, so an entity
+  that has none (a draft never published) is not readable and answers as one
+  that is not there, as `gdefcore_access_read()` does. The oracle sweep found
+  this: the first version told an anonymous visitor that a draft existed.
+  A condition that reads the entity's fields or actor reads the published
+  projection too, so such a grant does not hold for a draft that was never
+  published, and `own` does not match it.
+- **With no entity** (type level): whether the principal could hold it for some
+  entity of the type, the question `gdefcore_access_permits()` asks. It is not
+  safe for deciding an operation on a specific entity and says nothing about
+  one; a page, a tab or a button passes the entity.
+- **Memo.** The answer is remembered on the request, keyed by principal, acting
+  principal, permission, type, entity and the entity's revision (the config
+  epoch at type level), so a question asked twice is answered once, an entity
+  written within the request is a new question, and no principal's answer is
+  served to another. The memo holds `GDEFCORE_REQUEST_MEMO_MAX` (256) answers
+  and then starts over. Failures are not remembered.
+- **Render key.** A call marks the request principal-dependent and records
+  the (entity, revision) it read in the request's read set
+  (`gdefcore_request_record_dependency()`). `gdefcore_access_render_key()` adds a
+  `reads:` line, a digest of the set, when there is one, so a fragment that
+  depended on an entity is a different fragment once the entity changes; a set
+  of more than 256 says `+overflow`. Because the key then carries the
+  principal, no two principals share a fragment that asked. (There was no read
+  set before: the key carried only the config epoch, which every applied
+  changeset moves; this is the precise form of it.)
+- **Fuel.** A request may be given a budget (`gdefcore_request_set_fuel()`; none
+  means unlimited). A call costs `GDEFCORE_ACCESS_CAN_FUEL_HIT` (1) when the memo
+  answers it and `GDEFCORE_ACCESS_CAN_FUEL_MISS` (4) when it is decided. Without
+  enough, it is refused with `GDEFCORE_ERR_LIMIT` and `allowed` 0, and the
+  budget is left empty.
+- **Failure.** A store read, an allocation, a condition that could not be decided
+  (any grant, even one that would not have been the one to allow) and a lack of
+  fuel give `allowed` 0 and a result other than `GDEFCORE_OK`, which is the
+  caller's to log. They never allow and are not remembered. Bad arguments are
+  `GDEFCORE_ERR_INVALID`.
+
+`gdefcore_changeset_enforce_access(changeset, 1)` makes apply ask `can()` for
+each entity the changeset touches, with the changeset's request: a save or a
+draft is `update`, a publish `publish`, a clear (a revert to nothing) `delete`.
+It is off by default, so no existing writer is asked anything new. Templates
+keep their own permission. A new entity has no actor yet, so an `own` grant does
+not allow its first save.
+
 ## The render key
 
 Derived artifacts are keyed by the render key: tenant, config epoch,
 edition, the hash of the granted permissions, overlay or `live`, and the
-principal's public id when a compiled condition read the principal. The
+principal's public id when a compiled condition read the principal, or
+`gdefcore_access_can()` was asked, and a digest of the entities and revisions
+it read. The
 hash covers labels, conditions (an expression by the hash of its canonical
 text), types, fields and actions. A condition that reads the principal
 (`principal`, `actor`) makes the key depend on who asks. It does not

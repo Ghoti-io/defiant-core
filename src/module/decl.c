@@ -282,6 +282,9 @@ static void build_routes(Build * b, const GDEFCORE_Module_Manifest * m,
         ? NULL : dup_str(b, r.parent, r.parent_len, "route", i);
     spec->parent_len = r.parent_len;
     spec->is_default = r.is_default != 0;
+    spec->entity_capture = r.entity_capture_len == 0
+        ? NULL : dup_str(b, r.entity_capture, r.entity_capture_len, "route", i);
+    spec->entity_capture_len = r.entity_capture_len;
     dr->handler = dup_str(b, r.handler, r.handler_len, "route", i);
     dr->handler_len = r.handler_len;
     if (b->rc != GDEFCORE_OK) {

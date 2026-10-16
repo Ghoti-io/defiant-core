@@ -116,6 +116,9 @@
 #define gdefcore_access_matrix_free GHOTIIO_DEFCORE(gdefcore_access_matrix_free)
 #define gdefcore_access_stage_module_grant \
   GHOTIIO_DEFCORE(gdefcore_access_stage_module_grant)
+#define gdefcore_access_can GHOTIIO_DEFCORE(gdefcore_access_can)
+#define gdefcore_access_route_check \
+  GHOTIIO_DEFCORE(gdefcore_access_route_check)
 #define gdefcore_access_stage_module_permission                                \
   GHOTIIO_DEFCORE(gdefcore_access_stage_module_permission)
 #define gdefcore_condition_parse \
@@ -187,6 +190,8 @@
 #define gdefcore_changeset_revert GHOTIIO_DEFCORE(gdefcore_changeset_revert)
 #define gdefcore_changeset_serialize                                           \
   GHOTIIO_DEFCORE(gdefcore_changeset_serialize)
+#define gdefcore_changeset_enforce_access \
+  GHOTIIO_DEFCORE(gdefcore_changeset_enforce_access)
 #define gdefcore_changeset_set_request                                         \
   GHOTIIO_DEFCORE(gdefcore_changeset_set_request)
 #define gdefcore_changeset_stage_module                                        \
@@ -306,6 +311,20 @@
 #define gdefcore_request_id GHOTIIO_DEFCORE(gdefcore_request_id)
 #define gdefcore_request_note GHOTIIO_DEFCORE(gdefcore_request_note)
 #define gdefcore_request_principal GHOTIIO_DEFCORE(gdefcore_request_principal)
+#define gdefcore_request_memo_get GHOTIIO_DEFCORE(gdefcore_request_memo_get)
+#define gdefcore_request_memo_put GHOTIIO_DEFCORE(gdefcore_request_memo_put)
+#define gdefcore_request_memo_stats GHOTIIO_DEFCORE(gdefcore_request_memo_stats)
+#define gdefcore_request_record_dependency \
+  GHOTIIO_DEFCORE(gdefcore_request_record_dependency)
+#define gdefcore_request_dependency_count \
+  GHOTIIO_DEFCORE(gdefcore_request_dependency_count)
+#define gdefcore_request_dependency_at \
+  GHOTIIO_DEFCORE(gdefcore_request_dependency_at)
+#define gdefcore_request_dependencies_overflowed \
+  GHOTIIO_DEFCORE(gdefcore_request_dependencies_overflowed)
+#define gdefcore_request_set_fuel GHOTIIO_DEFCORE(gdefcore_request_set_fuel)
+#define gdefcore_request_spend_fuel GHOTIIO_DEFCORE(gdefcore_request_spend_fuel)
+#define gdefcore_request_fuel_left GHOTIIO_DEFCORE(gdefcore_request_fuel_left)
 #define gdefcore_request_set_time GHOTIIO_DEFCORE(gdefcore_request_set_time)
 #define gdefcore_request_time GHOTIIO_DEFCORE(gdefcore_request_time)
 #define gdefcore_request_mark_principal_dependent                              \
@@ -335,6 +354,8 @@
 #define gdefcore_routes_destroy GHOTIIO_DEFCORE(gdefcore_routes_destroy)
 #define gdefcore_routes_free GHOTIIO_DEFCORE(gdefcore_routes_free)
 #define gdefcore_routes_set_check GHOTIIO_DEFCORE(gdefcore_routes_set_check)
+#define gdefcore_routes_tabs_visible \
+  GHOTIIO_DEFCORE(gdefcore_routes_tabs_visible)
 #define gdefcore_routes_tabs GHOTIIO_DEFCORE(gdefcore_routes_tabs)
 #define gdefcore_sched_create GHOTIIO_DEFCORE(gdefcore_sched_create)
 #define gdefcore_sched_destroy GHOTIIO_DEFCORE(gdefcore_sched_destroy)

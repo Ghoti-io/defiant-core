@@ -37,6 +37,17 @@ typedef struct GDEFCORE_Note {
   size_t value_len;
 } GDEFCORE_Note;
 
+typedef struct GDEFCORE_Memo {
+  char * key;
+  size_t key_len;
+  int value;
+} GDEFCORE_Memo;
+
+typedef struct GDEFCORE_Read {
+  char id[GDEFCORE_PUBLIC_ID_LEN + 1];
+  uint64_t revision;
+} GDEFCORE_Read;
+
 struct GDEFCORE_Request {
   uint8_t * tenant;
   size_t tenant_len;
@@ -57,6 +68,17 @@ struct GDEFCORE_Request {
   int principal_dependent;
   int64_t time_seconds;
   int time_set;
+  GDEFCORE_Memo * memo;
+  size_t nmemo;
+  size_t cap_memo;
+  uint64_t memo_hits;
+  uint64_t memo_restarts;
+  GDEFCORE_Read * reads;
+  size_t nreads;
+  size_t cap_reads;
+  int reads_overflowed;
+  int has_fuel;
+  uint64_t fuel;
   const GDEFCORE_Allocator * allocator;
 };
 

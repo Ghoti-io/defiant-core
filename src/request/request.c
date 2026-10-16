@@ -75,6 +75,14 @@ GDEFCORE_Result gdefcore_request_create(const uint8_t * tenant,
   return GDEFCORE_OK;
 }
 
+static void memo_clear(GDEFCORE_Request * request) {
+  size_t i;
+  for (i = 0; i < request->nmemo; i++) {
+    gcu_allocator_free(request->allocator, request->memo[i].key);
+  }
+  request->nmemo = 0;
+}
+
 void gdefcore_request_destroy(GDEFCORE_Request * request) {
   const GDEFCORE_Allocator * allocator;
   if (request == NULL) {
@@ -98,6 +106,9 @@ void gdefcore_request_destroy(GDEFCORE_Request * request) {
     gcu_allocator_free(allocator, request->notes);
   }
   gcu_allocator_free(allocator, request->resolution);
+  memo_clear(request);
+  gcu_allocator_free(allocator, request->memo);
+  gcu_allocator_free(allocator, request->reads);
   gcu_allocator_free(allocator, request->principal);
   gcu_allocator_free(allocator, request->acting);
   gcu_allocator_free(allocator, request->tenant);
@@ -400,4 +411,166 @@ int64_t gdefcore_request_time(GDEFCORE_Request * request) {
     request->time_set = 1;
   }
   return request->time_seconds;
+}
+
+int gdefcore_request_memo_get(GDEFCORE_Request * request, const char * key,
+    size_t key_len, int * out_value) {
+  size_t i;
+  if (request == NULL || key == NULL || out_value == NULL) {
+    return 0;
+  }
+  for (i = 0; i < request->nmemo; i++) {
+    if (request->memo[i].key_len == key_len &&
+        memcmp(request->memo[i].key, key, key_len) == 0) {
+      *out_value = request->memo[i].value;
+      request->memo_hits += 1;
+      return 1;
+    }
+  }
+  return 0;
+}
+
+GDEFCORE_Result gdefcore_request_memo_put(GDEFCORE_Request * request,
+    const char * key, size_t key_len, int value) {
+  size_t i;
+  char * copy;
+  if (request == NULL || key == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  for (i = 0; i < request->nmemo; i++) {
+    if (request->memo[i].key_len == key_len &&
+        memcmp(request->memo[i].key, key, key_len) == 0) {
+      request->memo[i].value = value;
+      return GDEFCORE_OK;
+    }
+  }
+  if (request->nmemo >= GDEFCORE_REQUEST_MEMO_MAX) {
+    /* Start over rather than grow: the cost is asking again. */
+    memo_clear(request);
+    request->memo_restarts += 1;
+  }
+  if (request->nmemo == request->cap_memo) {
+    size_t cap = request->cap_memo == 0 ? 16 : request->cap_memo * 2;
+    GDEFCORE_Memo * next = (GDEFCORE_Memo *)gcu_allocator_realloc(
+        request->allocator, request->memo, cap * sizeof *next);
+    if (next == NULL) {
+      return GDEFCORE_ERR_OOM;
+    }
+    request->memo = next;
+    request->cap_memo = cap;
+  }
+  copy = copy_bytes(request->allocator, key, key_len);
+  if (copy == NULL) {
+    return GDEFCORE_ERR_OOM;
+  }
+  request->memo[request->nmemo].key = copy;
+  request->memo[request->nmemo].key_len = key_len;
+  request->memo[request->nmemo].value = value;
+  request->nmemo += 1;
+  return GDEFCORE_OK;
+}
+
+void gdefcore_request_memo_stats(const GDEFCORE_Request * request,
+    size_t * out_entries, uint64_t * out_hits, uint64_t * out_restarts) {
+  if (out_entries != NULL) {
+    *out_entries = request == NULL ? 0 : request->nmemo;
+  }
+  if (out_hits != NULL) {
+    *out_hits = request == NULL ? 0 : request->memo_hits;
+  }
+  if (out_restarts != NULL) {
+    *out_restarts = request == NULL ? 0 : request->memo_restarts;
+  }
+}
+
+GDEFCORE_Result gdefcore_request_record_dependency(GDEFCORE_Request * request,
+    const char * id, size_t id_len, uint64_t revision) {
+  size_t i;
+  char canon[GDEFCORE_PUBLIC_ID_LEN + 1];
+  if (request == NULL || id == NULL ||
+      gdefcore_id_canonical(id, id_len, canon) != GDEFCORE_OK) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  for (i = 0; i < request->nreads; i++) {
+    if (request->reads[i].revision == revision &&
+        memcmp(request->reads[i].id, canon, sizeof canon) == 0) {
+      return GDEFCORE_OK;
+    }
+  }
+  if (request->nreads >= GDEFCORE_REQUEST_READS_MAX) {
+    request->reads_overflowed = 1;
+    return GDEFCORE_OK;
+  }
+  if (request->nreads == request->cap_reads) {
+    size_t cap = request->cap_reads == 0 ? 16 : request->cap_reads * 2;
+    GDEFCORE_Read * next = (GDEFCORE_Read *)gcu_allocator_realloc(
+        request->allocator, request->reads, cap * sizeof *next);
+    if (next == NULL) {
+      return GDEFCORE_ERR_OOM;
+    }
+    request->reads = next;
+    request->cap_reads = cap;
+  }
+  memcpy(request->reads[request->nreads].id, canon, sizeof canon);
+  request->reads[request->nreads].revision = revision;
+  request->nreads += 1;
+  return GDEFCORE_OK;
+}
+
+size_t gdefcore_request_dependency_count(const GDEFCORE_Request * request) {
+  return request == NULL ? 0 : request->nreads;
+}
+
+int gdefcore_request_dependency_at(const GDEFCORE_Request * request, size_t index,
+    const char ** out_id, size_t * out_id_len, uint64_t * out_revision) {
+  if (request == NULL || index >= request->nreads) {
+    return 0;
+  }
+  if (out_id != NULL) {
+    *out_id = request->reads[index].id;
+  }
+  if (out_id_len != NULL) {
+    *out_id_len = GDEFCORE_PUBLIC_ID_LEN;
+  }
+  if (out_revision != NULL) {
+    *out_revision = request->reads[index].revision;
+  }
+  return 1;
+}
+
+int gdefcore_request_dependencies_overflowed(const GDEFCORE_Request * request) {
+  return request != NULL && request->reads_overflowed != 0;
+}
+
+GDEFCORE_Result gdefcore_request_set_fuel(GDEFCORE_Request * request,
+    uint64_t units) {
+  if (request == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  request->has_fuel = 1;
+  request->fuel = units;
+  return GDEFCORE_OK;
+}
+
+GDEFCORE_Result gdefcore_request_spend_fuel(GDEFCORE_Request * request,
+    uint64_t units) {
+  if (request == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  if (!request->has_fuel) {
+    return GDEFCORE_OK;
+  }
+  if (request->fuel < units) {
+    request->fuel = 0;
+    return GDEFCORE_ERR_LIMIT;
+  }
+  request->fuel -= units;
+  return GDEFCORE_OK;
+}
+
+uint64_t gdefcore_request_fuel_left(const GDEFCORE_Request * request) {
+  if (request == NULL || !request->has_fuel) {
+    return UINT64_MAX;
+  }
+  return request->fuel;
 }

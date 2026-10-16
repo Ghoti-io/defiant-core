@@ -297,6 +297,8 @@ typedef struct GDEFCORE_Route_Call {
   size_t machine_len;        ///< Length of @ref machine.
   void * data;               ///< The route's data pointer.
   const void * internal;     ///< Private. Use the accessors.
+  const char * entity_capture; ///< The route's @ref GDEFCORE_Route_Spec::entity_capture, or "".
+  size_t entity_capture_len; ///< Length of @ref entity_capture.
 } GDEFCORE_Route_Call;
 
 /** @brief A handler that reads captures through its call. */
@@ -319,6 +321,13 @@ typedef int (*GDEFCORE_Route_Check_Fn)(const GDEFCORE_Route_Call * call,
  * @brief A route with a permission, a title, a kind and a parent.
  *
  * Begins with @ref size. Set exactly one of @ref fn and @ref call_fn.
+ *
+ * @ref permission names a permission by its action. When @ref entity_capture
+ * names one of the pattern's `:name` captures, the permission is about the
+ * entity whose public id that segment holds: the check
+ * (gdefcore_access_route_check()) asks whether the principal holds it for
+ * that entity, not for some entity of the type. With no entity capture the
+ * question is the type-level one.
  */
 typedef struct GDEFCORE_Route_Spec {
   size_t size;                ///< Must be `sizeof(GDEFCORE_Route_Spec)`.
@@ -339,7 +348,17 @@ typedef struct GDEFCORE_Route_Spec {
   const char * parent;        ///< Parent machine name. Required for a tab.
   size_t parent_len;          ///< Length of @ref parent.
   int is_default;             ///< Non-zero: the default tab of @ref parent.
+  const char * entity_capture; ///< Capture that holds an entity id, or NULL.
+  size_t entity_capture_len;  ///< Length of @ref entity_capture.
 } GDEFCORE_Route_Spec;
+
+/**
+ * The size of a ::GDEFCORE_Route_Spec before @ref
+ * GDEFCORE_Route_Spec::entity_capture was added. A spec of that size is
+ * accepted, and names no entity capture.
+ */
+#define GDEFCORE_ROUTE_SPEC_SIZE_V1 \
+  (offsetof(GDEFCORE_Route_Spec, entity_capture))
 
 /**
  * @brief One route as the enumeration reports it.
@@ -360,6 +379,8 @@ typedef struct GDEFCORE_Route_Info {
   int kind;                   ///< ::GDEFCORE_ROUTE_PAGE, _TAB or _ACTION.
   int is_default;             ///< Non-zero for the default tab.
   int weight;                 ///< The route's weight.
+  const char * entity_capture; ///< Its entity capture, or "" when none.
+  size_t entity_capture_len;  ///< Length of @ref entity_capture.
 } GDEFCORE_Route_Info;
 
 /**
@@ -406,6 +427,25 @@ GDEFCORE_API GDEFCORE_Result gdefcore_routes_set_check(GDEFCORE_Routes * routes,
 GDEFCORE_API int gdefcore_route_call_capture(const GDEFCORE_Route_Call * call,
     const char * name, size_t name_len, const char ** out_value,
     size_t * out_len);
+
+/**
+ * @brief The tabs of @p parent that the request may use, for the page whose
+ * call is @p page.
+ *
+ * As gdefcore_routes_tabs(), without the tabs the permission check refuses.
+ * The check is the route table's own (gdefcore_routes_set_check()) and is
+ * asked what dispatch would ask for that tab: its permission, and the entity
+ * its @ref GDEFCORE_Route_Spec::entity_capture names, taken from the captures
+ * of @p page (the call of the page the tabs are drawn on, whose pattern
+ * should capture the same names). So a menu cannot show a tab that dispatch
+ * would answer as not found, and cannot hide one it would serve. A tab that
+ * names a permission while no check is set is not shown, as it never matches.
+ * Free @p out with gdefcore_routes_free().
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_routes_tabs_visible(
+    GDEFCORE_Routes * routes, const char * parent, size_t parent_len,
+    const GDEFCORE_Route_Call * page, GDEFCORE_Route_Info ** out,
+    size_t * out_count);
 
 /**
  * @brief The tabs of the route @p parent, in weight order then machine name.

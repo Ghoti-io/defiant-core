@@ -36,6 +36,7 @@
 #include <ghoti.io/defiant-core/allocator.h>
 #include <ghoti.io/defiant-core/core.h>
 #include <ghoti.io/defiant-core/entity.h>
+#include <ghoti.io/defiant-core/form.h>
 #include <ghoti.io/defiant-core/request.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -408,6 +409,80 @@ GDEFCORE_API GDEFCORE_Result gdefcore_access_list(GDEFCORE_Catalog * catalog,
  */
 GDEFCORE_API int gdefcore_access_permits(GDEFCORE_Catalog * catalog,
     GDEFCORE_Request * request, const char * permission, size_t permission_len);
+
+/** Fuel a gdefcore_access_can() that is answered from the request's memo costs. */
+#define GDEFCORE_ACCESS_CAN_FUEL_HIT 1
+/** Fuel a gdefcore_access_can() that has to be decided costs, memo hits included in the price. */
+#define GDEFCORE_ACCESS_CAN_FUEL_MISS 4
+
+/**
+ * @brief May the request's principal do @p permission to this entity? The one
+ * decision.
+ *
+ * Roles, then the grants of enabled modules, with conditions evaluated by the
+ * one evaluator that read, list and permits use, and bounded by the
+ * acting principal's ceiling (AD-12). The write path, the route check, the
+ * tab list and the template editor all ask this, so a button, the page it
+ * leads to and the write behind it cannot disagree.
+ *
+ * @p permission is named by its action, as for gdefcore_access_permits() (the
+ * story that defined this calls it the permission label). @p type is the
+ * entity type the permission is about. @p entity_id is the entity's public id
+ * (NUL-terminated), or NULL.
+ *
+ * - **With an entity**: allowed when a grant for the permission, on that type
+ *   and not on a field, holds on that entity. An entity that does not exist, a
+ *   permission nobody declared, an entity of another type than @p type, and an
+ *   entity on which no grant holds all answer the same way: @p out_allowed 0
+ *   and ::GDEFCORE_OK. This does not require the entity to be readable by the
+ *   principal as well; a site that does not want the existence of an entity
+ *   told to someone who may change it but not read it grants the read too.
+ *   The one exception is the permission `read` itself, which is of the
+ *   published projection: an entity with none (a draft never published) is not
+ *   readable, as for gdefcore_access_read().
+ * - **With no entity** (type level): whether the principal could hold the
+ *   permission for some entity of the type, as gdefcore_access_permits() asks.
+ *   That is **not** safe for deciding an operation on a specific entity, and a
+ *   page, tab or button must pass the entity.
+ *
+ * The answer is memoized on the request, keyed by principal, acting
+ * principal, permission, type, entity and the entity's revision (the config
+ * epoch at type level), so a write within the request makes the next question
+ * a new one. The memo holds ::GDEFCORE_REQUEST_MEMO_MAX answers and then
+ * starts over. A call marks the request principal-dependent
+ * (gdefcore_request_mark_principal_dependent()) and records the entity and
+ * revision it read (gdefcore_request_record_dependency()), which the render
+ * key carries. A call costs ::GDEFCORE_ACCESS_CAN_FUEL_HIT of the request's
+ * fuel, and ::GDEFCORE_ACCESS_CAN_FUEL_MISS in all when it is decided rather
+ * than remembered; with too little fuel the answer is refused.
+ *
+ * A failure (a store read, an allocation, a condition that could not be
+ * decided, no fuel) is @p out_allowed 0 and a result other than
+ * ::GDEFCORE_OK, which the caller may log. It never grants, and is not
+ * remembered. Bad arguments are ::GDEFCORE_ERR_INVALID.
+ *
+ * @return ::GDEFCORE_OK, ::GDEFCORE_ERR_INVALID, ::GDEFCORE_ERR_LIMIT (no
+ *   fuel), or the failure.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_access_can(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Request * request, const char * permission, size_t permission_len,
+    const char * type, size_t type_len, const char * entity_id,
+    int * out_allowed);
+
+/**
+ * @brief The ready-made route check, for gdefcore_routes_set_check().
+ *
+ * Pass the catalog as the check's data. A route with no
+ * @ref GDEFCORE_Route_Spec::entity_capture asks the type-level question
+ * (gdefcore_access_permits()). One with a capture asks gdefcore_access_can()
+ * for the entity the captured segment names, on that entity's own type; a
+ * segment that is not an id, or names no entity, is a no. A no makes the route
+ * not match, which dispatch answers as a route that does not exist.
+ *
+ * @return Non-zero to allow.
+ */
+GDEFCORE_API int gdefcore_access_route_check(const GDEFCORE_Route_Call * call,
+    const char * permission, size_t permission_len, void * data);
 
 /**
  * @brief The render key for this request.

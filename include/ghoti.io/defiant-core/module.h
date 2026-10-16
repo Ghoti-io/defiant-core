@@ -349,6 +349,8 @@ typedef struct GDEFCORE_Module_Route {
   int admin;                  ///< Non-zero: an admin route.
   const char * handler;       ///< Name of the module's handler service.
   size_t handler_len;         ///< Length of @ref handler.
+  const char * entity_capture; ///< Capture that holds an entity id, or NULL.
+  size_t entity_capture_len;  ///< Length of @ref entity_capture.
 } GDEFCORE_Module_Route;
 
 /**

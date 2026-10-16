@@ -2472,6 +2472,64 @@ static int cmp_cstr(const void * a, const void * b) {
   return strcmp(*(char *const *)a, *(char *const *)b);
 }
 
+static int cmp_dep(const void * a, const void * b) {
+  return strcmp((const char *)a, (const char *)b);
+}
+
+/* A digest of the (entity, revision) pairs the request recorded, order
+ * ignored, or 0 when it recorded none. A set that overflowed says so, and
+ * then differs from every set that did not. */
+static int deps_digest(const GDEFCORE_Request * request, char out[80]) {
+  size_t n = gdefcore_request_dependency_count(request);
+  size_t i;
+  char (*lines)[GDEFCORE_PUBLIC_ID_LEN + 24];
+  char hex[65];
+  int overflow = gdefcore_request_dependencies_overflowed(request);
+  if (n == 0 && !overflow) {
+    return 0;
+  }
+  lines = (char (*)[GDEFCORE_PUBLIC_ID_LEN + 24])gcu_allocator_calloc(
+      alloc_default(), n == 0 ? 1 : n, sizeof *lines);
+  if (lines == NULL) {
+    snprintf(out, 80, "unreadable");
+    return 1;
+  }
+  for (i = 0; i < n; i++) {
+    const char * id = NULL;
+    size_t id_len = 0;
+    uint64_t revision = 0;
+    (void)gdefcore_request_dependency_at(request, i, &id, &id_len, &revision);
+    snprintf(lines[i], sizeof lines[i], "%.*s@%llu\n", (int)id_len, id,
+        (unsigned long long)revision);
+  }
+  if (n > 1) {
+    qsort(lines, n, sizeof *lines, cmp_dep);
+  }
+  {
+    GSEC_Sha256 ctx;
+    uint8_t dig[GSEC_SHA256_DIGEST_LEN];
+    static const char hexd[] = "0123456789abcdef";
+    int ok = gsec_sha256_init(&ctx) == GSEC_OK;
+    for (i = 0; ok && i < n; i++) {
+      ok = gsec_sha256_update(&ctx, lines[i], strlen(lines[i])) == GSEC_OK;
+    }
+    ok = ok && gsec_sha256_final(&ctx, dig) == GSEC_OK;
+    if (!ok) {
+      gcu_allocator_free(alloc_default(), lines);
+      snprintf(out, 80, "unreadable");
+      return 1;
+    }
+    for (i = 0; i < GSEC_SHA256_DIGEST_LEN; i++) {
+      hex[i * 2] = hexd[dig[i] >> 4];
+      hex[i * 2 + 1] = hexd[dig[i] & 0x0fu];
+    }
+    hex[64] = '\0';
+  }
+  gcu_allocator_free(alloc_default(), lines);
+  snprintf(out, 80, "%s%s", hex, overflow ? "+overflow" : "");
+  return 1;
+}
+
 GDEFCORE_Result gdefcore_access_render_key(GDEFCORE_Catalog * catalog,
     GDEFCORE_Request * request, const char * overlay, size_t overlay_len,
     const uint8_t * module_bytes, size_t module_len, char ** out_key,
@@ -2486,6 +2544,7 @@ GDEFCORE_Result gdefcore_access_render_key(GDEFCORE_Catalog * catalog,
   uint64_t epoch = 0;
   char perm_hex[65];
   char module_hex[65];
+  char deps_hex[80];
   char * lines[kGrantMax];
   size_t nlines = 0;
   char * blob = NULL;
@@ -2691,6 +2750,12 @@ GDEFCORE_Result gdefcore_access_render_key(GDEFCORE_Catalog * catalog,
     }
     ADD_KEY("\nmodule:", 8);
     ADD_KEY(module_text, strlen(module_text));
+    if (deps_digest(request, deps_hex)) {
+      /* What the request read of entities: a different revision of any is a
+       * different key. */
+      ADD_KEY("\nreads:", 7);
+      ADD_KEY(deps_hex, strlen(deps_hex));
+    }
     ADD_KEY("\n", 1);
 #undef ADD_KEY
   }
@@ -2737,11 +2802,16 @@ static int expr_could_apply(Eval * ev, const Grant * grant) {
  * condition is held as it always was: the permission is not about one entity.
  * An expression is held when it could apply to something. */
 static int permits_in(Eval * ev, const Grant * grants, size_t ngrants,
-    const char * permission, size_t permission_len) {
+    const char * permission, size_t permission_len, const char * type,
+    size_t type_len) {
   size_t i;
   for (i = 0; i < ngrants; i++) {
     if (!same(grants[i].action, grants[i].action_len, permission,
             permission_len)) {
+      continue;
+    }
+    if (type != NULL && (grants[i].field_len != 0 ||
+            !same(grants[i].type_name, grants[i].type_len, type, type_len))) {
       continue;
     }
     if (grants[i].condition != kCondExpr || expr_could_apply(ev, &grants[i])) {
@@ -2771,10 +2841,11 @@ int gdefcore_access_permits(GDEFCORE_Catalog * catalog,
   }
   eval_init(&ev, catalog, request, NULL, 0);
   (void)setup_ceiling(&ev);
-  held = permits_in(&ev, grants, ngrants, permission, permission_len);
+  held = permits_in(&ev, grants, ngrants, permission, permission_len, NULL, 0);
   if (held && ev.has_ceiling) {
     /* The intersection: the acting principal must hold it too. */
-    held = permits_in(&ev, ev.ceiling, ev.nceiling, permission, permission_len);
+    held = permits_in(&ev, ev.ceiling, ev.nceiling, permission, permission_len,
+        NULL, 0);
   }
   eval_done(&ev);
   return held;
@@ -3643,4 +3714,237 @@ GDEFCORE_Result gdefcore_access_matrix(GDEFCORE_Catalog * catalog,
   *out_rows = b.rows;
   *out_count = b.n;
   return GDEFCORE_OK;
+}
+
+/* ---- one can() --------------------------------------------------------- */
+
+/* The memo key: who asks (and for whom), what, of which entity at which
+ * revision. At type level the entity is "*" and the revision is the epoch of
+ * the configuration, because the answer depends on every entity of the type.
+ * 0 when it does not fit, in which case the question is not memoized. */
+static int can_key(char * out, size_t cap, const GDEFCORE_Request * request,
+    const char * permission, size_t permission_len, const char * type,
+    size_t type_len, const char * entity, uint64_t version) {
+  size_t principal_len = 0;
+  const char * principal = gdefcore_request_principal(request, &principal_len);
+  size_t acting_len = 0;
+  const char * acting = gdefcore_request_acting_principal(request, &acting_len);
+  int n = snprintf(out, cap, "can\x1f%.*s\x1f%.*s\x1f%.*s\x1f%.*s\x1f%s\x1f%llu",
+      (int)(principal == NULL ? 1 : principal_len),
+      principal == NULL ? "-" : principal,
+      (int)(acting == NULL ? 1 : acting_len), acting == NULL ? "-" : acting,
+      (int)permission_len, permission, (int)type_len, type,
+      entity == NULL ? "*" : entity, (unsigned long long)version);
+  return n > 0 && (size_t)n < cap ? n : 0;
+}
+
+/* One decision, not remembered. @p canon is the entity's canonical id, or
+ * NULL for the type-level question. */
+static GDEFCORE_Result can_decide(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Request * request, const char * permission, size_t permission_len,
+    const char * type, size_t type_len, const char * canon, int * out_allowed) {
+  Grant grants[kGrantMax];
+  size_t ngrants = 0;
+  int read_principal = 0;
+  Eval ev;
+  size_t i;
+  int allowed = 0;
+  int failed;
+  char * actor = NULL;
+  size_t actor_len = 0;
+  const char * principal;
+  size_t principal_len = 0;
+  GDEFCORE_Result rc;
+  *out_allowed = 0;
+  rc = load_effective(catalog, request, grants, kGrantMax, &ngrants,
+      &read_principal);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  principal = gdefcore_request_principal(request, &principal_len);
+  eval_init(&ev, catalog, request, NULL, 0);
+  (void)setup_ceiling(&ev);
+  if (canon == NULL) {
+    allowed = permits_in(&ev, grants, ngrants, permission, permission_len, type,
+        type_len);
+    if (allowed && ev.has_ceiling) {
+      allowed = permits_in(&ev, ev.ceiling, ev.nceiling, permission,
+          permission_len, type, type_len);
+    }
+  } else {
+    rc = gdefcore_entity_actor(catalog, canon, GDEFCORE_PUBLIC_ID_LEN, &actor,
+        &actor_len);
+    if (rc != GDEFCORE_OK) {
+      eval_done(&ev);
+      /* The entity went between the question above and this: a no, as for one
+       * that was never there. */
+      return rc == GDEFCORE_ERR_INVALID ? GDEFCORE_OK : rc;
+    }
+    ev.id = canon;
+    for (i = 0; i < ngrants && !allowed; i++) {
+      if (grants[i].field_len != 0 ||
+          !same(grants[i].action, grants[i].action_len, permission,
+              permission_len) ||
+          !same(grants[i].type_name, grants[i].type_len, type, type_len)) {
+        continue;
+      }
+      allowed = condition_ok(&ev, &grants[i], actor, actor_len, principal,
+          principal_len);
+    }
+    gdefcore_text_free(catalog, actor);
+    if (allowed && same(permission, permission_len, "read", 4)) {
+      /* To read is to read the published projection, as gdefcore_access_read()
+       * does: an entity that has none (a draft) is not there for a reader, and
+       * must answer as one that is not there. Other permissions are not about
+       * what is published. */
+      int state = 0;
+      if (gdefcore_entity_state(catalog, canon, GDEFCORE_PUBLIC_ID_LEN,
+              &state) != GDEFCORE_OK) {
+        ev.failed = 1;
+      } else if (state != GDEFCORE_STATE_PUBLISHED) {
+        allowed = 0;
+      }
+    }
+  }
+  failed = ev.failed;
+  eval_done(&ev);
+  if (failed) {
+    /* A condition that could not be decided is not a no that can be
+     * remembered, and not a yes. */
+    return GDEFCORE_ERR_INTERNAL;
+  }
+  *out_allowed = allowed;
+  return GDEFCORE_OK;
+}
+
+GDEFCORE_Result gdefcore_access_can(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Request * request, const char * permission, size_t permission_len,
+    const char * type, size_t type_len, const char * entity_id,
+    int * out_allowed) {
+  char canon[GDEFCORE_PUBLIC_ID_LEN + 1];
+  char key[1024];
+  int key_len;
+  int memo = 0;
+  uint64_t version = 0;
+  char * actual_type = NULL;
+  size_t actual_len = 0;
+  int allowed = 0;
+  GDEFCORE_Result rc;
+  if (out_allowed != NULL) {
+    *out_allowed = 0;
+  }
+  if (catalog == NULL || request == NULL || out_allowed == NULL ||
+      permission == NULL || permission_len == 0 || type == NULL ||
+      type_len == 0) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  /* What this request renders now depends on who asked. */
+  gdefcore_request_mark_principal_dependent(request);
+  rc = gdefcore_request_spend_fuel(request, GDEFCORE_ACCESS_CAN_FUEL_HIT);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  /* A question about a name no permission has, or longer than any, is a no. */
+  if (permission_len > GDEFCORE_ROUTE_PERMISSION_MAX || type_len > kPart) {
+    return GDEFCORE_OK;
+  }
+  rc = ensure(catalog);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  if (entity_id != NULL) {
+    /* The entity must be there, of the type asked about. Missing, malformed
+     * and of another type are one answer, and so is unreadable: a no. */
+    if (gdefcore_id_canonical(entity_id, strlen(entity_id), canon) !=
+        GDEFCORE_OK) {
+      return GDEFCORE_OK;
+    }
+    rc = gdefcore_entity_type(catalog, canon, GDEFCORE_PUBLIC_ID_LEN,
+        &actual_type, &actual_len);
+    if (rc == GDEFCORE_ERR_INVALID) {
+      return GDEFCORE_OK;
+    }
+    if (rc != GDEFCORE_OK) {
+      return rc;
+    }
+    if (!same(actual_type, actual_len, type, type_len)) {
+      gdefcore_text_free(catalog, actual_type);
+      return GDEFCORE_OK;
+    }
+    gdefcore_text_free(catalog, actual_type);
+    rc = gdefcore_entity_revision(catalog, canon, GDEFCORE_PUBLIC_ID_LEN,
+        &version);
+    if (rc == GDEFCORE_ERR_INVALID) {
+      return GDEFCORE_OK;
+    }
+    if (rc != GDEFCORE_OK) {
+      return rc;
+    }
+    (void)gdefcore_request_record_dependency(request, canon,
+        GDEFCORE_PUBLIC_ID_LEN, version);
+  } else {
+    uint64_t epoch = 0;
+    rc = gdefcore_epoch(catalog, &epoch);
+    if (rc != GDEFCORE_OK) {
+      return rc;
+    }
+    version = epoch;
+  }
+  key_len = can_key(key, sizeof key, request, permission, permission_len, type,
+      type_len, entity_id == NULL ? NULL : canon, version);
+  memo = key_len > 0;
+  if (memo && gdefcore_request_memo_get(request, key, (size_t)key_len,
+                  &allowed)) {
+    *out_allowed = allowed != 0;
+    return GDEFCORE_OK;
+  }
+  rc = gdefcore_request_spend_fuel(request, GDEFCORE_ACCESS_CAN_FUEL_MISS -
+                                               GDEFCORE_ACCESS_CAN_FUEL_HIT);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  rc = can_decide(catalog, request, permission, permission_len, type, type_len,
+      entity_id == NULL ? NULL : canon, &allowed);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  if (memo) {
+    (void)gdefcore_request_memo_put(request, key, (size_t)key_len, allowed);
+  }
+  *out_allowed = allowed != 0;
+  return GDEFCORE_OK;
+}
+
+int gdefcore_access_route_check(const GDEFCORE_Route_Call * call,
+    const char * permission, size_t permission_len, void * data) {
+  GDEFCORE_Catalog * catalog = (GDEFCORE_Catalog *)data;
+  const char * value = NULL;
+  size_t value_len = 0;
+  char canon[GDEFCORE_PUBLIC_ID_LEN + 1];
+  char * type = NULL;
+  size_t type_len = 0;
+  int allowed = 0;
+  GDEFCORE_Result rc;
+  if (catalog == NULL || call == NULL || call->request == NULL ||
+      permission == NULL || permission_len == 0) {
+    return 0;
+  }
+  if (call->entity_capture_len == 0) {
+    return gdefcore_access_permits(catalog, call->request, permission,
+        permission_len);
+  }
+  if (!gdefcore_route_call_capture(call, call->entity_capture,
+          call->entity_capture_len, &value, &value_len) ||
+      gdefcore_id_canonical(value, value_len, canon) != GDEFCORE_OK) {
+    return 0;
+  }
+  rc = gdefcore_entity_type(catalog, canon, GDEFCORE_PUBLIC_ID_LEN, &type,
+      &type_len);
+  if (rc != GDEFCORE_OK) {
+    return 0;
+  }
+  rc = gdefcore_access_can(catalog, call->request, permission, permission_len,
+      type, type_len, canon, &allowed);
+  gdefcore_text_free(catalog, type);
+  return rc == GDEFCORE_OK && allowed;
 }

@@ -136,6 +136,8 @@ typedef struct Route {
   size_t nsegs;
   char * permission;
   size_t permission_len;
+  char * entity_capture;
+  size_t entity_capture_len;
   char * title;
   size_t title_len;
   int kind;
@@ -2493,6 +2495,7 @@ static void route_clear(const GDEFCORE_Allocator * alloc, Route * route) {
   gcu_allocator_free(alloc, route->machine);
   gcu_allocator_free(alloc, route->path);
   gcu_allocator_free(alloc, route->permission);
+  gcu_allocator_free(alloc, route->entity_capture);
   gcu_allocator_free(alloc, route->title);
   gcu_allocator_free(alloc, route->parent);
   seg_free(alloc, route->segs, route->nsegs);
@@ -2681,6 +2684,18 @@ static GDEFCORE_Result seg_copy(const GDEFCORE_Allocator * alloc, const Seg * fr
   return GDEFCORE_OK;
 }
 
+/* Whether the pattern has a named segment @p name. */
+static int capture_in(const Seg * segs, size_t nsegs, const char * name,
+    size_t name_len) {
+  size_t i;
+  for (i = 0; i < nsegs; i++) {
+    if (segs[i].named && span_eq(segs[i].text, segs[i].len, name, name_len)) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
 /* The one place a route is validated and added. `named` is non-zero for
  * gdefcore_route_add_spec(), which reads `:name`; the older call keeps `:`
  * literal. Nothing is changed on any error. */
@@ -2756,6 +2771,11 @@ static GDEFCORE_Result route_insert(GDEFCORE_Routes * routes,
                  (spec->permission == NULL ||
                      !text_ok(spec->permission, spec->permission_len)))) {
     why = "permission is not text of at most 256 bytes";
+  } else if (spec->entity_capture_len > 0 &&
+             (spec->entity_capture == NULL ||
+                 !capture_in(segs, nsegs, spec->entity_capture,
+                     spec->entity_capture_len))) {
+    why = "entity capture names no capture of the pattern";
   } else if (spec->is_default && spec->kind != GDEFCORE_ROUTE_TAB) {
     why = "only a tab can be the default";
   } else if (spec->kind != GDEFCORE_ROUTE_TAB && spec->parent_len > 0) {
@@ -2843,8 +2863,11 @@ static GDEFCORE_Result route_insert(GDEFCORE_Routes * routes,
   next->permission = dup_span(alloc, spec->permission, spec->permission_len);
   next->title = dup_span(alloc, spec->title, spec->title_len);
   next->parent = dup_span(alloc, spec->parent, spec->parent_len);
+  next->entity_capture =
+      dup_span(alloc, spec->entity_capture, spec->entity_capture_len);
   if (next->machine == NULL || next->path == NULL || next->permission == NULL ||
-      next->title == NULL || next->parent == NULL) {
+      next->title == NULL || next->parent == NULL ||
+      next->entity_capture == NULL) {
     seg_free(alloc, segs, nsegs);
     seg_free(alloc, alt, parent != NULL ? parent->nsegs : 0);
     gcu_allocator_free(alloc, next->machine);
@@ -2852,6 +2875,7 @@ static GDEFCORE_Result route_insert(GDEFCORE_Routes * routes,
     gcu_allocator_free(alloc, next->permission);
     gcu_allocator_free(alloc, next->title);
     gcu_allocator_free(alloc, next->parent);
+    gcu_allocator_free(alloc, next->entity_capture);
     memset(next, 0, sizeof *next);
     return GDEFCORE_ERR_OOM;
   }
@@ -2860,6 +2884,7 @@ static GDEFCORE_Result route_insert(GDEFCORE_Routes * routes,
   next->permission_len = spec->permission_len;
   next->title_len = spec->title_len;
   next->parent_len = spec->parent_len;
+  next->entity_capture_len = spec->entity_capture_len;
   next->weight = spec->weight;
   next->after = spec->after ? 1 : 0;
   next->score = score;
@@ -2908,18 +2933,24 @@ GDEFCORE_Result gdefcore_route_add(GDEFCORE_Routes * routes, const char * machin
 
 GDEFCORE_Result gdefcore_route_add_spec(GDEFCORE_Routes * routes,
     const GDEFCORE_Route_Spec * spec, char ** out_error, size_t * out_error_len) {
+  GDEFCORE_Route_Spec local;
   if (out_error != NULL) {
     *out_error = NULL;
   }
   if (out_error_len != NULL) {
     *out_error_len = 0;
   }
-  if (routes == NULL || spec == NULL || spec->size != sizeof *spec ||
+  if (routes == NULL || spec == NULL ||
+      (spec->size != sizeof *spec && spec->size != GDEFCORE_ROUTE_SPEC_SIZE_V1) ||
       spec->machine == NULL || spec->machine_len == 0 || spec->path == NULL ||
       ((spec->fn == NULL) == (spec->call_fn == NULL))) {
     return GDEFCORE_ERR_INVALID;
   }
-  return route_insert(routes, spec, 1, out_error, out_error_len);
+  /* A spec from before the entity capture existed names none. */
+  memset(&local, 0, sizeof local);
+  memcpy(&local, spec, spec->size);
+  local.size = sizeof local;
+  return route_insert(routes, &local, 1, out_error, out_error_len);
 }
 
 GDEFCORE_Result gdefcore_routes_set_check(GDEFCORE_Routes * routes,
@@ -3023,6 +3054,8 @@ GDEFCORE_Result gdefcore_routes_tabs(GDEFCORE_Routes * routes, const char * pare
     info[i].title_len = pick[i]->title_len;
     info[i].permission = pick[i]->permission;
     info[i].permission_len = pick[i]->permission_len;
+    info[i].entity_capture = pick[i]->entity_capture;
+    info[i].entity_capture_len = pick[i]->entity_capture_len;
     info[i].kind = pick[i]->kind;
     info[i].is_default = pick[i]->is_default;
     info[i].weight = pick[i]->weight;
@@ -3030,6 +3063,55 @@ GDEFCORE_Result gdefcore_routes_tabs(GDEFCORE_Routes * routes, const char * pare
   gcu_allocator_free(routes->alloc, pick);
   *out = info;
   *out_count = n;
+  return GDEFCORE_OK;
+}
+
+GDEFCORE_Result gdefcore_routes_tabs_visible(GDEFCORE_Routes * routes,
+    const char * parent, size_t parent_len, const GDEFCORE_Route_Call * page,
+    GDEFCORE_Route_Info ** out, size_t * out_count) {
+  GDEFCORE_Route_Info * all = NULL;
+  size_t n = 0;
+  size_t kept = 0;
+  size_t i;
+  GDEFCORE_Result rc;
+  if (routes == NULL || parent == NULL || page == NULL ||
+      page->size != sizeof *page || out == NULL || out_count == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  *out = NULL;
+  *out_count = 0;
+  rc = gdefcore_routes_tabs(routes, parent, parent_len, &all, &n);
+  if (rc != GDEFCORE_OK || n == 0) {
+    return rc;
+  }
+  for (i = 0; i < n; i++) {
+    if (all[i].permission_len > 0) {
+      /* What dispatch would ask for this tab, with the captures of the page
+       * the tabs are drawn on in place of the tab's own request. */
+      GDEFCORE_Route_Call call = *page;
+      const Route * r = route_find(routes, all[i].machine, all[i].machine_len);
+      int allowed = 0;
+      call.machine = all[i].machine;
+      call.machine_len = all[i].machine_len;
+      call.data = r == NULL ? NULL : r->data;
+      call.entity_capture = all[i].entity_capture;
+      call.entity_capture_len = all[i].entity_capture_len;
+      if (routes->check != NULL) {
+        allowed = routes->check(&call, all[i].permission,
+            all[i].permission_len, routes->check_data);
+      }
+      if (!allowed) {
+        continue;
+      }
+    }
+    all[kept++] = all[i];
+  }
+  if (kept == 0) {
+    gcu_allocator_free(routes->alloc, all);
+    return GDEFCORE_OK;
+  }
+  *out = all;
+  *out_count = kept;
   return GDEFCORE_OK;
 }
 
@@ -3090,6 +3172,8 @@ static void dispatch(GDEFCORE_Routes * routes, GDEFCORE_Request * request,
         call.machine_len = r->machine_len;
         call.data = r->data;
         call.internal = &st;
+        call.entity_capture = r->entity_capture;
+        call.entity_capture_len = r->entity_capture_len;
         allowed = routes->check(&call, r->permission, r->permission_len,
             routes->check_data);
       }

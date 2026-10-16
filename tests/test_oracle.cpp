@@ -246,6 +246,18 @@ TEST(Oracle, Control) {
       std::vector<std::string> diffs = Differences(a, b);
       EXPECT_TRUE(HasKey(diffs, "t:note1:read.title")) << Join(diffs);
       EXPECT_TRUE(HasKey(diffs, "t:note1:read.secret")) << Join(diffs);
+      /* The one decision sees the note, and so does the route guarded by it;
+       * a permission the readers lack is a no for both worlds. */
+      EXPECT_TRUE(HasKey(diffs, "t:note1:can.read")) << Join(diffs);
+      EXPECT_TRUE(HasKey(diffs, "t:note1:resolve.guard")) << Join(diffs);
+      EXPECT_FALSE(HasKey(diffs, "t:note1:can.update")) << Join(diffs);
+      EXPECT_NE(std::string::npos,
+          a.kv["t:note1:can.read"].find("allowed=1"))
+          << a.kv["t:note1:can.read"];
+      EXPECT_NE(std::string::npos, a.kv["t:note1:resolve.guard"].find("rc=No error"))
+          << a.kv["t:note1:resolve.guard"];
+      EXPECT_NE(std::string::npos, b.kv["t:note1:resolve.guard"].find("rc=Invalid"))
+          << b.kv["t:note1:resolve.guard"];
       /* The condition evaluator is a system read: a condition that holds
        * answers 1 for an entity that exists and 0 for one that does not, so
        * the sweep sees the difference. The false condition (asked of every

@@ -57,28 +57,40 @@ plant default-tab-as-ancestor src/form/form.c testRoutes \
 # resolution, once in the request status, and once not at all (the check's
 # answer is ignored, so the refused route runs).
 plant refusal-sets-resolution src/form/form.c testRoutes 'Routes.RefusalIsAMissingRoute' \
-  '      if (!allowed) {
+  '            routes->check_data);
+      }
+      if (!allowed) {
         continue;
       }' \
-  '      if (!allowed) {
+  '            routes->check_data);
+      }
+      if (!allowed) {
         (void)gdefcore_request_set_resolution(request, "route.denied", 12);
         continue;
       }'
 
 plant refusal-sets-status src/form/form.c testRoutes 'Routes.RefusalIsAMissingRoute' \
-  '      if (!allowed) {
+  '            routes->check_data);
+      }
+      if (!allowed) {
         continue;
       }' \
-  '      if (!allowed) {
+  '            routes->check_data);
+      }
+      if (!allowed) {
         gdefcore_request_set_status(request, GDEFCORE_ERR_INVALID);
         continue;
       }'
 
 plant refusal-ignored src/form/form.c testRoutes 'Routes.RefusalIsAMissingRoute' \
-  '      if (!allowed) {
+  '            routes->check_data);
+      }
+      if (!allowed) {
         continue;
       }' \
-  '      if (0 && !allowed) {
+  '            routes->check_data);
+      }
+      if (0 && !allowed) {
         continue;
       }'
 

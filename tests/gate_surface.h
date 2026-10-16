@@ -70,6 +70,14 @@ static const Surface kSurface[] = {
     {"gdefcore_access_render_key", "RF"},
     {"gdefcore_access_shared_cache", "P"},
     {"gdefcore_access_permits", "RF"},
+    {"gdefcore_access_can", "RF"},
+    /* gdefcore_access_route_check decides as a principal, but its request
+     * arrives inside the GDEFCORE_Route_Call dispatch hands it, so its
+     * prototype names no GDEFCORE_Request and the table would refuse it as an
+     * RF. It is filed P and asked by the oracle sweep through a guarded
+     * route (World::Routes), which is where it is ever called from. */
+    {"gdefcore_access_route_check", "P"},
+    {"gdefcore_routes_tabs_visible", "P"},
     {"gdefcore_access_grant_when", "W"},
     {"gdefcore_access_permission_info", "RA"},
     {"gdefcore_access_grant_risk", "P"},
@@ -158,6 +166,7 @@ static const Surface kSurface[] = {
     {"gdefcore_changeset_parse", "W"},
     {"gdefcore_catalog_tenant", "P"},
     {"gdefcore_catalog_bind_host", "W"},
+    {"gdefcore_changeset_enforce_access", "W"},
     {"gdefcore_changeset_set_request", "W"},
     {"gdefcore_changeset_stage_module", "W"},
     {"gdefcore_changeset_module_count", "P"},
@@ -304,6 +313,16 @@ static const Surface kSurface[] = {
     {"gdefcore_request_principal_dependent", "P"},
     {"gdefcore_request_set_time", "W"},
     {"gdefcore_request_time", "P"},
+    {"gdefcore_request_memo_get", "P"},
+    {"gdefcore_request_memo_put", "W"},
+    {"gdefcore_request_memo_stats", "P"},
+    {"gdefcore_request_record_dependency", "W"},
+    {"gdefcore_request_dependency_count", "P"},
+    {"gdefcore_request_dependency_at", "P"},
+    {"gdefcore_request_dependencies_overflowed", "P"},
+    {"gdefcore_request_set_fuel", "W"},
+    {"gdefcore_request_spend_fuel", "W"},
+    {"gdefcore_request_fuel_left", "P"},
     {"gdefcore_sched_create", "W"},
     {"gdefcore_sched_destroy", "W"},
     {"gdefcore_sched_spawn", "W"},

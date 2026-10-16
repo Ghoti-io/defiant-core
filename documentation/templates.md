@@ -232,7 +232,11 @@ static GDEFCORE_Result judge(GDEFCORE_Request * request, const void * args,
 **Where it is checked.** `gdefcore_changeset_apply()` calls
 `gdefcore_template_authorize()` before it does anything else, for a changeset
 that has a request (`gdefcore_changeset_set_request()`): the principal is the
-request's. A changeset with no request is the operator's, such as the kit
+request's. The permission is asked of `gdefcore_access_can()` about the
+template entity being written, for the kind it will be and the kind it was, so
+the editor's answer is the route's and the tab's: roles, the grants of enabled
+modules, conditions, and an acting principal's ceiling all count. (The
+decision hook below is still consulted after it, until it is retired.) A changeset with no request is the operator's, such as the kit
 install or a tool run with the changeset API, and is not asked. A refusal is
 `GDEFCORE_ERR_INVALID`, the code a principal gets for an id it may not see,
 and writes nothing. It is checked before the confirmation, the conflict check
@@ -279,4 +283,5 @@ instrument that shows a host's cache what it may keep.
 | `gdefcore_template_may_edit`, `gdefcore_template_authorize` | Who may edit; what apply asks. |
 | `gdefcore_module_fire_veto` | A decision hook as a veto: any deny wins, no opinion stands. |
 | `gdefcore_access_permits` | Whether a request's principal holds a permission by its action. |
+| `gdefcore_access_can` | The one decision: may the principal do this to this entity. What authorize asks. |
 | `gdefcore_render_sample`, `gdefcore_render_shareable_count` | The editor's preview, and the shared-cache count. |
