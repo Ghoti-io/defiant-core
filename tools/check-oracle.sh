@@ -47,12 +47,12 @@ plant alias-resolves-unfiltered src/form/form.c testOracle 'Oracle.Entities' \
 
 # A list that shows rows the principal may not read: count and order differ.
 plant list-skips-visibility src/access/access.c testOracle 'Oracle.Entities' \
-  '    if (!entity_visible(grants, ngrants, local.type_name, local.type_name_len,' \
-  '    if (0 && !entity_visible(grants, ngrants, local.type_name, local.type_name_len,'
+  '    if (!entity_visible(ev, grants, ngrants, local.type_name,' \
+  '    if (0 && !entity_visible(ev, grants, ngrants, local.type_name,'
 
 # A read that answers for a hidden id as if the principal could see it.
 plant read-skips-filter src/access/access.c testOracle 'Oracle.Entities' \
-  '  if (!entity_visible(grants, ngrants, type_name, type_len, actor, actor_len,' \
-  '  if (0 && !entity_visible(grants, ngrants, type_name, type_len, actor, actor_len,'
+  '  visible = entity_visible(&ev,' \
+  '  visible = 1 || entity_visible(&ev,'
 
 plant_finish

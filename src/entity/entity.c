@@ -5632,6 +5632,51 @@ GDEFCORE_Result gdefcore_entity_actor(GDEFCORE_Catalog * catalog,
   return GDEFCORE_OK;
 }
 
+GDEFCORE_Result gdefcore_entity_state(GDEFCORE_Catalog * catalog,
+    const char * id, size_t id_len, int * out_state) {
+  char canon[GDEFCORE_PUBLIC_ID_LEN + 1];
+  char type_buf[160];
+  char row_text[32];
+  size_t rn = 0;
+  uint64_t row = 0;
+  char * type_name = NULL;
+  size_t type_len = 0;
+  int kn;
+  GDEFSTOR_Projection * proj = NULL;
+  GDEFCORE_Result rc;
+  if (catalog == NULL || out_state == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  if (gdefcore_id_canonical(id, id_len, canon) != GDEFCORE_OK) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  rc = lookup_id(catalog, canon, GDEFCORE_PUBLIC_ID_LEN, &row, &type_name,
+      &type_len, NULL, NULL);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  if (!u64_put(row, row_text, sizeof row_text, &rn)) {
+    gcu_allocator_free(catalog->alloc, type_name);
+    return GDEFCORE_ERR_LIMIT;
+  }
+  kn = snprintf(type_buf, sizeof type_buf, "p:%.*s", (int)type_len, type_name);
+  gcu_allocator_free(catalog->alloc, type_name);
+  if (kn <= 0 || (size_t)kn >= sizeof type_buf) {
+    return GDEFCORE_ERR_LIMIT;
+  }
+  rc = proj_get(catalog, type_buf, (size_t)kn, row_text, rn, &proj);
+  if (rc == GDEFCORE_ERR_INVALID) {
+    *out_state = GDEFCORE_STATE_DRAFT;
+    return GDEFCORE_OK;
+  }
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  gdefstor_projection_free(proj);
+  *out_state = GDEFCORE_STATE_PUBLISHED;
+  return GDEFCORE_OK;
+}
+
 GDEFCORE_Result gdefcore_text_dup(GDEFCORE_Catalog * catalog, const char * text,
     size_t len, char ** out) {
   char * copy;

@@ -2,7 +2,7 @@
 #
 # Fail if one subsystem includes another's private header.
 #
-# request, sched, entity, module, access, account, inst, subject, form, render and template are the subsystems.
+# request, sched, entity, module, access, condition, account, inst, subject, form, render and template are the subsystems.
 # Each may include another's public header. A private header included
 # from another subsystem is the seam the gate exists to catch.
 #
@@ -32,8 +32,8 @@ refuse() {
 scan() {
   tree=$1
   status=0
-  dirs='request sched entity module access account inst subject form render template'
-  headers='request_internal\.h sched_internal\.h entity_internal\.h module_internal\.h access_internal\.h account_internal\.h inst_internal\.h subject_internal\.h form_internal\.h render_internal\.h template_internal\.h'
+  dirs='request sched entity module access condition account inst subject form render template'
+  headers='request_internal\.h sched_internal\.h entity_internal\.h module_internal\.h access_internal\.h condition_internal\.h account_internal\.h inst_internal\.h subject_internal\.h form_internal\.h render_internal\.h template_internal\.h'
   for dir in $dirs; do
     for header in $headers; do
       case "$header" in
@@ -62,6 +62,7 @@ if [ ! -f "$ROOT/src/request/request_internal.h" ] ||
    [ ! -f "$ROOT/src/entity/entity_internal.h" ] ||
    [ ! -f "$ROOT/src/module/module_internal.h" ] ||
    [ ! -f "$ROOT/src/access/access_internal.h" ] ||
+   [ ! -f "$ROOT/src/condition/condition_internal.h" ] ||
    [ ! -f "$ROOT/src/account/account_internal.h" ] ||
    [ ! -f "$ROOT/src/inst/inst_internal.h" ] ||
    [ ! -f "$ROOT/src/subject/subject_internal.h" ] ||
@@ -75,12 +76,13 @@ fi
 if ! scan "$ROOT"; then
   exit 1
 fi
-printf 'check-seams: request, sched, entity, module, access, account, inst, subject, form, render and template include only public headers of each other\n'
+printf 'check-seams: request, sched, entity, module, access, condition, account, inst, subject, form, render and template include only public headers of each other\n'
 
 plant=$(mktemp -d)
 trap 'rm -rf "$plant"' EXIT
 mkdir -p "$plant/src/request" "$plant/src/sched" "$plant/src/entity" \
-  "$plant/src/module" "$plant/src/access" "$plant/src/account" \
+  "$plant/src/module" "$plant/src/access" "$plant/src/condition" \
+  "$plant/src/account" \
   "$plant/src/inst" "$plant/src/subject" "$plant/src/form" \
   "$plant/src/render" "$plant/src/template" "$plant/include"
 printf '%s\n' '#include "../sched/sched_internal.h"' > "$plant/src/request/plant.c"
@@ -89,6 +91,7 @@ printf '%s\n' '/* private */' > "$plant/src/request/request_internal.h"
 printf '%s\n' '/* private */' > "$plant/src/entity/entity_internal.h"
 printf '%s\n' '/* private */' > "$plant/src/module/module_internal.h"
 printf '%s\n' '/* private */' > "$plant/src/access/access_internal.h"
+printf '%s\n' '/* private */' > "$plant/src/condition/condition_internal.h"
 printf '%s\n' '/* private */' > "$plant/src/account/account_internal.h"
 printf '%s\n' '/* private */' > "$plant/src/inst/inst_internal.h"
 printf '%s\n' '/* private */' > "$plant/src/subject/subject_internal.h"
@@ -172,3 +175,11 @@ if scan "$plant"; then
   exit 1
 fi
 printf 'check-seams: planted include of template_internal.h was refused\n'
+
+rm -f "$plant/src/render/plant.c"
+printf '%s\n' '#include "../condition/condition_internal.h"' > "$plant/src/access/plant.c"
+if scan "$plant"; then
+  printf 'check-seams: the planted condition include passed\n' >&2
+  exit 1
+fi
+printf 'check-seams: planted include of condition_internal.h was refused\n'

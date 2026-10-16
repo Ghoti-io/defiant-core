@@ -276,6 +276,25 @@ GDEFCORE_API void gdefcore_request_mark_principal_dependent(
 GDEFCORE_API int gdefcore_request_principal_dependent(
     const GDEFCORE_Request * request);
 
+/**
+ * @brief Fix the request's clock: seconds since the epoch.
+ *
+ * Optional. A condition that reads `now` (see condition.h) reads this value,
+ * so a test or a host that wants a repeatable answer sets it. Setting it
+ * again replaces the value.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_request_set_time(
+    GDEFCORE_Request * request, int64_t seconds);
+
+/**
+ * @brief The request's time in seconds since the epoch.
+ *
+ * Fixed for the life of the request: the value from
+ * gdefcore_request_set_time(), or, when none was set, the wall clock read
+ * once at the first call and kept. A NULL request reads 0.
+ */
+GDEFCORE_API int64_t gdefcore_request_time(GDEFCORE_Request * request);
+
 #ifdef __cplusplus
 }
 #endif

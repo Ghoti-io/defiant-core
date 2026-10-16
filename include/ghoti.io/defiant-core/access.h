@@ -68,6 +68,13 @@ extern "C" {
  *
  * @ref field empty means the permission covers the entity. A field name
  * covers that field only. New permissions are granted to nobody.
+ *
+ * The condition is either @ref condition (::GDEFCORE_ACCESS_ANY or
+ * ::GDEFCORE_ACCESS_OWN) or, newer, @ref condition_text: an expression in the
+ * language of condition.h, validated against @ref type_name when the
+ * permission is declared and stored in its canonical form. Setting both is
+ * ::GDEFCORE_ERR_INVALID, and so is setting neither. A struct from before
+ * @ref condition_text existed (a smaller @ref size) has none.
  */
 typedef struct GDEFCORE_Permission {
   size_t size;                 ///< Must be `sizeof(GDEFCORE_Permission)`.
@@ -82,6 +89,8 @@ typedef struct GDEFCORE_Permission {
   size_t type_name_len;        ///< Length of @ref type_name.
   const char * field;          ///< Field, or NULL when the permission is entity-wide.
   size_t field_len;            ///< Length of @ref field.
+  const char * condition_text; ///< A condition expression (condition.h), or NULL.
+  size_t condition_text_len;   ///< Length of @ref condition_text.
 } GDEFCORE_Permission;
 
 /**

@@ -23,12 +23,12 @@ plant_control testReadpaths 'Paths.*:Principals.*'
 
 # A read that skips the filter, in each of the places that makes one.
 plant read-skips-filter src/access/access.c testReadpaths 'Paths.NoPermission' \
-  '  if (!entity_visible(grants, ngrants, type_name, type_len, actor, actor_len,' \
-  '  if (0 && !entity_visible(grants, ngrants, type_name, type_len, actor, actor_len,'
+  '  visible = entity_visible(&ev,' \
+  '  visible = 1 || entity_visible(&ev,'
 
 plant list-skips-visibility src/access/access.c testReadpaths 'Paths.NoPermission' \
-  '    if (!entity_visible(grants, ngrants, local.type_name, local.type_name_len,' \
-  '    if (0 && !entity_visible(grants, ngrants, local.type_name, local.type_name_len,'
+  '    if (!entity_visible(ev, grants, ngrants, local.type_name,' \
+  '    if (0 && !entity_visible(ev, grants, ngrants, local.type_name,'
 
 # The render path reads fields through the filter; this one reads them raw.
 plant render-reads-unfiltered src/render/render.c testReadpaths 'Paths.NoPermission' \

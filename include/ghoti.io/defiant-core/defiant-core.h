@@ -30,6 +30,7 @@
 #include <ghoti.io/defiant-core/access.h>
 #include <ghoti.io/defiant-core/account.h>
 #include <ghoti.io/defiant-core/allocator.h>
+#include <ghoti.io/defiant-core/condition.h>
 #include <ghoti.io/defiant-core/core.h>
 #include <ghoti.io/defiant-core/entity.h>
 #include <ghoti.io/defiant-core/form.h>

@@ -161,11 +161,27 @@ TEST(Oracle, Control) {
     BuildS(&absent, false);
     {
       Ask ask = AskEverything(false, {"note1", "note2", "missing"});
+      ask.cond_true = true;
       Obs a = Observe(hidden, hidden.principal["readers"], ask);
       Obs b = Observe(absent, absent.principal["readers"], ask);
       std::vector<std::string> diffs = Differences(a, b);
       EXPECT_TRUE(HasKey(diffs, "t:note1:read.title")) << Join(diffs);
       EXPECT_TRUE(HasKey(diffs, "t:note1:read.secret")) << Join(diffs);
+      /* The condition evaluator is a system read: a condition that holds
+       * answers 1 for an entity that exists and 0 for one that does not, so
+       * the sweep sees the difference. The false condition (asked of every
+       * principal in every other test) is what must not. */
+      EXPECT_TRUE(HasKey(diffs, "t:note1:cond.true")) << Join(diffs);
+      EXPECT_FALSE(HasKey(diffs, "t:note1:cond.false")) << Join(diffs);
+      EXPECT_NE(std::string::npos,
+          a.kv["t:note1:cond.true"].find("allow=1 failed=0"))
+          << a.kv["t:note1:cond.true"];
+      EXPECT_NE(std::string::npos,
+          a.kv["t:note1:cond.false"].find("allow=0 failed=0"))
+          << a.kv["t:note1:cond.false"];
+      EXPECT_NE(std::string::npos,
+          a.kv["t:missing:cond.true"].find("allow=0 failed=0"))
+          << a.kv["t:missing:cond.true"];
       EXPECT_TRUE(HasKey(diffs, "g:list.notes")) << Join(diffs);
       EXPECT_TRUE(HasKey(diffs, "g:list.notes.title=Hidden Note One"))
           << Join(diffs);

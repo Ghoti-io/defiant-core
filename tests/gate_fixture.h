@@ -674,10 +674,44 @@ inline std::string KeyLine(World & w, const std::string & who) {
   return out;
 }
 
+/**
+ * One condition evaluated on one id, as the principal's request. The false
+ * condition reads every operand the entity offers (type, state, actor, a
+ * field) and holds for nothing, so a hidden entity and a missing one must
+ * answer alike. The true one (only when asked) holds for any note or post
+ * that exists: a control, which shows the sweep can see an entity at all.
+ */
+inline std::string CondLine(World & w, const std::string & who,
+    const std::string & id, bool holds) {
+  static const char kFalse[] =
+      "(or (= field.title \"no-such-title-anywhere\") (= type \"no.such.type\")"
+      " (= state \"nonesuch\") (= actor \"nobody\") (= principal \"nobody\"))";
+  static const char kTrue[] = "(in type (\"site.note\" \"site.post\"))";
+  const char * text = holds ? kTrue : kFalse;
+  Fresh fresh(w, who);
+  GDEFCORE_Condition * cond = NULL;
+  GDEFCORE_Condition_Subject subject;
+  int failed = 99;
+  int allow;
+  EXPECT_EQ(GDEFCORE_OK,
+      gdefcore_condition_parse(text, strlen(text), &cond, NULL));
+  memset(&subject, 0, sizeof subject);
+  subject.size = sizeof subject;
+  subject.entity = id.data();
+  subject.entity_len = id.size();
+  Note("gdefcore_condition_eval");
+  allow = gdefcore_condition_eval(w.site.catalog, fresh.req, cond, &subject,
+      &failed);
+  gdefcore_condition_free(cond);
+  return "allow=" + std::to_string(allow) + " failed=" + std::to_string(failed) +
+         Diag(w, fresh.req);
+}
+
 /** What to ask. */
 struct Ask {
   bool posts = false;                 ///< Ask the site.post surfaces too.
   std::vector<std::string> targets;   ///< Target names to aim per-target probes at.
+  bool cond_true = false;             ///< Also ask a condition that HOLDS (a control).
 };
 
 /**
@@ -698,6 +732,10 @@ inline Obs Observe(World & w, const std::string & who, const Ask & ask) {
     o.kv[pre + "read.nope"] = ReadLine(w, who, target, "nope");
     o.kv[pre + "resolve.echo"] =
         ResolveLine(w, who, true, "/echo/" + name, true);
+    o.kv[pre + "cond.false"] = CondLine(w, who, target, false);
+    if (ask.cond_true) {
+      o.kv[pre + "cond.true"] = CondLine(w, who, target, true);
+    }
     if (ask.posts) {
       o.kv[pre + "page.echo"] = PageLine(w, who, true, "/echo/" + name);
     }

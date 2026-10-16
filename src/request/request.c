@@ -30,6 +30,7 @@
 #include <ghoti.io/defiant-core/request.h>
 
 #include <stdatomic.h>
+#include <time.h>
 #include <string.h>
 
 #include "request_internal.h"
@@ -378,4 +379,25 @@ void gdefcore_request_mark_principal_dependent(GDEFCORE_Request * request) {
 
 int gdefcore_request_principal_dependent(const GDEFCORE_Request * request) {
   return request != NULL && request->principal_dependent != 0;
+}
+
+GDEFCORE_Result gdefcore_request_set_time(GDEFCORE_Request * request,
+    int64_t seconds) {
+  if (request == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  request->time_seconds = seconds;
+  request->time_set = 1;
+  return GDEFCORE_OK;
+}
+
+int64_t gdefcore_request_time(GDEFCORE_Request * request) {
+  if (request == NULL) {
+    return 0;
+  }
+  if (!request->time_set) {
+    request->time_seconds = (int64_t)time(NULL);
+    request->time_set = 1;
+  }
+  return request->time_seconds;
 }

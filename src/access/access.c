@@ -28,6 +28,7 @@
 
 #include <ghoti.io/defiant-core/macros.h>
 #include <ghoti.io/defiant-core/access.h>
+#include <ghoti.io/defiant-core/condition.h>
 
 #include "access_internal.h"
 
@@ -43,7 +44,10 @@ enum {
   kStageMax = 16,
   kPart = 160,
   kGrantMax = 64,
-  kAssignedRoles = 8
+  kAssignedRoles = 8,
+  /* A grant whose condition is an expression (condition.h). The public
+   * ::GDEFCORE_ACCESS_ANY and ::GDEFCORE_ACCESS_OWN stay 1 and 2. */
+  kCondExpr = 3
 };
 
 static const char kLang[] = "en";
@@ -59,6 +63,10 @@ static const char kPermissionConfirm[] = "core.permission";
 static const char kSeedConfirm[] = "core.principal\ncore.role";
 static const char kEmptyMark[] = "-";
 static const char kRetired[] = "1";
+static const char kCondAny[] = "any";
+static const char kCondOwn[] = "own";
+static const char kCondExprMark[] = "expr";
+static const char kFailedNote[] = "defiant.condition.failed";
 
 typedef struct StagePerm {
   char label[kPart];
@@ -244,25 +252,38 @@ static GDEFCORE_Result define_types(GDEFCORE_Catalog * catalog) {
   return rc;
 }
 
-static int retired_id(GDEFCORE_Catalog * catalog, const char * id) {
+/* Whether the entity is retired. A flag that cannot be read is retired:
+ * unknown is no grant, and the lookups that look for a live entity move on. */
+static GDEFCORE_Result retired_state(GDEFCORE_Catalog * catalog, const char * id,
+    int * out_retired) {
   char ** texts = NULL;
   size_t * lens = NULL;
   size_t count = 0;
-  int retired = 0;
-  if (read_values(catalog, id, "retired", &texts, &lens, &count) !=
-      GDEFCORE_OK) {
-    return 0;
+  GDEFCORE_Result rc = read_values(catalog, id, "retired", &texts, &lens, &count);
+  if (rc != GDEFCORE_OK) {
+    *out_retired = 1;
+    return rc;
   }
-  retired = values_have(texts, lens, count, kRetired, strlen(kRetired));
+  *out_retired = values_have(texts, lens, count, kRetired, strlen(kRetired));
   gdefcore_values_free(catalog, texts, lens, count);
+  return GDEFCORE_OK;
+}
+
+static int retired_id(GDEFCORE_Catalog * catalog, const char * id) {
+  int retired = 1;
+  (void)retired_state(catalog, id, &retired);
   return retired;
 }
 
+/* The first entity of @p type whose @p field holds @p want. A read that fails
+ * on the way is not "no such entity": if nothing was found and something
+ * failed, the failure is what comes back. */
 static GDEFCORE_Result find_named(GDEFCORE_Catalog * catalog, const char * type,
     const char * field, const char * want, size_t want_len, char * out_id) {
   char ** ids = NULL;
   size_t count = 0;
   size_t i;
+  GDEFCORE_Result failure = GDEFCORE_OK;
   GDEFCORE_Result rc = gdefcore_entity_ids(catalog, type, strlen(type), &ids,
       &count);
   if (rc != GDEFCORE_OK) {
@@ -273,10 +294,18 @@ static GDEFCORE_Result find_named(GDEFCORE_Catalog * catalog, const char * type,
     char ** texts = NULL;
     size_t * lens = NULL;
     size_t n = 0;
-    if (retired_id(catalog, ids[i])) {
+    int retired = 0;
+    GDEFCORE_Result got = retired_state(catalog, ids[i], &retired);
+    if (got != GDEFCORE_OK) {
+      failure = failure == GDEFCORE_OK ? got : failure;
       continue;
     }
-    if (read_values(catalog, ids[i], field, &texts, &lens, &n) != GDEFCORE_OK) {
+    if (retired) {
+      continue;
+    }
+    got = read_values(catalog, ids[i], field, &texts, &lens, &n);
+    if (got != GDEFCORE_OK) {
+      failure = failure == GDEFCORE_OK ? got : failure;
       continue;
     }
     if (values_have(texts, lens, n, want, want_len)) {
@@ -288,6 +317,9 @@ static GDEFCORE_Result find_named(GDEFCORE_Catalog * catalog, const char * type,
     gdefcore_values_free(catalog, texts, lens, n);
   }
   gdefcore_ids_free(catalog, ids, count);
+  if (rc != GDEFCORE_OK && failure != GDEFCORE_OK) {
+    return failure;
+  }
   return rc;
 }
 
@@ -331,8 +363,15 @@ static GDEFCORE_Result ensure(GDEFCORE_Catalog * catalog) {
   size_t role_lens[1];
   GDEFCORE_Changeset * changeset = NULL;
   GDEFCORE_Result rc;
-  if (find_role(catalog, kAdmin, strlen(kAdmin), admin_role) == GDEFCORE_OK) {
+  rc = find_role(catalog, kAdmin, strlen(kAdmin), admin_role);
+  if (rc == GDEFCORE_OK) {
     return GDEFCORE_OK;
+  }
+  if (rc != GDEFCORE_ERR_INVALID) {
+    /* Not "no admin role yet": the lookup itself failed (an allocation, the
+     * store). Seeding on top of an admin role that is there but unread would
+     * make a second admin role and a second admin principal. */
+    return rc;
   }
   rc = define_types(catalog);
   if (rc != GDEFCORE_OK) {
@@ -387,7 +426,10 @@ static GDEFCORE_Result ensure(GDEFCORE_Catalog * catalog) {
 }
 
 static int encode_grant(char * buf, size_t cap, const Grant * grant) {
-  const char * cond = grant->condition == GDEFCORE_ACCESS_OWN ? "own" : "any";
+  const char * cond = grant->condition == kCondExpr
+                          ? kCondExprMark
+                          : (grant->condition == GDEFCORE_ACCESS_OWN ? kCondOwn
+                                                                     : kCondAny);
   int n = snprintf(buf, cap, "%.*s%c%.*s%c%.*s%c%s%c%.*s%c%.*s",
       (int)grant->label_len, grant->label, 0x1f, (int)grant->action_len,
       grant->action, 0x1f, (int)grant->module_len, grant->module_name, 0x1f,
@@ -447,6 +489,8 @@ static int parse_grant(const char * text, size_t len, Grant * grant,
     grant->condition = GDEFCORE_ACCESS_ANY;
   } else if (plens[3] == 3 && memcmp(parts[3], "own", 3) == 0) {
     grant->condition = GDEFCORE_ACCESS_OWN;
+  } else if (plens[3] == 4 && memcmp(parts[3], kCondExprMark, 4) == 0) {
+    grant->condition = kCondExpr;
   } else {
     return 0;
   }
@@ -483,21 +527,6 @@ static GDEFCORE_Result load_role_grants(GDEFCORE_Catalog * catalog,
   }
   gdefcore_values_free(catalog, texts, lens, count);
   return GDEFCORE_OK;
-}
-
-static int condition_ok(const Grant * grant, const char * actor,
-    size_t actor_len, const char * principal, size_t principal_len) {
-  if (grant->condition == GDEFCORE_ACCESS_ANY) {
-    return 1;
-  }
-  if (grant->condition != GDEFCORE_ACCESS_OWN) {
-    return 0;
-  }
-  if (actor == NULL || principal == NULL || actor_len == 0 ||
-      principal_len == 0) {
-    return 0;
-  }
-  return same(actor, actor_len, principal, principal_len);
 }
 
 static GDEFCORE_Result load_effective(GDEFCORE_Catalog * catalog,
@@ -663,6 +692,9 @@ static GDEFCORE_Result load_decls(GDEFCORE_Catalog * catalog, Grant * decls,
       decl->condition = GDEFCORE_ACCESS_OWN;
     } else if (cn == 1 && same(condition[0], cl[0], "any", 3)) {
       decl->condition = GDEFCORE_ACCESS_ANY;
+    } else if (cn == 1 && cl[0] > 0) {
+      /* An expression. Only its field, if any, matters here. */
+      decl->condition = kCondExpr;
     } else {
       gdefcore_values_free(catalog, label, ll, ln);
       gdefcore_values_free(catalog, type_name, tl, tn);
@@ -709,7 +741,145 @@ static int type_has_field(GDEFCORE_Catalog * catalog, const char * type,
   return 0;
 }
 
-static int entity_visible(const Grant * grants, size_t ngrants,
+/* One parsed expression, by the label of the permission that carries it. */
+typedef struct ExprSlot {
+  char label[kPart];
+  size_t label_len;
+  GDEFCORE_Condition * cond;
+  int bad;
+} ExprSlot;
+
+/*
+ * What a grant's condition needs to be decided: the entity now being asked
+ * about, the language its field values are read in, the parsed expressions
+ * (each read and parsed once per call), and whether anything failed. A
+ * failure is a grant that does not hold, never one that does.
+ */
+typedef struct Eval {
+  GDEFCORE_Catalog * catalog;
+  GDEFCORE_Request * request;
+  const char * lang;
+  size_t lang_len;
+  const char * id;      /* canonical id of the entity being asked about */
+  ExprSlot slots[kGrantMax];
+  size_t nslots;
+  int failed;
+} Eval;
+
+static void eval_init(Eval * ev, GDEFCORE_Catalog * catalog,
+    GDEFCORE_Request * request, const char * lang, size_t lang_len) {
+  ev->catalog = catalog;
+  ev->request = request;
+  ev->lang = lang == NULL ? kLang : lang;
+  ev->lang_len = lang == NULL ? strlen(kLang) : lang_len;
+  ev->id = NULL;
+  ev->nslots = 0;
+  ev->failed = 0;
+}
+
+/* Frees the slots. A failure leaves a note on the request, which is how the
+ * caller of a filtered read learns that a condition could not be decided. */
+static void eval_done(Eval * ev) {
+  size_t i;
+  for (i = 0; i < ev->nslots; i++) {
+    gdefcore_condition_free(ev->slots[i].cond);
+  }
+  ev->nslots = 0;
+  if (ev->failed && ev->request != NULL) {
+    (void)gdefcore_request_set_note(ev->request, kFailedNote,
+        strlen(kFailedNote), "1", 1);
+  }
+}
+
+static ExprSlot * expr_slot(Eval * ev, const Grant * grant) {
+  size_t i;
+  ExprSlot * slot;
+  char id[GDEFCORE_PUBLIC_ID_LEN + 1];
+  char ** texts = NULL;
+  size_t * lens = NULL;
+  size_t n = 0;
+  for (i = 0; i < ev->nslots; i++) {
+    if (same(ev->slots[i].label, ev->slots[i].label_len, grant->label,
+            grant->label_len)) {
+      return &ev->slots[i];
+    }
+  }
+  if (ev->nslots >= kGrantMax) {
+    return NULL;
+  }
+  slot = &ev->slots[ev->nslots];
+  memset(slot, 0, sizeof *slot);
+  memcpy(slot->label, grant->label, grant->label_len);
+  slot->label_len = grant->label_len;
+  ev->nslots += 1;
+  slot->bad = 1;
+  if (find_named(ev->catalog, kPermissionType, "label", grant->label,
+          grant->label_len, id) != GDEFCORE_OK) {
+    return slot;
+  }
+  if (read_values(ev->catalog, id, "condition", &texts, &lens, &n) ==
+          GDEFCORE_OK &&
+      n == 1) {
+    if (gdefcore_condition_parse(texts[0], lens[0], &slot->cond, NULL) ==
+        GDEFCORE_OK) {
+      slot->bad = 0;
+    }
+  }
+  gdefcore_values_free(ev->catalog, texts, lens, n);
+  return slot;
+}
+
+/* Whether a grant's expression holds on the entity ev->id, or, with no
+ * entity, could hold for something of the grant's type. */
+static int expr_holds(Eval * ev, const Grant * grant, const char * id,
+    size_t id_len) {
+  ExprSlot * slot = expr_slot(ev, grant);
+  GDEFCORE_Condition_Subject subject;
+  int failed = 0;
+  int r;
+  if (slot == NULL || slot->bad || slot->cond == NULL) {
+    ev->failed = 1;
+    return 0;
+  }
+  memset(&subject, 0, sizeof subject);
+  subject.size = sizeof subject;
+  subject.entity = id;
+  subject.entity_len = id_len;
+  subject.type_name = grant->type_name;
+  subject.type_name_len = grant->type_len;
+  subject.lang = ev->lang;
+  subject.lang_len = ev->lang_len;
+  r = gdefcore_condition_eval(ev->catalog, ev->request, slot->cond, &subject,
+      &failed);
+  if (failed) {
+    ev->failed = 1;
+    return 0;
+  }
+  return r;
+}
+
+static int condition_ok(Eval * ev, const Grant * grant, const char * actor,
+    size_t actor_len, const char * principal, size_t principal_len) {
+  if (grant->condition == GDEFCORE_ACCESS_ANY) {
+    return 1;
+  }
+  if (grant->condition == kCondExpr) {
+    if (ev == NULL || ev->id == NULL) {
+      return 0;
+    }
+    return expr_holds(ev, grant, ev->id, GDEFCORE_PUBLIC_ID_LEN);
+  }
+  if (grant->condition != GDEFCORE_ACCESS_OWN) {
+    return 0;
+  }
+  if (actor == NULL || principal == NULL || actor_len == 0 ||
+      principal_len == 0) {
+    return 0;
+  }
+  return same(actor, actor_len, principal, principal_len);
+}
+
+static int entity_visible(Eval * ev, const Grant * grants, size_t ngrants,
     const char * type, size_t type_len, const char * actor, size_t actor_len,
     const char * principal, size_t principal_len) {
   size_t i;
@@ -721,7 +891,8 @@ static int entity_visible(const Grant * grants, size_t ngrants,
       continue;
     }
     if (same(grants[i].action, grants[i].action_len, "read", 4) &&
-        condition_ok(&grants[i], actor, actor_len, principal, principal_len)) {
+        condition_ok(ev, &grants[i], actor, actor_len, principal,
+            principal_len)) {
       return 1;
     }
   }
@@ -743,9 +914,10 @@ static int field_restricted(const Grant * decls, size_t ndecls,
   return 0;
 }
 
-static int field_granted(const Grant * grants, size_t ngrants, const char * type,
-    size_t type_len, const char * field, size_t field_len, const char * actor,
-    size_t actor_len, const char * principal, size_t principal_len) {
+static int field_granted(Eval * ev, const Grant * grants, size_t ngrants,
+    const char * type, size_t type_len, const char * field, size_t field_len,
+    const char * actor, size_t actor_len, const char * principal,
+    size_t principal_len) {
   size_t i;
   for (i = 0; i < ngrants; i++) {
     if (grants[i].field_len == 0) {
@@ -758,13 +930,16 @@ static int field_granted(const Grant * grants, size_t ngrants, const char * type
     if (!same(grants[i].action, grants[i].action_len, "read", 4)) {
       continue;
     }
-    if (condition_ok(&grants[i], actor, actor_len, principal, principal_len)) {
+    if (condition_ok(ev, &grants[i], actor, actor_len, principal,
+            principal_len)) {
       return 1;
     }
   }
   return 0;
 }
 
+/* Whether any grant could let the principal name the field. An expression
+ * is decided per entity, so here it only says "possibly". */
 static int grant_names_field(const Grant * grants, size_t ngrants,
     const Grant * decls, size_t ndecls, const char * type, size_t type_len,
     const char * field, size_t field_len, const char * principal,
@@ -779,7 +954,8 @@ static int grant_names_field(const Grant * grants, size_t ngrants,
         !same(grants[i].action, grants[i].action_len, "read", 4)) {
       continue;
     }
-    if (grants[i].condition == GDEFCORE_ACCESS_ANY) {
+    if (grants[i].condition == GDEFCORE_ACCESS_ANY ||
+        grants[i].condition == kCondExpr) {
       return 1;
     }
     if (grants[i].condition == GDEFCORE_ACCESS_OWN && principal != NULL &&
@@ -790,15 +966,15 @@ static int grant_names_field(const Grant * grants, size_t ngrants,
   return 0;
 }
 
-static int may_name_field(const Grant * grants, size_t ngrants,
+static int may_name_field(Eval * ev, const Grant * grants, size_t ngrants,
     const Grant * decls, size_t ndecls, const char * type, size_t type_len,
     const char * field, size_t field_len, const char * actor, size_t actor_len,
     const char * principal, size_t principal_len) {
   if (!field_restricted(decls, ndecls, type, type_len, field, field_len)) {
     return 1;
   }
-  return field_granted(grants, ngrants, type, type_len, field, field_len, actor,
-      actor_len, principal, principal_len);
+  return field_granted(ev, grants, ngrants, type, type_len, field, field_len,
+      actor, actor_len, principal, principal_len);
 }
 
 static StageSlot * find_slot(GDEFCORE_Changeset * changeset, int create) {
@@ -907,8 +1083,10 @@ static GDEFCORE_Result permission_by_label(GDEFCORE_Catalog * catalog,
     }
     if (cl[0] == 3 && memcmp(condition[0], "own", 3) == 0) {
       grant->condition = GDEFCORE_ACCESS_OWN;
-    } else {
+    } else if (cl[0] == 3 && memcmp(condition[0], "any", 3) == 0) {
       grant->condition = GDEFCORE_ACCESS_ANY;
+    } else {
+      grant->condition = kCondExpr;
     }
     copy_part(grant->module_name, sizeof grant->module_name, &grant->module_len,
         module[0], ml[0]);
@@ -928,18 +1106,26 @@ static GDEFCORE_Result permission_by_label(GDEFCORE_Catalog * catalog,
 }
 
 static GDEFCORE_Result declare_grant(GDEFCORE_Catalog * catalog,
-    const Grant * grant, const char * module_name, size_t module_len) {
+    const Grant * grant, const char * module_name, size_t module_len,
+    const char * expr, size_t expr_len) {
   char existing[GDEFCORE_PUBLIC_ID_LEN + 1];
   GDEFCORE_Value values[6];
   const char * texts[6];
   size_t lens[6];
   Grant stored;
   const char * cond;
+  size_t cond_len;
   if (permission_by_label(catalog, grant->label, grant->label_len, existing,
           &stored, NULL, 0, NULL) == GDEFCORE_OK) {
     return GDEFCORE_OK;
   }
-  cond = grant->condition == GDEFCORE_ACCESS_OWN ? "own" : "any";
+  if (grant->condition == kCondExpr) {
+    cond = expr;
+    cond_len = expr_len;
+  } else {
+    cond = grant->condition == GDEFCORE_ACCESS_OWN ? kCondOwn : kCondAny;
+    cond_len = 3;
+  }
   texts[0] = grant->label;
   lens[0] = grant->label_len;
   texts[1] = module_name;
@@ -947,7 +1133,7 @@ static GDEFCORE_Result declare_grant(GDEFCORE_Catalog * catalog,
   texts[2] = grant->action;
   lens[2] = grant->action_len;
   texts[3] = cond;
-  lens[3] = 3;
+  lens[3] = cond_len;
   texts[4] = grant->type_name;
   lens[4] = grant->type_len;
   value_set(&values[0], "label", &texts[0], &lens[0], 1);
@@ -1336,7 +1522,7 @@ GDEFCORE_Result gdefcore_access_copy_template(GDEFCORE_Catalog * catalog,
   copy_part(grant.module_name, sizeof grant.module_name, &grant.module_len,
       "core", 4);
   grant.condition = GDEFCORE_ACCESS_OWN;
-  rc = declare_grant(catalog, &grant, "core", 4);
+  rc = declare_grant(catalog, &grant, "core", 4, NULL, 0);
   if (rc != GDEFCORE_OK) {
     return rc;
   }
@@ -1404,6 +1590,9 @@ GDEFCORE_Result gdefcore_access_declare(GDEFCORE_Catalog * catalog,
   Grant grant;
   GDEFCORE_Permission local;
   GDEFCORE_Result rc;
+  int has_text;
+  char * canon = NULL;
+  size_t canon_len = 0;
   if (catalog == NULL || permission == NULL ||
       permission->size < sizeof(size_t)) {
     return GDEFCORE_ERR_INVALID;
@@ -1416,12 +1605,20 @@ GDEFCORE_Result gdefcore_access_declare(GDEFCORE_Catalog * catalog,
     }
     memcpy(&local, permission, n);
   }
+  has_text = local.condition_text != NULL && local.condition_text_len > 0;
   if (!line_ok(local.label, local.label_len) ||
       !line_ok(local.module_name, local.module_name_len) ||
       !line_ok(local.action, local.action_len) ||
-      !line_ok(local.type_name, local.type_name_len) ||
-      (local.condition != GDEFCORE_ACCESS_ANY &&
-          local.condition != GDEFCORE_ACCESS_OWN)) {
+      !line_ok(local.type_name, local.type_name_len)) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  if (has_text) {
+    /* Both set is an error: there is one condition, not a choice of two. */
+    if (local.condition != 0) {
+      return GDEFCORE_ERR_INVALID;
+    }
+  } else if (local.condition != GDEFCORE_ACCESS_ANY &&
+             local.condition != GDEFCORE_ACCESS_OWN) {
     return GDEFCORE_ERR_INVALID;
   }
   if (local.field_len > 0 && !line_ok(local.field, local.field_len)) {
@@ -1446,8 +1643,29 @@ GDEFCORE_Result gdefcore_access_declare(GDEFCORE_Catalog * catalog,
     return GDEFCORE_ERR_LIMIT;
   }
   grant.condition = local.condition;
-  return declare_grant(catalog, &grant, local.module_name,
-      local.module_name_len);
+  if (has_text) {
+    GDEFCORE_Condition * parsed = NULL;
+    /* The expression must parse, name only fields the type has (and none
+     * that is personal), and is stored in its canonical form. */
+    rc = gdefcore_condition_parse(local.condition_text,
+        local.condition_text_len, &parsed, NULL);
+    if (rc == GDEFCORE_OK) {
+      rc = gdefcore_condition_validate(catalog, parsed, local.type_name,
+          local.type_name_len, NULL);
+    }
+    if (rc == GDEFCORE_OK) {
+      rc = gdefcore_condition_canonical(parsed, &canon, &canon_len);
+    }
+    gdefcore_condition_free(parsed);
+    if (rc != GDEFCORE_OK) {
+      return rc;
+    }
+    grant.condition = kCondExpr;
+  }
+  rc = declare_grant(catalog, &grant, local.module_name, local.module_name_len,
+      canon, canon_len);
+  gdefcore_condition_text_free(canon);
+  return rc;
 }
 
 GDEFCORE_Result gdefcore_access_grant(GDEFCORE_Catalog * catalog,
@@ -1724,6 +1942,9 @@ GDEFCORE_Result gdefcore_access_read(GDEFCORE_Catalog * catalog,
   size_t ngrants = 0;
   size_t ndecls = 0;
   int read_principal = 0;
+  Eval ev;
+  int visible;
+  int granted = 1;
   GDEFCORE_Result rc;
   if (catalog == NULL || request == NULL || out_texts == NULL ||
       out_lens == NULL || out_count == NULL || field == NULL) {
@@ -1758,20 +1979,26 @@ GDEFCORE_Result gdefcore_access_read(GDEFCORE_Catalog * catalog,
     gdefcore_text_free(catalog, actor);
     return rc;
   }
-  if (!entity_visible(grants, ngrants, type_name, type_len, actor, actor_len,
-          principal, principal_len)) {
+  eval_init(&ev, catalog, request, lang, lang_len);
+  ev.id = canon;
+  visible = entity_visible(&ev, grants, ngrants, type_name, type_len, actor,
+      actor_len, principal, principal_len);
+  if (visible && type_has_field(catalog, type_name, type_len, field,
+                     field_len) &&
+      field_restricted(decls, ndecls, type_name, type_len, field, field_len)) {
+    granted = field_granted(&ev, grants, ngrants, type_name, type_len, field,
+        field_len, actor, actor_len, principal, principal_len);
+  }
+  /* A condition that could not be decided has not granted: it reads as the
+   * entity being hidden, which is also what a missing one reads as. */
+  eval_done(&ev);
+  if (!visible || !type_has_field(catalog, type_name, type_len, field,
+                      field_len)) {
     gdefcore_text_free(catalog, type_name);
     gdefcore_text_free(catalog, actor);
     return GDEFCORE_ERR_INVALID;
   }
-  if (!type_has_field(catalog, type_name, type_len, field, field_len)) {
-    gdefcore_text_free(catalog, type_name);
-    gdefcore_text_free(catalog, actor);
-    return GDEFCORE_ERR_INVALID;
-  }
-  if (field_restricted(decls, ndecls, type_name, type_len, field, field_len) &&
-      !field_granted(grants, ngrants, type_name, type_len, field, field_len,
-          actor, actor_len, principal, principal_len)) {
+  if (!granted) {
     gdefcore_text_free(catalog, type_name);
     gdefcore_text_free(catalog, actor);
     *out_texts = NULL;
@@ -1810,7 +2037,7 @@ static void drop_rows(GDEFCORE_Catalog * catalog, struct Listed * rows,
   gdefcore_ids_free(catalog, ids, count);
 }
 
-GDEFCORE_Result gdefcore_access_list(GDEFCORE_Catalog * catalog,
+static GDEFCORE_Result list_impl(Eval * ev, GDEFCORE_Catalog * catalog,
     GDEFCORE_Request * request, const GDEFCORE_Access_List * query,
     char *** out_ids, size_t * out_count) {
   GDEFCORE_Access_List local;
@@ -1857,6 +2084,7 @@ GDEFCORE_Result gdefcore_access_list(GDEFCORE_Catalog * catalog,
   if (rc != GDEFCORE_OK) {
     return rc;
   }
+  eval_init(ev, catalog, request, local.lang, local.lang_len);
   if (local.filter_field != NULL && local.filter_field_len > 0) {
     if (!type_has_field(catalog, local.type_name, local.type_name_len,
             local.filter_field, local.filter_field_len) ||
@@ -1898,19 +2126,22 @@ GDEFCORE_Result gdefcore_access_list(GDEFCORE_Catalog * catalog,
       drop_rows(catalog, rows, nrows, ids, count);
       return rc;
     }
-    if (!entity_visible(grants, ngrants, local.type_name, local.type_name_len,
-            actor, actor_len, principal, principal_len)) {
+    ev->id = ids[i];
+    if (!entity_visible(ev, grants, ngrants, local.type_name,
+            local.type_name_len, actor, actor_len, principal, principal_len)) {
       gdefcore_text_free(catalog, actor);
       continue;
     }
     if ((local.filter_field != NULL && local.filter_field_len > 0 &&
-            !may_name_field(grants, ngrants, decls, ndecls, local.type_name,
-                local.type_name_len, local.filter_field, local.filter_field_len,
-                actor, actor_len, principal, principal_len)) ||
+            !may_name_field(ev, grants, ngrants, decls, ndecls,
+                local.type_name, local.type_name_len, local.filter_field,
+                local.filter_field_len, actor, actor_len, principal,
+                principal_len)) ||
         (local.sort_field != NULL && local.sort_field_len > 0 &&
-            !may_name_field(grants, ngrants, decls, ndecls, local.type_name,
-                local.type_name_len, local.sort_field, local.sort_field_len,
-                actor, actor_len, principal, principal_len))) {
+            !may_name_field(ev, grants, ngrants, decls, ndecls,
+                local.type_name, local.type_name_len, local.sort_field,
+                local.sort_field_len, actor, actor_len, principal,
+                principal_len))) {
       gdefcore_text_free(catalog, actor);
       drop_rows(catalog, rows, nrows, ids, count);
       return GDEFCORE_ERR_INVALID;
@@ -1992,6 +2223,17 @@ GDEFCORE_Result gdefcore_access_list(GDEFCORE_Catalog * catalog,
   return GDEFCORE_OK;
 }
 
+GDEFCORE_Result gdefcore_access_list(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Request * request, const GDEFCORE_Access_List * query,
+    char *** out_ids, size_t * out_count) {
+  Eval ev;
+  GDEFCORE_Result rc;
+  memset(&ev, 0, sizeof ev);
+  rc = list_impl(&ev, catalog, request, query, out_ids, out_count);
+  eval_done(&ev);
+  return rc;
+}
+
 static int sha_hex(const void * data, size_t n, char out[65]) {
   GSEC_Sha256 ctx;
   uint8_t dig[GSEC_SHA256_DIGEST_LEN];
@@ -2042,7 +2284,9 @@ GDEFCORE_Result gdefcore_access_render_key(GDEFCORE_Catalog * catalog,
   const char * principal_text = "-";
   size_t principal_text_len = 1;
   const char * module_text = "-";
+  Eval ev;
   GDEFCORE_Result rc;
+  memset(&ev, 0, sizeof ev);
   if (catalog == NULL || request == NULL || out_key == NULL) {
     return GDEFCORE_ERR_INVALID;
   }
@@ -2070,6 +2314,19 @@ GDEFCORE_Result gdefcore_access_render_key(GDEFCORE_Catalog * catalog,
   }
   tenant = gdefcore_catalog_tenant(catalog, &tenant_len);
   principal = gdefcore_request_principal(request, &principal_len);
+  eval_init(&ev, catalog, request, NULL, 0);
+  for (i = 0; i < ngrants; i++) {
+    if (grants[i].condition == kCondExpr) {
+      /* An expression that reads the principal, or that cannot be read at
+       * all, makes the render depend on who is asking. */
+      ExprSlot * slot = expr_slot(&ev, &grants[i]);
+      if (slot == NULL || slot->bad ||
+          (gdefcore_condition_uses(slot->cond) &
+              GDEFCORE_CONDITION_USES_PRINCIPAL) != 0) {
+        read_principal = 1;
+      }
+    }
+  }
   if ((read_principal || gdefcore_request_principal_dependent(request)) &&
       principal != NULL && principal_len > 0) {
     principal_text = principal;
@@ -2077,13 +2334,36 @@ GDEFCORE_Result gdefcore_access_render_key(GDEFCORE_Catalog * catalog,
   }
   for (i = 0; i < ngrants; i++) {
     char line[512];
-    int n = snprintf(line, sizeof line, "%.*s\t%s\t%.*s\t%.*s\t%.*s\n",
-        (int)grants[i].label_len, grants[i].label,
-        grants[i].condition == GDEFCORE_ACCESS_OWN ? "own" : "any",
+    char cond_text[GDEFCORE_CONDITION_HASH_LEN + 8];
+    int n;
+    char * copy;
+    if (grants[i].condition == kCondExpr) {
+      /* The key names the expression by the hash of its canonical text, so
+       * a changed condition is a changed key. One that cannot be read is
+       * keyed apart from every readable one. */
+      ExprSlot * slot = expr_slot(&ev, &grants[i]);
+      char * canon = NULL;
+      size_t canon_len = 0;
+      snprintf(cond_text, sizeof cond_text, "expr:?");
+      if (slot != NULL && !slot->bad &&
+          gdefcore_condition_canonical(slot->cond, &canon, &canon_len) ==
+              GDEFCORE_OK) {
+        char hash[GDEFCORE_CONDITION_HASH_LEN + 1];
+        if (gdefcore_condition_hash(canon, canon_len, hash, NULL) ==
+            GDEFCORE_OK) {
+          snprintf(cond_text, sizeof cond_text, "expr:%s", hash);
+        }
+      }
+      gdefcore_condition_text_free(canon);
+    } else {
+      snprintf(cond_text, sizeof cond_text, "%s",
+          grants[i].condition == GDEFCORE_ACCESS_OWN ? kCondOwn : kCondAny);
+    }
+    n = snprintf(line, sizeof line, "%.*s\t%s\t%.*s\t%.*s\t%.*s\n",
+        (int)grants[i].label_len, grants[i].label, cond_text,
         (int)grants[i].type_len, grants[i].type_name,
         (int)grants[i].field_len, grants[i].field, (int)grants[i].action_len,
         grants[i].action);
-    char * copy;
     if (n <= 0 || (size_t)n >= sizeof line) {
       rc = GDEFCORE_ERR_LIMIT;
       goto done;
@@ -2194,6 +2474,7 @@ GDEFCORE_Result gdefcore_access_render_key(GDEFCORE_Catalog * catalog,
     *out_len = key_n;
   }
 done:
+  eval_done(&ev);
   for (i = 0; i < nlines; i++) {
     gcu_allocator_free(alloc_default(), lines[i]);
   }
@@ -2202,12 +2483,39 @@ done:
   return rc;
 }
 
+/* Whether an expression grant could apply to something: to a hypothetical
+ * entity of its type (which has no state, actor or values), or to a real one. */
+static int expr_could_apply(Eval * ev, const Grant * grant) {
+  char ** ids = NULL;
+  size_t count = 0;
+  size_t i;
+  int holds = 0;
+  if (expr_holds(ev, grant, NULL, 0)) {
+    return 1;
+  }
+  if (ev->failed) {
+    return 0;
+  }
+  if (gdefcore_entity_ids(ev->catalog, grant->type_name, grant->type_len, &ids,
+          &count) != GDEFCORE_OK) {
+    ev->failed = 1;
+    return 0;
+  }
+  for (i = 0; i < count && !holds; i++) {
+    holds = expr_holds(ev, grant, ids[i], strlen(ids[i]));
+  }
+  gdefcore_ids_free(ev->catalog, ids, count);
+  return holds;
+}
+
 int gdefcore_access_permits(GDEFCORE_Catalog * catalog,
     GDEFCORE_Request * request, const char * permission, size_t permission_len) {
   Grant grants[kGrantMax];
   size_t ngrants = 0;
   int read_principal = 0;
   size_t i;
+  int held = 0;
+  Eval ev;
   if (catalog == NULL || request == NULL || permission == NULL ||
       permission_len == 0) {
     return 0;
@@ -2219,13 +2527,22 @@ int gdefcore_access_permits(GDEFCORE_Catalog * catalog,
           &read_principal) != GDEFCORE_OK) {
     return 0;
   }
-  for (i = 0; i < ngrants; i++) {
-    if (same(grants[i].action, grants[i].action_len, permission,
+  eval_init(&ev, catalog, request, NULL, 0);
+  for (i = 0; i < ngrants && !held; i++) {
+    if (!same(grants[i].action, grants[i].action_len, permission,
             permission_len)) {
-      return 1;
+      continue;
+    }
+    /* An int condition is held as it always was: the permission is not about
+     * one entity. An expression is held when it could apply to something. */
+    if (grants[i].condition != kCondExpr) {
+      held = 1;
+    } else {
+      held = expr_could_apply(&ev, &grants[i]);
     }
   }
-  return 0;
+  eval_done(&ev);
+  return held;
 }
 
 int gdefcore_access_shared_cache(const char * overlay, size_t overlay_len) {
@@ -2345,7 +2662,7 @@ GDEFCORE_Result gdefcore_access_commit_staged(GDEFCORE_Changeset * changeset) {
     copy_part(grant.module_name, sizeof grant.module_name, &grant.module_len,
         local[i].module_name, local[i].module_len);
     rc = declare_grant(catalog, &grant, local[i].module_name,
-        local[i].module_len);
+        local[i].module_len, NULL, 0);
     if (rc == GDEFCORE_OK) {
       rc = grant_role(catalog, kAdmin, strlen(kAdmin), local[i].label,
           local[i].label_len, 0, NULL, 0);

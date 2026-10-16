@@ -92,12 +92,13 @@ plant permission-not-declared src/entity/entity.c testTpermission \
 # Plant 9: any grant at all counts as holding the permission asked about.
 plant permits-ignores-the-name src/access/access.c testTpermission \
   'TPerm.GrantFlow' \
-  '    if (same(grants[i].action, grants[i].action_len, permission,
+  '    if (!same(grants[i].action, grants[i].action_len, permission,
             permission_len)) {
-      return 1;
+      continue;
     }' \
-  '    if (grants[i].action_len > 0) {
-      return 1;
+  '    if (0 && !same(grants[i].action, grants[i].action_len, permission,
+            permission_len)) {
+      continue;
     }'
 
 # Plant 10: the sample render does not ask whether the principal may edit.

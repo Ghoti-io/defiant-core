@@ -38,6 +38,9 @@
 #define GDEFCORE_Alter GHOTIIO_DEFCORE(GDEFCORE_Alter)
 #define GDEFCORE_Catalog GHOTIIO_DEFCORE(GDEFCORE_Catalog)
 #define GDEFCORE_Changeset GHOTIIO_DEFCORE(GDEFCORE_Changeset)
+#define GDEFCORE_Condition GHOTIIO_DEFCORE(GDEFCORE_Condition)
+#define GDEFCORE_Condition_Error GHOTIIO_DEFCORE(GDEFCORE_Condition_Error)
+#define GDEFCORE_Condition_Subject GHOTIIO_DEFCORE(GDEFCORE_Condition_Subject)
 #define GDEFCORE_Field GHOTIIO_DEFCORE(GDEFCORE_Field)
 #define GDEFCORE_Form GHOTIIO_DEFCORE(GDEFCORE_Form)
 #define GDEFCORE_Hook_Fn GHOTIIO_DEFCORE(GDEFCORE_Hook_Fn)
@@ -106,6 +109,26 @@
   GHOTIIO_DEFCORE(gdefcore_access_shared_cache)
 #define gdefcore_access_stage_module_permission                                \
   GHOTIIO_DEFCORE(gdefcore_access_stage_module_permission)
+#define gdefcore_condition_parse \
+  GHOTIIO_DEFCORE(gdefcore_condition_parse)
+#define gdefcore_condition_free \
+  GHOTIIO_DEFCORE(gdefcore_condition_free)
+#define gdefcore_condition_validate \
+  GHOTIIO_DEFCORE(gdefcore_condition_validate)
+#define gdefcore_condition_canonical \
+  GHOTIIO_DEFCORE(gdefcore_condition_canonical)
+#define gdefcore_condition_text_free \
+  GHOTIIO_DEFCORE(gdefcore_condition_text_free)
+#define gdefcore_condition_hash \
+  GHOTIIO_DEFCORE(gdefcore_condition_hash)
+#define gdefcore_condition_builtin \
+  GHOTIIO_DEFCORE(gdefcore_condition_builtin)
+#define gdefcore_condition_uses \
+  GHOTIIO_DEFCORE(gdefcore_condition_uses)
+#define gdefcore_condition_explain \
+  GHOTIIO_DEFCORE(gdefcore_condition_explain)
+#define gdefcore_condition_eval \
+  GHOTIIO_DEFCORE(gdefcore_condition_eval)
 #define gdefcore_account_bind GHOTIIO_DEFCORE(gdefcore_account_bind)
 #define gdefcore_account_check GHOTIIO_DEFCORE(gdefcore_account_check)
 #define gdefcore_account_create GHOTIIO_DEFCORE(gdefcore_account_create)
@@ -158,6 +181,7 @@
 #define gdefcore_changeset_stage_module                                        \
   GHOTIIO_DEFCORE(gdefcore_changeset_stage_module)
 #define gdefcore_entity_actor GHOTIIO_DEFCORE(gdefcore_entity_actor)
+#define gdefcore_entity_state GHOTIIO_DEFCORE(gdefcore_entity_state)
 #define gdefcore_entity_create GHOTIIO_DEFCORE(gdefcore_entity_create)
 #define gdefcore_entity_ids GHOTIIO_DEFCORE(gdefcore_entity_ids)
 #define gdefcore_entity_publish GHOTIIO_DEFCORE(gdefcore_entity_publish)
@@ -270,6 +294,8 @@
 #define gdefcore_request_id GHOTIIO_DEFCORE(gdefcore_request_id)
 #define gdefcore_request_note GHOTIIO_DEFCORE(gdefcore_request_note)
 #define gdefcore_request_principal GHOTIIO_DEFCORE(gdefcore_request_principal)
+#define gdefcore_request_set_time GHOTIIO_DEFCORE(gdefcore_request_set_time)
+#define gdefcore_request_time GHOTIIO_DEFCORE(gdefcore_request_time)
 #define gdefcore_request_mark_principal_dependent                              \
   GHOTIIO_DEFCORE(gdefcore_request_mark_principal_dependent)
 #define gdefcore_request_principal_dependent                                   \

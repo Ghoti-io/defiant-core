@@ -608,6 +608,22 @@ GDEFCORE_API GDEFCORE_Result gdefcore_entity_type(GDEFCORE_Catalog * catalog,
 GDEFCORE_API GDEFCORE_Result gdefcore_entity_actor(GDEFCORE_Catalog * catalog,
     const char * id, size_t id_len, char ** out_actor, size_t * out_len);
 
+/** The entity has no published projection (a draft, or nothing saved yet). */
+#define GDEFCORE_STATE_DRAFT 1
+/** The entity has a published projection. */
+#define GDEFCORE_STATE_PUBLISHED 2
+
+/**
+ * @brief The projection state of an entity.
+ *
+ * ::GDEFCORE_STATE_PUBLISHED when the entity has a published projection,
+ * whether or not a newer draft sits beside it; otherwise
+ * ::GDEFCORE_STATE_DRAFT. A missing id is ::GDEFCORE_ERR_INVALID and
+ * @p out_state is not written. Unfiltered, like gdefcore_entity_values().
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_entity_state(GDEFCORE_Catalog * catalog,
+    const char * id, size_t id_len, int * out_state);
+
 /**
  * @brief Copy bytes with the catalog allocator.
  *

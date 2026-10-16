@@ -73,6 +73,25 @@ static const Surface kSurface[] = {
     {"gdefcore_access_stage_module_permission", "W"},
     {"gdefcore_access_commit_staged", "W"},
     {"gdefcore_access_clear_staged", "W"},
+    {"gdefcore_condition_parse", "P"},
+    {"gdefcore_condition_free", "P"},
+    {"gdefcore_condition_validate", "RA"},
+    {"gdefcore_condition_canonical", "P"},
+    {"gdefcore_condition_text_free", "P"},
+    {"gdefcore_condition_hash", "P"},
+    {"gdefcore_condition_builtin", "P"},
+    {"gdefcore_condition_uses", "P"},
+    {"gdefcore_condition_explain", "P"},
+    /* gdefcore_condition_eval reads one entity AS THE SYSTEM: it does not
+     * filter. It is filed RF anyway, for two reasons. It takes a request (the
+     * principal and the clock), and the table does not allow a request on an
+     * RA. And an answer that depends on an entity's state and values is
+     * exactly what the oracle sweep exists to compare: the sweep calls it
+     * as a principal who may see nothing with a condition that is false, and
+     * a hidden entity and a missing one must answer alike. Its true answers
+     * do say that an entity exists, so it is a host function: the condition
+     * and the id are the host's, never a principal's. */
+    {"gdefcore_condition_eval", "RF"},
     {"gdefcore_keyring_create", "P"},
     {"gdefcore_keyring_destroy", "P"},
     {"gdefcore_keyring_export", "P"},
@@ -144,6 +163,7 @@ static const Surface kSurface[] = {
     {"gdefcore_ids_free", "P"},
     {"gdefcore_entity_type", "RA"},
     {"gdefcore_entity_actor", "RA"},
+    {"gdefcore_entity_state", "RA"},
     {"gdefcore_text_dup", "P"},
     {"gdefcore_changeset_catalog", "P"},
     {"gdefcore_changeset_add_confirm_line", "W"},
@@ -273,6 +293,8 @@ static const Surface kSurface[] = {
     {"gdefcore_request_resolution", "P"},
     {"gdefcore_request_mark_principal_dependent", "W"},
     {"gdefcore_request_principal_dependent", "P"},
+    {"gdefcore_request_set_time", "W"},
+    {"gdefcore_request_time", "P"},
     {"gdefcore_sched_create", "W"},
     {"gdefcore_sched_destroy", "W"},
     {"gdefcore_sched_spawn", "W"},

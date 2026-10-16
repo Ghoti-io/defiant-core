@@ -55,6 +55,8 @@ struct GDEFCORE_Request {
   char * resolution;
   size_t resolution_len;
   int principal_dependent;
+  int64_t time_seconds;
+  int time_set;
   const GDEFCORE_Allocator * allocator;
 };
 
