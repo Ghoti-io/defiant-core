@@ -93,6 +93,53 @@ typedef struct GDEFCORE_Permission {
   size_t condition_text_len;   ///< Length of @ref condition_text.
 } GDEFCORE_Permission;
 
+/** A grant whose breadth is narrow: the matrix rates it low. */
+#define GDEFCORE_ACCESS_RISK_LOW 1
+/** A grant that is broad on one thing, or reaches a single field. */
+#define GDEFCORE_ACCESS_RISK_MEDIUM 2
+/** A grant whose breadth is unbounded or cannot be judged. */
+#define GDEFCORE_ACCESS_RISK_HIGH 3
+
+/**
+ * @brief A declared permission, as gdefcore_access_permission_info() reports
+ * it. Begins with @ref size. The texts are NUL-terminated.
+ */
+typedef struct GDEFCORE_Access_Permission {
+  size_t size;              ///< Must be `sizeof(GDEFCORE_Access_Permission)`.
+  char module[161];         ///< The module that declared it (`core` for the kernel).
+  char action[65];          ///< Its action.
+  char type_name[161];      ///< Its entity type.
+  char field[65];           ///< Its field; empty when it covers the entity.
+} GDEFCORE_Access_Permission;
+
+/**
+ * @brief One row of the access matrix. Begins with @ref size.
+ *
+ * Every text is plain, not escaped for any output, and may hold what a module
+ * author wrote: a page must escape it. @ref source reads `role <name>` or
+ * `module <name>`. A role grant made with a condition of its own shows the
+ * permission's label, not the stored name of the derived permission.
+ */
+typedef struct GDEFCORE_Access_Matrix_Row {
+  size_t size;                ///< `sizeof(GDEFCORE_Access_Matrix_Row)`.
+  const char * source;        ///< `role <name>` or `module <name>`.
+  size_t source_len;          ///< Length of @ref source.
+  int from_module;            ///< Non-zero: a module's grant, held by no role.
+  const char * permission;    ///< The permission's label.
+  size_t permission_len;      ///< Length of @ref permission.
+  const char * action;        ///< Its action; empty when the permission is not declared.
+  size_t action_len;          ///< Length of @ref action.
+  const char * type_name;     ///< Entity type.
+  size_t type_name_len;       ///< Length of @ref type_name.
+  const char * field;         ///< Field, or "".
+  size_t field_len;           ///< Length of @ref field.
+  const char * condition;     ///< The condition, in its canonical text.
+  size_t condition_len;       ///< Length of @ref condition.
+  const char * explain;       ///< The condition in plain English.
+  size_t explain_len;         ///< Length of @ref explain.
+  int risk;                   ///< ::GDEFCORE_ACCESS_RISK_LOW, _MEDIUM or _HIGH.
+} GDEFCORE_Access_Matrix_Row;
+
 /**
  * @brief A filtered list. Begins with @ref size.
  *
@@ -195,6 +242,92 @@ GDEFCORE_API GDEFCORE_Result gdefcore_access_declare(
 GDEFCORE_API GDEFCORE_Result gdefcore_access_grant(GDEFCORE_Catalog * catalog,
     const char * role, size_t role_len, const char * label, size_t label_len,
     const char * confirmation, size_t confirmation_len);
+
+/**
+ * @brief Grant a declared permission to a role, under a condition of its own.
+ *
+ * As gdefcore_access_grant(), and the same confirmations. The role holds the
+ * permission only where @p condition_text holds as well as the condition the
+ * permission was declared with (`any` and `own` are conditions): a grant can
+ * narrow a permission and never widen it. The text is validated against the
+ * permission's type (condition.h) and refused, with nothing written, if it is
+ * not valid. The grant is kept as a permission of its own (the label with a
+ * suffix naming the condition), so the same condition granted twice is one
+ * grant and a different condition is another; gdefcore_access_role_grants()
+ * names it as stored, and the matrix shows the label as declared.
+ *
+ * @return ::GDEFCORE_OK, or ::GDEFCORE_ERR_INVALID (a bad confirmation, a
+ *   condition that is not valid, an unknown role or permission), or
+ *   ::GDEFCORE_ERR_LIMIT (the combined condition is past a limit of
+ *   condition.h).
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_access_grant_when(
+    GDEFCORE_Catalog * catalog, const char * role, size_t role_len,
+    const char * label, size_t label_len, const char * condition_text,
+    size_t condition_len, const char * confirmation, size_t confirmation_len);
+
+/**
+ * @brief The declaration behind a permission label.
+ * @return ::GDEFCORE_OK, or ::GDEFCORE_ERR_INVALID when nothing declared it.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_access_permission_info(
+    GDEFCORE_Catalog * catalog, const char * label, size_t label_len,
+    GDEFCORE_Access_Permission * out);
+
+/**
+ * @brief How broad a grant is: a pure function of the grant.
+ *
+ * The action decides its class: `read`, `view`, `list`, `search`, `count`,
+ * `export` are reads; `update`, `edit`, `create`, `save`, `draft`, `write`
+ * are edits; `delete`, `remove`, `erase`, `publish`, `unpublish`, `admin`,
+ * `grant`, `revert`, `restore`, `install`, `enable`, `disable` are strong. The
+ * words are taken from the action's dot-separated parts; an action that has a
+ * strong word is strong, then one with an edit word is an edit, then a read;
+ * an action with none of them is strong. The condition decides the rest.
+ *
+ * - **High**: the condition bounds nothing (it neither names a type, see
+ *   gdefcore_condition_constrains_type(), nor reads the entity: `true`, or a
+ *   condition about the time or the principal alone, matches every entity); or
+ *   the grant reaches the anonymous state and is not a read; or the class is
+ *   strong and the condition reads neither the entity nor the principal; or
+ *   the condition cannot be parsed.
+ * - **Low**: the condition reads both the entity and the principal (`own`);
+ *   or the grant is a read and the condition reads the entity or the
+ *   principal.
+ * - **Medium**: everything else: any grant of a single field, an edit that no
+ *   condition narrows, a read that none narrows.
+ *
+ * @param has_field Non-zero when the permission covers one field.
+ * @param reaches_anonymous Non-zero for a grant that the anonymous state
+ *   holds: a grant of the role `anonymous`, or a module grant whose condition
+ *   does not read the principal.
+ * @return ::GDEFCORE_ACCESS_RISK_LOW, _MEDIUM or _HIGH.
+ */
+GDEFCORE_API int gdefcore_access_grant_risk(const char * action,
+    size_t action_len, int has_field, const char * condition_text,
+    size_t condition_len, int reaches_anonymous);
+
+/** @brief `low`, `medium` or `high` for a rating; `unknown` otherwise. */
+GDEFCORE_API const char * gdefcore_access_risk_name(int risk);
+
+/**
+ * @brief Every effective grant: role grants and the grants of enabled modules.
+ *
+ * Rows are sorted by source, permission, type, field and condition, bytewise,
+ * so the order does not depend on the order roles were granted or modules
+ * enabled in. Only an administrator may read it: the request's principal
+ * (and its acting principal, if it names another) must hold `admin`.
+ * Anyone else gets ::GDEFCORE_ERR_INVALID, the answer a page that does not
+ * exist gets, and no row. A matrix that cannot be read whole is an error,
+ * never a short one. Free @p out_rows with gdefcore_access_matrix_free().
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_access_matrix(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Request * request, GDEFCORE_Access_Matrix_Row ** out_rows,
+    size_t * out_count);
+
+/** @brief Free rows from gdefcore_access_matrix(). NULL is ignored. */
+GDEFCORE_API void gdefcore_access_matrix_free(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Access_Matrix_Row * rows, size_t count);
 
 /**
  * @brief Create a principal with no roles. @p out_id receives the public id.
@@ -307,6 +440,23 @@ GDEFCORE_API GDEFCORE_Result gdefcore_access_stage_module_permission(
     const char * action, size_t action_len, int condition,
     const char * type_name, size_t type_name_len, const char * field,
     size_t field_len);
+
+/**
+ * @brief Remember a module's grant for the enable confirmation.
+ *
+ * Adds one line to the changeset's confirmation that says, in words, what the
+ * grant does and how broad it is, so that applying the enable means having
+ * been shown it. The condition is parsed again here and must be valid for
+ * @p type_name. This writes nothing: the grant takes effect through the
+ * module being enabled, and ends when it is disabled.
+ * @param action The permission's action (for the rating).
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_access_stage_module_grant(
+    GDEFCORE_Changeset * changeset, const char * module_name,
+    size_t module_name_len, const char * label, size_t label_len,
+    const char * action, size_t action_len, const char * type_name,
+    size_t type_name_len, const char * field, size_t field_len,
+    const char * condition_text, size_t condition_len);
 
 /** @brief Grant staged module permissions to admin. A changeset with none is success. */
 GDEFCORE_API GDEFCORE_Result gdefcore_access_commit_staged(

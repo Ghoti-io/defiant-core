@@ -179,5 +179,10 @@ a test proves them identical to `(= type "T")` and
 candidate entity, in memory (compiling it into the query is a later story).
 See access.md.
 
-Not here yet: relations, the list compiler, module grants, callbacks, the
-permission matrix, and `can()`.
+`gdefcore_access_grant_when()` grants under a condition of the grant's own, a
+module's manifest can declare grants, and `gdefcore_access_matrix()` lists them
+all with a risk. `gdefcore_condition_constrains_type()` says whether a
+condition holds only for entities of some stated type; the risk rating uses it.
+access.md and modules.md have the rest.
+
+Not here yet: relations, the list compiler, callbacks, and `can()`.

@@ -199,6 +199,16 @@ GDEFCORE_API unsigned gdefcore_condition_uses(
     const GDEFCORE_Condition * condition);
 
 /**
+ * @brief Whether @p condition can hold only for entities of some stated type.
+ * True when `type` is an operand of an equality or an `in` that every way of
+ * satisfying the condition must pass (an operand of an `and`, or of every
+ * operand of an `or`). `not` never counts. The access matrix uses this to
+ * tell a grant that is bounded by a type from one that is not. 0 for NULL.
+ */
+GDEFCORE_API int gdefcore_condition_constrains_type(
+    const GDEFCORE_Condition * condition);
+
+/**
  * @brief Plain English for @p condition. English only; deterministic.
  *
  * Built from the canonical form, so two spellings of one condition read

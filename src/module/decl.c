@@ -196,6 +196,26 @@ static int cmp_setting(const void * a, const void * b) {
   return c != 0 ? c : (x->index < y->index ? -1 : (x->index > y->index));
 }
 
+static int cmp_grant(const void * a, const void * b) {
+  const DeclGrant * x = (const DeclGrant *)a;
+  const DeclGrant * y = (const DeclGrant *)b;
+  int c = span_cmp(x->pub.permission, x->pub.permission_len, y->pub.permission,
+      y->pub.permission_len);
+  if (c == 0) {
+    c = span_cmp(x->pub.type_name, x->pub.type_name_len, y->pub.type_name,
+        y->pub.type_name_len);
+  }
+  if (c == 0) {
+    c = span_cmp(x->pub.field, x->pub.field_len, y->pub.field,
+        y->pub.field_len);
+  }
+  if (c == 0) {
+    c = span_cmp(x->pub.condition, x->pub.condition_len, y->pub.condition,
+        y->pub.condition_len);
+  }
+  return c != 0 ? c : (x->index < y->index ? -1 : (x->index > y->index));
+}
+
 static int cmp_var(const void * a, const void * b) {
   const DeclVar * x = (const DeclVar *)a;
   const DeclVar * y = (const DeclVar *)b;
@@ -219,6 +239,7 @@ void gdefcore_decl_free(Decl * d) {
   gcu_allocator_free(d->alloc, d->links);
   gcu_allocator_free(d->alloc, d->settings);
   gcu_allocator_free(d->alloc, d->vars);
+  gcu_allocator_free(d->alloc, d->grants);
   gcu_allocator_free(d->alloc, d);
 }
 
@@ -417,6 +438,42 @@ static void build_vars(Build * b, const GDEFCORE_Module_Manifest * m,
   }
 }
 
+static void build_grants(Build * b, const GDEFCORE_Module_Manifest * m) {
+  Decl * d = b->d;
+  size_t i;
+  d->grants = (DeclGrant *)gcu_allocator_calloc(d->alloc, m->ngrants,
+      sizeof *d->grants);
+  if (d->grants == NULL) {
+    build_fail(b, GDEFCORE_ERR_OOM, "grant", 0);
+    return;
+  }
+  for (i = 0; i < m->ngrants && b->rc == GDEFCORE_OK; i++) {
+    GDEFCORE_Module_Grant g;
+    DeclGrant * dg = &d->grants[i];
+    take_prefix(&g, sizeof g, &m->grants[i]);
+    dg->index = i;
+    dg->pub.size = sizeof dg->pub;
+    dg->pub.module = d->module;
+    dg->pub.module_len = d->module_len;
+    dg->pub.permission = dup_str(b, g.permission, g.permission_len, "grant", i);
+    dg->pub.permission_len = g.permission_len;
+    dg->pub.type_name = dup_str(b, g.type_name, g.type_name_len, "grant", i);
+    dg->pub.type_name_len = g.type_name_len;
+    dg->pub.field = dup_str(b, g.field, g.field_len, "grant", i);
+    dg->pub.field_len = g.field_len;
+    dg->pub.condition = dup_str(b, g.condition, g.condition_len, "grant", i);
+    dg->pub.condition_len = g.condition_len;
+    if (b->rc == GDEFCORE_OK && (g.permission_len == 0 || g.type_name_len == 0 ||
+            g.condition_len == 0)) {
+      build_fail(b, GDEFCORE_ERR_INVALID, "grant", i);
+    }
+    d->ngrants = i + 1;
+  }
+  if (b->rc == GDEFCORE_OK && d->ngrants > 1) {
+    qsort(d->grants, d->ngrants, sizeof *d->grants, cmp_grant);
+  }
+}
+
 GDEFCORE_Result gdefcore_decl_build(const GDEFCORE_Allocator * alloc,
     const char * module, size_t module_len,
     const GDEFCORE_Module_Manifest * man, const DeclSvc * svcs, size_t nsvcs,
@@ -425,7 +482,7 @@ GDEFCORE_Result gdefcore_decl_build(const GDEFCORE_Allocator * alloc,
   Decl * d;
   *out = NULL;
   if (man->nroutes == 0 && man->nlinks == 0 && man->nsettings == 0 &&
-      man->nvariables == 0) {
+      man->nvariables == 0 && man->ngrants == 0) {
     return GDEFCORE_OK;
   }
   if (module_len > 64) {
@@ -446,19 +503,22 @@ GDEFCORE_Result gdefcore_decl_build(const GDEFCORE_Allocator * alloc,
   if (man->nroutes > GDEFCORE_MODULE_ROUTES_MAX ||
       man->nlinks > GDEFCORE_MODULE_LINKS_MAX ||
       man->nsettings > GDEFCORE_MODULE_SETTINGS_MAX ||
-      man->nvariables > GDEFCORE_MODULE_VARIABLES_MAX) {
+      man->nvariables > GDEFCORE_MODULE_VARIABLES_MAX ||
+      man->ngrants > GDEFCORE_MODULE_GRANTS_MAX) {
     b.rc = GDEFCORE_ERR_LIMIT;
     if (err != NULL && cap > 0) {
       snprintf(err, cap,
-          "Module %s declares more than %d routes, %d links, %d settings or "
-          "%d variables.",
+          "Module %s declares more than %d routes, %d links, %d settings, "
+          "%d variables or %d grants.",
           d->module, GDEFCORE_MODULE_ROUTES_MAX, GDEFCORE_MODULE_LINKS_MAX,
-          GDEFCORE_MODULE_SETTINGS_MAX, GDEFCORE_MODULE_VARIABLES_MAX);
+          GDEFCORE_MODULE_SETTINGS_MAX, GDEFCORE_MODULE_VARIABLES_MAX,
+          GDEFCORE_MODULE_GRANTS_MAX);
     }
   } else if ((man->nroutes > 0 && man->routes == NULL) ||
              (man->nlinks > 0 && man->links == NULL) ||
              (man->nsettings > 0 && man->settings == NULL) ||
-             (man->nvariables > 0 && man->variables == NULL)) {
+             (man->nvariables > 0 && man->variables == NULL) ||
+             (man->ngrants > 0 && man->grants == NULL)) {
     b.rc = GDEFCORE_ERR_INVALID;
     if (err != NULL && cap > 0) {
       snprintf(err, cap, "Module %s: a declared table has a count and no data.",
@@ -476,6 +536,9 @@ GDEFCORE_Result gdefcore_decl_build(const GDEFCORE_Allocator * alloc,
   }
   if (b.rc == GDEFCORE_OK && man->nvariables > 0) {
     build_vars(&b, man, svcs, nsvcs);
+  }
+  if (b.rc == GDEFCORE_OK && man->ngrants > 0) {
+    build_grants(&b, man);
   }
   if (b.rc != GDEFCORE_OK) {
     gdefcore_decl_free(d);
@@ -1270,6 +1333,37 @@ GDEFCORE_Result gdefcore_decl_settings(const GDEFCORE_Allocator * alloc,
   for (m = 0; m < n; m++) {
     for (i = 0; i < refs[m].decl->nsettings; i++) {
       items[at++] = &refs[m].decl->settings[i].pub;
+    }
+  }
+  *out = items;
+  *count = total;
+  return GDEFCORE_OK;
+}
+
+GDEFCORE_Result gdefcore_decl_grants(const GDEFCORE_Allocator * alloc,
+    const DeclRef * refs, size_t n,
+    const GDEFCORE_Module_Declared_Grant *** out, size_t * count) {
+  size_t m;
+  size_t i;
+  size_t total = 0;
+  size_t at = 0;
+  const GDEFCORE_Module_Declared_Grant ** items;
+  *out = NULL;
+  *count = 0;
+  for (m = 0; m < n; m++) {
+    total += refs[m].decl->ngrants;
+  }
+  if (total == 0) {
+    return GDEFCORE_OK;
+  }
+  items = (const GDEFCORE_Module_Declared_Grant **)gcu_allocator_calloc(alloc,
+      total, sizeof *items);
+  if (items == NULL) {
+    return GDEFCORE_ERR_OOM;
+  }
+  for (m = 0; m < n; m++) {
+    for (i = 0; i < refs[m].decl->ngrants; i++) {
+      items[at++] = &refs[m].decl->grants[i].pub;
     }
   }
   *out = items;

@@ -500,7 +500,7 @@ TESTFLAGS := `PKG_CONFIG_PATH=$(PKG_CONFIG_LOOKUP_PATH) pkg-config --libs --cfla
 # coverage target does, because --coverage links the gcov runtime, whose
 # mangle_path check-symbols is right to reject in a shipping library and
 # wrong to reject in an instrumented one. Spelled as text's TEST_GATES is.
-TEST_GATES ?= check-symbols check-aliasing check-seams check-prefix check-labels check-access check-account check-inst check-subject check-form check-render check-erasure check-oracle check-readpaths check-routes check-tenant check-renderkey check-wait check-contexts check-bus check-defects check-safeout check-templates check-tpermission check-manifest check-conditions
+TEST_GATES ?= check-symbols check-aliasing check-seams check-prefix check-labels check-access check-account check-inst check-subject check-form check-render check-erasure check-oracle check-readpaths check-routes check-tenant check-renderkey check-wait check-contexts check-bus check-defects check-safeout check-templates check-tpermission check-manifest check-conditions check-grants
 
 # Valgrind flags (exclude "still reachable" as it's not a leak)
 # --suppressions: see tests/valgrind.supp. It holds allocations that are
@@ -1616,7 +1616,7 @@ $(FUZZ_FLAGS_STAMP): force-flags
 	@printf '%s\n' '$(FUZZ_CC) $(FUZZ_CXX) $(FUZZ_SAN) $(FUZZ_LIB_FLAGS) $(FUZZ_BIN_FLAGS) $(INCLUDE) $(STOR_LIBS) $(CUTIL_LIBS) $(SEC_LIBS) $(TEXT_LIBS) $(REGEX_LIBS) $(LTANG_LIBS) $(ARC_LIBS) $(MEM_LIBS)' > $@.new
 	@cmp -s $@.new $@ 2>/dev/null && rm -f $@.new || mv -f $@.new $@
 
-.PHONY: check-seams check-prefix check-labels check-access check-account check-inst check-subject check-form check-render check-erasure check-oracle check-readpaths check-routes check-tenant check-renderkey check-wait check-contexts check-bus check-defects check-safeout check-templates check-tpermission check-manifest check-conditions
+.PHONY: check-seams check-prefix check-labels check-access check-account check-inst check-subject check-form check-render check-erasure check-oracle check-readpaths check-routes check-tenant check-renderkey check-wait check-contexts check-bus check-defects check-safeout check-templates check-tpermission check-manifest check-conditions check-grants
 check-seams: ## Fail if a subsystem includes another's private header
 	@tools/check-seams.sh .
 check-prefix: ## Fail if a derived Defiant prefix collides or a dependency is out of order
@@ -1665,3 +1665,5 @@ check-manifest: $(APP_DIR)/testModule$(EXE_EXTENSION) ## Manifest tables: routes
 	@tools/check-manifest.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX))
 check-conditions: $(APP_DIR)/testCondition$(EXE_EXTENSION) ## Conditions as data: the language, the evaluator, grants that carry one; real-source plants
 	@tools/check-conditions.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX))
+check-grants: $(APP_DIR)/testGrants$(EXE_EXTENSION) $(APP_DIR)/testOracle$(EXE_EXTENSION) ## Grants under conditions, module grants, the matrix and its ratings; real-source plants
+	@tools/check-grants.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX))

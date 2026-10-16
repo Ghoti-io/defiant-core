@@ -76,6 +76,85 @@ Ask AskEverything(bool posts, const std::vector<std::string> & targets) {
   return ask;
 }
 
+/* ---- a module that grants (access-conditions story A4) ------------------ */
+
+#define MODULE_STR2(x) #x
+#define MODULE_STR(x) MODULE_STR2(x)
+
+struct OracleModule {
+  std::string condition;
+  GDEFCORE_Module_Perm perm;
+  GDEFCORE_Module_Grant grant;
+  GDEFCORE_Module_Manifest man;
+};
+
+OracleModule g_module;
+
+extern "C" const GDEFCORE_Module_Manifest * OracleGuest(void) {
+  return &g_module.man;
+}
+
+/** Install and enable a module that grants `read` of notes under @p condition. */
+void EnableGranting(World * w, const std::string & condition) {
+  static const char kCoreToken[] = MODULE_STR(GHOTIIO_DEFCORE_NAME);
+  GDEFCORE_Changeset * cs = NULL;
+  GDEFCORE_Condition * parsed = NULL;
+  char * words = NULL;
+  size_t words_len = 0;
+  std::vector<std::string> lines;
+  std::string text = "oracle";
+  size_t i;
+  g_module.condition = condition;
+  memset(&g_module.perm, 0, sizeof g_module.perm);
+  g_module.perm.size = sizeof g_module.perm;
+  g_module.perm.label = "oracle.read";
+  g_module.perm.label_len = 11;
+  g_module.perm.action = "read";
+  g_module.perm.action_len = 4;
+  g_module.perm.condition = GDEFCORE_ACCESS_ANY;
+  g_module.perm.type_name = "site.note";
+  g_module.perm.type_name_len = 9;
+  memset(&g_module.grant, 0, sizeof g_module.grant);
+  g_module.grant.size = sizeof g_module.grant;
+  g_module.grant.permission = "oracle.read";
+  g_module.grant.permission_len = 11;
+  g_module.grant.type_name = "site.note";
+  g_module.grant.type_name_len = 9;
+  g_module.grant.condition = g_module.condition.c_str();
+  g_module.grant.condition_len = g_module.condition.size();
+  memset(&g_module.man, 0, sizeof g_module.man);
+  g_module.man.size = sizeof g_module.man;
+  g_module.man.core_token = kCoreToken;
+  g_module.man.core_token_len = strlen(kCoreToken);
+  g_module.man.name = "oracle";
+  g_module.man.name_len = 6;
+  g_module.man.label = "oracle";
+  g_module.man.label_len = 6;
+  g_module.man.perms = &g_module.perm;
+  g_module.man.nperms = 1;
+  g_module.man.grants = &g_module.grant;
+  g_module.man.ngrants = 1;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_module_install_guest(w->host, OracleGuest));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_condition_parse(condition.data(), condition.size(), &parsed, NULL));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_condition_explain(parsed, &words, &words_len));
+  /* A condition on the note's own data, read alone: low. */
+  lines.push_back("Module oracle grants oracle.read (low risk): " +
+                  std::string(words, words_len));
+  lines.push_back("oracle.read");
+  std::sort(lines.begin(), lines.end());
+  for (i = 0; i < lines.size(); i++) {
+    text += "\n" + lines[i];
+  }
+  gdefcore_condition_text_free(words);
+  gdefcore_condition_free(parsed);
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_changeset_prepare(w->site.catalog, NULL, 0, &cs));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_module_enable(w->host, cs, "oracle", 6));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, text.data(), text.size()));
+  gdefcore_changeset_destroy(cs);
+}
+
 }  // namespace
 
 TEST(Oracle, Entities) {
@@ -224,6 +303,92 @@ TEST(Oracle, Control) {
     x.Close();
     y.Close();
   }
+}
+
+TEST(Oracle, ModuleGrant) {
+  /* A module grant that does not hold on an existing note answers like a note
+   * that does not exist: the principal has no role, the module grants reads
+   * of notes titled something no note is titled, and so the two worlds are
+   * the same to them. */
+  {
+    World hidden;
+    World absent;
+    BuildS(&hidden, true);
+    BuildS(&absent, false);
+    EnableGranting(&hidden, "(= field.title \"no-such-title-anywhere\")");
+    EnableGranting(&absent, "(= field.title \"no-such-title-anywhere\")");
+    Ask ask = AskEverything(false, {"note1", "note2", "missing"});
+    Obs a = Observe(hidden, hidden.principal["none"], ask);
+    Obs b = Observe(absent, absent.principal["none"], ask);
+    EXPECT_GT(a.kv.size(), 25u);
+    EXPECT_TRUE(Differences(a, b).empty())
+        << "a module grant that does not hold changed an answer:"
+        << Join(Differences(a, b));
+    EXPECT_TRUE(HiddenVsMissing(hidden, a).empty())
+        << "a hidden id answers unlike a missing one:"
+        << Join(HiddenVsMissing(hidden, a));
+    EXPECT_NE(std::string::npos,
+        a.kv["t:note1:read.title"].find("rc=Invalid"))
+        << a.kv["t:note1:read.title"];
+    hidden.Close();
+    absent.Close();
+  }
+  {
+    /* The control: the same module with a condition that holds on one note.
+     * The worlds now differ on that note, and only there. */
+    World hidden;
+    World absent;
+    BuildS(&hidden, true);
+    BuildS(&absent, false);
+    EnableGranting(&hidden, "(= field.title \"Hidden Note One\")");
+    EnableGranting(&absent, "(= field.title \"Hidden Note One\")");
+    Ask ask = AskEverything(false, {"note1", "note2", "missing"});
+    Obs a = Obs(Observe(hidden, hidden.principal["none"], ask));
+    Obs b = Obs(Observe(absent, absent.principal["none"], ask));
+    std::vector<std::string> diffs = Differences(a, b);
+    EXPECT_TRUE(HasKey(diffs, "t:note1:read.title")) << Join(diffs);
+    EXPECT_TRUE(HasKey(diffs, "g:list.notes")) << Join(diffs);
+    EXPECT_FALSE(HasKey(diffs, "t:note2:read.title")) << Join(diffs);
+    EXPECT_NE(std::string::npos, a.kv["t:note1:read.title"].find("rc=No error"))
+        << a.kv["t:note1:read.title"];
+    EXPECT_FALSE(HiddenVsMissing(hidden, a).empty());
+    hidden.Close();
+    absent.Close();
+  }
+}
+
+TEST(Oracle, MatrixIsForAdministrators) {
+  /* The matrix of grants is asked as a principal who may see nothing and
+   * answers alike in both worlds; as the administrator it has rows (the
+   * control that the probe can see one). */
+  World hidden;
+  World absent;
+  BuildS(&hidden, true);
+  BuildS(&absent, false);
+  {
+    Ask ask = AskEverything(false, {"missing"});
+    Obs a = Observe(hidden, hidden.principal["none"], ask);
+    Obs b = Observe(absent, absent.principal["none"], ask);
+    EXPECT_NE(std::string::npos, a.kv["g:matrix"].find("rc=Invalid argument null n=0"))
+        << a.kv["g:matrix"];
+    EXPECT_EQ(a.kv["g:matrix"], b.kv["g:matrix"]);
+    a = Observe(hidden, "", ask);
+    EXPECT_NE(std::string::npos, a.kv["g:matrix"].find("rc=Invalid argument null n=0"))
+        << a.kv["g:matrix"];
+  }
+  {
+    char admin[GDEFCORE_PUBLIC_ID_LEN + 1];
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_access_admin_principal(hidden.site.catalog, admin));
+    Ask ask = AskEverything(false, {"missing"});
+    Obs a = Observe(hidden, admin, ask);
+    EXPECT_NE(std::string::npos, a.kv["g:matrix"].find("rc=No error rows="))
+        << a.kv["g:matrix"];
+    EXPECT_EQ(std::string::npos, a.kv["g:matrix"].find("rows=0"))
+        << a.kv["g:matrix"];
+  }
+  hidden.Close();
+  absent.Close();
 }
 
 TEST(Oracle, EverySurfaceIsAsked) {

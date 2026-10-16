@@ -191,6 +191,37 @@ typedef struct GDEFCORE_Module_Perm {
   size_t field_len;         ///< Length of @ref field.
 } GDEFCORE_Module_Perm;
 
+/**
+ * @brief A grant the module declares. Begins with @ref size.
+ *
+ * While the module is enabled, every principal whose request meets
+ * @ref condition holds the permission called @ref permission, whether or not
+ * any role grants it. Nothing denies: a grant only adds (AD-10, AD-11).
+ *
+ * @ref permission is the label of a permission the module declares in
+ * @ref GDEFCORE_Module_Manifest::perms, or of a core permission (declared by
+ * the module `core`). Granting another module's permission is refused when
+ * the module is enabled, and the refusal names both modules. @ref type_name
+ * must be the permission's type, and @ref field its field (empty for none).
+ * @ref condition is a condition expression (condition.h) validated against
+ * @ref type_name when the module is enabled; an unparseable or invalid one
+ * refuses the enable and stages nothing. The condition stands on its own: it
+ * is not narrowed by the integer condition the permission was declared with.
+ * Because the grant is not held by a role, a condition that does not read the
+ * principal also reaches the anonymous state; the matrix rates it so.
+ */
+typedef struct GDEFCORE_Module_Grant {
+  size_t size;              ///< `sizeof(GDEFCORE_Module_Grant)` for this build.
+  const char * permission;  ///< Label of the permission granted. Borrowed.
+  size_t permission_len;    ///< Length of @ref permission.
+  const char * type_name;   ///< The permission's entity type. Borrowed.
+  size_t type_name_len;     ///< Length of @ref type_name.
+  const char * field;       ///< The permission's field, or NULL.
+  size_t field_len;         ///< Length of @ref field.
+  const char * condition;   ///< Condition text. Borrowed.
+  size_t condition_len;     ///< Length of @ref condition.
+} GDEFCORE_Module_Grant;
+
 /** A contribution provider answers with text (also for `markup`). */
 #define GDEFCORE_CONTRIBUTION_TEXT 1
 /** A contribution provider answers with an integer. */
@@ -254,6 +285,8 @@ typedef GDEFCORE_Result (*GDEFCORE_Contribution_Fn)(GDEFCORE_Request * request,
 #define GDEFCORE_MODULE_SETTINGS_MAX 64
 /** Most template variables one manifest declares. */
 #define GDEFCORE_MODULE_VARIABLES_MAX 32
+/** Most grants one manifest declares. */
+#define GDEFCORE_MODULE_GRANTS_MAX 16
 
 /** The version of a route handler service table. */
 #define GDEFCORE_MODULE_ROUTE_HANDLER_VERSION 1
@@ -422,6 +455,8 @@ typedef struct GDEFCORE_Module_Manifest {
   size_t nsettings;                         ///< How many settings.
   const GDEFCORE_Module_Variable * variables; ///< Declared template variables.
   size_t nvariables;                        ///< How many variables.
+  const GDEFCORE_Module_Grant * grants;     ///< Declared grants. May be NULL.
+  size_t ngrants;                           ///< How many grants.
 } GDEFCORE_Module_Manifest;
 
 /** The entry a native module exports and a guest hands to the host. */
@@ -852,6 +887,21 @@ typedef struct GDEFCORE_Module_Declared_Setting {
   size_t group_len;           ///< Length of @ref group.
 } GDEFCORE_Module_Declared_Setting;
 
+/** @brief A grant as the enumeration reports it. Borrowed from the host. */
+typedef struct GDEFCORE_Module_Declared_Grant {
+  size_t size;                ///< `sizeof(GDEFCORE_Module_Declared_Grant)`.
+  const char * module;        ///< The declaring module.
+  size_t module_len;          ///< Length of @ref module.
+  const char * permission;    ///< Label of the permission granted.
+  size_t permission_len;      ///< Length of @ref permission.
+  const char * type_name;     ///< The permission's type.
+  size_t type_name_len;       ///< Length of @ref type_name.
+  const char * field;         ///< The permission's field; "" for none.
+  size_t field_len;           ///< Length of @ref field.
+  const char * condition;     ///< The condition text as the module wrote it.
+  size_t condition_len;       ///< Length of @ref condition.
+} GDEFCORE_Module_Declared_Grant;
+
 /**
  * @brief The routes the modules enabled for @p tenant declare.
  *
@@ -898,8 +948,23 @@ GDEFCORE_API GDEFCORE_Result gdefcore_module_variables(GDEFCORE_Host * host,
     const GDEFCORE_Module_Contributed *** out_items, size_t * out_count);
 
 /**
- * @brief Free an array from gdefcore_module_routes(), _links(), _settings() or
- * _variables(). NULL is ignored.
+ * @brief The grants of the enabled modules.
+ *
+ * As gdefcore_module_routes(), in module order and, within a module, sorted by
+ * permission, type, field and condition, so the answer does not depend on the
+ * order the modules were enabled in. This is what access decides with: a
+ * module that is disabled, or quarantined, is not here, and so grants nothing.
+ * With @p projection, the set the changeset would leave. Free @p out_items
+ * with gdefcore_module_declared_free().
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_module_grants(GDEFCORE_Host * host,
+    const uint8_t * tenant, size_t tenant_len,
+    const GDEFCORE_Changeset * projection,
+    const GDEFCORE_Module_Declared_Grant *** out_items, size_t * out_count);
+
+/**
+ * @brief Free an array from gdefcore_module_routes(), _links(), _settings(),
+ * _variables() or _grants(). NULL is ignored.
  */
 GDEFCORE_API void gdefcore_module_declared_free(GDEFCORE_Host * host,
     const void * items);

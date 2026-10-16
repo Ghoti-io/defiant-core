@@ -107,6 +107,15 @@
 #define gdefcore_access_permits GHOTIIO_DEFCORE(gdefcore_access_permits)
 #define gdefcore_access_shared_cache                                           \
   GHOTIIO_DEFCORE(gdefcore_access_shared_cache)
+#define gdefcore_access_grant_when GHOTIIO_DEFCORE(gdefcore_access_grant_when)
+#define gdefcore_access_permission_info \
+  GHOTIIO_DEFCORE(gdefcore_access_permission_info)
+#define gdefcore_access_grant_risk GHOTIIO_DEFCORE(gdefcore_access_grant_risk)
+#define gdefcore_access_risk_name GHOTIIO_DEFCORE(gdefcore_access_risk_name)
+#define gdefcore_access_matrix GHOTIIO_DEFCORE(gdefcore_access_matrix)
+#define gdefcore_access_matrix_free GHOTIIO_DEFCORE(gdefcore_access_matrix_free)
+#define gdefcore_access_stage_module_grant \
+  GHOTIIO_DEFCORE(gdefcore_access_stage_module_grant)
 #define gdefcore_access_stage_module_permission                                \
   GHOTIIO_DEFCORE(gdefcore_access_stage_module_permission)
 #define gdefcore_condition_parse \
@@ -125,6 +134,8 @@
   GHOTIIO_DEFCORE(gdefcore_condition_builtin)
 #define gdefcore_condition_uses \
   GHOTIIO_DEFCORE(gdefcore_condition_uses)
+#define gdefcore_condition_constrains_type                                     \
+  GHOTIIO_DEFCORE(gdefcore_condition_constrains_type)
 #define gdefcore_condition_explain \
   GHOTIIO_DEFCORE(gdefcore_condition_explain)
 #define gdefcore_condition_eval \
@@ -264,6 +275,7 @@
 #define gdefcore_module_links GHOTIIO_DEFCORE(gdefcore_module_links)
 #define gdefcore_module_routes GHOTIIO_DEFCORE(gdefcore_module_routes)
 #define gdefcore_module_settings GHOTIIO_DEFCORE(gdefcore_module_settings)
+#define gdefcore_module_grants GHOTIIO_DEFCORE(gdefcore_module_grants)
 #define gdefcore_module_variables GHOTIIO_DEFCORE(gdefcore_module_variables)
 #define gdefcore_module_service GHOTIIO_DEFCORE(gdefcore_module_service)
 #define gdefcore_module_text_free GHOTIIO_DEFCORE(gdefcore_module_text_free)

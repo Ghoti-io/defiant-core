@@ -36,7 +36,7 @@
 
 /*
  * The tables a manifest declares (routes, menu links, settings, template
- * variables), as the host holds them. module.c owns the modules and their
+ * variables, grants), as the host holds them. module.c owns the modules and their
  * order; decl.c owns what a table means: copying it, resolving a handler or a
  * provider through the module's services, validating a set of modules, and
  * handing out the records an enumeration reports.
@@ -89,6 +89,11 @@ typedef struct DeclVar {
   size_t index;
 } DeclVar;
 
+typedef struct DeclGrant {
+  GDEFCORE_Module_Declared_Grant pub;
+  size_t index;
+} DeclGrant;
+
 typedef struct Decl Decl;
 
 struct Decl {
@@ -107,6 +112,8 @@ struct Decl {
   size_t nsettings;
   DeclVar * vars;
   size_t nvars;
+  DeclGrant * grants;
+  size_t ngrants;
 };
 
 /** The declarations of the modules in force, already in module order. */
@@ -152,6 +159,9 @@ GDEFCORE_Result gdefcore_decl_settings(const GDEFCORE_Allocator * alloc,
 GDEFCORE_Result gdefcore_decl_variables(const GDEFCORE_Allocator * alloc,
     const DeclRef * refs, size_t n, const GDEFCORE_Module_Contributed *** out,
     size_t * count);
+GDEFCORE_Result gdefcore_decl_grants(const GDEFCORE_Allocator * alloc,
+    const DeclRef * refs, size_t n,
+    const GDEFCORE_Module_Declared_Grant *** out, size_t * count);
 
 /**
  * Add the routes of @p refs to @p routes, a tab after its parent. On a refusal

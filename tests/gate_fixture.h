@@ -795,6 +795,24 @@ inline Obs Observe(World & w, const std::string & who, const Ask & ask) {
       gdefcore_text_free(w.site.catalog, bytes);
     }
   }
+  {
+    /* The matrix of grants is for administrators: anyone else is told what a
+     * page that is not there is told, and gets no row. */
+    GDEFCORE_Access_Matrix_Row * rows = (GDEFCORE_Access_Matrix_Row *)0x1;
+    size_t n = 99;
+    GDEFCORE_Result rc;
+    Fresh f(w, who);
+    Note("gdefcore_access_matrix");
+    rc = gdefcore_access_matrix(w.site.catalog, f.req, &rows, &n);
+    o.kv["g:matrix"] = "rc=" + Rc(rc) +
+        (rc == GDEFCORE_OK ? " rows=" + std::to_string(n)
+                           : std::string(rows == NULL ? " null" : " SET") +
+                                 " n=" + std::to_string(n)) +
+        Diag(w, f.req);
+    if (rc == GDEFCORE_OK) {
+      gdefcore_access_matrix_free(w.site.catalog, rows, n);
+    }
+  }
   if (ask.posts) {
     o.kv["g:list.posts"] = ListLine(w, who, "site.post", NULL, "", NULL);
     o.kv["g:list.posts.title"] =

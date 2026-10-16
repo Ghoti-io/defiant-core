@@ -28,6 +28,7 @@
 
 #include <ghoti.io/defiant-core/macros.h>
 #include <ghoti.io/defiant-core/access.h>
+#include <ghoti.io/defiant-core/condition.h>
 
 #include "module_internal.h"
 
@@ -1201,17 +1202,183 @@ static GDEFCORE_Result stage_named(GDEFCORE_Host * host,
   return gdefcore_changeset_stage_module(changeset, name, name_len, enable);
 }
 
+/*
+ * What a permission label names, for a module that wants to grant it: the
+ * module's own declaration, or the catalog's. @p owner is who declared it.
+ * 1 when found, 0 when nothing declares it.
+ */
+typedef struct GrantTarget {
+  char owner[161];
+  char action[161];
+  char type_name[161];
+  size_t type_len;
+  char field[161];
+  size_t field_len;
+} GrantTarget;
+
+static int grant_target(GDEFCORE_Host * host, GDEFCORE_Catalog * catalog,
+    const Mod * mod, const GDEFCORE_Module_Declared_Grant * g, GrantTarget * t) {
+  size_t i;
+  GDEFCORE_Access_Permission info;
+  size_t j;
+  memset(t, 0, sizeof *t);
+  for (i = 0; i < mod->nperms; i++) {
+    if (mod->perms[i].label_len == g->permission_len &&
+        memcmp(mod->perms[i].label, g->permission, g->permission_len) == 0) {
+      memcpy(t->owner, mod->name, mod->name_len);
+      memcpy(t->action, mod->perms[i].action, mod->perms[i].action_len);
+      memcpy(t->type_name, mod->perms[i].type_name, mod->perms[i].type_len);
+      t->type_len = mod->perms[i].type_len;
+      memcpy(t->field, mod->perms[i].field, mod->perms[i].field_len);
+      t->field_len = mod->perms[i].field_len;
+      return 1;
+    }
+  }
+  memset(&info, 0, sizeof info);
+  info.size = sizeof info;
+  if (gdefcore_access_permission_info(catalog, g->permission, g->permission_len,
+          &info) == GDEFCORE_OK) {
+    snprintf(t->owner, sizeof t->owner, "%s", info.module);
+    snprintf(t->action, sizeof t->action, "%s", info.action);
+    snprintf(t->type_name, sizeof t->type_name, "%s", info.type_name);
+    t->type_len = strlen(t->type_name);
+    snprintf(t->field, sizeof t->field, "%s", info.field);
+    t->field_len = strlen(t->field);
+    return 1;
+  }
+  /* Another installed module declares it, and has not been enabled yet. */
+  for (i = 0; i < host->nmods; i++) {
+    const Mod * other = &host->mods[i];
+    if (!other->used || other == mod) {
+      continue;
+    }
+    for (j = 0; j < other->nperms; j++) {
+      if (other->perms[j].label_len == g->permission_len &&
+          memcmp(other->perms[j].label, g->permission, g->permission_len) == 0) {
+        memcpy(t->owner, other->name, other->name_len);
+        memcpy(t->action, other->perms[j].action, other->perms[j].action_len);
+        memcpy(t->type_name, other->perms[j].type_name,
+            other->perms[j].type_len);
+        t->type_len = other->perms[j].type_len;
+        memcpy(t->field, other->perms[j].field, other->perms[j].field_len);
+        t->field_len = other->perms[j].field_len;
+        return 1;
+      }
+    }
+  }
+  return 0;
+}
+
+/*
+ * The grants a module declares, judged against the site as it is now: each
+ * names a permission the module may grant (its own, or the kernel's, never
+ * another module's: AD-35), on that permission's type and field, under a
+ * condition that is valid for the type. A grant that fails refuses the
+ * enable; the host's error names the module and the grant, and nothing has
+ * been staged.
+ */
+static GDEFCORE_Result check_grants(GDEFCORE_Host * host,
+    GDEFCORE_Changeset * changeset, const Mod * mod, int * out_has) {
+  const Decl * d = mod->decl;
+  GDEFCORE_Catalog * catalog = gdefcore_changeset_catalog(changeset);
+  size_t i;
+  *out_has = d != NULL && d->ngrants > 0;
+  if (!*out_has) {
+    return GDEFCORE_OK;
+  }
+  if (catalog == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  for (i = 0; i < d->ngrants; i++) {
+    const GDEFCORE_Module_Declared_Grant * g = &d->grants[i].pub;
+    GrantTarget t;
+    GDEFCORE_Condition * cond = NULL;
+    GDEFCORE_Condition_Error err;
+    GDEFCORE_Result rc;
+    char text[kErrorMax];
+    if (!grant_target(host, catalog, mod, g, &t)) {
+      snprintf(text, sizeof text,
+          "Module %s grants permission %.*s, which no module or the kernel "
+          "declares.",
+          mod->name, (int)g->permission_len, g->permission);
+      set_error(host, text);
+      return GDEFCORE_ERR_INVALID;
+    }
+    if (strcmp(t.owner, mod->name) != 0 && strcmp(t.owner, "core") != 0) {
+      snprintf(text, sizeof text,
+          "Module %s grants permission %.*s, which module %s declares.",
+          mod->name, (int)g->permission_len, g->permission, t.owner);
+      set_error(host, text);
+      return GDEFCORE_ERR_INVALID;
+    }
+    if (t.type_len != g->type_name_len ||
+        memcmp(t.type_name, g->type_name, g->type_name_len) != 0 ||
+        t.field_len != g->field_len ||
+        memcmp(t.field, g->field, g->field_len) != 0) {
+      snprintf(text, sizeof text,
+          "Module %s grants permission %.*s on a type or field other than the "
+          "one the permission declares.",
+          mod->name, (int)g->permission_len, g->permission);
+      set_error(host, text);
+      return GDEFCORE_ERR_INVALID;
+    }
+    memset(&err, 0, sizeof err);
+    err.size = sizeof err;
+    rc = gdefcore_condition_parse(g->condition, g->condition_len, &cond, &err);
+    if (rc == GDEFCORE_OK) {
+      rc = gdefcore_condition_validate(catalog, cond, g->type_name,
+          g->type_name_len, &err);
+    }
+    gdefcore_condition_free(cond);
+    if (rc != GDEFCORE_OK) {
+      if (rc == GDEFCORE_ERR_INVALID) {
+        snprintf(text, sizeof text,
+            "Module %s grants permission %.*s under a condition that is not "
+            "valid: %s (byte %zu).",
+            mod->name, (int)g->permission_len, g->permission,
+            err.message == NULL ? "refused" : err.message, err.offset);
+        set_error(host, text);
+      }
+      return rc;
+    }
+  }
+  return GDEFCORE_OK;
+}
+
 GDEFCORE_Result gdefcore_module_enable(GDEFCORE_Host * host,
     GDEFCORE_Changeset * changeset, const char * name, size_t name_len) {
   Mod * mod;
   size_t i;
-  GDEFCORE_Result rc = stage_named(host, changeset, name, name_len, 1);
+  int has_grants = 0;
+  GDEFCORE_Result rc;
+  mod = (host == NULL || name == NULL) ? NULL : find_mod(host, name, name_len);
+  if (mod != NULL && changeset != NULL) {
+    rc = check_grants(host, changeset, mod, &has_grants);
+    if (rc != GDEFCORE_OK) {
+      return rc;
+    }
+  }
+  rc = stage_named(host, changeset, name, name_len, 1);
   if (rc != GDEFCORE_OK) {
     return rc;
   }
   mod = find_mod(host, name, name_len);
   if (mod == NULL) {
     return GDEFCORE_OK;
+  }
+  for (i = 0; has_grants && i < mod->decl->ngrants; i++) {
+    const GDEFCORE_Module_Declared_Grant * g = &mod->decl->grants[i].pub;
+    GrantTarget t;
+    if (!grant_target(host, gdefcore_changeset_catalog(changeset), mod, g, &t)) {
+      return GDEFCORE_ERR_INVALID;
+    }
+    rc = gdefcore_access_stage_module_grant(changeset, name, name_len,
+        g->permission, g->permission_len, t.action, strlen(t.action),
+        g->type_name, g->type_name_len, g->field, g->field_len, g->condition,
+        g->condition_len);
+    if (rc != GDEFCORE_OK) {
+      return rc;
+    }
   }
   for (i = 0; i < mod->nperms; i++) {
     rc = gdefcore_access_stage_module_permission(changeset, name, name_len,
@@ -1664,6 +1831,27 @@ GDEFCORE_Result gdefcore_module_variables(GDEFCORE_Host * host,
     return rc;
   }
   rc = gdefcore_decl_variables(host->alloc, refs, n, out_items, out_count);
+  gcu_allocator_free(host->alloc, refs);
+  return rc;
+}
+
+GDEFCORE_Result gdefcore_module_grants(GDEFCORE_Host * host,
+    const uint8_t * tenant, size_t tenant_len,
+    const GDEFCORE_Changeset * projection,
+    const GDEFCORE_Module_Declared_Grant *** out_items, size_t * out_count) {
+  DeclRef * refs;
+  size_t n;
+  GDEFCORE_Result rc;
+  if (out_items == NULL || out_count == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  *out_items = NULL;
+  *out_count = 0;
+  rc = enumerate_refs(host, tenant, tenant_len, projection, &refs, &n);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  rc = gdefcore_decl_grants(host->alloc, refs, n, out_items, out_count);
   gcu_allocator_free(host->alloc, refs);
   return rc;
 }

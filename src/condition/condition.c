@@ -743,6 +743,51 @@ unsigned gdefcore_condition_uses(const GDEFCORE_Condition * condition) {
   return condition == NULL ? 0u : condition->uses;
 }
 
+/* Whether the node holds only for entities of some stated type. A comparison
+ * or a list that has `type` as an operand does; `and` does when any operand
+ * does; `or` only when every operand does. `not` never does: excluding one
+ * type leaves every other. */
+static int node_constrains_type(const GDEFCORE_Condition * c, int idx) {
+  const CNode * node = &c->nodes[idx];
+  size_t k;
+  switch (node->kind) {
+    case kCmp:
+    case kIn:
+      if (node->kind == kCmp && node->op != kEq) {
+        return 0;
+      }
+      for (k = 0; k < node->count; k++) {
+        if (c->nodes[c->kids[node->first + k]].kind == kType) {
+          return 1;
+        }
+      }
+      return 0;
+    case kAnd:
+      for (k = 0; k < node->count; k++) {
+        if (node_constrains_type(c, c->kids[node->first + k])) {
+          return 1;
+        }
+      }
+      return 0;
+    case kOr:
+      if (node->count == 0) {
+        return 0;
+      }
+      for (k = 0; k < node->count; k++) {
+        if (!node_constrains_type(c, c->kids[node->first + k])) {
+          return 0;
+        }
+      }
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+int gdefcore_condition_constrains_type(const GDEFCORE_Condition * condition) {
+  return condition != NULL && node_constrains_type(condition, condition->root);
+}
+
 /* ---- validation ------------------------------------------------------- */
 
 /* 1 when the type has a non-personal field called name. */

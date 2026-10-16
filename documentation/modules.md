@@ -30,7 +30,7 @@ ends it. templates.md has the rest.
 
 ## Declared tables
 
-A manifest can declare four tables besides its hooks, services and permissions:
+A manifest can declare four tables (and grants, below) besides its hooks, services and permissions:
 **routes**, **menu links**, **settings** and **template variables**. They are
 appended to `GDEFCORE_Module_Manifest` (AD-4): a module built against an older
 header fills a shorter prefix, and the host reads only the prefix, so such a
@@ -114,6 +114,38 @@ and no data, is refused when the module is installed. The other limits are
 checked when the module is enabled: 128 bytes for a machine name, 256 for a
 label or title or permission, 2048 for a path, 1024 for a description or a
 default value.
+
+## Grants
+
+A manifest can declare **grants** (`GDEFCORE_Module_Grant`, appended after the
+template variables): the label of a permission, its type, its field (or none),
+and a condition (conditions.md). While the module is enabled, every principal
+whose request meets the condition holds the permission, with or without a role.
+Nothing denies: a grant only adds. access.md has how that is decided, shown and
+rated.
+
+- **Which permission.** The module's own (a label in its `perms`) or one the
+  kernel declared (module `core`). A label another module declares is refused
+  when the module is enabled, and the host's error names both modules and the
+  label, whether the other module is enabled or only installed. A label nobody
+  declares is refused too. The type must be the permission's type and the field
+  its field, or the grant is refused.
+- **The condition** is parsed and checked against the type when the module is
+  enabled (an unknown field, a personal field, `related(...)`, a type that is
+  not defined, text that is not a condition, are all refused), and the enable
+  stages nothing. It is not narrowed by the integer condition the permission
+  was declared with.
+- **Confirmation.** Enabling adds one line per grant to the confirmation: what
+  it grants, how broad it is (low, medium or high risk) and the condition in
+  English. Enabling is already high risk; the lines are what makes the grants
+  seen. A wrong confirmation writes nothing.
+- **Enumeration.** `gdefcore_module_grants()` returns the grants of the enabled
+  modules, as the other enumerations do (AD-10 order, a projection shows the
+  site a changeset would leave). Access reads this, so a disabled module
+  grants nothing at once.
+- **Limits.** At most 16 grants per manifest (`GDEFCORE_MODULE_GRANTS_MAX`).
+  An empty permission, type or condition is refused when the module is
+  installed. A manifest built before grants existed declares none.
 
 ## Hooks
 
