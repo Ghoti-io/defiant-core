@@ -143,3 +143,21 @@ and not the kind of a type called `core.template/field`. The parser takes
 Parsing that list is untrusted. `..`, an absolute path, a byte that is not
 UTF-8, and a public id that fails its check are refused. A failing check is
 not looked up, and nothing is written.
+
+## Querying a type's entities
+
+`gdefcore_entity_query_active()` is the unfiltered index with a predicate: it
+runs a storage query (defiant-storage `query.h`) over the type's `a:<type>`
+projection and returns the public ids in the query's order, with the total. The
+row is the entity's number; its `id` column is the public id. The names a
+predicate may read are fixed in `entity.h` (`GDEFCORE_QUERY_COL_DOC`,
+`_COL_ID`, `_COL_REVISION_CREATOR`, `GDEFCORE_QUERY_RECORD_TYPE`, `_COL_PUBLISHED`,
+`_COL_CREATOR`) and one test reads the stored projections directly to hold the
+layout to them. The `lang` column is the active revision's document, read by
+language and field name (`{"en":{"title":["Hello"]}}`), which is why a field
+needs no column of its own. Nothing is indexed: a projection is one value per
+key, so a query reads every row of the type.
+
+This function filters nothing for a principal; it is not a way to read for
+one. `gdefcore_access_list()` builds a principal's access filter into the
+predicate it hands it (access.md, "Lists").

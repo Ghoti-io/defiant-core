@@ -67,14 +67,77 @@ that names a field the principal may not read, or a field that does not
 exist, is the same error, and no row is returned.
 
 A grant whose condition is an expression is evaluated for each candidate
-entity, as the system, in memory. That is correct and not fast; compiling it
-into the list query is a later story. A list's count is the number of
-entities for which some grant holds. An entity whose only grant has a false
-condition answers the principal exactly as an id that was never created does.
-If a condition cannot be decided (an allocation fails, a store read fails, the
-stored text no longer parses, a field is gone from the type or is personal) the
-grant does not hold, the read answers as for a hidden entity, and the request
-carries the note `defiant.condition.failed` with the value `1`.
+entity, as the system, by `gdefcore_condition_eval()` (a read, a permits
+question, and the reference for a list). A list is compiled instead: see
+"Lists" below. An entity whose only grant has a false condition answers the
+principal exactly as an id that was never created does. If a condition cannot
+be decided (an allocation fails, a store read fails, the stored text no longer
+parses, a field is gone from the type or is personal) the grant does not hold,
+the read answers as for a hidden entity, and the request carries the note
+`defiant.condition.failed` with the value `1`.
+
+## Lists
+
+`gdefcore_access_list()` returns the public ids of the published entities of a
+type for which some read grant of the principal holds (an acting principal's
+ceiling too, AD-12), narrowed by the list's own filter, sorts and condition.
+`gdefcore_access_list_page()` also returns the total, and
+`gdefcore_access_count()` only the total: **the number of entities the
+principal may see that match, whatever the page**. A principal who may see 3 of
+10 has a total of 3. `GDEFCORE_Access_List` is size-prefixed and grew by
+appending: `offset`, `limit`, a second sort key, a descending flag for each
+key, `condition` (a condition of condition.h, validated against the type, ANDed
+with the access filter: it narrows and never widens) and `flags`. A caller
+built against the shorter struct sets `size` to its size and gets the old list
+exactly: the single equality filter, the single ascending sort, every row.
+
+Order is the sort keys (the first value of the field in the call's language,
+none before any value, compared as bytes), and last the order the entities
+were created in; so a page is always a slice of one total order. The old list
+sorted with `qsort`, whose order for equal keys was not defined; it is now
+stable. A key containing a NUL byte used to be compared up to the NUL; it is
+now compared in full. `limit` 0 is every row; a larger `limit` than
+`GDEFCORE_ACCESS_LIST_MAX_LIMIT` (200) is clamped to it.
+
+### Compiled, and the fallback
+
+A list is compiled into a storage query (`gdefstor` query form, see
+defiant-storage's `documentation/query.md`) and the store finds, orders, counts
+and pages the rows. The predicate is: the entity record's published flag is
+set, **and** one of the read grants of the type holds, **and** the filter and
+the condition hold. Each grant is its base (`any` is true, `own` is "the
+record's creator is the principal", an expression is `plan.h` compiling it)
+and, for an agent, one of the acting principal's grants for the same permission
+with its base. A field is read from the active revision's document by language
+and field name; `creator` and the published flag from the record, joined by the
+row; `revision.creator` from the active copy; `now` and `principal` are
+constants of the request. `gdefcore_condition_eval()` remains the reference:
+the compiled predicate selects the entities it holds on, including where it
+cannot decide (an operand that fails ends the evaluation and the condition does
+not hold, `not` included; `plan.h` carries that as a second predicate, "the
+evaluation reaches a failure").
+
+The list is decided entity by entity instead, with the same rows in the same
+order and the same total, when:
+
+- a filter, a sort or the condition names a field that has a field-level
+  read grant declared on it (whether the principal may name it is decided per
+  entity, and a refusal refuses the whole list);
+- a filter or a sort names a personal field (its stored value is ciphertext,
+  which the query form never reads: a *condition* naming one is refused);
+- the catalog lets a field hold more than 64 values (the evaluator fails past
+  64 and a stored document does not say how many a save was allowed);
+- the compiled predicate is over a cap of the query form (8192 nodes, 64
+  deep), or a plan builds more than 6000 nodes; or
+- `GDEFCORE_ACCESS_LIST_EVALUATE` is set, which is how a test or a person
+  can ask for the reference.
+
+After a successful list the request carries the note `defiant.access.list`,
+`planned` or `evaluated`. A grant whose condition cannot be read (the stored
+text no longer parses) does not hold, and the request carries
+`defiant.condition.failed`; a compiled list sets that note when a condition
+*could* fail to decide (it names a personal field or one the type lacks), where
+the evaluated list sets it when an entity reaches the failure.
 
 A module may declare permissions. Enabling it does not grant them. The
 confirmation is the module name, then those permission labels, sorted,

@@ -30,13 +30,19 @@ plant read-skips-filter src/access/access.c testReadpaths 'Paths.NoPermission' \
             entity_visible(&ev, grants, ngrants, type_name, type_len, actor,
                 actor_len, principal, principal_len));'
 
+# (A list is answered by the store or entity by entity; both skip the grants.)
 plant list-skips-visibility src/access/access.c testReadpaths 'Paths.NoPermission' \
   '    if (!reader_sees(catalog, ids[i], ev) ||
-        !entity_visible(ev, grants, ngrants, local.type_name,
-            local.type_name_len, actor, actor_len, principal, principal_len)) {' \
+        !entity_visible(ev, grants, ngrants, local->type_name,
+            local->type_name_len, actor, actor_len, principal, principal_len)) {' \
   '    if (!reader_sees(catalog, ids[i], ev) ||
-        (0 && !entity_visible(ev, grants, ngrants, local.type_name,
-            local.type_name_len, actor, actor_len, principal, principal_len))) {'
+        (0 && !entity_visible(ev, grants, ngrants, local->type_name,
+            local->type_name_len, actor, actor_len, principal, principal_len))) {' \
+  '  parts[nparts++] = access_node(ev, plan, grants, ngrants, q->type_name,
+      q->type_name_len);' \
+  '  parts[nparts++] = gdefcore_plan_constant(plan, 1);
+  (void)grants;
+  (void)ngrants;'
 
 # The render path reads fields through the filter; this one reads them raw.
 plant render-reads-unfiltered src/render/render.c testReadpaths 'Paths.NoPermission' \

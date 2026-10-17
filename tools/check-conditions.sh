@@ -201,11 +201,18 @@ plant hash-before-canonical $PARSE testCondition 'Cond.CanonicalAndHash' \
 plant list-counts-before-filter $ACCESS testCondition \
   'CondAccess.ListCountsWhatIsGranted CondAccess.ReadAndListHonorTheExpression' \
   '    if (!reader_sees(catalog, ids[i], ev) ||
-        !entity_visible(ev, grants, ngrants, local.type_name,
-            local.type_name_len, actor, actor_len, principal, principal_len)) {' \
+        !entity_visible(ev, grants, ngrants, local->type_name,
+            local->type_name_len, actor, actor_len, principal, principal_len)) {' \
   '    if (0 && (!reader_sees(catalog, ids[i], ev) ||
-        !entity_visible(ev, grants, ngrants, local.type_name,
-            local.type_name_len, actor, actor_len, principal, principal_len))) {'
+        !entity_visible(ev, grants, ngrants, local->type_name,
+            local->type_name_len, actor, actor_len, principal, principal_len))) {' \
+  '  parts[nparts++] = access_node(ev, plan, grants, ngrants, q->type_name,
+      q->type_name_len);' \
+  '  parts[nparts++] = gdefcore_plan_constant(plan, 1);
+  (void)grants;
+  (void)ngrants;' \
+  '  parts[nparts++] = gdefcore_plan_published(plan);' \
+  '  parts[nparts++] = gdefcore_plan_constant(plan, 1);'
 
 # Plant 13 (a defect found on the way): a lookup that failed reads as "no such
 # entity", and the next call seeds the roles again.
@@ -224,8 +231,10 @@ plant lookup-failure-reseeds $ACCESS testCondition 'CondAccess.FailureNeverGrant
 # published, so an `any` reader is told the id of one a direct read refuses.
 plant list-skips-the-flag $ACCESS testCondition 'CondAccess.ReadAndListHonorTheExpression' \
   '    if (!reader_sees(catalog, ids[i], ev) ||
-        !entity_visible(ev, grants, ngrants, local.type_name,' \
-  '    if (!entity_visible(ev, grants, ngrants, local.type_name,'
+        !entity_visible(ev, grants, ngrants, local->type_name,' \
+  '    if (!entity_visible(ev, grants, ngrants, local->type_name,' \
+  '  parts[nparts++] = gdefcore_plan_published(plan);' \
+  '  parts[nparts++] = gdefcore_plan_constant(plan, 1);'
 
 # Plant 15: a condition reads the head revision, so a draft beside the active
 # revision decides who may do what.

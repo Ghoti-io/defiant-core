@@ -88,6 +88,8 @@
 #define gdefcore_access_free GHOTIIO_DEFCORE(gdefcore_access_free)
 #define gdefcore_access_grant GHOTIIO_DEFCORE(gdefcore_access_grant)
 #define gdefcore_access_list GHOTIIO_DEFCORE(gdefcore_access_list)
+#define gdefcore_access_list_page GHOTIIO_DEFCORE(gdefcore_access_list_page)
+#define gdefcore_access_count GHOTIIO_DEFCORE(gdefcore_access_count)
 #define gdefcore_access_principal_add_role                                     \
   GHOTIIO_DEFCORE(gdefcore_access_principal_add_role)
 #define gdefcore_access_principal_create                                       \
@@ -219,6 +221,8 @@
 #define gdefcore_entity_state GHOTIIO_DEFCORE(gdefcore_entity_state)
 #define gdefcore_entity_create GHOTIIO_DEFCORE(gdefcore_entity_create)
 #define gdefcore_entity_ids GHOTIIO_DEFCORE(gdefcore_entity_ids)
+#define gdefcore_entity_query_active GHOTIIO_DEFCORE(gdefcore_entity_query_active)
+#define gdefcore_catalog_limits GHOTIIO_DEFCORE(gdefcore_catalog_limits)
 #define gdefcore_entity_publish GHOTIIO_DEFCORE(gdefcore_entity_publish)
 #define gdefcore_entity_unpublish GHOTIIO_DEFCORE(gdefcore_entity_unpublish)
 #define gdefcore_entity_activate GHOTIIO_DEFCORE(gdefcore_entity_activate)
@@ -471,6 +475,34 @@
   GHOTIIO_DEFCORE(gdefcore_template_report_text)
 #define gdefcore_template_report_free \
   GHOTIIO_DEFCORE(gdefcore_template_report_free)
+
+#define gdefcore_plan_create \
+  GHOTIIO_DEFCORE(gdefcore_plan_create)
+#define gdefcore_plan_free \
+  GHOTIIO_DEFCORE(gdefcore_plan_free)
+#define gdefcore_plan_unsupported \
+  GHOTIIO_DEFCORE(gdefcore_plan_unsupported)
+#define gdefcore_plan_oom \
+  GHOTIIO_DEFCORE(gdefcore_plan_oom)
+#define gdefcore_plan_failed \
+  GHOTIIO_DEFCORE(gdefcore_plan_failed)
+#define gdefcore_plan_constant \
+  GHOTIIO_DEFCORE(gdefcore_plan_constant)
+#define gdefcore_plan_published \
+  GHOTIIO_DEFCORE(gdefcore_plan_published)
+#define gdefcore_plan_creator_is_principal \
+  GHOTIIO_DEFCORE(gdefcore_plan_creator_is_principal)
+#define gdefcore_plan_condition \
+  GHOTIIO_DEFCORE(gdefcore_plan_condition)
+#define gdefcore_plan_and \
+  GHOTIIO_DEFCORE(gdefcore_plan_and)
+#define gdefcore_plan_or \
+  GHOTIIO_DEFCORE(gdefcore_plan_or)
+#define gdefcore_plan_field_is \
+  GHOTIIO_DEFCORE(gdefcore_plan_field_is)
+#define gdefcore_plan_sort_field \
+  GHOTIIO_DEFCORE(gdefcore_plan_sort_field)
+#define GDEFCORE_Plan GHOTIIO_DEFCORE(GDEFCORE_Plan)
 
 /// @endcond
 

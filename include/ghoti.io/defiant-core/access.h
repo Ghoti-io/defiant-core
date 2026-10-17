@@ -190,11 +190,38 @@ typedef struct GDEFCORE_Access_Matrix_Row {
  * value is gone, and the marker ::GDEFCORE_SUBJECT_ERASED is returned. */
 #define GDEFCORE_REVISION_ERASED 4
 
+/** The most rows one page of a list returns. A larger limit is this. */
+#define GDEFCORE_ACCESS_LIST_MAX_LIMIT 200
+
+/** List flag: decide entity by entity, in memory, and not as a storage query.
+ * The answer is the same by contract; this is the reference the compiled list
+ * is held to, and what a principal can ask for to see the two agree. */
+#define GDEFCORE_ACCESS_LIST_EVALUATE 1
+
 /**
  * @brief A filtered list. Begins with @ref size.
  *
  * A filter or a sort that names a field the principal may not read, or a
  * field the type does not have, is refused and returns no rows.
+ *
+ * What is listed is the published entities of the type for which some read
+ * grant of the principal holds (AD-11), narrowed by the filter and by
+ * @ref condition. The members after @ref sort_field are additions: a caller
+ * built against the shorter struct sets @ref size to that struct's size and
+ * gets the old list exactly (no offset, no limit, no second sort).
+ *
+ * Order is the sort keys, each the first value of its field in @ref lang
+ * (none before any value), compared as bytes, ascending unless asked for the
+ * reverse, and then creation order. So a page is always a slice of one order.
+ * Paging is @ref offset and @ref limit over that order; a @ref limit above
+ * ::GDEFCORE_ACCESS_LIST_MAX_LIMIT is clamped to it and 0 is every row.
+ *
+ * Counted and paged by the store when the list can be compiled into a storage
+ * query (plan.h), and entity by entity otherwise: when a field it names has a
+ * field-level read grant, when a filter or sort names a personal field, when
+ * the compiled form is over a cap of the query form, or when asked for with
+ * ::GDEFCORE_ACCESS_LIST_EVALUATE. The two give the same rows in the same
+ * order and the same total.
  */
 typedef struct GDEFCORE_Access_List {
   size_t size;                  ///< Must be `sizeof(GDEFCORE_Access_List)`.
@@ -208,6 +235,16 @@ typedef struct GDEFCORE_Access_List {
   size_t filter_text_len;       ///< Length of @ref filter_text.
   const char * sort_field;      ///< Field to sort by, or NULL.
   size_t sort_field_len;        ///< Length of @ref sort_field.
+  uint64_t offset;              ///< Matches skipped before the first returned.
+  uint64_t limit;               ///< Rows returned; 0 is every row.
+  const char * sort2_field;     ///< A second sort key, or NULL.
+  size_t sort2_field_len;       ///< Length of @ref sort2_field.
+  int sort_descending;          ///< Non-zero reverses the first key.
+  int sort2_descending;         ///< Non-zero reverses the second key.
+  const char * condition;       ///< A condition (condition.h) ANDed with the
+                                ///< access filter, or NULL.
+  size_t condition_len;         ///< Length of @ref condition.
+  int flags;                    ///< ::GDEFCORE_ACCESS_LIST_EVALUATE or 0.
 } GDEFCORE_Access_List;
 
 /**
@@ -507,6 +544,30 @@ GDEFCORE_API GDEFCORE_Result gdefcore_access_read(GDEFCORE_Catalog * catalog,
 GDEFCORE_API GDEFCORE_Result gdefcore_access_list(GDEFCORE_Catalog * catalog,
     GDEFCORE_Request * request, const GDEFCORE_Access_List * query,
     char *** out_ids, size_t * out_count);
+
+/**
+ * @brief gdefcore_access_list() and the number of entities the principal may
+ * see that match, before the offset and the limit.
+ *
+ * The total counts only what is visible: a principal who may see 3 of 10
+ * entities has a total of 3, whatever page it asks for. It is the number the
+ * store counts for a compiled list and the number of rows the evaluation
+ * kept for one that was not. Free @p out_ids with gdefcore_access_free().
+ *
+ * @param out_total Receives the total. Required.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_access_list_page(
+    GDEFCORE_Catalog * catalog, GDEFCORE_Request * request,
+    const GDEFCORE_Access_List * query, char *** out_ids, size_t * out_count,
+    uint64_t * out_total);
+
+/**
+ * @brief How many entities the principal may see that match @p query, whatever
+ * its offset and limit. The count of gdefcore_access_list_page().
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_access_count(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Request * request, const GDEFCORE_Access_List * query,
+    uint64_t * out_total);
 
 /**
  * @brief Whether the request's principal holds the permission called

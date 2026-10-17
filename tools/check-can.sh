@@ -272,17 +272,28 @@ plant own-is-the-last-writer-read $ACCESS testCan 'Can.OwnIsTheCreatorNotTheLast
     return rc;'
 
 # Plant 18: the same in a list.
-plant own-is-the-last-writer-list $ACCESS testCan 'Can.OwnIsTheCreatorNotTheLastWriter' \
+# A list is answered by the store (own is the record's creator, in
+# condition_plan.c) or entity by entity (the creator read per entity); the
+# defect is planted in both.
+plantm own-is-the-last-writer-list testCan 'Can.OwnIsTheCreatorNotTheLastWriter' \
+  $ACCESS \
   '    rc = gdefcore_entity_creator(catalog, ids[i], GDEFCORE_PUBLIC_ID_LEN, &actor,
         &actor_len);' \
   '    rc = gdefcore_entity_actor(catalog, ids[i], GDEFCORE_PUBLIC_ID_LEN, &actor,
-        &actor_len);'
+        &actor_len);' \
+  src/condition/condition_plan.c \
+  '  l = column_operand(GDEFCORE_QUERY_COL_CREATOR, 1, 0);
+  r = one_text(plan, plan->principal, plan->principal_len);' \
+  '  l = column_operand(GDEFCORE_QUERY_COL_REVISION_CREATOR, 0, 0);
+  r = one_text(plan, plan->principal, plan->principal_len);'
 
 # Plant 19: a list does not ask whether an entity is published.
 plant list-lists-unpublished $ACCESS testCan 'Can.AnUnpublishedEntityIsNotThereForReaders' \
   '    if (!reader_sees(catalog, ids[i], ev) ||
-        !entity_visible(ev, grants, ngrants, local.type_name,' \
-  '    if (!entity_visible(ev, grants, ngrants, local.type_name,'
+        !entity_visible(ev, grants, ngrants, local->type_name,' \
+  '    if (!entity_visible(ev, grants, ngrants, local->type_name,' \
+  '  parts[nparts++] = gdefcore_plan_published(plan);' \
+  '  parts[nparts++] = gdefcore_plan_constant(plan, 1);'
 
 # Plant 20: reader_sees says yes to everything, so can(read) holds for an
 # entity readers may not see.
@@ -296,7 +307,9 @@ plant reader-sees-everything $ACCESS testCan 'Can.AnUnpublishedEntityIsNotThereF
 # posts names a draft and an unpublished post that every other surface hides.
 plant list-lists-unpublished-oracle $ACCESS testOracle 'Oracle.Unpublished' \
   '    if (!reader_sees(catalog, ids[i], ev) ||
-        !entity_visible(ev, grants, ngrants, local.type_name,' \
-  '    if (!entity_visible(ev, grants, ngrants, local.type_name,'
+        !entity_visible(ev, grants, ngrants, local->type_name,' \
+  '    if (!entity_visible(ev, grants, ngrants, local->type_name,' \
+  '  parts[nparts++] = gdefcore_plan_published(plan);' \
+  '  parts[nparts++] = gdefcore_plan_constant(plan, 1);'
 
 plant_finish

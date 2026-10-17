@@ -26,8 +26,8 @@ plant filter-unreadable-field src/access/access.c testOracle 'Oracle.Fields' \
     if (!type_has_field(' \
   '  if (0 && local.filter_field != NULL && local.filter_field_len > 0) {
     if (!type_has_field(' \
-  '    if ((local.filter_field != NULL && local.filter_field_len > 0 &&' \
-  '    if ((0 && local.filter_field != NULL && local.filter_field_len > 0 &&'
+  '    if ((local->filter_field != NULL && local->filter_field_len > 0 &&' \
+  '    if ((0 && local->filter_field != NULL && local->filter_field_len > 0 &&'
 
 # The same defect for sort: a sort on an unreadable field orders by it.
 plant sort-unreadable-field src/access/access.c testOracle 'Oracle.Fields' \
@@ -35,8 +35,8 @@ plant sort-unreadable-field src/access/access.c testOracle 'Oracle.Fields' \
     if (!type_has_field(' \
   '  if (0 && local.sort_field != NULL && local.sort_field_len > 0) {
     if (!type_has_field(' \
-  '        (local.sort_field != NULL && local.sort_field_len > 0 &&' \
-  '        (0 && local.sort_field != NULL && local.sort_field_len > 0 &&'
+  '        (local->sort_field != NULL && local->sort_field_len > 0 &&' \
+  '        (0 && local->sort_field != NULL && local->sort_field_len > 0 &&'
 
 # Alias resolution: a hidden entity's alias resolves, so the path answers
 # differently from a path nobody owns.
@@ -51,11 +51,16 @@ plant alias-resolves-unfiltered src/form/form.c testOracle 'Oracle.Entities' \
 # list-lists-unpublished-oracle in check-can.sh.)
 plant list-skips-visibility src/access/access.c testOracle 'Oracle.Entities' \
   '    if (!reader_sees(catalog, ids[i], ev) ||
-        !entity_visible(ev, grants, ngrants, local.type_name,
-            local.type_name_len, actor, actor_len, principal, principal_len)) {' \
+        !entity_visible(ev, grants, ngrants, local->type_name,
+            local->type_name_len, actor, actor_len, principal, principal_len)) {' \
   '    if (!reader_sees(catalog, ids[i], ev) ||
-        (0 && !entity_visible(ev, grants, ngrants, local.type_name,
-            local.type_name_len, actor, actor_len, principal, principal_len))) {'
+        (0 && !entity_visible(ev, grants, ngrants, local->type_name,
+            local->type_name_len, actor, actor_len, principal, principal_len))) {' \
+  '  parts[nparts++] = access_node(ev, plan, grants, ngrants, q->type_name,
+      q->type_name_len);' \
+  '  parts[nparts++] = gdefcore_plan_constant(plan, 1);
+  (void)grants;
+  (void)ngrants;'
 
 # A read that answers for a hidden id as if the principal could see it.
 plant read-skips-filter src/access/access.c testOracle 'Oracle.Entities' \

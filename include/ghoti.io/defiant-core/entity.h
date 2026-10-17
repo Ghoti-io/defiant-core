@@ -37,6 +37,7 @@
 #include <ghoti.io/defiant-core/allocator.h>
 #include <ghoti.io/defiant-core/core.h>
 #include <ghoti.io/defiant-storage/store.h>
+#include <ghoti.io/defiant-storage/query.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -685,6 +686,62 @@ GDEFCORE_API GDEFCORE_Result gdefcore_changeset_module_at(
 GDEFCORE_API GDEFCORE_Result gdefcore_entity_ids(GDEFCORE_Catalog * catalog,
     const char * type_name, size_t type_name_len, char *** out_ids,
     size_t * out_count);
+
+/*
+ * The shape the query form reads. An entity's active revision is the
+ * projection `a:<type>` keyed by its row, with the columns below; its record
+ * (published flag, creator) is the projection `s` keyed by the same row. A
+ * query over a type's entities joins the two by that shared row. Each name is
+ * pinned by a test that reads the stored projections directly, so a rename
+ * breaks that test and not a list.
+ */
+/** The projection type prefix of the active revision's copy. */
+#define GDEFCORE_QUERY_ACTIVE_PREFIX "a:"
+/** The active revision's document: language, then field, then the values. */
+#define GDEFCORE_QUERY_COL_DOC "lang"
+/** The public id of the entity. */
+#define GDEFCORE_QUERY_COL_ID "id"
+/** Who wrote the active revision (absent when nobody was recorded). */
+#define GDEFCORE_QUERY_COL_REVISION_CREATOR "actor"
+/** The entity record's projection type. */
+#define GDEFCORE_QUERY_RECORD_TYPE "s"
+/** The record's published flag: "1" or "0". */
+#define GDEFCORE_QUERY_COL_PUBLISHED "pub"
+/** The record's creator (absent when nobody was recorded). */
+#define GDEFCORE_QUERY_COL_CREATOR "creator"
+
+/**
+ * @brief The caps this catalog was opened with.
+ *
+ * @param out Receives a copy. Required.
+ */
+GDEFCORE_API void gdefcore_catalog_limits(const GDEFCORE_Catalog * catalog,
+    GDEFCORE_Limits * out);
+
+/**
+ * @brief Public ids of the entities of a type that have an active revision and
+ * match a storage query, in the query's order, with the total.
+ *
+ * This is the unfiltered index with a predicate: it reads the type's `a:`
+ * projection as the system and knows nothing of a principal. A caller that
+ * serves a principal puts that principal's access filter into the query's
+ * tree (gdefcore_access_list() does). Rows are the entities whose active
+ * revision exists, whether or not they are published; a tree that reads
+ * GDEFCORE_QUERY_RECORD_TYPE decides that. The query's own select list must be
+ * empty. The order ends in creation order, which is the order of
+ * gdefcore_entity_ids(). Free @p out_ids with gdefcore_ids_free().
+ *
+ * @param query A query (storage query.h) over the columns named above.
+ * @param out_total Receives the matches before the offset and the limit. May
+ *   be NULL.
+ * @return ::GDEFCORE_OK, ::GDEFCORE_ERR_INVALID, ::GDEFCORE_ERR_LIMIT (the
+ *   query is over a cap of the query form), ::GDEFCORE_ERR_CORRUPT, or the
+ *   store's error. An unknown type is an empty list.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_entity_query_active(
+    GDEFCORE_Catalog * catalog, const char * type_name, size_t type_name_len,
+    const GDEFSTOR_Query * query, char *** out_ids, size_t * out_count,
+    uint64_t * out_total);
 
 /** @brief Free ids from gdefcore_entity_ids(). NULL is ignored. */
 GDEFCORE_API void gdefcore_ids_free(GDEFCORE_Catalog * catalog, char ** ids,

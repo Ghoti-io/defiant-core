@@ -704,6 +704,26 @@ inline std::string ListLine(World & w, const std::string & who, const char * typ
     }
     gdefcore_access_free(w.site.catalog, ids, count);
   }
+  {
+    /* The same question as a page and as a count: what the principal may see
+     * is counted, never what is there. */
+    uint64_t total = 7777;
+    uint64_t counted = 8888;
+    char ** page = (char **)0x1;
+    size_t page_n = 99;
+    GDEFCORE_Result prc;
+    GDEFCORE_Result crc;
+    Note("gdefcore_access_list_page");
+    prc = gdefcore_access_list_page(w.site.catalog, req, &q, &page, &page_n,
+        &total);
+    if (prc == GDEFCORE_OK) {
+      gdefcore_access_free(w.site.catalog, page, page_n);
+    }
+    Note("gdefcore_access_count");
+    crc = gdefcore_access_count(w.site.catalog, req, &q, &counted);
+    out += " page=" + Rc(prc) + ":" + std::to_string(total) +
+           " counted=" + Rc(crc) + ":" + std::to_string(counted);
+  }
   return out + Diag(w, req);
 }
 

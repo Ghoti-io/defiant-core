@@ -30,6 +30,7 @@
 #include <ghoti.io/defiant-core/access.h>
 #include <ghoti.io/defiant-core/condition.h>
 #include <ghoti.io/defiant-core/module.h>
+#include <ghoti.io/defiant-core/plan.h>
 
 #include "access_internal.h"
 
@@ -74,6 +75,7 @@ static const char kCondAny[] = "any";
 static const char kCondOwn[] = "own";
 static const char kCondExprMark[] = "expr";
 static const char kFailedNote[] = "defiant.condition.failed";
+static const char kListNote[] = "defiant.access.list";
 
 typedef struct StagePerm {
   char label[kPart];
@@ -2406,15 +2408,11 @@ GDEFCORE_Result gdefcore_access_revision_values(GDEFCORE_Catalog * catalog,
 struct Listed {
   char * id;
   char * key;
+  size_t key_len;
+  char * key2;
+  size_t key2_len;
+  size_t index;
 };
-
-static int cmp_listed(const void * a, const void * b) {
-  const struct Listed * left = (const struct Listed *)a;
-  const struct Listed * right = (const struct Listed *)b;
-  const char * ak = left->key == NULL ? "" : left->key;
-  const char * bk = right->key == NULL ? "" : right->key;
-  return strcmp(ak, bk);
-}
 
 static void drop_rows(GDEFCORE_Catalog * catalog, struct Listed * rows,
     size_t nrows, char ** ids, size_t count) {
@@ -2422,21 +2420,543 @@ static void drop_rows(GDEFCORE_Catalog * catalog, struct Listed * rows,
   for (i = 0; i < nrows; i++) {
     gdefcore_text_free(catalog, rows[i].id);
     gdefcore_text_free(catalog, rows[i].key);
+    gdefcore_text_free(catalog, rows[i].key2);
   }
   gcu_allocator_free(alloc_default(), rows);
   gdefcore_ids_free(catalog, ids, count);
 }
 
-static GDEFCORE_Result list_impl(Eval * ev, GDEFCORE_Catalog * catalog,
-    GDEFCORE_Request * request, const GDEFCORE_Access_List * query,
-    char *** out_ids, size_t * out_count) {
-  GDEFCORE_Access_List local;
-  size_t ncopy;
+static int cmp_bytes(const char * a, size_t an, const char * b, size_t bn) {
+  size_t n = an < bn ? an : bn;
+  int c = n == 0 ? 0 : memcmp(a, b, n);
+  if (c != 0) {
+    return c < 0 ? -1 : 1;
+  }
+  return an < bn ? -1 : (an > bn ? 1 : 0);
+}
+
+/* The order a list has: the first key, then the second, each ascending unless
+ * asked otherwise, an absent key before any present one, and last the order
+ * the entities were created in. Bytes, not a locale. */
+static int listed_before(const struct Listed * a, const struct Listed * b,
+    int desc1, int desc2) {
+  int c = cmp_bytes(a->key == NULL ? "" : a->key, a->key_len,
+      b->key == NULL ? "" : b->key, b->key_len);
+  if (c != 0) {
+    return desc1 ? c > 0 : c < 0;
+  }
+  c = cmp_bytes(a->key2 == NULL ? "" : a->key2, a->key2_len,
+      b->key2 == NULL ? "" : b->key2, b->key2_len);
+  if (c != 0) {
+    return desc2 ? c > 0 : c < 0;
+  }
+  return a->index < b->index;
+}
+
+/* A merge sort: no comparator context to smuggle through qsort. */
+static GDEFCORE_Result listed_sort(struct Listed * rows, size_t n, int desc1,
+    int desc2) {
+  struct Listed * tmp;
+  size_t width;
+  if (n < 2) {
+    return GDEFCORE_OK;
+  }
+  tmp = (struct Listed *)gcu_allocator_calloc(alloc_default(), n, sizeof *tmp);
+  if (tmp == NULL) {
+    return GDEFCORE_ERR_OOM;
+  }
+  for (width = 1; width < n; width *= 2) {
+    size_t lo;
+    for (lo = 0; lo < n; lo += 2 * width) {
+      size_t mid = lo + width < n ? lo + width : n;
+      size_t hi = lo + 2 * width < n ? lo + 2 * width : n;
+      size_t a = lo;
+      size_t b = mid;
+      size_t k = lo;
+      while (a < mid && b < hi) {
+        if (listed_before(&rows[b], &rows[a], desc1, desc2)) {
+          tmp[k++] = rows[b++];
+        } else {
+          tmp[k++] = rows[a++];
+        }
+      }
+      while (a < mid) {
+        tmp[k++] = rows[a++];
+      }
+      while (b < hi) {
+        tmp[k++] = rows[b++];
+      }
+    }
+    memcpy(rows, tmp, n * sizeof *rows);
+  }
+  gcu_allocator_free(alloc_default(), tmp);
+  return GDEFCORE_OK;
+}
+
+/* The ids a list returns, in the shape gdefcore_access_free() takes. */
+static GDEFCORE_Result copy_ids(GDEFCORE_Catalog * catalog, char ** ids,
+    size_t n, char *** out) {
+  char ** result = (char **)gcu_allocator_calloc(alloc_default(),
+      n > 0 ? n : 1, sizeof *result);
+  size_t i;
+  if (result == NULL) {
+    return GDEFCORE_ERR_OOM;
+  }
+  for (i = 0; i < n; i++) {
+    if (gdefcore_text_dup(catalog, ids[i], strlen(ids[i]), &result[i]) !=
+        GDEFCORE_OK) {
+      gdefcore_access_free(catalog, result, i);
+      return GDEFCORE_ERR_OOM;
+    }
+  }
+  *out = result;
+  return GDEFCORE_OK;
+}
+
+/*
+ * The access filter and the list's own filter, built as a storage query. The
+ * entities a principal may see are the published ones for which some read
+ * grant of the type holds, as the loop in list_memory() decides one entity at
+ * a time; the two must give the same entities, and list_memory() is the one
+ * that is the reference. 0 when the plan could be built, else the plan says
+ * why (unsupported, or out of memory).
+ */
+static const GDEFSTOR_QueryNode * grant_base(Eval * ev, GDEFCORE_Plan * plan,
+    const Grant * grant) {
+  ExprSlot * slot;
+  if (grant->condition == GDEFCORE_ACCESS_ANY) {
+    return gdefcore_plan_constant(plan, 1);
+  }
+  if (grant->condition == GDEFCORE_ACCESS_OWN) {
+    return gdefcore_plan_creator_is_principal(plan);
+  }
+  if (grant->condition != kCondExpr) {
+    return gdefcore_plan_constant(plan, 0);
+  }
+  slot = expr_slot(ev, grant);
+  if (slot == NULL || slot->bad || slot->cond == NULL) {
+    /* An expression that cannot be read has not granted. */
+    ev->failed = 1;
+    return gdefcore_plan_constant(plan, 0);
+  }
+  return gdefcore_plan_condition(plan, slot->cond);
+}
+
+static const GDEFSTOR_QueryNode * access_node(Eval * ev, GDEFCORE_Plan * plan,
+    const Grant * grants, size_t ngrants, const char * type, size_t type_len) {
+  const GDEFSTOR_QueryNode ** terms;
+  size_t nterms = 0;
+  size_t i;
+  const GDEFSTOR_QueryNode * out;
+  terms = (const GDEFSTOR_QueryNode **)gcu_allocator_calloc(alloc_default(),
+      ngrants > 0 ? ngrants : 1, sizeof *terms);
+  if (terms == NULL) {
+    return NULL;
+  }
+  for (i = 0; i < ngrants; i++) {
+    const GDEFSTOR_QueryNode * pair[2];
+    const GDEFSTOR_QueryNode * base;
+    const GDEFSTOR_QueryNode * ceiling;
+    if (!same(grants[i].type_name, grants[i].type_len, type, type_len) ||
+        grants[i].field_len != 0 ||
+        !same(grants[i].action, grants[i].action_len, "read", 4)) {
+      continue;
+    }
+    base = grant_base(ev, plan, &grants[i]);
+    if (base == NULL) {
+      gcu_allocator_free(alloc_default(), terms);
+      return NULL;
+    }
+    if (ev->has_ceiling) {
+      /* A grant of the acting principal's for the same permission must hold
+       * on the same entity too (AD-12). */
+      const GDEFSTOR_QueryNode ** alts = (const GDEFSTOR_QueryNode **)
+          gcu_allocator_calloc(alloc_default(),
+              ev->nceiling > 0 ? ev->nceiling : 1, sizeof *alts);
+      size_t n = 0;
+      size_t j;
+      if (alts == NULL) {
+        gcu_allocator_free(alloc_default(), terms);
+        return NULL;
+      }
+      for (j = 0; j < ev->nceiling; j++) {
+        const Grant * h = &ev->ceiling[j];
+        if (same(h->action, h->action_len, grants[i].action,
+                grants[i].action_len) &&
+            same(h->type_name, h->type_len, grants[i].type_name,
+                grants[i].type_len) &&
+            same(h->field, h->field_len, grants[i].field, grants[i].field_len)) {
+          alts[n] = grant_base(ev, plan, h);
+          if (alts[n] == NULL) {
+            gcu_allocator_free(alloc_default(), alts);
+            gcu_allocator_free(alloc_default(), terms);
+            return NULL;
+          }
+          n += 1;
+        }
+      }
+      ceiling = gdefcore_plan_or(plan, alts, n);
+      gcu_allocator_free(alloc_default(), alts);
+      if (ceiling == NULL) {
+        gcu_allocator_free(alloc_default(), terms);
+        return NULL;
+      }
+    } else {
+      ceiling = gdefcore_plan_constant(plan, 1);
+    }
+    pair[0] = base;
+    pair[1] = ceiling;
+    terms[nterms] = gdefcore_plan_and(plan, pair, 2);
+    if (terms[nterms] == NULL) {
+      gcu_allocator_free(alloc_default(), terms);
+      return NULL;
+    }
+    nterms += 1;
+  }
+  out = gdefcore_plan_or(plan, terms, nterms);
+  gcu_allocator_free(alloc_default(), terms);
+  return out;
+}
+
+typedef struct ListSpec {
+  const GDEFCORE_Access_List * q;   /* the request, with defaults filled */
+  uint64_t limit;                    /* 0 for every match */
+  const GDEFCORE_Condition * cond;   /* the list's own condition, or NULL */
+  int count_only;
+} ListSpec;
+
+/* Run the list as a storage query. GDEFCORE_OK with *out_done set when it
+ * ran; GDEFCORE_OK with *out_done clear when it could not be compiled or ran
+ * over a cap of the query form (the caller evaluates entity by entity);
+ * an error otherwise. */
+static GDEFCORE_Result list_planned(Eval * ev, GDEFCORE_Catalog * catalog,
+    GDEFCORE_Request * request, const ListSpec * spec, const Grant * grants,
+    size_t ngrants, const char * principal, size_t principal_len,
+    char *** out_ids, size_t * out_count, uint64_t * out_total, int * out_done) {
+  const GDEFCORE_Access_List * q = spec->q;
+  GDEFCORE_Plan * plan = NULL;
+  const GDEFSTOR_QueryNode * parts[4];
+  size_t nparts = 0;
+  const GDEFSTOR_QueryNode * where;
+  const GDEFSTOR_QuerySort * sorts[2];
+  GDEFSTOR_QuerySort sort_copy[2];
+  size_t nsorts = 0;
+  GDEFSTOR_Query sq;
+  char ** ids = NULL;
+  size_t n = 0;
+  uint64_t total = 0;
+  GDEFCORE_Result rc;
+  *out_done = 0;
+  rc = gdefcore_plan_create(catalog, q->type_name, q->type_name_len, ev->lang,
+      ev->lang_len, principal, principal_len, gdefcore_request_time(request),
+      &plan);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  parts[nparts++] = gdefcore_plan_published(plan);
+  parts[nparts++] = access_node(ev, plan, grants, ngrants, q->type_name,
+      q->type_name_len);
+  if (q->filter_text != NULL && q->filter_field != NULL &&
+      q->filter_field_len > 0) {
+    parts[nparts++] = gdefcore_plan_field_is(plan, q->filter_field,
+        q->filter_field_len, q->filter_text, q->filter_text_len);
+  }
+  if (spec->cond != NULL) {
+    parts[nparts++] = gdefcore_plan_condition(plan, spec->cond);
+  }
+  if (q->sort_field != NULL && q->sort_field_len > 0) {
+    sorts[nsorts] = gdefcore_plan_sort_field(plan, q->sort_field,
+        q->sort_field_len, q->sort_descending);
+    if (sorts[nsorts] != NULL) {
+      sort_copy[nsorts] = *sorts[nsorts];
+    }
+    nsorts += 1;
+  }
+  if (q->sort2_field != NULL && q->sort2_field_len > 0) {
+    sorts[nsorts] = gdefcore_plan_sort_field(plan, q->sort2_field,
+        q->sort2_field_len, q->sort2_descending);
+    if (sorts[nsorts] != NULL) {
+      sort_copy[nsorts] = *sorts[nsorts];
+    }
+    nsorts += 1;
+  }
+  {
+    size_t i;
+    int built = 1;
+    for (i = 0; i < nparts; i++) {
+      built = built && parts[i] != NULL;
+    }
+    for (i = 0; i < nsorts; i++) {
+      built = built && sorts[i] != NULL;
+    }
+    if (!built) {
+      rc = gdefcore_plan_oom(plan) ? GDEFCORE_ERR_OOM : GDEFCORE_OK;
+      gdefcore_plan_free(plan);
+      return rc;
+    }
+  }
+  where = gdefcore_plan_and(plan, parts, nparts);
+  if (where == NULL) {
+    rc = gdefcore_plan_oom(plan) ? GDEFCORE_ERR_OOM : GDEFCORE_OK;
+    gdefcore_plan_free(plan);
+    return rc;
+  }
+  if (gdefcore_plan_failed(plan)) {
+    ev->failed = 1;
+  }
+  memset(&sq, 0, sizeof sq);
+  sq.size = sizeof sq;
+  sq.where = where;
+  sq.sorts = nsorts > 0 ? sort_copy : NULL;
+  sq.sort_count = nsorts;
+  sq.entity_numeric = 1; /* ends in creation order, as the index lists */
+  sq.offset = spec->count_only ? 0 : q->offset;
+  sq.limit = spec->count_only ? 1 : spec->limit;
+  rc = gdefcore_entity_query_active(catalog, q->type_name, q->type_name_len,
+      &sq, &ids, &n, &total);
+  gdefcore_plan_free(plan);
+  if (rc == GDEFCORE_ERR_LIMIT) {
+    /* More than the query form carries: evaluated entity by entity. */
+    return GDEFCORE_OK;
+  }
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  *out_total = total;
+  *out_count = 0;
+  *out_ids = NULL;
+  if (!spec->count_only) {
+    rc = copy_ids(catalog, ids, n, out_ids);
+    if (rc != GDEFCORE_OK) {
+      gdefcore_ids_free(catalog, ids, n);
+      return rc;
+    }
+    *out_count = n;
+  }
+  gdefcore_ids_free(catalog, ids, n);
+  *out_done = 1;
+  return GDEFCORE_OK;
+}
+
+/* The list, entity by entity: the reference. */
+static GDEFCORE_Result list_memory(Eval * ev, GDEFCORE_Catalog * catalog,
+    GDEFCORE_Request * request, const ListSpec * spec, const Grant * grants,
+    size_t ngrants, const Grant * decls, size_t ndecls,
+    const char * principal, size_t principal_len, const char ** cond_fields,
+    const size_t * cond_field_lens, size_t ncond_fields, char *** out_ids,
+    size_t * out_count, uint64_t * out_total) {
+  const GDEFCORE_Access_List * local = spec->q;
   char ** ids = NULL;
   size_t count = 0;
   struct Listed * rows = NULL;
   size_t nrows = 0;
   char ** result = NULL;
+  size_t i;
+  size_t first;
+  size_t take;
+  GDEFCORE_Result rc;
+  rc = gdefcore_entity_ids(catalog, local->type_name, local->type_name_len,
+      &ids, &count);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  rows = (struct Listed *)gcu_allocator_calloc(alloc_default(),
+      count > 0 ? count : 1, sizeof *rows);
+  if (rows == NULL) {
+    gdefcore_ids_free(catalog, ids, count);
+    return GDEFCORE_ERR_OOM;
+  }
+  for (i = 0; i < count; i++) {
+    char * actor = NULL;
+    size_t actor_len = 0;
+    char ** texts = NULL;
+    size_t * lens = NULL;
+    size_t n = 0;
+    size_t f;
+    rc = gdefcore_entity_creator(catalog, ids[i], GDEFCORE_PUBLIC_ID_LEN, &actor,
+        &actor_len);
+    if (rc != GDEFCORE_OK) {
+      drop_rows(catalog, rows, nrows, ids, count);
+      return rc;
+    }
+    ev->id = ids[i];
+    /* Not published is not listed: the id of an entity readers may not see
+     * must not leak through a list that a direct read refuses. */
+    if (!reader_sees(catalog, ids[i], ev) ||
+        !entity_visible(ev, grants, ngrants, local->type_name,
+            local->type_name_len, actor, actor_len, principal, principal_len)) {
+      gdefcore_text_free(catalog, actor);
+      continue;
+    }
+    if ((local->filter_field != NULL && local->filter_field_len > 0 &&
+            !may_name_field(ev, grants, ngrants, decls, ndecls,
+                local->type_name, local->type_name_len, local->filter_field,
+                local->filter_field_len, actor, actor_len, principal,
+                principal_len)) ||
+        (local->sort_field != NULL && local->sort_field_len > 0 &&
+            !may_name_field(ev, grants, ngrants, decls, ndecls,
+                local->type_name, local->type_name_len, local->sort_field,
+                local->sort_field_len, actor, actor_len, principal,
+                principal_len)) ||
+        (local->sort2_field != NULL && local->sort2_field_len > 0 &&
+            !may_name_field(ev, grants, ngrants, decls, ndecls,
+                local->type_name, local->type_name_len, local->sort2_field,
+                local->sort2_field_len, actor, actor_len, principal,
+                principal_len))) {
+      gdefcore_text_free(catalog, actor);
+      drop_rows(catalog, rows, nrows, ids, count);
+      return GDEFCORE_ERR_INVALID;
+    }
+    for (f = 0; f < ncond_fields; f++) {
+      if (!may_name_field(ev, grants, ngrants, decls, ndecls,
+              local->type_name, local->type_name_len, cond_fields[f],
+              cond_field_lens[f], actor, actor_len, principal,
+              principal_len)) {
+        gdefcore_text_free(catalog, actor);
+        drop_rows(catalog, rows, nrows, ids, count);
+        return GDEFCORE_ERR_INVALID;
+      }
+    }
+    gdefcore_text_free(catalog, actor);
+    if (local->filter_text != NULL && local->filter_field != NULL &&
+        local->filter_field_len > 0) {
+      char field_name[65];
+      if (local->filter_field_len >= sizeof field_name) {
+        drop_rows(catalog, rows, nrows, ids, count);
+        return GDEFCORE_ERR_LIMIT;
+      }
+      memcpy(field_name, local->filter_field, local->filter_field_len);
+      field_name[local->filter_field_len] = '\0';
+      rc = read_lang(catalog, ids[i], ev->lang, ev->lang_len, field_name,
+          &texts, &lens, &n);
+      if (rc != GDEFCORE_OK) {
+        gdefcore_values_free(catalog, texts, lens, n);
+        drop_rows(catalog, rows, nrows, ids, count);
+        return rc;
+      }
+      if (!values_have(texts, lens, n, local->filter_text,
+              local->filter_text_len)) {
+        gdefcore_values_free(catalog, texts, lens, n);
+        continue;
+      }
+      gdefcore_values_free(catalog, texts, lens, n);
+    }
+    if (spec->cond != NULL) {
+      GDEFCORE_Condition_Subject subject;
+      int failed = 0;
+      int holds;
+      memset(&subject, 0, sizeof subject);
+      subject.size = sizeof subject;
+      subject.entity = ids[i];
+      subject.entity_len = GDEFCORE_PUBLIC_ID_LEN;
+      subject.lang = ev->lang;
+      subject.lang_len = ev->lang_len;
+      holds = gdefcore_condition_eval(catalog, request, spec->cond, &subject,
+          &failed);
+      if (failed) {
+        ev->failed = 1;
+      }
+      if (!holds) {
+        continue;
+      }
+    }
+    rc = gdefcore_text_dup(catalog, ids[i], strlen(ids[i]), &rows[nrows].id);
+    if (rc != GDEFCORE_OK) {
+      drop_rows(catalog, rows, nrows, ids, count);
+      return rc;
+    }
+    rows[nrows].index = i;
+    {
+      const char * sort_fields[2];
+      size_t sort_lens[2];
+      char ** keys[2];
+      size_t * key_lens[2];
+      int k;
+      sort_fields[0] = local->sort_field;
+      sort_lens[0] = local->sort_field_len;
+      sort_fields[1] = local->sort2_field;
+      sort_lens[1] = local->sort2_field_len;
+      keys[0] = &rows[nrows].key;
+      keys[1] = &rows[nrows].key2;
+      key_lens[0] = &rows[nrows].key_len;
+      key_lens[1] = &rows[nrows].key2_len;
+      for (k = 0; k < 2; k++) {
+        char field_name[65];
+        if (sort_fields[k] == NULL || sort_lens[k] == 0) {
+          continue;
+        }
+        if (sort_lens[k] >= sizeof field_name) {
+          gdefcore_text_free(catalog, rows[nrows].id);
+          drop_rows(catalog, rows, nrows, ids, count);
+          return GDEFCORE_ERR_LIMIT;
+        }
+        memcpy(field_name, sort_fields[k], sort_lens[k]);
+        field_name[sort_lens[k]] = '\0';
+        rc = read_lang(catalog, ids[i], ev->lang, ev->lang_len, field_name,
+            &texts, &lens, &n);
+        if (rc != GDEFCORE_OK) {
+          gdefcore_values_free(catalog, texts, lens, n);
+          gdefcore_text_free(catalog, rows[nrows].id);
+          drop_rows(catalog, rows, nrows, ids, count);
+          return rc;
+        }
+        if (n > 0) {
+          if (gdefcore_text_dup(catalog, texts[0], lens[0], keys[k]) ==
+              GDEFCORE_OK) {
+            *key_lens[k] = lens[0];
+          }
+        }
+        gdefcore_values_free(catalog, texts, lens, n);
+      }
+    }
+    nrows += 1;
+  }
+  gdefcore_ids_free(catalog, ids, count);
+  *out_total = nrows;
+  if (spec->count_only) {
+    drop_rows(catalog, rows, nrows, NULL, 0);
+    *out_ids = NULL;
+    *out_count = 0;
+    return GDEFCORE_OK;
+  }
+  if (nrows > 1 && ((local->sort_field != NULL && local->sort_field_len > 0) ||
+                       (local->sort2_field != NULL &&
+                           local->sort2_field_len > 0))) {
+    rc = listed_sort(rows, nrows, local->sort_descending,
+        local->sort2_descending);
+    if (rc != GDEFCORE_OK) {
+      drop_rows(catalog, rows, nrows, NULL, 0);
+      return rc;
+    }
+  }
+  first = local->offset >= nrows ? nrows : (size_t)local->offset;
+  take = nrows - first;
+  if (spec->limit != 0 && spec->limit < take) {
+    take = (size_t)spec->limit;
+  }
+  result = (char **)gcu_allocator_calloc(alloc_default(), take > 0 ? take : 1,
+      sizeof *result);
+  if (result == NULL) {
+    drop_rows(catalog, rows, nrows, NULL, 0);
+    return GDEFCORE_ERR_OOM;
+  }
+  for (i = 0; i < take; i++) {
+    result[i] = rows[first + i].id;
+    rows[first + i].id = NULL;
+  }
+  drop_rows(catalog, rows, nrows, NULL, 0);
+  *out_ids = result;
+  *out_count = take;
+  return GDEFCORE_OK;
+}
+
+static GDEFCORE_Result list_impl(Eval * ev, GDEFCORE_Catalog * catalog,
+    GDEFCORE_Request * request, const GDEFCORE_Access_List * query,
+    int count_only, char *** out_ids, size_t * out_count,
+    uint64_t * out_total) {
+  GDEFCORE_Access_List local;
+  ListSpec spec;
+  size_t ncopy;
   Grant grants[kGrantMax];
   Grant decls[kGrantMax];
   size_t ngrants = 0;
@@ -2444,7 +2964,16 @@ static GDEFCORE_Result list_impl(Eval * ev, GDEFCORE_Catalog * catalog,
   int read_principal = 0;
   const char * principal = NULL;
   size_t principal_len = 0;
+  GDEFCORE_Condition * cond = NULL;
+  const char * cond_fields[64];
+  size_t cond_field_lens[64];
+  char * cond_names[64];
+  size_t ncond = 0;
   size_t i;
+  int restricted = 0;
+  int personal = 0;
+  uint64_t total = 0;
+  int planned = 0;
   GDEFCORE_Result rc;
   if (catalog == NULL || request == NULL || query == NULL || out_ids == NULL ||
       out_count == NULL || query->size < sizeof(size_t)) {
@@ -2452,6 +2981,9 @@ static GDEFCORE_Result list_impl(Eval * ev, GDEFCORE_Catalog * catalog,
   }
   *out_ids = NULL;
   *out_count = 0;
+  if (out_total != NULL) {
+    *out_total = 0;
+  }
   memset(&local, 0, sizeof local);
   ncopy = query->size;
   if (ncopy > sizeof local) {
@@ -2484,6 +3016,10 @@ static GDEFCORE_Result list_impl(Eval * ev, GDEFCORE_Catalog * catalog,
             principal, principal_len)) {
       return GDEFCORE_ERR_INVALID;
     }
+    restricted |= field_restricted(decls, ndecls, local.type_name,
+        local.type_name_len, local.filter_field, local.filter_field_len);
+    personal |= field_is_personal(catalog, local.type_name, local.type_name_len,
+        local.filter_field, local.filter_field_len);
   }
   if (local.sort_field != NULL && local.sort_field_len > 0) {
     if (!type_has_field(catalog, local.type_name, local.type_name_len,
@@ -2493,127 +3029,116 @@ static GDEFCORE_Result list_impl(Eval * ev, GDEFCORE_Catalog * catalog,
             principal, principal_len)) {
       return GDEFCORE_ERR_INVALID;
     }
+    restricted |= field_restricted(decls, ndecls, local.type_name,
+        local.type_name_len, local.sort_field, local.sort_field_len);
+    personal |= field_is_personal(catalog, local.type_name, local.type_name_len,
+        local.sort_field, local.sort_field_len);
   }
-  rc = gdefcore_entity_ids(catalog, local.type_name, local.type_name_len, &ids,
-      &count);
+  if (local.sort2_field != NULL && local.sort2_field_len > 0) {
+    if (!type_has_field(catalog, local.type_name, local.type_name_len,
+            local.sort2_field, local.sort2_field_len) ||
+        !grant_names_field(grants, ngrants, decls, ndecls, local.type_name,
+            local.type_name_len, local.sort2_field, local.sort2_field_len,
+            principal, principal_len)) {
+      return GDEFCORE_ERR_INVALID;
+    }
+    restricted |= field_restricted(decls, ndecls, local.type_name,
+        local.type_name_len, local.sort2_field, local.sort2_field_len);
+    personal |= field_is_personal(catalog, local.type_name, local.type_name_len,
+        local.sort2_field, local.sort2_field_len);
+  }
+  /* The list's own condition: a written condition (never a principal's own
+   * word for what it may see: it narrows the access filter and never widens
+   * it) over fields the principal may name. */
+  if (local.condition != NULL && local.condition_len > 0) {
+    size_t nfields = 0;
+    GDEFCORE_Condition_Error err;
+    memset(&err, 0, sizeof err);
+    err.size = sizeof err;
+    if (gdefcore_condition_parse(local.condition, local.condition_len, &cond,
+            &err) != GDEFCORE_OK ||
+        gdefcore_condition_validate(catalog, cond, local.type_name,
+            local.type_name_len, &err) != GDEFCORE_OK) {
+      gdefcore_condition_free(cond);
+      return GDEFCORE_ERR_INVALID;
+    }
+    if (gdefcore_type_field_count(catalog, local.type_name, local.type_name_len,
+            &nfields) != GDEFCORE_OK) {
+      gdefcore_condition_free(cond);
+      return GDEFCORE_ERR_INVALID;
+    }
+    for (i = 0; i < nfields && ncond < 64; i++) {
+      char * name = NULL;
+      size_t name_len = 0;
+      int required = 0;
+      int many = 0;
+      if (gdefcore_type_field(catalog, local.type_name, local.type_name_len, i,
+              &name, &name_len, &required, &many) != GDEFCORE_OK) {
+        break;
+      }
+      if (gdefcore_condition_tests_field(cond, name, name_len)) {
+        if (!grant_names_field(grants, ngrants, decls, ndecls, local.type_name,
+                local.type_name_len, name, name_len, principal,
+                principal_len)) {
+          gdefcore_text_free(catalog, name);
+          for (i = 0; i < ncond; i++) {
+            gdefcore_text_free(catalog, cond_names[i]);
+          }
+          gdefcore_condition_free(cond);
+          return GDEFCORE_ERR_INVALID;
+        }
+        if (field_restricted(decls, ndecls, local.type_name,
+                local.type_name_len, name, name_len)) {
+          restricted = 1;
+          cond_names[ncond] = name;
+          cond_fields[ncond] = name;
+          cond_field_lens[ncond] = name_len;
+          ncond += 1;
+          continue;
+        }
+      }
+      gdefcore_text_free(catalog, name);
+    }
+  }
+  memset(&spec, 0, sizeof spec);
+  spec.q = &local;
+  spec.cond = cond;
+  spec.count_only = count_only;
+  spec.limit = local.limit == 0 ? 0
+               : (local.limit > GDEFCORE_ACCESS_LIST_MAX_LIMIT
+                         ? GDEFCORE_ACCESS_LIST_MAX_LIMIT
+                         : local.limit);
+  {
+    int done = 0;
+    rc = GDEFCORE_OK;
+    /* A field that only some principals may name is decided entity by
+     * entity; so is a personal field's ciphertext, and everything when asked
+     * for the reference. */
+    if ((local.flags & GDEFCORE_ACCESS_LIST_EVALUATE) == 0 && !restricted &&
+        !personal) {
+      rc = list_planned(ev, catalog, request, &spec, grants, ngrants, principal,
+          principal_len, out_ids, out_count, &total, &done);
+    }
+    planned = done;
+    if (rc == GDEFCORE_OK && !done) {
+      rc = list_memory(ev, catalog, request, &spec, grants, ngrants, decls,
+          ndecls, principal, principal_len, cond_fields, cond_field_lens, ncond,
+          out_ids, out_count, &total);
+    }
+  }
+  for (i = 0; i < ncond; i++) {
+    gdefcore_text_free(catalog, cond_names[i]);
+  }
+  gdefcore_condition_free(cond);
   if (rc != GDEFCORE_OK) {
     return rc;
   }
-  rows = (struct Listed *)gcu_allocator_calloc(alloc_default(),
-      count > 0 ? count : 1, sizeof *rows);
-  if (rows == NULL) {
-    gdefcore_ids_free(catalog, ids, count);
-    return GDEFCORE_ERR_OOM;
+  /* How this list was answered, for a test or an explain trace to read. */
+  (void)gdefcore_request_set_note(request, kListNote, strlen(kListNote),
+      planned ? "planned" : "evaluated", planned ? 7 : 9);
+  if (out_total != NULL) {
+    *out_total = total;
   }
-  for (i = 0; i < count; i++) {
-    char * actor = NULL;
-    size_t actor_len = 0;
-    char ** texts = NULL;
-    size_t * lens = NULL;
-    size_t n = 0;
-    rc = gdefcore_entity_creator(catalog, ids[i], GDEFCORE_PUBLIC_ID_LEN, &actor,
-        &actor_len);
-    if (rc != GDEFCORE_OK) {
-      drop_rows(catalog, rows, nrows, ids, count);
-      return rc;
-    }
-    ev->id = ids[i];
-    /* Not published is not listed: the id of an entity readers may not see
-     * must not leak through a list that a direct read refuses. */
-    if (!reader_sees(catalog, ids[i], ev) ||
-        !entity_visible(ev, grants, ngrants, local.type_name,
-            local.type_name_len, actor, actor_len, principal, principal_len)) {
-      gdefcore_text_free(catalog, actor);
-      continue;
-    }
-    if ((local.filter_field != NULL && local.filter_field_len > 0 &&
-            !may_name_field(ev, grants, ngrants, decls, ndecls,
-                local.type_name, local.type_name_len, local.filter_field,
-                local.filter_field_len, actor, actor_len, principal,
-                principal_len)) ||
-        (local.sort_field != NULL && local.sort_field_len > 0 &&
-            !may_name_field(ev, grants, ngrants, decls, ndecls,
-                local.type_name, local.type_name_len, local.sort_field,
-                local.sort_field_len, actor, actor_len, principal,
-                principal_len))) {
-      gdefcore_text_free(catalog, actor);
-      drop_rows(catalog, rows, nrows, ids, count);
-      return GDEFCORE_ERR_INVALID;
-    }
-    gdefcore_text_free(catalog, actor);
-    if (local.filter_text != NULL && local.filter_field != NULL &&
-        local.filter_field_len > 0) {
-      char field_name[65];
-      if (local.filter_field_len >= sizeof field_name) {
-        drop_rows(catalog, rows, nrows, ids, count);
-        return GDEFCORE_ERR_LIMIT;
-      }
-      memcpy(field_name, local.filter_field, local.filter_field_len);
-      field_name[local.filter_field_len] = '\0';
-      rc = read_lang(catalog, ids[i], local.lang, local.lang_len, field_name,
-          &texts, &lens, &n);
-      if (rc != GDEFCORE_OK) {
-        gdefcore_values_free(catalog, texts, lens, n);
-        drop_rows(catalog, rows, nrows, ids, count);
-        return rc;
-      }
-      if (!values_have(texts, lens, n, local.filter_text,
-              local.filter_text_len)) {
-        gdefcore_values_free(catalog, texts, lens, n);
-        continue;
-      }
-      gdefcore_values_free(catalog, texts, lens, n);
-    }
-    rc = gdefcore_text_dup(catalog, ids[i], strlen(ids[i]), &rows[nrows].id);
-    if (rc != GDEFCORE_OK) {
-      drop_rows(catalog, rows, nrows, ids, count);
-      return rc;
-    }
-    if (local.sort_field != NULL && local.sort_field_len > 0) {
-      char field_name[65];
-      if (local.sort_field_len >= sizeof field_name) {
-        gdefcore_text_free(catalog, rows[nrows].id);
-        drop_rows(catalog, rows, nrows, ids, count);
-        return GDEFCORE_ERR_LIMIT;
-      }
-      memcpy(field_name, local.sort_field, local.sort_field_len);
-      field_name[local.sort_field_len] = '\0';
-      rc = read_lang(catalog, ids[i], local.lang, local.lang_len, field_name,
-          &texts, &lens, &n);
-      if (rc != GDEFCORE_OK) {
-        gdefcore_values_free(catalog, texts, lens, n);
-        gdefcore_text_free(catalog, rows[nrows].id);
-        drop_rows(catalog, rows, nrows, ids, count);
-        return rc;
-      }
-      if (n > 0) {
-        gdefcore_text_dup(catalog, texts[0], lens[0], &rows[nrows].key);
-      }
-      gdefcore_values_free(catalog, texts, lens, n);
-    }
-    nrows += 1;
-  }
-  gdefcore_ids_free(catalog, ids, count);
-  if (local.sort_field != NULL && local.sort_field_len > 0 && nrows > 1) {
-    qsort(rows, nrows, sizeof *rows, cmp_listed);
-  }
-  result = (char **)gcu_allocator_calloc(alloc_default(),
-      nrows > 0 ? nrows : 1, sizeof *result);
-  if (result == NULL) {
-    for (i = 0; i < nrows; i++) {
-      gdefcore_text_free(catalog, rows[i].id);
-      gdefcore_text_free(catalog, rows[i].key);
-    }
-    gcu_allocator_free(alloc_default(), rows);
-    return GDEFCORE_ERR_OOM;
-  }
-  for (i = 0; i < nrows; i++) {
-    result[i] = rows[i].id;
-    gdefcore_text_free(catalog, rows[i].key);
-  }
-  gcu_allocator_free(alloc_default(), rows);
-  *out_ids = result;
-  *out_count = nrows;
   return GDEFCORE_OK;
 }
 
@@ -2623,7 +3148,38 @@ GDEFCORE_Result gdefcore_access_list(GDEFCORE_Catalog * catalog,
   Eval ev;
   GDEFCORE_Result rc;
   memset(&ev, 0, sizeof ev);
-  rc = list_impl(&ev, catalog, request, query, out_ids, out_count);
+  rc = list_impl(&ev, catalog, request, query, 0, out_ids, out_count, NULL);
+  eval_done(&ev);
+  return rc;
+}
+
+GDEFCORE_Result gdefcore_access_list_page(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Request * request, const GDEFCORE_Access_List * query,
+    char *** out_ids, size_t * out_count, uint64_t * out_total) {
+  Eval ev;
+  GDEFCORE_Result rc;
+  if (out_total == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  memset(&ev, 0, sizeof ev);
+  rc = list_impl(&ev, catalog, request, query, 0, out_ids, out_count,
+      out_total);
+  eval_done(&ev);
+  return rc;
+}
+
+GDEFCORE_Result gdefcore_access_count(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Request * request, const GDEFCORE_Access_List * query,
+    uint64_t * out_total) {
+  Eval ev;
+  char ** ids = NULL;
+  size_t count = 0;
+  GDEFCORE_Result rc;
+  if (out_total == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  memset(&ev, 0, sizeof ev);
+  rc = list_impl(&ev, catalog, request, query, 1, &ids, &count, out_total);
   eval_done(&ev);
   return rc;
 }

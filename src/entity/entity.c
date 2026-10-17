@@ -6313,6 +6313,87 @@ GDEFCORE_Result gdefcore_entity_ids(GDEFCORE_Catalog * catalog,
   return GDEFCORE_OK;
 }
 
+void gdefcore_catalog_limits(const GDEFCORE_Catalog * catalog,
+    GDEFCORE_Limits * out) {
+  if (catalog == NULL || out == NULL) {
+    return;
+  }
+  *out = catalog->limits;
+}
+
+GDEFCORE_Result gdefcore_entity_query_active(GDEFCORE_Catalog * catalog,
+    const char * type_name, size_t type_name_len, const GDEFSTOR_Query * query,
+    char *** out_ids, size_t * out_count, uint64_t * out_total) {
+  char ptype[160];
+  GDEFSTOR_Query q;
+  GDEFSTOR_QueryOperand select;
+  GDEFSTOR_QueryResult * result = NULL;
+  char ** ids = NULL;
+  size_t n;
+  size_t i;
+  GDEFCORE_Result rc;
+  if (catalog == NULL || type_name == NULL || type_name_len == 0 ||
+      query == NULL || query->size != sizeof q || query->select_count != 0 ||
+      out_ids == NULL || out_count == NULL ||
+      type_name_len + sizeof GDEFCORE_QUERY_ACTIVE_PREFIX >= sizeof ptype) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  *out_ids = NULL;
+  *out_count = 0;
+  if (out_total != NULL) {
+    *out_total = 0;
+  }
+  memcpy(ptype, GDEFCORE_QUERY_ACTIVE_PREFIX,
+      sizeof GDEFCORE_QUERY_ACTIVE_PREFIX - 1);
+  memcpy(ptype + sizeof GDEFCORE_QUERY_ACTIVE_PREFIX - 1, type_name,
+      type_name_len);
+  /* The entities are the rows; their public ids come back with them. */
+  q = *query;
+  memset(&select, 0, sizeof select);
+  select.kind = GDEFSTOR_QUERY_COLUMN;
+  select.column = GDEFCORE_QUERY_COL_ID;
+  select.column_len = sizeof GDEFCORE_QUERY_COL_ID - 1;
+  q.select = &select;
+  q.select_count = 1;
+  rc = map_stor(gdefstor_projection_query(catalog->store,
+      (const char *)catalog->tenant, catalog->tenant_len, ptype,
+      sizeof GDEFCORE_QUERY_ACTIVE_PREFIX - 1 + type_name_len, &q, &result));
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  n = gdefstor_query_result_rows(result);
+  ids = (char **)mem0(catalog->alloc, (n == 0 ? 1 : n) * sizeof *ids);
+  if (ids == NULL) {
+    gdefstor_query_result_free(result);
+    return GDEFCORE_ERR_OOM;
+  }
+  for (i = 0; i < n; i++) {
+    int present = 0;
+    const uint8_t * b = NULL;
+    size_t bn = 0;
+    if (gdefstor_query_result_value(result, i, 0, &present, &b, &bn) !=
+            GDEFSTOR_OK ||
+        !present || bn != GDEFCORE_PUBLIC_ID_LEN) {
+      gdefcore_ids_free(catalog, ids, i);
+      gdefstor_query_result_free(result);
+      return GDEFCORE_ERR_CORRUPT;
+    }
+    ids[i] = dup_span(catalog->alloc, (const char *)b, bn);
+    if (ids[i] == NULL) {
+      gdefcore_ids_free(catalog, ids, i);
+      gdefstor_query_result_free(result);
+      return GDEFCORE_ERR_OOM;
+    }
+  }
+  if (out_total != NULL) {
+    *out_total = gdefstor_query_result_total(result);
+  }
+  gdefstor_query_result_free(result);
+  *out_ids = ids;
+  *out_count = n;
+  return GDEFCORE_OK;
+}
+
 void gdefcore_ids_free(GDEFCORE_Catalog * catalog, char ** ids, size_t count) {
   size_t i;
   if (catalog == NULL || ids == NULL) {

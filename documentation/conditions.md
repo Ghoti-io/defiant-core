@@ -191,9 +191,12 @@ a test proves them identical to `(= type "T")` and
 `own` is the entity's creator: an editor who saves someone's post does not
 become its owner.
 
-`gdefcore_access_read`, `_list` and `_permits` evaluate an expression per
-candidate entity, in memory (compiling it into the query is a later story).
-See access.md.
+`gdefcore_access_read` and `_permits` evaluate an expression on the entity
+asked about. `gdefcore_access_list` compiles it into a storage query (plan.h),
+and decides entity by entity, with this evaluator, only when it cannot (see
+"Lists" in access.md). The evaluator is the reference: the two give the same
+entities for every condition, in the same order, with the same total, which a
+generated sweep over both storage backends holds them to.
 
 `gdefcore_access_grant_when()` grants under a condition of the grant's own, a
 module's manifest can declare grants, and `gdefcore_access_matrix()` lists them
@@ -201,7 +204,7 @@ all with a risk. `gdefcore_condition_constrains_type()` says whether a
 condition holds only for entities of some stated type; the risk rating uses it.
 access.md and modules.md have the rest.
 
-Not here yet: relations, the list compiler, callbacks, and `can()`.
+Not here yet: relations and callbacks.
 
 ## Editions
 
@@ -230,3 +233,30 @@ is for text being written. The upcaster is a rename and is as trivial as it
 looks; `Cond.EditionOneActorIsUpcastAndNotWrittenAnyMore` and
 `CondAccess.AStoredEditionOneGrantStillMeansWhatItMeant` pin it, and
 tools/check-conditions.sh plants the three ways it can go wrong.
+
+## Compiled into a list (plan.h)
+
+`gdefcore_plan_condition()` turns a parsed condition into the predicate tree of
+the storage query form. It is part of the public surface so that a list
+(`gdefcore_access_list()`), a count and a later search all build their filter
+the same way. Everything the evaluator decides, it decides:
+
+- Constants, `type`, `now` and `principal` are constants of the plan. `now` is
+  the request clock at the time the plan is built; the render key still does
+  not capture it (A6).
+- `creator` is the entity record's creator, `revision.creator` the active
+  revision's; each is *none*, not the empty text, when absent. A field is read
+  from the active revision's document in the call's language; one with no value
+  is the single empty text.
+- `state` is compared through the record's published flag: "published" when
+  set, "draft" otherwise. `state` against an operand that is not a constant is
+  compiled too (some text of the operand is the state); an ordered comparison
+  with `state` is false, as a state is never an integer.
+- A comparison of integers holds when some pair of texts are integers
+  (`-?[0-9]{1,18}`); a text that is not one makes its pair false.
+- A condition that names a personal field or a field the type lacks fails when
+  evaluation reaches it, and then does not hold at all, `not` included. `and`
+  and `or` stop at the first operand that decides them, so a failure after that
+  point is never reached. The plan builds, for each operand, the predicate for
+  its value and the predicate for "evaluation reaches a failure", and the
+  condition holds where the first holds and the second does not.
