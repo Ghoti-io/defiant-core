@@ -71,6 +71,8 @@ static const Surface kSurface[] = {
     {"gdefcore_access_shared_cache", "P"},
     {"gdefcore_access_permits", "RF"},
     {"gdefcore_access_can", "RF"},
+    {"gdefcore_access_can_field", "RF"},
+    {"gdefcore_access_can_create", "RF"},
     /* gdefcore_access_route_check decides as a principal, but its request
      * arrives inside the GDEFCORE_Route_Call dispatch hands it, so its
      * prototype names no GDEFCORE_Request and the table would refuse it as an
@@ -205,6 +207,8 @@ static const Surface kSurface[] = {
     {"gdefcore_form_check", "W"},
     {"gdefcore_form_resign", "W"},
     {"gdefcore_form_submit", "W"},
+    {"gdefcore_form_authorize", "W"},
+    {"gdefcore_form_submit_authorized", "W"},
     {"gdefcore_form_sign_subject", "W"},
     {"gdefcore_form_submit_subject", "W"},
     {"gdefcore_form_publish", "W"},

@@ -1889,10 +1889,60 @@ static GDEFCORE_Result seal_personal(GDEFCORE_Subjects * subjects,
   return GDEFCORE_OK;
 }
 
+/*
+ * What a signed-form path asks before it writes (SPEC decisions 7 and 8). The
+ * entity the question is about is the token's target, which the AEAD bound at
+ * sign time with the session, the principal and the base revision: it is not
+ * a value a body can steer. The id the request itself names (a route capture,
+ * a hidden field) is only checked against it; if they differ, the request is
+ * not about one entity and is refused. The question is asked of the entity as
+ * it is stored, before anything is staged, so no value in the token can
+ * enter the condition; the token's values and the principal's own id are not
+ * read here at all, and the actor of the revision this writes is the
+ * request's, set later by gdefcore_changeset_prepare().
+ */
+typedef struct Guard {
+  const char * action;
+  size_t action_len;
+  const char * claimed;
+  size_t claimed_len;
+  int * out_allowed;
+} Guard;
+
+static GDEFCORE_Result guard_decide(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Request * request, const Opened * opened, const Guard * guard,
+    int * out_allowed) {
+  char * type = NULL;
+  size_t type_len = 0;
+  char claimed[GDEFCORE_PUBLIC_ID_LEN + 1];
+  GDEFCORE_Result rc;
+  *out_allowed = 0;
+  if (guard->claimed != NULL) {
+    if (gdefcore_id_canonical(guard->claimed, guard->claimed_len, claimed) !=
+            GDEFCORE_OK ||
+        memcmp(claimed, opened->target, GDEFCORE_PUBLIC_ID_LEN) != 0) {
+      return GDEFCORE_OK;
+    }
+  }
+  rc = gdefcore_entity_type(catalog, opened->target, GDEFCORE_PUBLIC_ID_LEN,
+      &type, &type_len);
+  if (rc == GDEFCORE_ERR_INVALID) {
+    return GDEFCORE_OK;
+  }
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  rc = gdefcore_access_can(catalog, request, guard->action, guard->action_len,
+      type, type_len, opened->target, out_allowed);
+  gdefcore_text_free(catalog, type);
+  return rc;
+}
+
 static GDEFCORE_Result submit_impl(GDEFCORE_Catalog * catalog,
     GDEFCORE_Request * request, GDEFCORE_Keyring * keyring, const uint8_t * root,
     size_t root_len, const char * session, size_t session_len, const char * token,
-    size_t token_len, GDEFCORE_Subjects * subjects, int * out_conflict) {
+    size_t token_len, GDEFCORE_Subjects * subjects, const Guard * guard,
+    int * out_conflict) {
   const char * principal = NULL;
   size_t principal_len = 0;
   uint64_t session_expiry = 0;
@@ -1934,6 +1984,16 @@ static GDEFCORE_Result submit_impl(GDEFCORE_Catalog * catalog,
   if (rc != GDEFCORE_OK) {
     opened_free(catalog, &opened);
     return rc;
+  }
+  if (guard != NULL) {
+    int allowed = 0;
+    rc = guard_decide(catalog, request, &opened, guard, &allowed);
+    *guard->out_allowed = rc == GDEFCORE_OK && allowed;
+    if (rc != GDEFCORE_OK || !allowed) {
+      /* Nothing has been staged, let alone written. */
+      opened_free(catalog, &opened);
+      return rc != GDEFCORE_OK ? rc : GDEFCORE_ERR_INVALID;
+    }
   }
   memset(&sealed, 0, sizeof sealed);
   rc = gdefcore_entity_revision(catalog, opened.target, GDEFCORE_PUBLIC_ID_LEN,
@@ -2050,7 +2110,75 @@ GDEFCORE_Result gdefcore_form_submit(GDEFCORE_Catalog * catalog,
     size_t root_len, const char * session, size_t session_len, const char * token,
     size_t token_len, int * out_conflict) {
   return submit_impl(catalog, request, keyring, root, root_len, session,
-      session_len, token, token_len, NULL, out_conflict);
+      session_len, token, token_len, NULL, NULL, out_conflict);
+}
+
+GDEFCORE_Result gdefcore_form_submit_authorized(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Request * request, GDEFCORE_Keyring * keyring, const uint8_t * root,
+    size_t root_len, const char * session, size_t session_len, const char * token,
+    size_t token_len, const char * claimed, size_t claimed_len, int * out_allowed,
+    int * out_conflict) {
+  Guard guard;
+  int allowed = 0;
+  if (out_allowed != NULL) {
+    *out_allowed = 0;
+  }
+  if (out_allowed == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  guard.action = GDEFCORE_ACTION_UPDATE;
+  guard.action_len = sizeof GDEFCORE_ACTION_UPDATE - 1;
+  guard.claimed = claimed;
+  guard.claimed_len = claimed_len;
+  guard.out_allowed = &allowed;
+  {
+    GDEFCORE_Result rc = submit_impl(catalog, request, keyring, root, root_len,
+        session, session_len, token, token_len, NULL, &guard, out_conflict);
+    *out_allowed = allowed;
+    return rc;
+  }
+}
+
+GDEFCORE_Result gdefcore_form_authorize(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Request * request, GDEFCORE_Keyring * keyring, const uint8_t * root,
+    size_t root_len, const char * session, size_t session_len, const char * token,
+    size_t token_len, const char * claimed, size_t claimed_len,
+    const char * action, size_t action_len, int * out_allowed) {
+  const char * principal = NULL;
+  size_t principal_len = 0;
+  uint64_t session_expiry = 0;
+  Opened opened;
+  Guard guard;
+  GDEFCORE_Result rc;
+  if (out_allowed != NULL) {
+    *out_allowed = 0;
+  }
+  if (catalog == NULL || request == NULL || keyring == NULL || token == NULL ||
+      token_len == 0 || action == NULL || action_len == 0 || out_allowed == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  rc = principal_of(catalog, request, keyring, root, root_len, session,
+      session_len, &principal, &principal_len, &session_expiry);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  memset(&opened, 0, sizeof opened);
+  rc = open_token(catalog, keyring, root, root_len, session, session_len,
+      principal, principal_len, session_expiry, token, token_len, &opened);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  guard.action = action;
+  guard.action_len = action_len;
+  guard.claimed = claimed;
+  guard.claimed_len = claimed_len;
+  guard.out_allowed = out_allowed;
+  rc = guard_decide(catalog, request, &opened, &guard, out_allowed);
+  opened_free(catalog, &opened);
+  if (rc != GDEFCORE_OK) {
+    *out_allowed = 0;
+  }
+  return rc;
 }
 
 GDEFCORE_Result gdefcore_form_submit_subject(GDEFCORE_Catalog * catalog,
@@ -2064,7 +2192,7 @@ GDEFCORE_Result gdefcore_form_submit_subject(GDEFCORE_Catalog * catalog,
     return GDEFCORE_ERR_INVALID;
   }
   return submit_impl(catalog, request, keyring, root, root_len, session,
-      session_len, token, token_len, subjects, out_conflict);
+      session_len, token, token_len, subjects, NULL, out_conflict);
 }
 
 static GDEFCORE_Result published_field(GDEFCORE_Catalog * catalog,

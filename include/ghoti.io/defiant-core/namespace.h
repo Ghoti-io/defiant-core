@@ -118,6 +118,8 @@
 #define gdefcore_access_risk_name GHOTIIO_DEFCORE(gdefcore_access_risk_name)
 #define gdefcore_access_revision_values \
   GHOTIIO_DEFCORE(gdefcore_access_revision_values)
+#define gdefcore_access_can_field GHOTIIO_DEFCORE(gdefcore_access_can_field)
+#define gdefcore_access_can_create GHOTIIO_DEFCORE(gdefcore_access_can_create)
 #define gdefcore_access_matrix GHOTIIO_DEFCORE(gdefcore_access_matrix)
 #define gdefcore_access_matrix_free GHOTIIO_DEFCORE(gdefcore_access_matrix_free)
 #define gdefcore_access_stage_module_grant \
@@ -237,6 +239,9 @@
 #define gdefcore_form_destroy GHOTIIO_DEFCORE(gdefcore_form_destroy)
 #define gdefcore_form_field GHOTIIO_DEFCORE(gdefcore_form_field)
 #define gdefcore_form_field_count GHOTIIO_DEFCORE(gdefcore_form_field_count)
+#define gdefcore_form_authorize GHOTIIO_DEFCORE(gdefcore_form_authorize)
+#define gdefcore_form_submit_authorized \
+  GHOTIIO_DEFCORE(gdefcore_form_submit_authorized)
 #define gdefcore_form_publish GHOTIIO_DEFCORE(gdefcore_form_publish)
 #define gdefcore_form_resign GHOTIIO_DEFCORE(gdefcore_form_resign)
 #define gdefcore_form_resolve GHOTIIO_DEFCORE(gdefcore_form_resolve)

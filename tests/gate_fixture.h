@@ -830,6 +830,36 @@ inline std::string CanLine(World & w, const std::string & who,
          Diag(w, fresh.req);
 }
 
+/** The field-limited and the create questions, as a principal is answered. */
+inline std::string CanFieldLine(World & w, const std::string & who,
+    const std::string & id, const char * action, const char * type,
+    const char * field) {
+  Fresh fresh(w, who);
+  int allowed = 99;
+  GDEFCORE_Result rc;
+  Note("gdefcore_access_can_field");
+  rc = gdefcore_access_can_field(w.site.catalog, fresh.req, action,
+      strlen(action), type, strlen(type), id.empty() ? NULL : id.c_str(), field,
+      strlen(field), &allowed);
+  return "rc=" + Rc(rc) + " allowed=" + std::to_string(allowed) +
+         Diag(w, fresh.req);
+}
+
+inline std::string CanCreateLine(World & w, const std::string & who,
+    const std::string & container, const char * type) {
+  Fresh fresh(w, who);
+  int allowed = 99;
+  GDEFCORE_Result rc;
+  const char * fields[2] = {"title", "secret"};
+  size_t lens[2] = {5, 6};
+  Note("gdefcore_access_can_create");
+  rc = gdefcore_access_can_create(w.site.catalog, fresh.req,
+      container.empty() ? NULL : container.c_str(), container.size(), type,
+      strlen(type), fields, lens, 2, &allowed);
+  return "rc=" + Rc(rc) + " allowed=" + std::to_string(allowed) +
+         Diag(w, fresh.req);
+}
+
 /** What to ask. */
 struct Ask {
   bool posts = false;                 ///< Ask the site.post surfaces too.
@@ -860,6 +890,10 @@ inline Obs Observe(World & w, const std::string & who, const Ask & ask) {
     o.kv[pre + "cond.false"] = CondLine(w, who, target, false);
     o.kv[pre + "can.read"] = CanLine(w, who, target, "read", "site.note");
     o.kv[pre + "can.update"] = CanLine(w, who, target, "update", "site.note");
+    o.kv[pre + "can-field.update.title"] =
+        CanFieldLine(w, who, target, "update", "site.note", "title");
+    o.kv[pre + "can-create.container"] =
+        CanCreateLine(w, who, target, "site.note");
     o.kv[pre + "resolve.guard"] =
         ResolveLine(w, who, true, "/guard/" + target, true);
     if (ask.cond_true) {
@@ -895,6 +929,9 @@ inline Obs Observe(World & w, const std::string & who, const Ask & ask) {
         ListLine(w, who, "site.note", "secret", w.secrets[0], "title");
   }
   o.kv["g:render-key"] = KeyLine(w, who);
+  o.kv["g:can-create.type"] = CanCreateLine(w, who, std::string(), "site.note");
+  o.kv["g:can-field.type"] =
+      CanFieldLine(w, who, std::string(), "create", "site.note", "title");
   o.kv["g:can-type.read"] = CanLine(w, who, std::string(), "read", "site.note");
   o.kv["g:can-type.undeclared"] =
       CanLine(w, who, std::string(), "frobnicate", "site.note");

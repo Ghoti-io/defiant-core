@@ -4216,6 +4216,198 @@ GDEFCORE_Result gdefcore_access_can(GDEFCORE_Catalog * catalog,
   return GDEFCORE_OK;
 }
 
+/* Whether a field-level grant of @p action for @p field holds. Asked of one
+ * entity, a grant holds when its condition does on that entity as stored.
+ * Asked with none (a create: there is no stored entity), a grant holds when
+ * the permission is the kind that is not about one entity, or when its
+ * expression could apply to something; no value being written is consulted. */
+static int field_grant_holds(Eval * ev, const Grant * grants, size_t ngrants,
+    const char * action, size_t action_len, const char * type, size_t type_len,
+    const char * field, size_t field_len, const char * actor, size_t actor_len,
+    const char * principal, size_t principal_len, int type_level) {
+  size_t i;
+  for (i = 0; i < ngrants; i++) {
+    if (grants[i].field_len == 0 ||
+        !same(grants[i].action, grants[i].action_len, action, action_len) ||
+        !same(grants[i].type_name, grants[i].type_len, type, type_len) ||
+        !same(grants[i].field, grants[i].field_len, field, field_len)) {
+      continue;
+    }
+    if (type_level) {
+      if (grants[i].condition != kCondExpr || expr_could_apply(ev, &grants[i])) {
+        return 1;
+      }
+    } else if (condition_ok(ev, &grants[i], actor, actor_len, principal,
+                   principal_len)) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+GDEFCORE_Result gdefcore_access_can_field(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Request * request, const char * action, size_t action_len,
+    const char * type, size_t type_len, const char * entity_id,
+    const char * field, size_t field_len, int * out_allowed) {
+  char canon[GDEFCORE_PUBLIC_ID_LEN + 1];
+  Grant grants[kGrantMax];
+  Grant decls[kGrantMax];
+  size_t ngrants = 0;
+  size_t ndecls = 0;
+  int read_principal = 0;
+  int restricted = 0;
+  int allowed = 0;
+  char * actor = NULL;
+  size_t actor_len = 0;
+  const char * principal;
+  size_t principal_len = 0;
+  Eval ev;
+  size_t i;
+  GDEFCORE_Result rc;
+  if (out_allowed != NULL) {
+    *out_allowed = 0;
+  }
+  if (catalog == NULL || request == NULL || out_allowed == NULL ||
+      action == NULL || action_len == 0 || type == NULL || type_len == 0 ||
+      field == NULL || field_len == 0) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  gdefcore_request_mark_principal_dependent(request);
+  rc = ensure(catalog);
+  if (rc == GDEFCORE_OK) {
+    rc = load_decls(catalog, decls, kGrantMax, &ndecls);
+  }
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  for (i = 0; i < ndecls && !restricted; i++) {
+    restricted = decls[i].field_len != 0 &&
+                 same(decls[i].action, decls[i].action_len, action, action_len) &&
+                 same(decls[i].type_name, decls[i].type_len, type, type_len) &&
+                 same(decls[i].field, decls[i].field_len, field, field_len);
+  }
+  if (!restricted) {
+    /* No permission limits this field for this action: the question the
+     * caller asked at the entity or the container decides. */
+    *out_allowed = 1;
+    return GDEFCORE_OK;
+  }
+  if (entity_id != NULL) {
+    char * actual = NULL;
+    size_t actual_len = 0;
+    if (gdefcore_id_canonical(entity_id, strlen(entity_id), canon) !=
+        GDEFCORE_OK) {
+      return GDEFCORE_OK;
+    }
+    rc = gdefcore_entity_type(catalog, canon, GDEFCORE_PUBLIC_ID_LEN, &actual,
+        &actual_len);
+    if (rc == GDEFCORE_ERR_INVALID) {
+      return GDEFCORE_OK;
+    }
+    if (rc != GDEFCORE_OK) {
+      return rc;
+    }
+    rc = same(actual, actual_len, type, type_len) ? GDEFCORE_OK
+                                                  : GDEFCORE_ERR_INVALID;
+    gdefcore_text_free(catalog, actual);
+    if (rc != GDEFCORE_OK) {
+      return GDEFCORE_OK;
+    }
+    rc = gdefcore_entity_creator(catalog, canon, GDEFCORE_PUBLIC_ID_LEN, &actor,
+        &actor_len);
+    if (rc != GDEFCORE_OK) {
+      return rc == GDEFCORE_ERR_INVALID ? GDEFCORE_OK : rc;
+    }
+  }
+  rc = load_effective(catalog, request, grants, kGrantMax, &ngrants,
+      &read_principal);
+  if (rc != GDEFCORE_OK) {
+    gdefcore_text_free(catalog, actor);
+    return rc;
+  }
+  principal = gdefcore_request_principal(request, &principal_len);
+  eval_init(&ev, catalog, request, NULL, 0);
+  (void)setup_ceiling(&ev);
+  ev.id = entity_id == NULL ? NULL : canon;
+  allowed = field_grant_holds(&ev, grants, ngrants, action, action_len, type,
+      type_len, field, field_len, actor, actor_len, principal, principal_len,
+      entity_id == NULL);
+  if (allowed && entity_id == NULL && ev.has_ceiling) {
+    /* condition_ok applies the ceiling per entity; with none, the acting
+     * principal must hold a grant of its own. */
+    allowed = field_grant_holds(&ev, ev.ceiling, ev.nceiling, action,
+        action_len, type, type_len, field, field_len, actor, actor_len,
+        principal, principal_len, 1);
+  }
+  gdefcore_text_free(catalog, actor);
+  rc = ev.failed ? GDEFCORE_ERR_INTERNAL : GDEFCORE_OK;
+  eval_done(&ev);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  *out_allowed = allowed != 0;
+  return GDEFCORE_OK;
+}
+
+GDEFCORE_Result gdefcore_access_can_create(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Request * request, const char * container, size_t container_len,
+    const char * type, size_t type_len, const char * const * fields,
+    const size_t * field_lens, size_t nfields, int * out_allowed) {
+  static const char kCreate[] = GDEFCORE_ACTION_CREATE;
+  char canon[GDEFCORE_PUBLIC_ID_LEN + 1];
+  char * ctype = NULL;
+  size_t ctype_len = 0;
+  int allowed = 0;
+  size_t i;
+  GDEFCORE_Result rc;
+  if (out_allowed != NULL) {
+    *out_allowed = 0;
+  }
+  if (catalog == NULL || request == NULL || out_allowed == NULL || type == NULL ||
+      type_len == 0 || (nfields > 0 && (fields == NULL || field_lens == NULL))) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  if (container != NULL) {
+    /* The container is the one the path names: the handler took it from the
+     * route, never from the form. A grant on the container's type decides,
+     * on the container as stored. */
+    if (gdefcore_id_canonical(container, container_len, canon) != GDEFCORE_OK) {
+      return GDEFCORE_OK;
+    }
+    rc = gdefcore_entity_type(catalog, canon, GDEFCORE_PUBLIC_ID_LEN, &ctype,
+        &ctype_len);
+    if (rc == GDEFCORE_ERR_INVALID) {
+      return GDEFCORE_OK;
+    }
+    if (rc != GDEFCORE_OK) {
+      return rc;
+    }
+    rc = gdefcore_access_can(catalog, request, kCreate, sizeof kCreate - 1,
+        ctype, ctype_len, canon, &allowed);
+    gdefcore_text_free(catalog, ctype);
+  } else {
+    /* No container: a grant of `create` on the type itself. */
+    rc = gdefcore_access_can(catalog, request, kCreate, sizeof kCreate - 1,
+        type, type_len, NULL, &allowed);
+  }
+  if (rc != GDEFCORE_OK || !allowed) {
+    return rc;
+  }
+  /* Then, field by field, what the new entity is given. A field that no
+   * `create` permission limits is not limited; one that is needs a grant that
+   * holds with no stored entity to look at. */
+  for (i = 0; i < nfields; i++) {
+    int field_ok = 0;
+    rc = gdefcore_access_can_field(catalog, request, kCreate, sizeof kCreate - 1,
+        type, type_len, NULL, fields[i], field_lens[i], &field_ok);
+    if (rc != GDEFCORE_OK || !field_ok) {
+      return rc;
+    }
+  }
+  *out_allowed = 1;
+  return GDEFCORE_OK;
+}
+
 int gdefcore_access_route_check(const GDEFCORE_Route_Call * call,
     const char * permission, size_t permission_len, void * data) {
   GDEFCORE_Catalog * catalog = (GDEFCORE_Catalog *)data;

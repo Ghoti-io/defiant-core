@@ -54,7 +54,7 @@ extern "C" {
  * - `create`: add an entity. Checked against the **container the path names**
  *   (a permission on the container's type, asked of the container), or at type
  *   level; a permission with a field limits what may be supplied, field by
- *   field. Never a condition on the values
+ *   field (gdefcore_access_can_field()). Never a condition on the values
  *   being written.
  * - `read`: see an entity's published, active revision. Needs the published flag.
  * - `update`: save a draft. Decided on the entity as stored, before the change.
@@ -582,6 +582,50 @@ GDEFCORE_API GDEFCORE_Result gdefcore_access_can(GDEFCORE_Catalog * catalog,
     GDEFCORE_Request * request, const char * permission, size_t permission_len,
     const char * type, size_t type_len, const char * entity_id,
     int * out_allowed);
+
+/**
+ * @brief Whether a permission that limits one field lets the principal act on
+ * it.
+ *
+ * Some permissions are declared for one field of a type (the `field` of
+ * ::GDEFCORE_Permission). A field that no declared permission of @p action
+ * limits is not limited by this question, and the answer is 1: the entity or
+ * the container decides. A field that one does limit needs a grant of that
+ * permission that holds, and this is 0 without one.
+ *
+ * With @p entity_id the grant's condition is evaluated on that entity as it
+ * is stored. With NULL (a create: there is no stored entity) a grant holds
+ * when its permission is not about one entity, or when its condition could
+ * apply to something; no value that is being written is ever consulted
+ * (SPEC decision 8). An entity that does not exist, or is of another type, is
+ * 0. Bad arguments are ::GDEFCORE_ERR_INVALID.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_access_can_field(
+    GDEFCORE_Catalog * catalog, GDEFCORE_Request * request, const char * action,
+    size_t action_len, const char * type, size_t type_len, const char * entity_id,
+    const char * field, size_t field_len, int * out_allowed);
+
+/**
+ * @brief May the principal create an entity of @p type, supplying these fields?
+ *
+ * Create has no stored entity, so no condition is evaluated on what is about
+ * to be written. It is checked against **the container the path names**: a
+ * route such as `/group/:id/new` captures the container's id, and the handler
+ * passes that capture (never a value from the form) as @p container. Then the
+ * question is ::GDEFCORE_ACTION_CREATE of the container's type, on the container
+ * as stored, as gdefcore_access_can() answers it. With @p container NULL it is
+ * a type-level grant of `create` on @p type itself. In either case each name in
+ * @p fields is then asked of gdefcore_access_can_field(): a field that a
+ * `create` permission limits needs its own grant, and the rest are free.
+ *
+ * A refusal is @p out_allowed 0 and ::GDEFCORE_OK, as for gdefcore_access_can();
+ * a container that does not exist is the same refusal.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_access_can_create(
+    GDEFCORE_Catalog * catalog, GDEFCORE_Request * request,
+    const char * container, size_t container_len, const char * type,
+    size_t type_len, const char * const * fields, const size_t * field_lens,
+    size_t nfields, int * out_allowed);
 
 /**
  * @brief The ready-made route check, for gdefcore_routes_set_check().

@@ -191,6 +191,51 @@ GDEFCORE_API GDEFCORE_Result gdefcore_form_submit(GDEFCORE_Catalog * catalog,
     int * out_conflict);
 
 /**
+ * @brief May the request do @p action to the entity this token is for?
+ *
+ * The question a signed-form path asks before it hands control to code (a
+ * route, a button, a preview), answered by gdefcore_access_can() for **the
+ * token's target**, which the token binds with the session, the principal
+ * and the base revision, so a body cannot steer it. @p claimed is the entity
+ * id the request itself names (a route capture, a hidden field), or NULL; if
+ * it is not the token's target the answer is no, because such a request is
+ * not about one entity. The condition is evaluated on the entity as it is
+ * stored (SPEC decision 8): no value in the token, and nothing the principal
+ * typed, is read.
+ *
+ * A token that does not verify is the error gdefcore_form_check() gives. A
+ * refusal, a target that does not exist and a target of another type all are
+ * @p out_allowed 0 and ::GDEFCORE_OK. Nothing is written.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_form_authorize(
+    GDEFCORE_Catalog * catalog, GDEFCORE_Request * request,
+    GDEFCORE_Keyring * keyring, const uint8_t * root, size_t root_len,
+    const char * session, size_t session_len, const char * token,
+    size_t token_len, const char * claimed, size_t claimed_len,
+    const char * action, size_t action_len, int * out_allowed);
+
+/**
+ * @brief The signed-form path for an update: gdefcore_form_authorize() for
+ * the permission `update`, then gdefcore_form_submit().
+ *
+ * gdefcore_form_submit() itself asks nothing, as no library function does
+ * (SPEC decision 7); this is the entry point a route's handler calls. The
+ * question is asked first, of the entity as it is stored, before anything is
+ * staged. A refusal is ::GDEFCORE_ERR_INVALID with @p out_allowed 0 and
+ * nothing written; the refusal is the same whichever way the request was
+ * wrong. @p claimed is as for gdefcore_form_authorize().
+ *
+ * @param out_allowed Required. 1 when the question was a yes.
+ * @param out_conflict As for gdefcore_form_submit().
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_form_submit_authorized(
+    GDEFCORE_Catalog * catalog, GDEFCORE_Request * request,
+    GDEFCORE_Keyring * keyring, const uint8_t * root, size_t root_len,
+    const char * session, size_t session_len, const char * token,
+    size_t token_len, const char * claimed, size_t claimed_len, int * out_allowed,
+    int * out_conflict);
+
+/**
  * @brief Submit @p token and seal its personal values for its subject.
  *
  * As gdefcore_form_submit(), for a token from gdefcore_form_sign_subject()
