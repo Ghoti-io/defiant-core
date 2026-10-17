@@ -1706,6 +1706,89 @@ TEST_F(Erasure, RevisionViewsAndAnActivatedOldRevisionOfAnErasedSubject) {
   EXPECT_TRUE(FoundIn(activated, kSurvivor, "output: export of b"));
 }
 
+/*
+ * A3: a relation row names a person by public id, which is not a personal value
+ * (SPEC decision 6). Erasing the subject deletes the key; the row keeps the id
+ * and nothing of the person is in it, so no sweep of any store finds a value.
+ */
+TEST_F(Erasure, ARelationRowNamesAnErasedSubjectByItsPublicIdOnly) {
+  std::vector<Artifact> post;
+  std::vector<std::string> values;
+  std::vector<std::string> leaks;
+  Populate();
+  if (HasFatalFailure()) {
+    return;
+  }
+  values.push_back(kCanary);
+  values.push_back(kCanaryLater);
+  values.push_back(kCanaryFr);
+  Needles(a_, values, WrappedKey(a_), &needles_);
+  ASSERT_FALSE(HasFatalFailure());
+  /* The rows a module's relation would hold, written as the kernel stores them
+   * (relation.h): the relation's name and a public id per entity column. */
+  {
+    GDEFCORE_Field f[3];
+    char row[GDEFCORE_PUBLIC_ID_LEN + 1];
+    const char * texts[3] = {"blog.fan", a_, "gold"};
+    size_t lens[3] = {8, strlen(a_), 4};
+    const char * fields[3] = {"relation", "c0", "c1"};
+    GDEFCORE_Value v[3];
+    GDEFCORE_Changeset * cs = NULL;
+    size_t i;
+    memset(f, 0, sizeof f);
+    for (i = 0; i < 3; i++) {
+      f[i].size = sizeof f[i];
+      f[i].name = fields[i];
+      f[i].name_len = strlen(fields[i]);
+    }
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_type_define(catalog_, GDEFCORE_RELATION_ROW_TYPE,
+            strlen(GDEFCORE_RELATION_ROW_TYPE), GDEFCORE_TYPE_CONTENT, f, 3));
+    for (i = 0; i < 3; i++) {
+      memset(&v[i], 0, sizeof v[i]);
+      v[i].size = sizeof v[i];
+      v[i].field = fields[i];
+      v[i].field_len = strlen(fields[i]);
+      v[i].texts = &texts[i];
+      v[i].text_lens = &lens[i];
+      v[i].count = 1;
+    }
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_entity_create(catalog_, GDEFCORE_RELATION_ROW_TYPE,
+            strlen(GDEFCORE_RELATION_ROW_TYPE), row, NULL));
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_entity_save(cs, row, strlen(row), "en", 2, v, 3));
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, NULL, 0));
+    gdefcore_changeset_destroy(cs);
+  }
+  Erase(a_);
+  /* The row still names the person, by the id and by nothing else. */
+  {
+    char ** ids = NULL;
+    size_t n = 0;
+    char ** texts = NULL;
+    size_t * lens = NULL;
+    size_t count = 0;
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_entity_ids(catalog_, GDEFCORE_RELATION_ROW_TYPE,
+            strlen(GDEFCORE_RELATION_ROW_TYPE), &ids, &n));
+    ASSERT_EQ(1u, n);
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_entity_values(catalog_, NULL, GDEFCORE_VIEW_ACTIVE, ids[0],
+            GDEFCORE_PUBLIC_ID_LEN, "en", 2, "c0", 2, &texts, &lens, &count));
+    ASSERT_EQ(1u, count);
+    EXPECT_EQ(std::string(a_), std::string(texts[0], lens[0]));
+    gdefcore_values_free(catalog_, texts, lens, count);
+    gdefcore_ids_free(catalog_, ids, n);
+  }
+  Collect(&post, "after");
+  ASSERT_FALSE(HasFatalFailure());
+  leaks = Sweep(post, needles_);
+  EXPECT_TRUE(leaks.empty()) << Joined(leaks);
+  /* The sweep is not blind: the survivor's value is still found where it sits. */
+  EXPECT_TRUE(FoundIn(post, kSurvivor, "output: export of b"));
+}
+
 TEST_F(Erasure, ParsePersonalPatch) {
   GDEFCORE_Changeset * cs = NULL;
   GDEFCORE_Patch * files = NULL;

@@ -94,6 +94,12 @@ typedef struct DeclGrant {
   size_t index;
 } DeclGrant;
 
+typedef struct DeclRelation {
+  GDEFCORE_Module_Declared_Relation pub;
+  GDEFCORE_Module_Relation_Column cols[GDEFCORE_RELATION_COLUMNS_MAX];
+  size_t index;
+} DeclRelation;
+
 typedef struct Decl Decl;
 
 struct Decl {
@@ -114,6 +120,8 @@ struct Decl {
   size_t nvars;
   DeclGrant * grants;
   size_t ngrants;
+  DeclRelation * relations;
+  size_t nrelations;
 };
 
 /** The declarations of the modules in force, already in module order. */
@@ -162,6 +170,10 @@ GDEFCORE_Result gdefcore_decl_variables(const GDEFCORE_Allocator * alloc,
 GDEFCORE_Result gdefcore_decl_grants(const GDEFCORE_Allocator * alloc,
     const DeclRef * refs, size_t n,
     const GDEFCORE_Module_Declared_Grant *** out, size_t * count);
+
+GDEFCORE_Result gdefcore_decl_relations(const GDEFCORE_Allocator * alloc,
+    const DeclRef * refs, size_t n,
+    const GDEFCORE_Module_Declared_Relation *** out, size_t * count);
 
 /**
  * Add the routes of @p refs to @p routes, a tab after its parent. On a refusal

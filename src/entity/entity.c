@@ -3408,7 +3408,7 @@ static GDEFCORE_Result stage_record_op(GDEFCORE_Changeset * changeset,
         rc = GDEFCORE_ERR_INVALID;
       }
     }
-  } else if (rc == GDEFCORE_OK) {
+  } else if (rc == GDEFCORE_OK && kind != GDEFCORE_OP_CLEAR) {
     rc = doc_clone(cat->alloc, &base, &staged);
   }
   if (rc == GDEFCORE_OK) {
@@ -3455,6 +3455,11 @@ static GDEFCORE_Result stage_record_op(GDEFCORE_Changeset * changeset,
 GDEFCORE_Result gdefcore_entity_unpublish(GDEFCORE_Changeset * changeset,
     const char * id, size_t id_len) {
   return stage_record_op(changeset, id, id_len, GDEFCORE_OP_UNPUBLISH, 0);
+}
+
+GDEFCORE_Result gdefcore_entity_clear(GDEFCORE_Changeset * changeset,
+    const char * id, size_t id_len) {
+  return stage_record_op(changeset, id, id_len, GDEFCORE_OP_CLEAR, 0);
 }
 
 GDEFCORE_Result gdefcore_entity_activate(GDEFCORE_Changeset * changeset,

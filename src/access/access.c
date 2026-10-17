@@ -31,6 +31,7 @@
 #include <ghoti.io/defiant-core/condition.h>
 #include <ghoti.io/defiant-core/module.h>
 #include <ghoti.io/defiant-core/plan.h>
+#include <ghoti.io/defiant-core/relation.h>
 
 #include "access_internal.h"
 
@@ -2704,6 +2705,20 @@ static GDEFCORE_Result list_planned(Eval * ev, GDEFCORE_Catalog * catalog,
   if (gdefcore_plan_failed(plan)) {
     ev->failed = 1;
   }
+  /* What the list read of each relation is part of what it shows: noted on the
+   * request at the relation's version, as the evaluator does for one entity. */
+  {
+    size_t r;
+    const char * rname;
+    size_t rlen;
+    for (r = 0; gdefcore_plan_relation_at(plan, r, &rname, &rlen); r++) {
+      rc = gdefcore_relation_note_dependency(catalog, request, rname, rlen);
+      if (rc != GDEFCORE_OK) {
+        gdefcore_plan_free(plan);
+        return rc;
+      }
+    }
+  }
   memset(&sq, 0, sizeof sq);
   sq.size = sizeof sq;
   sq.where = where;
@@ -4006,6 +4021,7 @@ static int risk_base(const char * action, size_t action_len, int has_field,
   int constrains;
   int narrowing;
   int own_like;
+  int related;
   if (condition_text == NULL ||
       gdefcore_condition_parse_stored(condition_text, condition_len, &cond,
           NULL) != GDEFCORE_OK) {
@@ -4021,6 +4037,7 @@ static int risk_base(const char * action, size_t action_len, int has_field,
                           field_len, cond);
   }
   gdefcore_condition_free(cond);
+  related = (uses & GDEFCORE_CONDITION_USES_RELATION) != 0;
   narrowing = (uses & (GDEFCORE_CONDITION_USES_ENTITY |
                    GDEFCORE_CONDITION_USES_PRINCIPAL)) != 0;
   own_like = (uses & GDEFCORE_CONDITION_USES_ENTITY) != 0 &&
@@ -4038,14 +4055,17 @@ static int risk_base(const char * action, size_t action_len, int has_field,
   if (cls == kClassStrong && !narrowing) {
     return GDEFCORE_ACCESS_RISK_HIGH;
   }
+  /* A relation's rows are written by a module, and who may add one is not
+   * something this grant can bound: a grant that rests on one is never rated
+   * low, whatever else narrows it. */
   if (own_like) {
-    return GDEFCORE_ACCESS_RISK_LOW;
+    return related ? GDEFCORE_ACCESS_RISK_MEDIUM : GDEFCORE_ACCESS_RISK_LOW;
   }
   if (has_field) {
     return GDEFCORE_ACCESS_RISK_MEDIUM;
   }
   if (cls == kClassRead && narrowing) {
-    return GDEFCORE_ACCESS_RISK_LOW;
+    return related ? GDEFCORE_ACCESS_RISK_MEDIUM : GDEFCORE_ACCESS_RISK_LOW;
   }
   return GDEFCORE_ACCESS_RISK_MEDIUM;
 }
@@ -4101,6 +4121,9 @@ const char * gdefcore_access_risk_name(int risk) {
 
 /* ---- a module's grant, offered at enable ------------------------------- */
 
+static size_t relation_note(const GDEFCORE_Condition * cond, char * buf,
+    size_t cap);
+
 GDEFCORE_Result gdefcore_access_stage_module_grant(
     GDEFCORE_Changeset * changeset, const char * module_name,
     size_t module_name_len, const char * label, size_t label_len,
@@ -4110,6 +4133,8 @@ GDEFCORE_Result gdefcore_access_stage_module_grant(
   GDEFCORE_Condition * cond = NULL;
   char * explain = NULL;
   size_t explain_len = 0;
+  char rel_note[512];
+  size_t rel_note_len = 0;
   char * line = NULL;
   size_t cap;
   size_t i;
@@ -4124,12 +4149,17 @@ GDEFCORE_Result gdefcore_access_stage_module_grant(
   }
   rc = gdefcore_condition_parse(condition_text, condition_len, &cond, NULL);
   if (rc == GDEFCORE_OK) {
-    rc = gdefcore_condition_validate(gdefcore_changeset_catalog(changeset), cond,
-        type_name, type_name_len, NULL);
+    /* The module being enabled is in this changeset already, so its own
+     * relations count. */
+    rc = gdefcore_condition_validate_in(gdefcore_changeset_catalog(changeset),
+        cond, type_name, type_name_len, changeset, NULL);
   }
   if (rc == GDEFCORE_OK) {
     rc = gdefcore_condition_explain(cond, &explain, &explain_len);
   }
+  rel_note_len = rc == GDEFCORE_OK
+                     ? relation_note(cond, rel_note, sizeof rel_note)
+                     : 0;
   if (rc != GDEFCORE_OK) {
     gdefcore_condition_free(cond);
     return rc;
@@ -4140,15 +4170,16 @@ GDEFCORE_Result gdefcore_access_stage_module_grant(
       condition_text, condition_len,
       (gdefcore_condition_uses(cond) & GDEFCORE_CONDITION_USES_PRINCIPAL) == 0);
   gdefcore_condition_free(cond);
-  cap = module_name_len + label_len + explain_len + 64;
+  cap = module_name_len + label_len + explain_len + rel_note_len + 80;
   line = (char *)gcu_allocator_malloc(alloc_default(), cap);
   if (line == NULL) {
     gdefcore_condition_text_free(explain);
     return GDEFCORE_ERR_OOM;
   }
-  n = snprintf(line, cap, "Module %.*s grants %.*s (%s risk): %.*s",
+  n = snprintf(line, cap, "Module %.*s grants %.*s (%s risk): %.*s%.*s",
       (int)module_name_len, module_name, (int)label_len, label,
-      gdefcore_access_risk_name(risk), (int)explain_len, explain);
+      gdefcore_access_risk_name(risk), (int)explain_len, explain,
+      (int)rel_note_len, rel_note);
   gdefcore_condition_text_free(explain);
   if (n <= 0 || (size_t)n >= cap) {
     gcu_allocator_free(alloc_default(), line);
@@ -4263,6 +4294,40 @@ static GDEFCORE_Result mx_join(GDEFCORE_Catalog * catalog, const char * a,
   return GDEFCORE_OK;
 }
 
+/* The sentence for a grant that rests on a relation: what its breadth turns
+ * on, which no condition can say. The relations are named; 0 when it uses
+ * none. */
+static size_t relation_note(const GDEFCORE_Condition * cond, char * buf,
+    size_t cap) {
+  size_t at = 0;
+  size_t i;
+  const char * name;
+  size_t name_len;
+  int n;
+  if (!gdefcore_condition_relation_at(cond, 0, &name, &name_len)) {
+    return 0;
+  }
+  n = snprintf(buf, cap, " Its breadth depends on who may add rows to the relation");
+  at = n > 0 ? (size_t)n : 0;
+  for (i = 0; at < cap && gdefcore_condition_relation_at(cond, i, &name, &name_len);
+       i++) {
+    n = snprintf(buf + at, cap - at, "%s %.*s", i > 0 ? "," : "", (int)name_len,
+        name);
+    at += n > 0 ? (size_t)n : 0;
+  }
+  if (at < cap) {
+    n = snprintf(buf + at, cap - at,
+        ": anyone who can add a row widens this grant.");
+    at += n > 0 ? (size_t)n : 0;
+  }
+  for (i = 0; i < at && i < cap; i++) {
+    if ((unsigned char)buf[i] < 0x20 || buf[i] == 0x7f) {
+      buf[i] = '?';
+    }
+  }
+  return at < cap ? at : cap - 1;
+}
+
 /* Add one row. @p cond is the canonical text, or NULL when @p cond_raw is all
  * that is known (a condition that cannot be parsed). */
 static GDEFCORE_Result mx_add(MatrixBuild * b, const char * source,
@@ -4274,6 +4339,8 @@ static GDEFCORE_Result mx_add(MatrixBuild * b, const char * source,
   GDEFCORE_Condition * parsed = NULL;
   char * explain = NULL;
   size_t explain_len = 0;
+  char rel_note[512];
+  size_t rel_note_len = 0;
   const char * unreadable = "(this condition cannot be read)";
   GDEFCORE_Result rc;
   if (b->n == b->cap) {
@@ -4295,6 +4362,7 @@ static GDEFCORE_Result mx_add(MatrixBuild * b, const char * source,
   if (gdefcore_condition_parse_stored(cond, cond_len, &parsed, NULL) ==
       GDEFCORE_OK) {
     rc = gdefcore_condition_explain(parsed, &explain, &explain_len);
+    rel_note_len = relation_note(parsed, rel_note, sizeof rel_note);
     gdefcore_condition_free(parsed);
   }
   if (rc != GDEFCORE_OK) {
@@ -4339,6 +4407,17 @@ static GDEFCORE_Result mx_add(MatrixBuild * b, const char * source,
     size_t joined_len = 0;
     rc = mx_join(b->catalog, row->explain, row->explain_len, kSelfNote,
         sizeof kSelfNote - 1, &joined, &joined_len);
+    if (rc == GDEFCORE_OK) {
+      gdefcore_text_free(b->catalog, (char *)row->explain);
+      row->explain = joined;
+      row->explain_len = joined_len;
+    }
+  }
+  if (rc == GDEFCORE_OK && rel_note_len > 0) {
+    char * joined = NULL;
+    size_t joined_len = 0;
+    rc = mx_join(b->catalog, row->explain, row->explain_len, rel_note,
+        rel_note_len, &joined, &joined_len);
     if (rc == GDEFCORE_OK) {
       gdefcore_text_free(b->catalog, (char *)row->explain);
       row->explain = joined;

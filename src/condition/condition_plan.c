@@ -44,6 +44,8 @@
 #include <ghoti.io/defiant-core/macros.h>
 #include <ghoti.io/defiant-core/plan.h>
 #include <ghoti.io/defiant-core/entity.h>
+#include <ghoti.io/defiant-core/module.h>
+#include <ghoti.io/defiant-core/relation.h>
 
 #include "condition_internal.h"
 
@@ -85,6 +87,11 @@ struct GDEFCORE_Plan {
   const GDEFSTOR_QueryNode * no;
   const GDEFSTOR_QueryNode * pub1;
   const GDEFSTOR_QueryNode * pub0;
+  const GDEFSTOR_QueryNode * outer_pub1;
+  const GDEFSTOR_QueryNode * outer_pub0;
+  char * rels[GDEFCORE_CONDITION_MAX_RELATIONS * 8];
+  size_t rel_lens[GDEFCORE_CONDITION_MAX_RELATIONS * 8];
+  size_t nrels;
 };
 
 static void * plan_mem(GDEFCORE_Plan * p, size_t n) {
@@ -545,7 +552,7 @@ typedef struct VX {
 } VX;
 
 static void make_operand(GDEFCORE_Plan * p, const GDEFCORE_Condition * c,
-    const CNode * node, Op * out) {
+    const CNode * node, Op * out, int outer) {
   const char * text;
   memset(out, 0, sizeof *out);
   switch (node->kind) {
@@ -585,9 +592,11 @@ static void make_operand(GDEFCORE_Plan * p, const GDEFCORE_Condition * c,
       return;
     case kCreator:
       out->op = column_operand(GDEFCORE_QUERY_COL_CREATOR, 1, 0);
+      out->op.flags |= outer ? GDEFSTOR_QUERY_OUTER : 0;
       return;
     case kRevCreator:
       out->op = column_operand(GDEFCORE_QUERY_COL_REVISION_CREATOR, 0, 0);
+      out->op.flags |= outer ? GDEFSTOR_QUERY_OUTER : 0;
       return;
     case kState:
       out->is_state = 1;
@@ -595,6 +604,7 @@ static void make_operand(GDEFCORE_Plan * p, const GDEFCORE_Condition * c,
     case kField:
       out->fail = field_operand(p, c->pool + node->str, node->str_len, 1,
           &out->op);
+      out->op.flags |= outer ? GDEFSTOR_QUERY_OUTER : 0;
       return;
     default:
       out->fail = 1;
@@ -645,12 +655,175 @@ static int cmp_op(int evaluator_op) {
   }
 }
 
+/* ---- a relation ---------------------------------------------------------- */
+
+/* The row's field as an operand of the relation rows: language and field. */
+static GDEFSTOR_QueryOperand row_operand(const char * field) {
+  GDEFSTOR_QueryOperand o = column_operand(GDEFCORE_QUERY_COL_DOC, 0, 0);
+  o.path_depth = 2;
+  o.path1 = GDEFCORE_RELATION_LANG;
+  o.path1_len = strlen(GDEFCORE_RELATION_LANG);
+  o.path2 = field;
+  o.path2_len = strlen(field);
+  return o;
+}
+
+/* The outer entity's published flag, from inside the semi-join. */
+static const GDEFSTOR_QueryNode * outer_pub_is(GDEFCORE_Plan * p, int value) {
+  const GDEFSTOR_QueryNode ** slot = value ? &p->outer_pub1 : &p->outer_pub0;
+  if (*slot == NULL) {
+    GDEFSTOR_QueryOperand l = column_operand(GDEFCORE_QUERY_COL_PUBLISHED, 1, 0);
+    GDEFSTOR_QueryOperand r = one_text(p, value ? "1" : "0", 1);
+    l.flags |= GDEFSTOR_QUERY_OUTER;
+    *slot = mk_cmp(p, GDEFSTOR_QUERY_EQ, &l, &r);
+  }
+  return *slot;
+}
+
+/* Whether an enabled module declares the relation with this many columns. */
+static int relation_declared(GDEFCORE_Plan * p, const char * name,
+    size_t name_len, size_t arity) {
+  GDEFCORE_Host * host = gdefcore_catalog_host(p->catalog);
+  const GDEFCORE_Module_Declared_Relation ** items = NULL;
+  size_t n = 0;
+  size_t i;
+  size_t tenant_len = 0;
+  const uint8_t * tenant = gdefcore_catalog_tenant(p->catalog, &tenant_len);
+  int ok = 0;
+  if (host == NULL ||
+      gdefcore_module_relations(host, tenant, tenant_len, NULL, &items, &n) !=
+          GDEFCORE_OK) {
+    return 0;
+  }
+  for (i = 0; i < n; i++) {
+    if (items[i]->name_len == name_len && memcmp(items[i]->name, name, name_len) == 0) {
+      ok = items[i]->ncolumns == arity;
+      break;
+    }
+  }
+  gdefcore_module_declared_free(host, items);
+  return ok;
+}
+
+static void note_relation(GDEFCORE_Plan * p, const char * name, size_t name_len) {
+  size_t i;
+  char * keep;
+  for (i = 0; i < p->nrels; i++) {
+    if (p->rel_lens[i] == name_len && memcmp(p->rels[i], name, name_len) == 0) {
+      return;
+    }
+  }
+  if (p->nrels >= sizeof p->rels / sizeof p->rels[0]) {
+    p->unsupported = 1;
+    return;
+  }
+  keep = plan_str(p, name, name_len);
+  if (keep == NULL) {
+    return;
+  }
+  p->rels[p->nrels] = keep;
+  p->rel_lens[p->nrels] = name_len;
+  p->nrels += 1;
+}
+
+size_t gdefcore_plan_relation_count(const GDEFCORE_Plan * plan) {
+  return plan == NULL ? 0 : plan->nrels;
+}
+
+int gdefcore_plan_relation_at(const GDEFCORE_Plan * plan, size_t index,
+    const char ** out_name, size_t * out_len) {
+  if (plan == NULL || index >= plan->nrels || out_name == NULL || out_len == NULL) {
+    return 0;
+  }
+  *out_name = plan->rels[index];
+  *out_len = plan->rel_lens[index];
+  return 1;
+}
+
+/*
+ * (related "name" (operand ...)): there is a row of the relation whose columns
+ * are among the operand's texts, as a semi-join over the active copies of the
+ * relation's rows, with the entity being decided as the outer row. A relation
+ * that no enabled module declares with this many columns, or an operand that
+ * cannot be read, is a failure, as it is for the evaluator.
+ */
+static VX compile_related(GDEFCORE_Plan * p, const GDEFCORE_Condition * c,
+    const CNode * n) {
+  const CNode * name = &c->nodes[c->kids[n->first]];
+  size_t arity = (size_t)n->count - 1;
+  const GDEFSTOR_QueryNode * parts[1 + GDEFCORE_RELATION_COLUMNS_MAX];
+  size_t nparts = 0;
+  size_t i;
+  GDEFSTOR_QueryOperand l;
+  GDEFSTOR_QueryOperand r;
+  GDEFSTOR_QueryNode * exists;
+  const GDEFSTOR_QueryNode * kids[1];
+  const GDEFSTOR_QueryNode * inner;
+  char * type;
+  size_t type_len;
+  if (arity == 0 || arity > GDEFCORE_RELATION_COLUMNS_MAX ||
+      !relation_declared(p, c->pool + name->str, name->str_len, arity)) {
+    return failure(p);
+  }
+  l = row_operand(GDEFCORE_RELATION_FIELD_NAME);
+  r = one_text(p, c->pool + name->str, name->str_len);
+  parts[nparts++] = mk_cmp(p, GDEFSTOR_QUERY_EQ, &l, &r);
+  for (i = 0; i < arity; i++) {
+    const CNode * operand = &c->nodes[c->kids[n->first + 1 + i]];
+    Op o;
+    if (operand->kind == kAny) {
+      continue;
+    }
+    make_operand(p, c, operand, &o, 1);
+    if (o.fail) {
+      return failure(p);
+    }
+    l = row_operand(gdefcore_relation_column_field(i));
+    if (o.is_state) {
+      /* The column holds the state of the outer entity, as text. */
+      GDEFSTOR_QueryOperand published = one_text(p, "published", 9);
+      GDEFSTOR_QueryOperand draft = one_text(p, "draft", 5);
+      const GDEFSTOR_QueryNode * a = mk_cmp(p, GDEFSTOR_QUERY_EQ, &l, &published);
+      const GDEFSTOR_QueryNode * b = mk_cmp(p, GDEFSTOR_QUERY_EQ, &l, &draft);
+      parts[nparts++] = mk_or2(p, mk_and2(p, outer_pub_is(p, 1), a),
+          mk_and2(p, outer_pub_is(p, 0), b));
+    } else {
+      parts[nparts++] = mk_cmp(p, GDEFSTOR_QUERY_EQ, &l, &o.op);
+    }
+  }
+  for (i = 0; i < nparts; i++) {
+    if (parts[i] == NULL) {
+      return plain(NULL);
+    }
+  }
+  inner = fold_list(p, GDEFSTOR_QUERY_AND, parts, nparts);
+  if (inner == NULL) {
+    return plain(NULL);
+  }
+  type_len = strlen(GDEFCORE_QUERY_ACTIVE_PREFIX) + strlen(GDEFCORE_RELATION_ROW_TYPE);
+  type = (char *)plan_mem(p, type_len + 1);
+  if (type == NULL) {
+    return plain(NULL);
+  }
+  snprintf(type, type_len + 1, "%s%s", GDEFCORE_QUERY_ACTIVE_PREFIX,
+      GDEFCORE_RELATION_ROW_TYPE);
+  kids[0] = inner;
+  exists = (GDEFSTOR_QueryNode *)list_node(p, GDEFSTOR_QUERY_EXISTS, kids, 1);
+  if (exists == NULL) {
+    return plain(NULL);
+  }
+  exists->exists_type = type;
+  exists->exists_type_len = type_len;
+  note_relation(p, c->pool + name->str, name->str_len);
+  return plain(exists);
+}
+
 static VX compile_cmp(GDEFCORE_Plan * p, const GDEFCORE_Condition * c,
     const CNode * n) {
   Op a;
   Op b;
-  make_operand(p, c, &c->nodes[c->kids[n->first]], &a);
-  make_operand(p, c, &c->nodes[c->kids[n->first + 1]], &b);
+  make_operand(p, c, &c->nodes[c->kids[n->first]], &a, 0);
+  make_operand(p, c, &c->nodes[c->kids[n->first + 1]], &b, 0);
   if (a.fail || b.fail) {
     return failure(p);
   }
@@ -678,7 +851,7 @@ static VX compile_in(GDEFCORE_Plan * p, const GDEFCORE_Condition * c,
   size_t k;
   size_t members = n->count - 1;
   GDEFSTOR_QueryOperand list;
-  make_operand(p, c, &c->nodes[c->kids[n->first]], &a);
+  make_operand(p, c, &c->nodes[c->kids[n->first]], &a, 0);
   if (a.fail) {
     return failure(p);
   }
@@ -794,6 +967,8 @@ static VX compile_node(GDEFCORE_Plan * p, const GDEFCORE_Condition * c,
       return compile_cmp(p, c, n);
     case kIn:
       return compile_in(p, c, n);
+    case kRelated:
+      return compile_related(p, c, n);
     default:
       p->unsupported = 1;
       return plain(NULL);

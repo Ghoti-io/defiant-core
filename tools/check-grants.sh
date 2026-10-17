@@ -111,15 +111,12 @@ plant foreign-permission-accepted $MODULE testGrants 'Grants.ModuleGrantForeignP
   '    if (strcmp(t.owner, mod->name) != 0 && strcmp(t.owner, "core") != 0) {' \
   '    if (0 && strcmp(t.owner, mod->name) != 0 && strcmp(t.owner, "core") != 0) {'
 
-# Plant 6: the condition is neither parsed nor checked against the type when
-# the module is enabled.
+# Plant 6: the condition is not checked against the type (as the site would be
+# left with the module enabled) when the module is enabled.
 plant invalid-condition-accepted $MODULE testGrants 'Grants.ModuleGrantBadCondition' \
-  '    rc = gdefcore_condition_parse(g->condition, g->condition_len, &cond, &err);
-    if (rc == GDEFCORE_OK) {
-      rc = gdefcore_condition_validate(catalog, cond, g->type_name,
-          g->type_name_len, &err);
-    }' \
-  '    rc = GDEFCORE_OK;'
+  '        rc = gdefcore_condition_validate_in(catalog, cond, g->type_name,
+            g->type_name_len, projected, &err);' \
+  '        rc = GDEFCORE_OK;'
 
 # Plant 7: the matrix lists role grants and leaves out the modules'.
 plant matrix-omits-module-grants $ACCESS testGrants 'Grants.MatrixRolesAndModules' \

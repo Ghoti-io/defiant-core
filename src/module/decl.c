@@ -216,6 +216,13 @@ static int cmp_grant(const void * a, const void * b) {
   return c != 0 ? c : (x->index < y->index ? -1 : (x->index > y->index));
 }
 
+static int cmp_relation(const void * a, const void * b) {
+  const DeclRelation * x = (const DeclRelation *)a;
+  const DeclRelation * y = (const DeclRelation *)b;
+  int c = span_cmp(x->pub.name, x->pub.name_len, y->pub.name, y->pub.name_len);
+  return c != 0 ? c : (x->index < y->index ? -1 : (x->index > y->index));
+}
+
 static int cmp_var(const void * a, const void * b) {
   const DeclVar * x = (const DeclVar *)a;
   const DeclVar * y = (const DeclVar *)b;
@@ -240,6 +247,7 @@ void gdefcore_decl_free(Decl * d) {
   gcu_allocator_free(d->alloc, d->settings);
   gcu_allocator_free(d->alloc, d->vars);
   gcu_allocator_free(d->alloc, d->grants);
+  gcu_allocator_free(d->alloc, d->relations);
   gcu_allocator_free(d->alloc, d);
 }
 
@@ -477,6 +485,58 @@ static void build_grants(Build * b, const GDEFCORE_Module_Manifest * m) {
   }
 }
 
+static void build_relations(Build * b, const GDEFCORE_Module_Manifest * m) {
+  Decl * d = b->d;
+  size_t i;
+  size_t c;
+  d->relations = (DeclRelation *)gcu_allocator_calloc(d->alloc, m->nrelations,
+      sizeof *d->relations);
+  if (d->relations == NULL) {
+    build_fail(b, GDEFCORE_ERR_OOM, "relation", 0);
+    return;
+  }
+  for (i = 0; i < m->nrelations && b->rc == GDEFCORE_OK; i++) {
+    GDEFCORE_Module_Relation r;
+    DeclRelation * dr = &d->relations[i];
+    take_prefix(&r, sizeof r, &m->relations[i]);
+    dr->index = i;
+    dr->pub.size = sizeof dr->pub;
+    dr->pub.module = d->module;
+    dr->pub.module_len = d->module_len;
+    dr->pub.name = dup_str(b, r.name, r.name_len, "relation", i);
+    dr->pub.name_len = r.name_len;
+    if (b->rc == GDEFCORE_OK &&
+        (r.ncolumns == 0 || r.ncolumns > GDEFCORE_RELATION_COLUMNS_MAX ||
+            r.columns == NULL)) {
+      build_fail(b, r.ncolumns > GDEFCORE_RELATION_COLUMNS_MAX
+                        ? GDEFCORE_ERR_LIMIT
+                        : GDEFCORE_ERR_INVALID,
+          "relation", i);
+    }
+    for (c = 0; b->rc == GDEFCORE_OK && c < r.ncolumns; c++) {
+      GDEFCORE_Module_Relation_Column col;
+      take_prefix(&col, sizeof col, &r.columns[c]);
+      dr->cols[c].size = sizeof dr->cols[c];
+      dr->cols[c].name = dup_str(b, col.name, col.name_len, "relation", i);
+      dr->cols[c].name_len = col.name_len;
+      dr->cols[c].kind = col.kind;
+      dr->cols[c].type_name = dup_str(b, col.type_name, col.type_name_len,
+          "relation", i);
+      dr->cols[c].type_name_len = col.type_name_len;
+    }
+    dr->pub.columns = dr->cols;
+    dr->pub.ncolumns = r.ncolumns;
+    d->nrelations = i + 1;
+  }
+  if (b->rc == GDEFCORE_OK && d->nrelations > 1) {
+    qsort(d->relations, d->nrelations, sizeof *d->relations, cmp_relation);
+  }
+  /* The sort moved the rows; each still points at its own columns. */
+  for (i = 0; b->rc == GDEFCORE_OK && i < d->nrelations; i++) {
+    d->relations[i].pub.columns = d->relations[i].cols;
+  }
+}
+
 GDEFCORE_Result gdefcore_decl_build(const GDEFCORE_Allocator * alloc,
     const char * module, size_t module_len,
     const GDEFCORE_Module_Manifest * man, const DeclSvc * svcs, size_t nsvcs,
@@ -485,7 +545,7 @@ GDEFCORE_Result gdefcore_decl_build(const GDEFCORE_Allocator * alloc,
   Decl * d;
   *out = NULL;
   if (man->nroutes == 0 && man->nlinks == 0 && man->nsettings == 0 &&
-      man->nvariables == 0 && man->ngrants == 0) {
+      man->nvariables == 0 && man->ngrants == 0 && man->nrelations == 0) {
     return GDEFCORE_OK;
   }
   if (module_len > 64) {
@@ -507,21 +567,23 @@ GDEFCORE_Result gdefcore_decl_build(const GDEFCORE_Allocator * alloc,
       man->nlinks > GDEFCORE_MODULE_LINKS_MAX ||
       man->nsettings > GDEFCORE_MODULE_SETTINGS_MAX ||
       man->nvariables > GDEFCORE_MODULE_VARIABLES_MAX ||
-      man->ngrants > GDEFCORE_MODULE_GRANTS_MAX) {
+      man->ngrants > GDEFCORE_MODULE_GRANTS_MAX ||
+      man->nrelations > GDEFCORE_MODULE_RELATIONS_MAX) {
     b.rc = GDEFCORE_ERR_LIMIT;
     if (err != NULL && cap > 0) {
       snprintf(err, cap,
           "Module %s declares more than %d routes, %d links, %d settings, "
-          "%d variables or %d grants.",
+          "%d variables, %d grants or %d relations.",
           d->module, GDEFCORE_MODULE_ROUTES_MAX, GDEFCORE_MODULE_LINKS_MAX,
           GDEFCORE_MODULE_SETTINGS_MAX, GDEFCORE_MODULE_VARIABLES_MAX,
-          GDEFCORE_MODULE_GRANTS_MAX);
+          GDEFCORE_MODULE_GRANTS_MAX, GDEFCORE_MODULE_RELATIONS_MAX);
     }
   } else if ((man->nroutes > 0 && man->routes == NULL) ||
              (man->nlinks > 0 && man->links == NULL) ||
              (man->nsettings > 0 && man->settings == NULL) ||
              (man->nvariables > 0 && man->variables == NULL) ||
-             (man->ngrants > 0 && man->grants == NULL)) {
+             (man->ngrants > 0 && man->grants == NULL) ||
+             (man->nrelations > 0 && man->relations == NULL)) {
     b.rc = GDEFCORE_ERR_INVALID;
     if (err != NULL && cap > 0) {
       snprintf(err, cap, "Module %s: a declared table has a count and no data.",
@@ -542,6 +604,9 @@ GDEFCORE_Result gdefcore_decl_build(const GDEFCORE_Allocator * alloc,
   }
   if (b.rc == GDEFCORE_OK && man->ngrants > 0) {
     build_grants(&b, man);
+  }
+  if (b.rc == GDEFCORE_OK && man->nrelations > 0) {
+    build_relations(&b, man);
   }
   if (b.rc != GDEFCORE_OK) {
     gdefcore_decl_free(d);
@@ -1053,6 +1118,96 @@ static int check_settings(const DeclRef * refs, size_t n, Say * say) {
   return 0;
 }
 
+static int column_name_ok(const char * s, size_t n) {
+  size_t i;
+  if (n == 0 || n > GDEFCORE_RELATION_COLUMN_NAME_MAX || s[0] < 'a' || s[0] > 'z') {
+    return 0;
+  }
+  for (i = 1; i < n; i++) {
+    if (!((s[i] >= 'a' && s[i] <= 'z') || (s[i] >= '0' && s[i] <= '9') ||
+            s[i] == '_')) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static int check_relations(const DeclRef * refs, size_t n, Say * say) {
+  size_t m;
+  size_t i;
+  size_t c;
+  size_t k;
+  for (m = 0; m < n; m++) {
+    const Decl * d = refs[m].decl;
+    for (i = 0; i < d->nrelations; i++) {
+      const GDEFCORE_Module_Declared_Relation * r = &d->relations[i].pub;
+      char a[kShow + 8];
+      int mc;
+      if (r->name_len == 0) {
+        SAY(say, "Module %s: a relation has an empty name.", d->module);
+        return 1;
+      }
+      mc = machine_check(r->name, r->name_len, d->module, d->module_len);
+      if (mc == 1) {
+        SAY(say, "Module %s: relation '%s' is not named %s.<name>.", d->module,
+            show(a, r->name, r->name_len), d->module);
+        return 1;
+      }
+      if (mc == 2) {
+        SAY(say,
+            "Module %s: relation '%s' has a name over %d bytes or with a "
+            "character outside a-z, 0-9, '.', '_' and '-'.",
+            d->module, show(a, r->name, r->name_len),
+            GDEFCORE_MODULE_DECL_NAME_MAX);
+        return 1;
+      }
+      for (c = 0; c < r->ncolumns; c++) {
+        const GDEFCORE_Module_Relation_Column * col = &r->columns[c];
+        char b[kShow + 8];
+        if (!column_name_ok(col->name, col->name_len)) {
+          SAY(say,
+              "Module %s: relation '%s' has a column named '%s', which is not "
+              "1 to %d bytes of a-z, 0-9 and '_' starting with a letter.",
+              d->module, show(a, r->name, r->name_len),
+              show(b, col->name, col->name_len),
+              GDEFCORE_RELATION_COLUMN_NAME_MAX);
+          return 1;
+        }
+        for (k = 0; k < c; k++) {
+          if (span_is(r->columns[k].name, r->columns[k].name_len, col->name,
+                  col->name_len)) {
+            SAY(say, "Module %s: relation '%s' has two columns named '%s'.",
+                d->module, show(a, r->name, r->name_len),
+                show(b, col->name, col->name_len));
+            return 1;
+          }
+        }
+        if (col->kind != GDEFCORE_RELATION_ENTITY &&
+            col->kind != GDEFCORE_RELATION_TEXT &&
+            col->kind != GDEFCORE_RELATION_INTEGER) {
+          SAY(say,
+              "Module %s: relation '%s' column '%s' is not an entity, a text "
+              "or an integer.",
+              d->module, show(a, r->name, r->name_len),
+              show(b, col->name, col->name_len));
+          return 1;
+        }
+        if (col->type_name_len > 0 &&
+            (col->kind != GDEFCORE_RELATION_ENTITY ||
+                !text_ok(col->type_name, col->type_name_len, 0))) {
+          SAY(say,
+              "Module %s: relation '%s' column '%s' names a type, which only "
+              "an entity column may.",
+              d->module, show(a, r->name, r->name_len),
+              show(b, col->name, col->name_len));
+          return 1;
+        }
+      }
+    }
+  }
+  return 0;
+}
+
 static int check_vars(const DeclRef * refs, size_t n, Say * say) {
   size_t m;
   size_t i;
@@ -1117,7 +1272,9 @@ static Entry * collect(const GDEFCORE_Allocator * alloc, const DeclRef * refs,
     const Decl * d = refs[m].decl;
     total += table == 0 ? d->nroutes
                         : (table == 1 ? d->nlinks
-                                      : (table == 2 ? d->nsettings : d->nvars));
+                                      : (table == 2 ? d->nsettings
+                                                    : (table == 3 ? d->nvars
+                                                                  : d->nrelations)));
   }
   e = (Entry *)gcu_allocator_calloc(alloc, total == 0 ? 1 : total, sizeof *e);
   if (e == NULL) {
@@ -1128,7 +1285,8 @@ static Entry * collect(const GDEFCORE_Allocator * alloc, const DeclRef * refs,
     size_t count = table == 0 ? d->nroutes
                               : (table == 1 ? d->nlinks
                                             : (table == 2 ? d->nsettings
-                                                          : d->nvars));
+                                                          : (table == 3 ? d->nvars
+                                                                        : d->nrelations)));
     for (i = 0; i < count; i++) {
       e[at].mod = m;
       e[at].idx = i;
@@ -1142,11 +1300,14 @@ static Entry * collect(const GDEFCORE_Allocator * alloc, const DeclRef * refs,
       } else if (table == 2) {
         e[at].p = d->settings[i].pub.name;
         e[at].n = d->settings[i].pub.name_len;
-      } else {
+      } else if (table == 3) {
         e[at].p = d->vars[i].pub.name;
         e[at].n = d->vars[i].pub.name_len;
         e[at].kind = d->vars[i].pub.kind;
         e[at].kind_n = d->vars[i].pub.kind_len;
+      } else {
+        e[at].p = d->relations[i].pub.name;
+        e[at].n = d->relations[i].pub.name_len;
       }
       at += 1;
     }
@@ -1165,10 +1326,12 @@ int gdefcore_decl_validate(const DeclRef * refs, size_t n, int local,
   Entry * links = NULL;
   Entry * settings = NULL;
   Entry * vars = NULL;
+  Entry * relations = NULL;
   size_t nroutes = 0;
   size_t nlinks = 0;
   size_t nsettings = 0;
   size_t nvars = 0;
+  size_t nrelations = 0;
   Say say;
   GDEFCORE_Routes * scratch = NULL;
   int bad = 0;
@@ -1182,7 +1345,9 @@ int gdefcore_decl_validate(const DeclRef * refs, size_t n, int local,
   links = collect(alloc, refs, n, 1, &nlinks);
   settings = collect(alloc, refs, n, 2, &nsettings);
   vars = collect(alloc, refs, n, 3, &nvars);
-  if (routes == NULL || links == NULL || settings == NULL || vars == NULL) {
+  relations = collect(alloc, refs, n, 4, &nrelations);
+  if (routes == NULL || links == NULL || settings == NULL || vars == NULL ||
+      relations == NULL) {
     SAY(&say, "Out of memory while checking the declarations.");
     bad = 1;
     goto done;
@@ -1192,10 +1357,12 @@ int gdefcore_decl_validate(const DeclRef * refs, size_t n, int local,
   bad = check_routes(refs, n, routes, nroutes, local, &say) ||
         check_links(refs, n, routes, nroutes, links, nlinks, local, &say) ||
         check_settings(refs, n, &say) || check_vars(refs, n, &say) ||
+        check_relations(refs, n, &say) ||
         duplicates(routes, nroutes, refs, "route", &say) ||
         duplicates(links, nlinks, refs, "menu link", &say) ||
         duplicates(settings, nsettings, refs, "setting", &say) ||
-        duplicates(vars, nvars, refs, "template variable", &say);
+        duplicates(vars, nvars, refs, "template variable", &say) ||
+        duplicates(relations, nrelations, refs, "relation", &say);
   if (bad) {
     goto done;
   }
@@ -1245,6 +1412,7 @@ done:
   gcu_allocator_free(alloc, links);
   gcu_allocator_free(alloc, settings);
   gcu_allocator_free(alloc, vars);
+  gcu_allocator_free(alloc, relations);
   return bad;
 }
 
@@ -1367,6 +1535,37 @@ GDEFCORE_Result gdefcore_decl_grants(const GDEFCORE_Allocator * alloc,
   for (m = 0; m < n; m++) {
     for (i = 0; i < refs[m].decl->ngrants; i++) {
       items[at++] = &refs[m].decl->grants[i].pub;
+    }
+  }
+  *out = items;
+  *count = total;
+  return GDEFCORE_OK;
+}
+
+GDEFCORE_Result gdefcore_decl_relations(const GDEFCORE_Allocator * alloc,
+    const DeclRef * refs, size_t n,
+    const GDEFCORE_Module_Declared_Relation *** out, size_t * count) {
+  size_t m;
+  size_t i;
+  size_t total = 0;
+  size_t at = 0;
+  const GDEFCORE_Module_Declared_Relation ** items;
+  *out = NULL;
+  *count = 0;
+  for (m = 0; m < n; m++) {
+    total += refs[m].decl->nrelations;
+  }
+  if (total == 0) {
+    return GDEFCORE_OK;
+  }
+  items = (const GDEFCORE_Module_Declared_Relation **)gcu_allocator_calloc(
+      alloc, total, sizeof *items);
+  if (items == NULL) {
+    return GDEFCORE_ERR_OOM;
+  }
+  for (m = 0; m < n; m++) {
+    for (i = 0; i < refs[m].decl->nrelations; i++) {
+      items[at++] = &refs[m].decl->relations[i].pub;
     }
   }
   *out = items;

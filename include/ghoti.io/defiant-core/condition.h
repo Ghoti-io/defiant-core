@@ -24,7 +24,7 @@
  * @stability free
  *
  * A condition is a small boolean expression stored as text
- * (`defiant-condition/2`, AD-34). A grant carries one. The text is an
+ * (`defiant-condition/3`, AD-34). A grant carries one. The text is an
  * s-expression; documentation/conditions.md gives the grammar. In short:
  *
  *     (and (= type "site.blog") (in field.group ("a" "b")))
@@ -35,7 +35,9 @@
  * `revision.creator` is who wrote the revision that is now active. Edition 1
  * called the second `actor`; see gdefcore_condition_upcast(). Operators: `=`, `!=`, `<`, `<=`,
  * `>`, `>=`, `in`, `and`, `or`, `not`, and the words `true` and `false`.
- * `related` is reserved for relations and is refused for now.
+ * `(related "<relation>" (<operand> ...))` holds when a module's relation
+ * (module.h) has a row whose columns equal the listed operands, in order; an
+ * operand `_` leaves its column free. At most four relations in one condition.
  *
  * Hard limits, enforced at parse: depth 16, 256 nodes, 4096 bytes of text,
  * a constant of at most 256 bytes. The input is UTF-8 with no NUL.
@@ -59,9 +61,15 @@ extern "C" {
 #endif
 
 /** The registered format name and version (AD-34). */
-#define GDEFCORE_CONDITION_FORMAT "defiant-condition/2"
-/** The edition before it, whose stored text gdefcore_condition_upcast() reads. */
-#define GDEFCORE_CONDITION_FORMAT_PREVIOUS "defiant-condition/1"
+#define GDEFCORE_CONDITION_FORMAT "defiant-condition/3"
+/** The editions before it, whose stored text gdefcore_condition_upcast() reads. */
+#define GDEFCORE_CONDITION_FORMAT_PREVIOUS "defiant-condition/2"
+/** The edition before that one. */
+#define GDEFCORE_CONDITION_FORMAT_FIRST "defiant-condition/1"
+/** Most relations one condition may name. */
+#define GDEFCORE_CONDITION_MAX_RELATIONS 4
+/** Most operands one `related` takes (a relation's columns). */
+#define GDEFCORE_CONDITION_MAX_RELATED_OPERANDS 4
 /** Deepest nesting of parentheses. */
 #define GDEFCORE_CONDITION_MAX_DEPTH 16
 /** Most nodes (operators, operands, constants, list members) in one condition. */
@@ -81,6 +89,8 @@ extern "C" {
 #define GDEFCORE_CONDITION_USES_ENTITY 2
 /** The condition reads the request time (`now`). */
 #define GDEFCORE_CONDITION_USES_TIME 4
+/** The condition reads a relation (`related`). */
+#define GDEFCORE_CONDITION_USES_RELATION 8
 
 /** The grant covers every entity of the type: `(= type "<T>")`. */
 #define GDEFCORE_CONDITION_BUILTIN_ANY 1
@@ -157,6 +167,23 @@ GDEFCORE_API GDEFCORE_Result gdefcore_condition_validate(
     GDEFCORE_Condition_Error * out_error);
 
 /**
+ * @brief gdefcore_condition_validate() for a condition that will hold when
+ * @p projection is applied.
+ *
+ * A `related` is checked against the relations of the modules enabled and,
+ * when @p projection is not NULL, of the modules that changeset enables or
+ * disables: the relation must be declared, the operands must be as many as its
+ * columns, and each operand's kind must suit its column (an entity column takes
+ * `principal`, `creator`, `revision.creator`, a field or a public id; an integer
+ * column an integer, `now` or a field; a text column anything). The error says
+ * which, at the byte offset of the clause or the operand.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_condition_validate_in(
+    GDEFCORE_Catalog * catalog, const GDEFCORE_Condition * condition,
+    const char * type_name, size_t type_name_len,
+    const GDEFCORE_Changeset * projection, GDEFCORE_Condition_Error * out_error);
+
+/**
  * @brief The canonical text of @p condition.
  *
  * Whitespace is single spaces. The operands of `and` and `or` are flattened
@@ -186,7 +213,10 @@ GDEFCORE_API void gdefcore_condition_text_free(char * text);
  * identity and a stored condition need not say which edition it is in.
  * Free @p out_text with gdefcore_condition_text_free().
  *
- * @param from_edition 1 or 2; anything else is ::GDEFCORE_ERR_INVALID.
+ * Edition 3 added `related` and changed nothing else, so from edition 2 or 3
+ * the text is copied, `related` clauses and all.
+ *
+ * @param from_edition 1, 2 or 3; anything else is ::GDEFCORE_ERR_INVALID.
  */
 GDEFCORE_API GDEFCORE_Result gdefcore_condition_upcast(const char * text,
     size_t len, int from_edition, char ** out_text, size_t * out_len);
@@ -243,6 +273,18 @@ GDEFCORE_API unsigned gdefcore_condition_uses(
  */
 GDEFCORE_API int gdefcore_condition_constrains_type(
     const GDEFCORE_Condition * condition);
+
+/**
+ * @brief The names of the relations @p condition tests, in order of first use.
+ *
+ * @param index Zero-based, below ::GDEFCORE_CONDITION_MAX_RELATIONS.
+ * @param out_name Receives a pointer into the condition (valid until it is
+ *   freed) and @p out_len its length.
+ * @return 1 when there is such a relation, else 0.
+ */
+GDEFCORE_API int gdefcore_condition_relation_at(
+    const GDEFCORE_Condition * condition, size_t index, const char ** out_name,
+    size_t * out_len);
 
 /**
  * @brief Whether @p condition reads the entity field @p field anywhere, even

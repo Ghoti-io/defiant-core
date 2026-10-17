@@ -137,6 +137,10 @@
   GHOTIIO_DEFCORE(gdefcore_condition_free)
 #define gdefcore_condition_validate \
   GHOTIIO_DEFCORE(gdefcore_condition_validate)
+#define gdefcore_condition_validate_in \
+  GHOTIIO_DEFCORE(gdefcore_condition_validate_in)
+#define gdefcore_condition_relation_at \
+  GHOTIIO_DEFCORE(gdefcore_condition_relation_at)
 #define gdefcore_condition_canonical \
   GHOTIIO_DEFCORE(gdefcore_condition_canonical)
 #define gdefcore_condition_text_free \
@@ -226,6 +230,7 @@
 #define gdefcore_entity_publish GHOTIIO_DEFCORE(gdefcore_entity_publish)
 #define gdefcore_entity_unpublish GHOTIIO_DEFCORE(gdefcore_entity_unpublish)
 #define gdefcore_entity_activate GHOTIIO_DEFCORE(gdefcore_entity_activate)
+#define gdefcore_entity_clear GHOTIIO_DEFCORE(gdefcore_entity_clear)
 #define gdefcore_entity_revision GHOTIIO_DEFCORE(gdefcore_entity_revision)
 #define gdefcore_entity_revision_at                                            \
   GHOTIIO_DEFCORE(gdefcore_entity_revision_at)
@@ -309,6 +314,7 @@
 #define gdefcore_module_routes GHOTIIO_DEFCORE(gdefcore_module_routes)
 #define gdefcore_module_settings GHOTIIO_DEFCORE(gdefcore_module_settings)
 #define gdefcore_module_grants GHOTIIO_DEFCORE(gdefcore_module_grants)
+#define gdefcore_module_relations GHOTIIO_DEFCORE(gdefcore_module_relations)
 #define gdefcore_module_variables GHOTIIO_DEFCORE(gdefcore_module_variables)
 #define gdefcore_module_service GHOTIIO_DEFCORE(gdefcore_module_service)
 #define gdefcore_module_text_free GHOTIIO_DEFCORE(gdefcore_module_text_free)
@@ -503,6 +509,15 @@
 #define gdefcore_plan_sort_field \
   GHOTIIO_DEFCORE(gdefcore_plan_sort_field)
 #define GDEFCORE_Plan GHOTIIO_DEFCORE(GDEFCORE_Plan)
+
+#define gdefcore_relation_column_field GHOTIIO_DEFCORE(gdefcore_relation_column_field)
+#define gdefcore_relation_add GHOTIIO_DEFCORE(gdefcore_relation_add)
+#define gdefcore_relation_remove GHOTIIO_DEFCORE(gdefcore_relation_remove)
+#define gdefcore_relation_version GHOTIIO_DEFCORE(gdefcore_relation_version)
+#define gdefcore_relation_note_dependency GHOTIIO_DEFCORE(gdefcore_relation_note_dependency)
+
+#define gdefcore_plan_relation_count GHOTIIO_DEFCORE(gdefcore_plan_relation_count)
+#define gdefcore_plan_relation_at GHOTIIO_DEFCORE(gdefcore_plan_relation_at)
 
 /// @endcond
 

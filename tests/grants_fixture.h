@@ -31,6 +31,7 @@
 #include <ghoti.io/defiant-core/macros.h>
 #include <ghoti.io/defiant-core/defiant-core.h>
 #include <ghoti.io/defiant-storage-memory/memory.h>
+#include <ghoti.io/defiant-storage-sqlite/sqlite.h>
 
 #include <gtest/gtest.h>
 
@@ -39,9 +40,11 @@
 #include <string.h>
 
 #include <algorithm>
+#include <filesystem>
 #include <list>
 #include <map>
 #include <memory>
+#include <random>
 #include <set>
 #include <string>
 #include <vector>
@@ -62,6 +65,8 @@ struct ModDef {
   std::list<std::string> pool;
   std::vector<GDEFCORE_Module_Perm> perms;
   std::vector<GDEFCORE_Module_Grant> grants;
+  std::vector<GDEFCORE_Module_Relation> relations;
+  std::list<std::vector<GDEFCORE_Module_Relation_Column> > relation_columns;
   std::vector<std::string> lines;   /* the confirmation lines the test expects */
   GDEFCORE_Module_Manifest man;
 
@@ -108,6 +113,39 @@ struct ModDef {
     grants.push_back(g);
   }
 
+  /** A relation: its columns as (name, kind, type). */
+  struct Col {
+    std::string name;
+    int kind;
+    std::string type;
+  };
+
+  void Relation(const std::string & relation_name, const std::vector<Col> & cols) {
+    std::vector<GDEFCORE_Module_Relation_Column> columns;
+    GDEFCORE_Module_Relation r;
+    for (const Col & c : cols) {
+      GDEFCORE_Module_Relation_Column column;
+      memset(&column, 0, sizeof column);
+      column.size = sizeof column;
+      column.name = S(c.name);
+      column.name_len = c.name.size();
+      column.kind = c.kind;
+      if (!c.type.empty()) {
+        column.type_name = S(c.type);
+        column.type_name_len = c.type.size();
+      }
+      columns.push_back(column);
+    }
+    relation_columns.push_back(columns);
+    memset(&r, 0, sizeof r);
+    r.size = sizeof r;
+    r.name = S(relation_name);
+    r.name_len = relation_name.size();
+    r.columns = relation_columns.back().data();
+    r.ncolumns = relation_columns.back().size();
+    relations.push_back(r);
+  }
+
   void Finish() {
     memset(&man, 0, sizeof man);
     man.size = sizeof man;
@@ -121,6 +159,8 @@ struct ModDef {
     man.nperms = perms.size();
     man.grants = grants.empty() ? NULL : &grants[0];
     man.ngrants = grants.size();
+    man.relations = relations.empty() ? NULL : &relations[0];
+    man.nrelations = relations.size();
   }
 };
 
@@ -192,6 +232,11 @@ class GrantsFixture : public ::testing::Test {
   size_t installed_ = 0;
   std::string last_error_;
   std::vector<GDEFCORE_Request *> requests_;
+  /* A test may ask for SQLite (in a directory made for it) or for a catalog
+   * allocator of its own before it calls Open() again. */
+  bool use_sqlite_ = false;
+  std::string sqlite_dir_;
+  const GDEFCORE_Allocator * catalog_alloc_ = NULL;
 
   void SetUp() override {
     Defs().clear();
@@ -204,10 +249,26 @@ class GrantsFixture : public ::testing::Test {
   }
 
   void Open() {
-    ASSERT_EQ(GDEFSMEMORY_OK, gdefsmemory_store_create(NULL, NULL, &store_));
+    if (use_sqlite_) {
+      std::error_code ec;
+      std::filesystem::path base = std::filesystem::temp_directory_path(ec);
+      std::random_device entropy;
+      for (int i = 0; i < 100 && sqlite_dir_.empty(); i++) {
+        std::filesystem::path p =
+            base / ("gdefcore-grants-" + std::to_string(entropy()));
+        if (std::filesystem::create_directory(p, ec) && !ec) {
+          sqlite_dir_ = p.string();
+        }
+      }
+      ASSERT_FALSE(sqlite_dir_.empty());
+      ASSERT_EQ(GDEFSSQLITE_OK,
+          gdefssqlite_store_create(sqlite_dir_.c_str(), NULL, NULL, &store_));
+    } else {
+      ASSERT_EQ(GDEFSMEMORY_OK, gdefsmemory_store_create(NULL, NULL, &store_));
+    }
     ASSERT_EQ(GDEFCORE_OK,
-        gdefcore_catalog_open(store_, (const uint8_t *)kTenant, 1, NULL, NULL,
-            &catalog_));
+        gdefcore_catalog_open(store_, (const uint8_t *)kTenant, 1, NULL,
+            catalog_alloc_, &catalog_));
     ASSERT_EQ(GDEFCORE_OK, gdefcore_host_open(store_, NULL, &host_));
     gdefcore_catalog_bind_host(catalog_, host_);
     installed_ = 0;
@@ -225,6 +286,11 @@ class GrantsFixture : public ::testing::Test {
     host_ = NULL;
     catalog_ = NULL;
     store_ = NULL;
+    if (!sqlite_dir_.empty()) {
+      std::error_code ec;
+      std::filesystem::remove_all(sqlite_dir_, ec);
+      sqlite_dir_.clear();
+    }
   }
 
   /** A request, anonymous when @p who is empty. Owned by the fixture. */
@@ -432,6 +498,18 @@ class GrantsFixture : public ::testing::Test {
     GDEFCORE_Result rc = Stage(name, &cs);
     if (rc == GDEFCORE_OK) {
       rc = gdefcore_changeset_apply(cs, text.data(), text.size());
+      if (rc != GDEFCORE_OK) {
+        size_t why_len = 0;
+        const char * why = gdefcore_changeset_refusal(cs, &why_len);
+        const char * merr = gdefcore_module_error(host_, NULL);
+        char * diff = NULL;
+        size_t diff_len = 0;
+        (void)gdefcore_changeset_diff(cs, &diff, &diff_len);
+        last_error_ = std::string(why == NULL ? "" : std::string(why, why_len).c_str()) +
+                      " | " + (merr == NULL ? "" : merr) + " | wanted: " + text +
+                      " | diff: " + (diff == NULL ? "" : std::string(diff, diff_len));
+        gdefcore_text_free(catalog_, diff);
+      }
     } else {
       const char * err = gdefcore_module_error(host_, NULL);
       last_error_ = err == NULL ? "" : err;

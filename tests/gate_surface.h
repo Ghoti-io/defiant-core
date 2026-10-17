@@ -98,6 +98,8 @@ static const Surface kSurface[] = {
     {"gdefcore_condition_parse", "P"},
     {"gdefcore_condition_free", "P"},
     {"gdefcore_condition_validate", "RA"},
+    {"gdefcore_condition_validate_in", "RA"},
+    {"gdefcore_condition_relation_at", "P"},
     {"gdefcore_condition_canonical", "P"},
     {"gdefcore_condition_text_free", "P"},
     {"gdefcore_condition_hash", "P"},
@@ -209,6 +211,20 @@ static const Surface kSurface[] = {
     {"gdefcore_plan_or", "P"},
     {"gdefcore_plan_field_is", "P"},
     {"gdefcore_plan_sort_field", "P"},
+    {"gdefcore_plan_relation_count", "P"},
+    {"gdefcore_plan_relation_at", "P"},
+    /* Relations (relation.h). Rows are written by the owning module and read
+     * only by the evaluator and the list compiler: no function here returns a
+     * row, and the test RelationsSurface.NoCallReadsRowsPastTheFilter holds the
+     * header to that. The writes are W. The version and the note are counters:
+     * the note takes a request only to record that a decision read the
+     * relation, and answers nothing about a row. */
+    {"gdefcore_relation_column_field", "P"},
+    {"gdefcore_relation_add", "W"},
+    {"gdefcore_relation_remove", "W"},
+    {"gdefcore_relation_version", "RA"},
+    {"gdefcore_relation_note_dependency", "W"},
+    {"gdefcore_entity_clear", "W"},
     {"gdefcore_ids_free", "P"},
     {"gdefcore_entity_type", "RA"},
     {"gdefcore_entity_actor", "RA"},
@@ -287,6 +303,7 @@ static const Surface kSurface[] = {
     {"gdefcore_module_settings", "RA"},
     {"gdefcore_module_variables", "RA"},
     {"gdefcore_module_grants", "RA"},
+    {"gdefcore_module_relations", "RA"},
     {"gdefcore_module_declared_free", "P"},
     {"gdefcore_module_add_routes", "W"},
     {"gdefcore_module_vet", "W"},

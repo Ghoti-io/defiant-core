@@ -38,6 +38,7 @@
 #include <ghoti.io/defiant-core/macros.h>
 #include <ghoti.io/defiant-core/module.h>
 #include <ghoti.io/defiant-core/plan.h>
+#include <ghoti.io/defiant-core/relation.h>
 #include <ghoti.io/defiant-core/render.h>
 #include <ghoti.io/defiant-core/request.h>
 #include <ghoti.io/defiant-core/sched.h>

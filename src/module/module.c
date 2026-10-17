@@ -1326,8 +1326,30 @@ static GDEFCORE_Result check_grants(GDEFCORE_Host * host,
     err.size = sizeof err;
     rc = gdefcore_condition_parse(g->condition, g->condition_len, &cond, &err);
     if (rc == GDEFCORE_OK) {
-      rc = gdefcore_condition_validate(catalog, cond, g->type_name,
-          g->type_name_len, &err);
+      /* The condition may test this module's own relations, which are not
+       * enabled yet: judge it against the site as this changeset would leave
+       * it, the module included. The real changeset has not been touched. */
+      GDEFCORE_Changeset * projected = NULL;
+      size_t k;
+      rc = gdefcore_changeset_prepare(catalog, NULL, 0, &projected);
+      for (k = 0; rc == GDEFCORE_OK && k < gdefcore_changeset_module_count(changeset);
+           k++) {
+        const char * other = NULL;
+        size_t other_len = 0;
+        int enable = 0;
+        if (gdefcore_changeset_module_at(changeset, k, &other, &other_len,
+                &enable) == GDEFCORE_OK) {
+          rc = gdefcore_changeset_stage_module(projected, other, other_len, enable);
+        }
+      }
+      if (rc == GDEFCORE_OK) {
+        rc = gdefcore_changeset_stage_module(projected, mod->name, mod->name_len, 1);
+      }
+      if (rc == GDEFCORE_OK) {
+        rc = gdefcore_condition_validate_in(catalog, cond, g->type_name,
+            g->type_name_len, projected, &err);
+      }
+      gdefcore_changeset_destroy(projected);
     }
     gdefcore_condition_free(cond);
     if (rc != GDEFCORE_OK) {
@@ -1345,6 +1367,50 @@ static GDEFCORE_Result check_grants(GDEFCORE_Host * host,
   return GDEFCORE_OK;
 }
 
+/*
+ * The relations a module declares, judged against the site as it is now: an
+ * entity column that names a type names one that is defined, or one in the
+ * module's own namespace (which the module defines when it runs). Nothing is
+ * staged when one fails.
+ */
+static GDEFCORE_Result check_relations(GDEFCORE_Host * host,
+    GDEFCORE_Changeset * changeset, const Mod * mod) {
+  const Decl * d = mod->decl;
+  GDEFCORE_Catalog * catalog = gdefcore_changeset_catalog(changeset);
+  size_t i;
+  size_t c;
+  if (d == NULL || d->nrelations == 0) {
+    return GDEFCORE_OK;
+  }
+  if (catalog == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  for (i = 0; i < d->nrelations; i++) {
+    const GDEFCORE_Module_Declared_Relation * r = &d->relations[i].pub;
+    for (c = 0; c < r->ncolumns; c++) {
+      const GDEFCORE_Module_Relation_Column * col = &r->columns[c];
+      int kind = 0;
+      int own = col->type_name_len > mod->name_len &&
+                memcmp(col->type_name, mod->name, mod->name_len) == 0 &&
+                col->type_name[mod->name_len] == '.';
+      char text[kErrorMax];
+      if (col->type_name_len == 0 || own ||
+          gdefcore_type_kind(catalog, col->type_name, col->type_name_len,
+              &kind) == GDEFCORE_OK) {
+        continue;
+      }
+      snprintf(text, sizeof text,
+          "Module %s relation %.*s column %.*s refers to type %.*s, which is "
+          "not defined and not in the module's own namespace.",
+          mod->name, (int)r->name_len, r->name, (int)col->name_len, col->name,
+          (int)col->type_name_len, col->type_name);
+      set_error(host, text);
+      return GDEFCORE_ERR_INVALID;
+    }
+  }
+  return GDEFCORE_OK;
+}
+
 GDEFCORE_Result gdefcore_module_enable(GDEFCORE_Host * host,
     GDEFCORE_Changeset * changeset, const char * name, size_t name_len) {
   Mod * mod;
@@ -1353,6 +1419,10 @@ GDEFCORE_Result gdefcore_module_enable(GDEFCORE_Host * host,
   GDEFCORE_Result rc;
   mod = (host == NULL || name == NULL) ? NULL : find_mod(host, name, name_len);
   if (mod != NULL && changeset != NULL) {
+    rc = check_relations(host, changeset, mod);
+    if (rc != GDEFCORE_OK) {
+      return rc;
+    }
     rc = check_grants(host, changeset, mod, &has_grants);
     if (rc != GDEFCORE_OK) {
       return rc;
@@ -1852,6 +1922,27 @@ GDEFCORE_Result gdefcore_module_grants(GDEFCORE_Host * host,
     return rc;
   }
   rc = gdefcore_decl_grants(host->alloc, refs, n, out_items, out_count);
+  gcu_allocator_free(host->alloc, refs);
+  return rc;
+}
+
+GDEFCORE_Result gdefcore_module_relations(GDEFCORE_Host * host,
+    const uint8_t * tenant, size_t tenant_len,
+    const GDEFCORE_Changeset * projection,
+    const GDEFCORE_Module_Declared_Relation *** out_items, size_t * out_count) {
+  DeclRef * refs;
+  size_t n;
+  GDEFCORE_Result rc;
+  if (out_items == NULL || out_count == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  *out_items = NULL;
+  *out_count = 0;
+  rc = enumerate_refs(host, tenant, tenant_len, projection, &refs, &n);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  rc = gdefcore_decl_relations(host->alloc, refs, n, out_items, out_count);
   gcu_allocator_free(host->alloc, refs);
   return rc;
 }

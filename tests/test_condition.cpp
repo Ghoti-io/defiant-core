@@ -484,11 +484,11 @@ TEST(Cond, RefusesBadSyntax) {
   rows.push_back({"(= field. 1)", "<refused: a field name was expected after field. @3>"});
   rows.push_back({"(= field.a-b 1)", "<refused: a field name was expected after field. @3>"});
   /* Relations are reserved. */
-  rows.push_back({"(related field.x)", "<refused: relations are not available yet @1>"});
-  rows.push_back({"related(field.x)", "<refused: relations are not available yet @0>"});
-  rows.push_back({"(= related 1)", "<refused: relations are not available yet @3>"});
-  rows.push_back({"(and true related)", "<refused: relations are not available yet @10>"});
-  rows.push_back({"(in type (related))", "<refused: relations are not available yet @10>"});
+  rows.push_back({"(related field.x)", "<refused: a relation name in quotes was expected @9>"});
+  rows.push_back({"related(field.x)", "<refused: related is written (related \"relation\" (operand ...)) @0>"});
+  rows.push_back({"(= related 1)", "<refused: related is written (related \"relation\" (operand ...)) @3>"});
+  rows.push_back({"(and true related)", "<refused: related is written (related \"relation\" (operand ...)) @10>"});
+  rows.push_back({"(in type (related))", "<refused: related is written (related \"relation\" (operand ...)) @10>"});
   /* Text and integers. */
   rows.push_back({"(= type \"abc", "<refused: a text constant is not closed @8>"});
   rows.push_back({"(= type \"a\\qb\")", "<refused: an unknown escape in a text constant @10>"});
@@ -1058,7 +1058,8 @@ TEST(Cond, EditionOneActorIsUpcastAndNotWrittenAnyMore) {
   EXPECT_EQ("(= actor principal)", Up("(= actor principal)", 2));   /* copied */
   EXPECT_EQ(Up("(= revision.creator principal)", 1),
       Up(Up("(= actor principal)", 1), 1));
-  EXPECT_EQ("<refused>", Up("x", 3));
+  EXPECT_EQ("x", Up("x", 3));   /* edition 3 is the identity */
+  EXPECT_EQ("<refused>", Up("x", 4));
   EXPECT_EQ("<refused>", Up("x", 0));
   EXPECT_EQ("", Up("", 1));
   /* the stored form parses as the new operand and evaluates as it */
@@ -1087,8 +1088,9 @@ TEST(Cond, EditionOneActorIsUpcastAndNotWrittenAnyMore) {
   EXPECT_EQ(GDEFCORE_OK,
       gdefcore_condition_parse_stored("(= creator principal)", 21, &stored, NULL));
   gdefcore_condition_free(stored);
-  EXPECT_STREQ("defiant-condition/2", GDEFCORE_CONDITION_FORMAT);
-  EXPECT_STREQ("defiant-condition/1", GDEFCORE_CONDITION_FORMAT_PREVIOUS);
+  EXPECT_STREQ("defiant-condition/3", GDEFCORE_CONDITION_FORMAT);
+  EXPECT_STREQ("defiant-condition/2", GDEFCORE_CONDITION_FORMAT_PREVIOUS);
+  EXPECT_STREQ("defiant-condition/1", GDEFCORE_CONDITION_FORMAT_FIRST);
 }
 
 TEST(Cond, BooleanTruthTables) {

@@ -222,6 +222,43 @@ typedef struct GDEFCORE_Module_Grant {
   size_t condition_len;     ///< Length of @ref condition.
 } GDEFCORE_Module_Grant;
 
+/**
+ * @brief One column of a relation. Begins with @ref size.
+ *
+ * @ref kind is ::GDEFCORE_RELATION_ENTITY, ::GDEFCORE_RELATION_TEXT or
+ * ::GDEFCORE_RELATION_INTEGER. For an entity column, @ref type_name names the
+ * type it refers to (a type that is defined when the module is enabled, or
+ * one in the module's own namespace), or is empty for any type.
+ */
+typedef struct GDEFCORE_Module_Relation_Column {
+  size_t size;              ///< `sizeof(GDEFCORE_Module_Relation_Column)`.
+  const char * name;        ///< Column name: `[a-z][a-z0-9_]*`. Borrowed.
+  size_t name_len;          ///< Length of @ref name.
+  int kind;                 ///< One of the `GDEFCORE_RELATION_` kinds.
+  const char * type_name;   ///< For an entity column, its type, or NULL.
+  size_t type_name_len;     ///< Length of @ref type_name.
+} GDEFCORE_Module_Relation_Column;
+
+/**
+ * @brief A relation the module declares. Begins with @ref size.
+ *
+ * A relation is a typed link between entities, in the module's own namespace
+ * (`module.name`, AD-35), with one to ::GDEFCORE_RELATION_COLUMNS_MAX columns.
+ * Its rows are stored as entities of a kernel type and written by the owning
+ * module through gdefcore_relation_add(); a condition tests membership with
+ * `(related "module.name" (operand ...))` (condition.h). The host reads a
+ * relation as the system, only while the module is enabled, and only the
+ * declared columns. Disabling the module takes the relation out of every
+ * decision at once; its rows stay and come back with the module.
+ */
+typedef struct GDEFCORE_Module_Relation {
+  size_t size;              ///< `sizeof(GDEFCORE_Module_Relation)`.
+  const char * name;        ///< `module.name`. Borrowed.
+  size_t name_len;          ///< Length of @ref name.
+  const GDEFCORE_Module_Relation_Column * columns; ///< The columns, in order.
+  size_t ncolumns;          ///< How many, 1 to 4.
+} GDEFCORE_Module_Relation;
+
 /** A contribution provider answers with text (also for `markup`). */
 #define GDEFCORE_CONTRIBUTION_TEXT 1
 /** A contribution provider answers with an integer. */
@@ -287,6 +324,19 @@ typedef GDEFCORE_Result (*GDEFCORE_Contribution_Fn)(GDEFCORE_Request * request,
 #define GDEFCORE_MODULE_VARIABLES_MAX 32
 /** Most grants one manifest declares. */
 #define GDEFCORE_MODULE_GRANTS_MAX 16
+/** Most relations one manifest declares. */
+#define GDEFCORE_MODULE_RELATIONS_MAX 16
+/** Most columns one relation has. */
+#define GDEFCORE_RELATION_COLUMNS_MAX 4
+/** Longest name of a relation column, in bytes. */
+#define GDEFCORE_RELATION_COLUMN_NAME_MAX 32
+
+/** A relation column that holds an entity, by its public id. */
+#define GDEFCORE_RELATION_ENTITY 1
+/** A relation column that holds a text, compared byte for byte. */
+#define GDEFCORE_RELATION_TEXT 2
+/** A relation column that holds an integer (`-?[0-9]{1,18}`, no leading zero). */
+#define GDEFCORE_RELATION_INTEGER 3
 
 /** The version of a route handler service table. */
 #define GDEFCORE_MODULE_ROUTE_HANDLER_VERSION 1
@@ -459,6 +509,8 @@ typedef struct GDEFCORE_Module_Manifest {
   size_t nvariables;                        ///< How many variables.
   const GDEFCORE_Module_Grant * grants;     ///< Declared grants. May be NULL.
   size_t ngrants;                           ///< How many grants.
+  const GDEFCORE_Module_Relation * relations; ///< Declared relations. May be NULL.
+  size_t nrelations;                        ///< How many relations.
 } GDEFCORE_Module_Manifest;
 
 /** The entry a native module exports and a guest hands to the host. */
@@ -904,6 +956,17 @@ typedef struct GDEFCORE_Module_Declared_Grant {
   size_t condition_len;       ///< Length of @ref condition.
 } GDEFCORE_Module_Declared_Grant;
 
+/** @brief A relation as the enumeration reports it. Borrowed from the host. */
+typedef struct GDEFCORE_Module_Declared_Relation {
+  size_t size;                ///< `sizeof(GDEFCORE_Module_Declared_Relation)`.
+  const char * module;        ///< The declaring module.
+  size_t module_len;          ///< Length of @ref module.
+  const char * name;          ///< The relation's name, `module.name`.
+  size_t name_len;            ///< Length of @ref name.
+  const GDEFCORE_Module_Relation_Column * columns; ///< Its columns, copied.
+  size_t ncolumns;            ///< How many.
+} GDEFCORE_Module_Declared_Relation;
+
 /**
  * @brief The routes the modules enabled for @p tenant declare.
  *
@@ -965,8 +1028,22 @@ GDEFCORE_API GDEFCORE_Result gdefcore_module_grants(GDEFCORE_Host * host,
     const GDEFCORE_Module_Declared_Grant *** out_items, size_t * out_count);
 
 /**
+ * @brief The relations of the enabled modules.
+ *
+ * As gdefcore_module_routes(), in module order and, within a module, by name.
+ * This is what a condition's `related` is judged against: a relation of a
+ * module that is disabled, or quarantined, is not here, and with
+ * @p projection a relation of a module the changeset enables is. Free
+ * @p out_items with gdefcore_module_declared_free().
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_module_relations(GDEFCORE_Host * host,
+    const uint8_t * tenant, size_t tenant_len,
+    const GDEFCORE_Changeset * projection,
+    const GDEFCORE_Module_Declared_Relation *** out_items, size_t * out_count);
+
+/**
  * @brief Free an array from gdefcore_module_routes(), _links(), _settings(),
- * _variables() or _grants(). NULL is ignored.
+ * _variables(), _grants() or _relations(). NULL is ignored.
  */
 GDEFCORE_API void gdefcore_module_declared_free(GDEFCORE_Host * host,
     const void * items);

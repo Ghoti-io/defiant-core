@@ -392,6 +392,22 @@ GDEFCORE_API GDEFCORE_Result gdefcore_entity_unpublish(
     GDEFCORE_Changeset * changeset, const char * id, size_t id_len);
 
 /**
+ * @brief Stage clearing an entity: it is unpublished, has no active revision
+ * and no projection of its content, as if it had no content.
+ *
+ * Every recorded revision stays, and the entity can be restored by making a
+ * revision active. This is the delete that a revert of a first revision makes
+ * (gdefcore_changeset_revert()), staged in a changeset of its own choosing so
+ * that it can be applied with other changes atomically. It checks no
+ * permission (SPEC decision 7).
+ *
+ * @return ::GDEFCORE_ERR_INVALID for an unknown id, an id already in the
+ *   changeset, or an applied changeset.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_entity_clear(GDEFCORE_Changeset * changeset,
+    const char * id, size_t id_len);
+
+/**
  * @brief Stage making revision @p seq the active revision.
  *
  * Apply does not append a revision and leaves the published flag alone. The

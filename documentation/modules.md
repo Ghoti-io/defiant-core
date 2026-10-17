@@ -131,7 +131,8 @@ rated.
   declares is refused too. The type must be the permission's type and the field
   its field, or the grant is refused.
 - **The condition** is parsed and checked against the type when the module is
-  enabled (an unknown field, a personal field, `related(...)`, a type that is
+  enabled (an unknown field, a personal field, a `related` of a relation that is
+  not declared, a type that is
   not defined, text that is not a condition, are all refused), and the enable
   stages nothing. It is not narrowed by the integer condition the permission
   was declared with.
@@ -146,6 +147,47 @@ rated.
 - **Limits.** At most 16 grants per manifest (`GDEFCORE_MODULE_GRANTS_MAX`).
   An empty permission, type or condition is refused when the module is
   installed. A manifest built before grants existed declares none.
+
+## Relations
+
+A manifest can declare **relations** (`GDEFCORE_Module_Relation`, appended after
+the grants): a typed link between entities, in the module's own namespace
+(`blog.group-editor`), with one to four columns. Each column is an entity (a
+public id, optionally of a stated type), a text, or an integer
+(`GDEFCORE_RELATION_ENTITY`, `_TEXT`, `_INTEGER`). A condition tests membership
+with `(related "blog.group-editor" (principal field.group))` (conditions.md).
+
+- **Names.** `<module>.<name>` as for any declared name; a column is
+  `[a-z][a-z0-9_]*` and at most 32 bytes; two columns of one relation do not
+  share a name; a type is named only by an entity column. A relation with no
+  column, more than four, or a column of an unknown kind is refused when the
+  module is installed or enabled.
+- **Types.** An entity column's type must be defined when the module is
+  enabled, or be in the module's own namespace (which the module defines when
+  it runs). The enable stages nothing when it is not.
+- **Enumeration.** `gdefcore_module_relations()` returns the relations of the
+  enabled modules (AD-10 order, then name; a projection shows the site a
+  changeset would leave). Conditions are judged against this, so a disabled
+  module's relation takes every decision that rested on it out at once, in the
+  same changeset. The rows stay and come back with the module.
+- **Rows** are entities of the kernel type `core.relation_row`, one per row,
+  written by the owning module through `gdefcore_relation_add()` and
+  `gdefcore_relation_remove()` (relation.h). They are business data (SPEC
+  decision 6): an entity column holds a public id and keeps holding it when
+  the person it names is erased. **The owning-module rule:** the call names the
+  module; the relation must be one that module declares and has enabled. A
+  module that names another module is refused. There is no ambient "current
+  module" in a C call, so the name is a claim the call checks against the
+  declaration, and the path that reaches the module's code is what keeps a
+  module from using another's name (SPEC decision 7). A relation's rows are not
+  read by any call; the evaluator and the list compiler read them as the
+  system, only the declared columns of a declared, enabled relation.
+- **Version.** Each relation has a counter that every change to its rows bumps,
+  in the changeset that changes them, so a render key's `reads:` digest moves
+  with them.
+- **Limits.** At most 16 relations per manifest
+  (`GDEFCORE_MODULE_RELATIONS_MAX`), four columns each. A manifest built before
+  relations existed declares none.
 
 ## Hooks
 

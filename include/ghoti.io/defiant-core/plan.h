@@ -149,6 +149,19 @@ GDEFCORE_API const GDEFSTOR_QueryNode * gdefcore_plan_field_is(
     const char * text, size_t text_len);
 
 /**
+ * @brief How many relations the compiled conditions test, and their names.
+ *
+ * A list that used a relation reads its version (relation.h) into the
+ * request's read set, so that the render key's `reads:` digest moves with the
+ * rows. @p index is zero-based; the name is valid until the plan is freed.
+ */
+GDEFCORE_API size_t gdefcore_plan_relation_count(const GDEFCORE_Plan * plan);
+
+/** @brief The @p index-th relation named. 1 when there is one, else 0. */
+GDEFCORE_API int gdefcore_plan_relation_at(const GDEFCORE_Plan * plan,
+    size_t index, const char ** out_name, size_t * out_len);
+
+/**
  * @brief A sort key: the first value of a field, the empty text when it has
  * none. NULL under the same rules as gdefcore_plan_field_is().
  */

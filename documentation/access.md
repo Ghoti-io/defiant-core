@@ -132,6 +132,12 @@ order and the same total, when:
 - `GDEFCORE_ACCESS_LIST_EVALUATE` is set, which is how a test or a person
   can ask for the reference.
 
+A condition that tests a relation (`related`, conditions.md) is compiled as a
+semi-join over the relation's rows, with the entity as the outer row, in both
+backends; the list notes each relation it used on the request at the relation's
+version, so the render key's `reads:` digest moves with its rows. A relation
+that is no longer declared is a failure, and the grant is out of the list.
+
 After a successful list the request carries the note `defiant.access.list`,
 `planned` or `evaluated`. A grant whose condition cannot be read (the stored
 text no longer parses) does not hold, and the request carries

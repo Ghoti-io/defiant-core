@@ -35,6 +35,8 @@
 
 #include <ghoti.io/defiant-core/macros.h>
 #include <ghoti.io/defiant-core/condition.h>
+#include <ghoti.io/defiant-core/module.h>
+#include <ghoti.io/defiant-core/relation.h>
 
 #include "condition_internal.h"
 
@@ -360,6 +362,162 @@ static int eval_in(Ctx * ctx, const CNode * node) {
   return r;
 }
 
+/*
+ * (related "name" (operand ...)): some row of the relation has, in each column
+ * given, one of the texts of the operand for it. The relation is read as the
+ * system, through the same unfiltered index every host read uses, and only if
+ * an enabled module declares it with this many columns: a relation that is
+ * gone (its module disabled) or changed shape is a failure, not a no, so that
+ * `not` of it never becomes a grant. The read is noted on the request at the
+ * relation's version, so a render key that depends on it moves with the rows.
+ */
+static int eval_related(Ctx * ctx, const CNode * node) {
+  const CNode * name = &ctx->c->nodes[ctx->c->kids[node->first]];
+  const char * rel = ctx->c->pool + name->str;
+  size_t rel_len = name->str_len;
+  size_t arity = (size_t)node->count - 1;
+  GDEFCORE_Host * host = gdefcore_catalog_host(ctx->catalog);
+  const GDEFCORE_Module_Declared_Relation ** items = NULL;
+  size_t nitems = 0;
+  size_t tenant_len = 0;
+  const uint8_t * tenant = gdefcore_catalog_tenant(ctx->catalog, &tenant_len);
+  size_t i;
+  int declared = 0;
+  Vals vals[GDEFCORE_RELATION_COLUMNS_MAX];
+  int any[GDEFCORE_RELATION_COLUMNS_MAX];
+  size_t got = 0;
+  GDEFSTOR_QueryText texts[1 + GDEFCORE_RELATION_COLUMNS_MAX * kMaxFieldValues];
+  size_t ntexts = 0;
+  GDEFSTOR_QueryNode leaves[1 + GDEFCORE_RELATION_COLUMNS_MAX];
+  const GDEFSTOR_QueryNode * kids[1 + GDEFCORE_RELATION_COLUMNS_MAX];
+  size_t nleaves = 0;
+  GDEFSTOR_QueryNode root;
+  GDEFSTOR_Query q;
+  char ** ids = NULL;
+  size_t nids = 0;
+  int result = 0;
+  int bad = 0;
+  GDEFCORE_Result rc;
+  if (host == NULL || arity == 0 || arity > GDEFCORE_RELATION_COLUMNS_MAX) {
+    return ctx_fail(ctx);
+  }
+  rc = gdefcore_module_relations(host, tenant, tenant_len, NULL, &items, &nitems);
+  if (rc != GDEFCORE_OK) {
+    return ctx_fail(ctx);
+  }
+  for (i = 0; i < nitems; i++) {
+    if (items[i]->name_len == rel_len && memcmp(items[i]->name, rel, rel_len) == 0) {
+      declared = items[i]->ncolumns == arity;
+      break;
+    }
+  }
+  gdefcore_module_declared_free(host, items);
+  if (!declared) {
+    return ctx_fail(ctx);
+  }
+  memset(vals, 0, sizeof vals);
+  memset(any, 0, sizeof any);
+  for (i = 0; i < arity; i++) {
+    int kid = ctx->c->kids[node->first + 1 + i];
+    if (ctx->c->nodes[kid].kind == kAny) {
+      any[i] = 1;
+      continue;
+    }
+    if (!operand(ctx, kid, &vals[i])) {
+      bad = 1;
+      got = i;
+      break;
+    }
+    got = i + 1;
+  }
+  if (!bad && gdefcore_relation_note_dependency(ctx->catalog, ctx->request, rel,
+                  rel_len) != GDEFCORE_OK) {
+    bad = 1;
+  }
+  if (!bad) {
+    int empty = 0;
+    for (i = 0; i < arity; i++) {
+      if (!any[i] && vals[i].n == 0) {
+        empty = 1; /* a none: equal to nothing */
+      }
+    }
+    if (!empty) {
+      GDEFSTOR_QueryOperand * left;
+      /* name = relation */
+      texts[ntexts].bytes = (const uint8_t *)rel;
+      texts[ntexts].len = rel_len;
+      memset(&leaves[nleaves], 0, sizeof leaves[nleaves]);
+      leaves[nleaves].op = GDEFSTOR_QUERY_EQ;
+      left = &leaves[nleaves].left;
+      left->kind = GDEFSTOR_QUERY_COLUMN;
+      left->column = GDEFCORE_QUERY_COL_DOC;
+      left->column_len = strlen(GDEFCORE_QUERY_COL_DOC);
+      left->path_depth = 2;
+      left->path1 = GDEFCORE_RELATION_LANG;
+      left->path1_len = strlen(GDEFCORE_RELATION_LANG);
+      left->path2 = GDEFCORE_RELATION_FIELD_NAME;
+      left->path2_len = strlen(GDEFCORE_RELATION_FIELD_NAME);
+      leaves[nleaves].right.kind = GDEFSTOR_QUERY_CONST;
+      leaves[nleaves].right.texts = &texts[ntexts];
+      leaves[nleaves].right.text_count = 1;
+      kids[nleaves] = &leaves[nleaves];
+      ntexts += 1;
+      nleaves += 1;
+      for (i = 0; i < arity; i++) {
+        size_t k;
+        size_t first = ntexts;
+        if (any[i]) {
+          continue;
+        }
+        for (k = 0; k < vals[i].n; k++) {
+          texts[ntexts].bytes = (const uint8_t *)vals[i].v[k].p;
+          texts[ntexts].len = vals[i].v[k].n;
+          ntexts += 1;
+        }
+        memset(&leaves[nleaves], 0, sizeof leaves[nleaves]);
+        leaves[nleaves].op = GDEFSTOR_QUERY_IN;
+        left = &leaves[nleaves].left;
+        left->kind = GDEFSTOR_QUERY_COLUMN;
+        left->column = GDEFCORE_QUERY_COL_DOC;
+        left->column_len = strlen(GDEFCORE_QUERY_COL_DOC);
+        left->path_depth = 2;
+        left->path1 = GDEFCORE_RELATION_LANG;
+        left->path1_len = strlen(GDEFCORE_RELATION_LANG);
+        left->path2 = gdefcore_relation_column_field(i);
+        left->path2_len = strlen(left->path2);
+        leaves[nleaves].right.kind = GDEFSTOR_QUERY_CONST;
+        leaves[nleaves].right.texts = &texts[first];
+        leaves[nleaves].right.text_count = ntexts - first;
+        kids[nleaves] = &leaves[nleaves];
+        nleaves += 1;
+      }
+      memset(&root, 0, sizeof root);
+      root.op = GDEFSTOR_QUERY_AND;
+      root.children = kids;
+      root.child_count = nleaves;
+      memset(&q, 0, sizeof q);
+      q.size = sizeof q;
+      q.where = &root;
+      q.limit = 1;
+      rc = gdefcore_entity_query_active(ctx->catalog, GDEFCORE_RELATION_ROW_TYPE,
+          strlen(GDEFCORE_RELATION_ROW_TYPE), &q, &ids, &nids, NULL);
+      if (rc != GDEFCORE_OK) {
+        bad = 1;
+      } else {
+        result = nids > 0;
+        gdefcore_ids_free(ctx->catalog, ids, nids);
+      }
+    }
+  }
+  for (i = 0; i < got; i++) {
+    vals_free(ctx, &vals[i]);
+  }
+  if (bad) {
+    return ctx_fail(ctx);
+  }
+  return result;
+}
+
 static int eval_node(Ctx * ctx, int idx) {
   const CNode * node = &ctx->c->nodes[idx];
   size_t k;
@@ -367,6 +525,8 @@ static int eval_node(Ctx * ctx, int idx) {
     return 0;
   }
   switch (node->kind) {
+    case kRelated:
+      return eval_related(ctx, node);
     case kTrue:
       return 1;
     case kFalse:

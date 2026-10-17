@@ -1,7 +1,7 @@
 # Conditions
 
 A condition is a small boolean expression, stored as text, that says which
-entities a grant covers. Its format is `defiant-condition/2` (AD-34; see "Editions" below for what changed from `/1`). The same
+entities a grant covers. Its format is `defiant-condition/3` (AD-34; see "Editions" below for what changed from `/1` and `/2`). The same
 text is parsed, checked against the catalog, written in one canonical form,
 explained in English, and evaluated on one entity. Everything is in
 `condition.h`.
@@ -25,7 +25,9 @@ condition := "true" | "false"
            | "(" "and" condition+ ")"  | "(" "or" condition+ ")"
            | "(" "not" condition ")"
            | "(" cmp operand operand ")"
-           | "(" "in" operand "(" constant+ ")" ")"
+ | "(" "in" operand "(" constant+ ")" ")"
+           | "(" "related" text "(" column+ ")" ")"
+column    := operand | "_"
 cmp       := "=" | "!=" | "<" | "<=" | ">" | ">="
 operand   := "type" | "state" | "creator" | "revision.creator" | "principal"
            | "now"
@@ -35,10 +37,12 @@ name      := [A-Za-z0-9_]+                  (at most 64 bytes)
 integer   := "-"? [0-9]+                    (at most 18 digits)
 ```
 
-Text constants are double-quoted. The escapes are `\"`, `\\`, `\n` and `\t`;
-any other control character, and any other escape, is refused. `related` is
-reserved for relations (a later story) and is refused everywhere with
-"relations are not available yet". There are no variables and no function
+`(related "blog.group-editor" (principal field.group))` holds when the relation
+has a row whose first column is the principal and whose second is the entity's
+`group` (see "Relations" below). Text constants are double-quoted. The escapes are `\"`, `\\`, `\n` and `\t`;
+any other control character, and any other escape, is refused. `related` is a
+clause and is refused anywhere else, with the message "related is written
+(related "relation" (operand ...))". There are no variables and no function
 calls; only the words above mean anything.
 
 ### Limits
@@ -49,6 +53,8 @@ Enforced at parse, with the byte offset of the first violation:
 |---|---|
 | nesting of parentheses | 16 (an `in` list is one level) |
 | nodes (operators, operands, constants, list members) | 256 |
+| relations named in one condition | 4 |
+| operands of one `related` | 4 |
 | bytes of text | 4096 |
 | bytes in one text constant, after escapes | 256 |
 
@@ -98,6 +104,45 @@ filter reads them. A many-valued field is all its values (at most 64).
 The request clock is `gdefcore_request_set_time()`. A request that never set
 it reads the wall clock once, at the first use, and keeps that value, so it is
 fixed for the life of the request. Tests set it.
+
+## Relations
+
+A module declares a relation in its manifest (modules.md): a name in its own
+namespace and one to four typed columns, each an entity (a public id), a text
+or an integer. `(related "r" (a b ...))` holds when the relation has a row
+whose columns are, in order, among the texts of the operands: `=` for each
+column, the way `in` is `=` against a list, so a many-valued field matches
+when any of its values is the column's. A `_` leaves a column free. A column
+that is an operand with no text at all (`creator` of an entity with no creator,
+`principal` of an anonymous request) matches nothing, as `=` does.
+
+- **Validation** (`gdefcore_condition_validate_in()`): the relation must be
+  declared by an enabled module, or by the module the same changeset enables;
+  the operands must be as many as the columns; and each must suit its column.
+  An entity column takes `principal`, `creator`, `revision.creator`, a field,
+  or a text that is a canonical public id; an integer column an integer, `now`
+  or a field; a text column anything. Errors are at the byte offset of the clause
+  (no such relation, wrong number) or of the operand.
+- **Reading** is as the system. The evaluator and the list compiler read
+  `core.relation_row` through the unfiltered index, only for a relation an
+  enabled module declares with this many columns and only its declared columns;
+  there is no call that returns rows (relation.h). A relation that is not
+  declared now (its module is disabled), or declared with another number of
+  columns, is a failure: the condition does not hold, `not` included, so that
+  disabling a module can never widen anything. A read that fails fails the
+  same way.
+- **Versions.** Every change to a relation's rows bumps a counter on the
+  relation, in the changeset that changes them. A decision that read a relation
+  notes it on the request at that version (`gdefcore_relation_note_dependency()`), so
+  the render key's `reads:` digest moves with the rows and a fragment that used
+  the relation is invalid after a change.
+- **Compiled.** In a list, `related` is a semi-join: some row of
+  `core.relation_row`'s active copies, with the entity being decided as the
+  outer row. The compiled list equals the evaluated one (access.md).
+- **Explain and rating.** "there is a row of blog.group-editor listing the
+  person and the group field". The matrix and the module's confirmation add
+  that the grant's breadth depends on who may add rows to the relation, and a
+  grant that rests on a relation is never rated low.
 
 ## Operators
 
@@ -204,9 +249,16 @@ all with a risk. `gdefcore_condition_constrains_type()` says whether a
 condition holds only for entities of some stated type; the risk rating uses it.
 access.md and modules.md have the rest.
 
-Not here yet: relations and callbacks.
+Not here yet: callbacks.
 
 ## Editions
+
+`defiant-condition/3` adds `related` and changes nothing else, so a condition
+stored at `/1` or `/2` means what it meant and `gdefcore_condition_upcast()`
+copies it whole from edition 2 or 3 (a `related` clause included). A condition
+written at `/3` is refused by nothing earlier than `/3`'s own parser, which is
+the only parser: the editions share one, and the stored text does not say which
+it is.
 
 `defiant-condition/2` is the first edition that is not `/1`. Nothing is
 released, but the stored form is versioned data (AD-15, AD-34), so the one

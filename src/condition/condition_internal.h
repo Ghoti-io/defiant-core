@@ -50,7 +50,9 @@ enum {
   kNow,
   kField,
   kText,
-  kInt
+  kInt,
+  kRelated,     /* (related "name" (operand ...)): kids[0] is the name, a kText */
+  kAny          /* `_` in a related: this column is free */
 };
 
 /* A comparison operator, in the node's op member. */

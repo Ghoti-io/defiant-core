@@ -32,6 +32,7 @@
 
 #include <ghoti.io/defiant-core/macros.h>
 #include <ghoti.io/defiant-core/condition.h>
+#include <ghoti.io/defiant-core/module.h>
 
 #include "condition_internal.h"
 
@@ -65,7 +66,17 @@ static const char kMsgControl[] = "a control character in a text constant";
 static const char kMsgChar[] = "an unexpected character";
 static const char kMsgInt[] = "an invalid integer";
 static const char kMsgBigInt[] = "an integer is too large";
-static const char kMsgRelated[] = "relations are not available yet";
+static const char kMsgRelated[] =
+    "related is written (related \"relation\" (operand ...))";
+static const char kMsgRelName[] = "a relation name in quotes was expected";
+static const char kMsgRelOperands[] =
+    "a related takes one to four operands in a list";
+static const char kMsgManyRel[] =
+    "a condition may name at most four relations";
+static const char kMsgNoRelation[] = "no such relation";
+static const char kMsgRelArity[] =
+    "the number of operands is not the number of columns";
+static const char kMsgRelOperand[] = "this operand does not suit the column";
 static const char kMsgRenamed[] =
     "actor is revision.creator since edition 2; creator is the entity's";
 static const char kMsgTrail[] = "unexpected text after the condition";
@@ -124,6 +135,7 @@ typedef struct Parser {
   GDEFCORE_Condition * c;
   const char * msg;
   size_t off;
+  size_t nrelated;
 } Parser;
 
 static int fail(Parser * p, size_t off, const char * msg) {
@@ -572,7 +584,71 @@ static int parse_expr(Parser * p, int depth) {
       return fail(p, p->pos, kMsgHead);
     }
     if (word_is(p->s + start, n, "related")) {
-      return fail(p, start, kMsgRelated);
+      /* (related "name" (operand ...)): kids[0] is the name, the rest the
+       * operands, a `_` being a column left free. */
+      int name;
+      size_t list_at;
+      idx = new_node(p, kRelated, open);
+      if (idx < 0) {
+        return -1;
+      }
+      if (p->nrelated >= GDEFCORE_CONDITION_MAX_RELATIONS) {
+        return fail(p, start, kMsgManyRel);
+      }
+      p->nrelated += 1;
+      skip_ws(p);
+      if (p->pos >= p->len || p->s[p->pos] != '"') {
+        return fail(p, p->pos, kMsgRelName);
+      }
+      name = parse_text(p);
+      if (name < 0) {
+        return -1;
+      }
+      kids[nk++] = (uint16_t)name;
+      skip_ws(p);
+      if (p->pos >= p->len || p->s[p->pos] != '(') {
+        return fail(p, p->pos, kMsgRelOperands);
+      }
+      list_at = p->pos;
+      if (depth + 2 > GDEFCORE_CONDITION_MAX_DEPTH) {
+        return fail(p, list_at, kMsgDepth);
+      }
+      p->pos += 1;
+      for (;;) {
+        int k;
+        size_t astart;
+        size_t an;
+        skip_ws(p);
+        if (p->pos < p->len && p->s[p->pos] == ')') {
+          break;
+        }
+        if (p->pos < p->len && p->s[p->pos] == '_' &&
+            (p->pos + 1 >= p->len || is_delim(p->s[p->pos + 1]))) {
+          astart = p->pos;
+          an = 1;
+          (void)an;
+          p->pos += 1;
+          k = new_node(p, kAny, astart);
+        } else {
+          k = parse_operand(p);
+        }
+        if (k < 0) {
+          return -1;
+        }
+        if (nk > GDEFCORE_CONDITION_MAX_RELATED_OPERANDS) {
+          return fail(p, p->c->nodes[k].pos, kMsgRelOperands);
+        }
+        kids[nk++] = (uint16_t)k;
+      }
+      if (nk < 2) {
+        return fail(p, p->pos, kMsgRelOperands);
+      }
+      p->pos += 1;
+      if (expect_close(p) < 0 || set_kids(p, idx, kids, nk) < 0) {
+        return -1;
+      }
+      p->c->uses |= GDEFCORE_CONDITION_USES_RELATION;
+      return idx;
     }
     if (word_is(p->s + start, n, "and") || word_is(p->s + start, n, "or")) {
       idx = new_node(p, word_is(p->s + start, n, "and") ? kAnd : kOr, open);
@@ -825,6 +901,48 @@ int gdefcore_condition_tests_field(const GDEFCORE_Condition * condition,
   return 0;
 }
 
+int gdefcore_condition_relation_at(const GDEFCORE_Condition * condition,
+    size_t index, const char ** out_name, size_t * out_len) {
+  size_t i;
+  size_t seen = 0;
+  if (condition == NULL || out_name == NULL || out_len == NULL) {
+    return 0;
+  }
+  for (i = 0; i < condition->nnodes; i++) {
+    const CNode * node = &condition->nodes[i];
+    const CNode * name;
+    size_t j;
+    int dup = 0;
+    if (node->kind != kRelated) {
+      continue;
+    }
+    name = &condition->nodes[condition->kids[node->first]];
+    /* In order of first use; a relation named twice is one relation. */
+    for (j = 0; j < i; j++) {
+      const CNode * other = &condition->nodes[j];
+      if (other->kind == kRelated) {
+        const CNode * on = &condition->nodes[condition->kids[other->first]];
+        if (on->str_len == name->str_len &&
+            memcmp(condition->pool + on->str, condition->pool + name->str,
+                name->str_len) == 0) {
+          dup = 1;
+          break;
+        }
+      }
+    }
+    if (dup) {
+      continue;
+    }
+    if (seen == index) {
+      *out_name = condition->pool + name->str;
+      *out_len = name->str_len;
+      return 1;
+    }
+    seen += 1;
+  }
+  return 0;
+}
+
 /* ---- validation ------------------------------------------------------- */
 
 /* 1 when the type has a non-personal field called name. */
@@ -864,9 +982,104 @@ static int state_name_ok(const char * s, size_t n) {
   return word_is(s, n, "published") || word_is(s, n, "draft");
 }
 
+/* Whether an operand can be what a relation column holds. */
+static int operand_suits(const GDEFCORE_Condition * c, const CNode * node,
+    int kind) {
+  char canon[GDEFCORE_PUBLIC_ID_LEN + 1];
+  int64_t v;
+  switch (node->kind) {
+    case kAny:
+    case kField:
+      return 1;
+    case kPrincipal:
+    case kCreator:
+    case kRevCreator:
+      return kind == GDEFCORE_RELATION_ENTITY || kind == GDEFCORE_RELATION_TEXT;
+    case kNow:
+    case kInt:
+      return kind == GDEFCORE_RELATION_INTEGER || kind == GDEFCORE_RELATION_TEXT;
+    case kType:
+    case kState:
+      return kind == GDEFCORE_RELATION_TEXT;
+    case kText:
+      if (kind == GDEFCORE_RELATION_TEXT) {
+        return 1;
+      }
+      if (kind == GDEFCORE_RELATION_ENTITY) {
+        return node->str_len == GDEFCORE_PUBLIC_ID_LEN &&
+               gdefcore_id_canonical(c->pool + node->str, node->str_len,
+                   canon) == GDEFCORE_OK &&
+               memcmp(canon, c->pool + node->str, node->str_len) == 0;
+      }
+      return cond_parse_int(c->pool + node->str, node->str_len, &v) &&
+             node->str_len < 20;
+    default:
+      return 0;
+  }
+}
+
+static GDEFCORE_Result check_related(GDEFCORE_Catalog * catalog,
+    const GDEFCORE_Condition * condition, const CNode * node,
+    const GDEFCORE_Changeset * projection, GDEFCORE_Condition_Error * out_error) {
+  const CNode * name = &condition->nodes[condition->kids[node->first]];
+  GDEFCORE_Host * host = gdefcore_catalog_host(catalog);
+  const GDEFCORE_Module_Declared_Relation ** items = NULL;
+  size_t nitems = 0;
+  size_t i;
+  size_t k;
+  const GDEFCORE_Module_Declared_Relation * found = NULL;
+  const uint8_t * tenant;
+  size_t tenant_len = 0;
+  GDEFCORE_Result rc;
+  GDEFCORE_Result out = GDEFCORE_OK;
+  if (host == NULL) {
+    set_error(out_error, node->pos, kMsgNoRelation);
+    return GDEFCORE_ERR_INVALID;
+  }
+  tenant = gdefcore_catalog_tenant(catalog, &tenant_len);
+  rc = gdefcore_module_relations(host, tenant, tenant_len, projection, &items,
+      &nitems);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  for (i = 0; i < nitems; i++) {
+    if (items[i]->name_len == name->str_len &&
+        memcmp(items[i]->name, condition->pool + name->str, name->str_len) == 0) {
+      found = items[i];
+      break;
+    }
+  }
+  if (found == NULL) {
+    set_error(out_error, node->pos, kMsgNoRelation);
+    out = GDEFCORE_ERR_INVALID;
+  } else if ((size_t)node->count - 1 != found->ncolumns) {
+    set_error(out_error, node->pos, kMsgRelArity);
+    out = GDEFCORE_ERR_INVALID;
+  } else {
+    for (k = 1; k < node->count; k++) {
+      const CNode * operand = &condition->nodes[condition->kids[node->first + k]];
+      if (!operand_suits(condition, operand, found->columns[k - 1].kind)) {
+        set_error(out_error, operand->pos, kMsgRelOperand);
+        out = GDEFCORE_ERR_INVALID;
+        break;
+      }
+    }
+  }
+  gdefcore_module_declared_free(host, items);
+  return out;
+}
+
 GDEFCORE_Result gdefcore_condition_validate(GDEFCORE_Catalog * catalog,
     const GDEFCORE_Condition * condition, const char * type_name,
     size_t type_name_len, GDEFCORE_Condition_Error * out_error) {
+  return gdefcore_condition_validate_in(catalog, condition, type_name,
+      type_name_len, NULL, out_error);
+}
+
+GDEFCORE_Result gdefcore_condition_validate_in(GDEFCORE_Catalog * catalog,
+    const GDEFCORE_Condition * condition, const char * type_name,
+    size_t type_name_len, const GDEFCORE_Changeset * projection,
+    GDEFCORE_Condition_Error * out_error) {
   size_t i;
   if (catalog == NULL || condition == NULL) {
     set_error(out_error, 0, kMsgExpr);
@@ -874,6 +1087,14 @@ GDEFCORE_Result gdefcore_condition_validate(GDEFCORE_Catalog * catalog,
   }
   for (i = 0; i < condition->nnodes; i++) {
     const CNode * node = &condition->nodes[i];
+    if (node->kind == kRelated) {
+      GDEFCORE_Result rc = check_related(catalog, condition, node, projection,
+          out_error);
+      if (rc != GDEFCORE_OK) {
+        return rc;
+      }
+      continue;
+    }
     if (node->kind == kField) {
       if (type_name == NULL ||
           !field_usable(catalog, type_name, type_name_len,
@@ -1125,6 +1346,23 @@ static void render(const GDEFCORE_Condition * c, int idx, Buf * out) {
     case kInt:
       buf_add(out, c->pool + node->str, node->str_len);
       break;
+    case kAny:
+      buf_str(out, "_");
+      break;
+    case kRelated: {
+      size_t k;
+      buf_str(out, "(related ");
+      render(c, c->kids[node->first], out);
+      buf_str(out, " (");
+      for (k = 1; k < node->count; k++) {
+        if (k > 1) {
+          buf_str(out, " ");
+        }
+        render(c, c->kids[node->first + k], out);
+      }
+      buf_str(out, "))");
+      break;
+    }
     case kNot:
       buf_str(out, "(not ");
       render(c, c->kids[node->first], out);
@@ -1349,7 +1587,7 @@ GDEFCORE_Result gdefcore_condition_upcast(const char * text, size_t len,
   Buf b;
   size_t i = 0;
   if (out_text == NULL || (text == NULL && len != 0) ||
-      (from_edition != 1 && from_edition != 2)) {
+      (from_edition != 1 && from_edition != 2 && from_edition != 3)) {
     return GDEFCORE_ERR_INVALID;
   }
   *out_text = NULL;
@@ -1462,6 +1700,9 @@ static void say_operand(const GDEFCORE_Condition * c, int idx, Buf * out) {
     case kInt:
       buf_add(out, c->pool + node->str, node->str_len);
       break;
+    case kAny:
+      buf_str(out, "anything");
+      break;
     default:
       if (plain_word(c->pool + node->str, node->str_len)) {
         buf_add(out, c->pool + node->str, node->str_len);
@@ -1511,6 +1752,19 @@ static void say(const GDEFCORE_Condition * c, int idx, Buf * out, int parent) {
       say_operand(c, c->kids[node->first], out);
       buf_str(out, verbs[node->op]);
       say_operand(c, c->kids[node->first + 1], out);
+      break;
+    }
+    case kRelated: {
+      const CNode * name = &c->nodes[c->kids[node->first]];
+      buf_str(out, "there is a row of ");
+      buf_add(out, c->pool + name->str, name->str_len);
+      buf_str(out, " listing ");
+      for (k = 1; k < node->count; k++) {
+        if (k > 1) {
+          buf_str(out, k + 1 == node->count ? " and " : ", ");
+        }
+        say_operand(c, c->kids[node->first + k], out);
+      }
       break;
     }
     case kIn:
