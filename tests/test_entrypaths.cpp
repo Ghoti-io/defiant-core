@@ -397,6 +397,288 @@ typedef std::vector<std::pair<std::string, std::string> > Fields;
 
 }  // namespace
 
+/* ---- the attacks: a body cannot steer the check ---------------------------- */
+
+TEST_F(EntryPath, AGroupBPostResubmittedAsGroupAIsRefused) {
+  DefinePost();
+  Declare(Perm("Edit posts", "update", GDEFCORE_ACCESS_ANY));
+  Role("group-a");
+  ASSERT_EQ(GDEFCORE_OK, GrantWhen("group-a", "Edit posts", kGroupA));
+  Routes();
+  Who ga = Person("group-a");
+  std::string a1 = Make(kPost, Admin(), {{"title", "a1"}, {"group", "a"}});
+  std::string b1 = Make(kPost, Admin(), {{"title", "b1"}, {"group", "b"}});
+  std::string a2 = Make(kPost, Admin(), {{"title", "a2"}, {"group", "a"}});
+
+  /* The control: the principal edits a real group a post through the path. */
+  Result ok = Submit(ga, "/post/" + a1 + "/submit", a1,
+      {{"title", "a1 edited"}, {"group", "a"}});
+  EXPECT_TRUE(ok.served);
+  EXPECT_EQ(1, ok.allowed);
+  EXPECT_TRUE(ok.written);
+  EXPECT_EQ("a1 edited", Head(a1, "title"));
+
+  /* The attack: the group b post, with the body saying group a. The route
+   * check asks the stored post (group b) and the path is not served. */
+  uint64_t before = Version(b1);
+  Result attack = Submit(ga, "/post/" + b1 + "/submit", b1,
+      {{"title", "pwned"}, {"group", "a"}});
+  EXPECT_FALSE(attack.served);
+  EXPECT_FALSE(attack.written);
+  EXPECT_EQ(before, Version(b1));
+  EXPECT_EQ("b1", Head(b1, "title"));
+  EXPECT_EQ("b", Active(b1, "group"));
+  /* and it is the answer for a post that does not exist */
+  EXPECT_EQ(Dispatch(Request(ga), "/post/" + b1 + "/submit"),
+      Dispatch(Request(ga), "/post/" + FreshIdText() + "/submit"));
+
+  /* The same attack with a URL that is allowed (the group a post) and a form
+   * for the group b post: the token's target decides, not the URL. */
+  Result swapped = Submit(ga, "/post/" + a2 + "/submit", b1,
+      {{"title", "pwned"}, {"group", "a"}});
+  EXPECT_TRUE(swapped.served);          /* the route check passed: a2 is theirs */
+  EXPECT_EQ(0, swapped.allowed);        /* the path refused: the form is for b1 */
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, g_submit.rc);
+  EXPECT_FALSE(swapped.written);
+  EXPECT_EQ("b1", Head(b1, "title"));
+  EXPECT_EQ("a2", Head(a2, "title"));
+
+  /* And through a path that names no entity at all (only the type-level
+   * question is asked of the route), the stored post still decides. */
+  Result bare = Submit(ga, "/submit", b1, {{"title", "pwned"}, {"group", "a"}},
+      false);
+  EXPECT_TRUE(bare.served);
+  EXPECT_EQ(0, bare.allowed);
+  EXPECT_FALSE(bare.written);
+  EXPECT_EQ("b1", Head(b1, "title"));
+  /* The control for that route: the same bare path for a post that is theirs. */
+  Result bare_ok = Submit(ga, "/submit", a2, {{"title", "a2 again"}, {"group", "a"}},
+      false);
+  EXPECT_TRUE(bare_ok.served);
+  EXPECT_EQ(1, bare_ok.allowed);
+  EXPECT_TRUE(bare_ok.written);
+  EXPECT_EQ("a2 again", Head(a2, "title"));
+}
+
+TEST_F(EntryPath, TheCheckIsOnTheStoredPostBeforeTheChange) {
+  DefinePost();
+  Declare(Perm("Edit posts", "update", GDEFCORE_ACCESS_ANY));
+  Role("group-a");
+  ASSERT_EQ(GDEFCORE_OK, GrantWhen("group-a", "Edit posts", kGroupA));
+  Routes();
+  Who ga = Person("group-a");
+  std::string a1 = Make(kPost, Admin(), {{"title", "a1"}, {"group", "a"}});
+  std::string a2 = Make(kPost, Admin(), {{"title", "a2"}, {"group", "a"}});
+  /* Moving a post out of the group is allowed: the post, as stored, is
+   * theirs. What the body says the group will be is not asked. */
+  Result out = Submit(ga, "/post/" + a1 + "/submit", a1,
+      {{"title", "moved"}, {"group", "b"}});
+  EXPECT_TRUE(out.served);
+  EXPECT_EQ(1, out.allowed);
+  EXPECT_TRUE(out.written);
+  EXPECT_EQ("moved", Head(a1, "title"));
+  EXPECT_EQ("b", Head(a1, "group"));
+  /* The write was a draft: the active revision, which conditions read, is
+   * still group a, so the post is still theirs until it is activated. */
+  EXPECT_EQ("a", Active(a1, "group"));
+  EXPECT_TRUE(Submit(ga, "/post/" + a1 + "/submit", a1, {{"title", "again"}}).written);
+  /* Control: publish the move, and the next edit is refused. */
+  {
+    GDEFCORE_Changeset * cs = NULL;
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_entity_publish(cs, a1.data(), a1.size()));
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, NULL, 0));
+    gdefcore_changeset_destroy(cs);
+  }
+  EXPECT_EQ("b", Active(a1, "group"));
+  Result late = Submit(ga, "/post/" + a1 + "/submit", a1, {{"title", "too late"}});
+  EXPECT_FALSE(late.served);
+  EXPECT_FALSE(late.written);
+  EXPECT_NE("too late", Head(a1, "title"));
+  (void)a2;
+}
+
+TEST_F(EntryPath, AnAuthorFieldSwappedToTheSubmittersIdIsRefused) {
+  Declare(Perm("Edit by author", "update", GDEFCORE_ACCESS_ANY, kArticle));
+  Declare(Perm("Edit own", "update", GDEFCORE_ACCESS_OWN, kArticle));
+  Role("by-author-field");
+  Role("owners");
+  Routes();
+  Who alice = Person("by-author-field");
+  Who olive = Person("owners");
+  Who bob = Person(NULL);
+  /* The grant: update where the article's author field is the principal. */
+  ASSERT_EQ(GDEFCORE_OK,
+      GrantWhen("by-author-field", "Edit by author",
+          "(= field.author principal)"));
+  Grant("owners", "Edit own");
+  std::string bobs = Make(kArticle, bob.id, {{"title", "bobs"}, {"author", bob.id}});
+  std::string alices = Make(kArticle, alice.id,
+      {{"title", "alices"}, {"author", alice.id}});
+
+  /* The control: her own article, through the path. */
+  Result ok = Submit(alice, "/post/" + alices + "/submit", alices,
+      {{"title", "alices edited"}, {"author", alice.id}});
+  EXPECT_TRUE(ok.served);
+  EXPECT_EQ(1, ok.allowed);
+  EXPECT_TRUE(ok.written);
+  EXPECT_EQ("alices edited", Head(alices, "title"));
+
+  /* The attack: bob's article, the form's author set to alice. The stored
+   * author is bob. */
+  Result attack = Submit(alice, "/post/" + bobs + "/submit", bobs,
+      {{"title", "pwned"}, {"author", alice.id}});
+  EXPECT_FALSE(attack.served);
+  EXPECT_FALSE(attack.written);
+  EXPECT_EQ("bobs", Head(bobs, "title"));
+  EXPECT_EQ(bob.id, Head(bobs, "author"));
+  Result bare = Submit(alice, "/submit", bobs,
+      {{"title", "pwned"}, {"author", alice.id}}, false);
+  EXPECT_TRUE(bare.served);
+  EXPECT_EQ(0, bare.allowed);
+  EXPECT_FALSE(bare.written);
+  EXPECT_EQ("bobs", Head(bobs, "title"));
+
+  /* The same against `own`: it is the entity's creator, set by the system
+   * when its first revision was written, and no field of a form can name it. */
+  std::string olives = Make(kArticle, olive.id, {{"title", "olives"}, {"author", olive.id}});
+  Result own_ok = Submit(olive, "/post/" + olives + "/submit", olives,
+      {{"title", "olives edited"}, {"author", olive.id}});
+  EXPECT_TRUE(own_ok.served);
+  EXPECT_EQ(1, own_ok.allowed);
+  EXPECT_TRUE(own_ok.written);
+  Result own_attack = Submit(olive, "/post/" + bobs + "/submit", bobs,
+      {{"title", "pwned"}, {"author", olive.id}});
+  EXPECT_FALSE(own_attack.served);
+  EXPECT_FALSE(own_attack.written);
+  Result own_bare = Submit(olive, "/submit", bobs,
+      {{"title", "pwned"}, {"author", olive.id}}, false);
+  EXPECT_TRUE(own_bare.served);
+  EXPECT_EQ(0, own_bare.allowed);
+  EXPECT_FALSE(own_bare.written);
+  EXPECT_EQ("bobs", Head(bobs, "title"));
+  /* An edit by someone else does not hand the article over either: the
+   * creator stays bob. */
+  char * creator = NULL;
+  size_t creator_len = 0;
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_entity_creator(catalog_, bobs.data(), bobs.size(), &creator,
+          &creator_len));
+  EXPECT_EQ(bob.id, std::string(creator, creator_len));
+  gdefcore_text_free(catalog_, creator);
+}
+
+TEST_F(EntryPath, TheCheckIsOnTheActiveRevisionNotTheNewestDraft) {
+  DefinePost();
+  Declare(Perm("Edit posts", "update", GDEFCORE_ACCESS_ANY));
+  Role("group-a");
+  ASSERT_EQ(GDEFCORE_OK, GrantWhen("group-a", "Edit posts", kGroupA));
+  Routes();
+  Who ga = Person("group-a");
+  /* Theirs as published, with a newer draft that says group b. */
+  std::string mine = Make(kPost, Admin(), {{"title", "mine"}, {"group", "a"}});
+  Redraft(mine, {{"group", "b"}});
+  EXPECT_EQ("b", Head(mine, "group"));
+  EXPECT_EQ("a", Active(mine, "group"));
+  Result ok = Submit(ga, "/post/" + mine + "/submit", mine, {{"title", "still mine"}});
+  EXPECT_TRUE(ok.served);
+  EXPECT_TRUE(ok.written);
+  /* Not theirs as published, with a newer draft that says group a. */
+  std::string theirs = Make(kPost, Admin(), {{"title", "theirs"}, {"group", "b"}});
+  Redraft(theirs, {{"group", "a"}});
+  EXPECT_EQ("a", Head(theirs, "group"));
+  EXPECT_EQ("b", Active(theirs, "group"));
+  Result no = Submit(ga, "/post/" + theirs + "/submit", theirs, {{"title", "mine now"}});
+  EXPECT_FALSE(no.served);
+  EXPECT_FALSE(no.written);
+  Result bare = Submit(ga, "/submit", theirs, {{"title", "mine now"}}, false);
+  EXPECT_EQ(0, bare.allowed);
+  EXPECT_FALSE(bare.written);
+}
+
+TEST_F(EntryPath, AnOpenChangesetDoesNotSteerTheCheck) {
+  DefinePost();
+  Declare(Perm("Edit posts", "update", GDEFCORE_ACCESS_ANY));
+  Role("group-a");
+  ASSERT_EQ(GDEFCORE_OK, GrantWhen("group-a", "Edit posts", kGroupA));
+  Who ga = Person("group-a");
+  std::string a1 = Make(kPost, Admin(), {{"title", "a1"}, {"group", "a"}});
+  std::string b1 = Make(kPost, Admin(), {{"title", "b1"}, {"group", "b"}});
+  int allowed = 99;
+  /* The requests exist before the changeset does. */
+  GDEFCORE_Request * for_b1 = Request(ga);
+  GDEFCORE_Request * for_a1 = Request(ga);
+  /* Staged, not applied: a changeset that would make b1 a group a post. */
+  GDEFCORE_Changeset * cs = NULL;
+  GDEFCORE_Value value;
+  const char * text = "a";
+  size_t len = 1;
+  memset(&value, 0, sizeof value);
+  value.size = sizeof value;
+  value.field = "group";
+  value.field_len = 5;
+  value.texts = &text;
+  value.text_lens = &len;
+  value.count = 1;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_entity_save_draft(cs, b1.data(), b1.size(), "en", 2, &value, 1));
+  /* The staged data are visible to the unfiltered preview: the control. */
+  {
+    char ** texts = NULL;
+    size_t * lens = NULL;
+    size_t count = 0;
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_entity_values(catalog_, cs, GDEFCORE_VIEW_ACTIVE, b1.data(),
+            b1.size(), "en", 2, "group", 5, &texts, &lens, &count));
+    EXPECT_EQ("a", std::string(texts[0], lens[0]));
+    gdefcore_values_free(catalog_, texts, lens, count);
+  }
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_access_can(catalog_, for_b1, "update", 6, kPost, strlen(kPost),
+          b1.c_str(), &allowed));
+  EXPECT_EQ(0, allowed);
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_access_can(catalog_, for_a1, "update", 6, kPost, strlen(kPost),
+          a1.c_str(), &allowed));
+  EXPECT_EQ(1, allowed);   /* the control: the question is not just broken */
+  gdefcore_changeset_destroy(cs);
+}
+
+TEST_F(EntryPath, TheStoredAuthorFieldDoesNotMakeAnOwner) {
+  Declare(Perm("Edit own", "update", GDEFCORE_ACCESS_OWN, kArticle));
+  Role("owners");
+  Grant("owners", "Edit own");
+  Routes();
+  Who bob = Person("owners");
+  Who eve = Person("owners");
+  std::string bobs = Make(kArticle, bob.id, {{"title", "bobs"}, {"author", bob.id}});
+  /* Someone with their own authority stores a revision whose author field
+   * names eve and makes it the one in force. */
+  Redraft(bobs, {{"author", eve.id}});
+  {
+    GDEFCORE_Changeset * cs = NULL;
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_entity_publish(cs, bobs.data(), bobs.size()));
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, NULL, 0));
+    gdefcore_changeset_destroy(cs);
+  }
+  EXPECT_EQ(eve.id, Active(bobs, "author"));
+  /* `own` is the entity's creator: bob still owns it (the control), and the
+   * name in a field makes nobody its owner. */
+  Result mine = Submit(bob, "/post/" + bobs + "/submit", bobs, {{"title", "bob again"}});
+  EXPECT_TRUE(mine.served);
+  EXPECT_EQ(1, mine.allowed);
+  EXPECT_TRUE(mine.written);
+  Result hers = Submit(eve, "/post/" + bobs + "/submit", bobs, {{"title", "eve's"}});
+  EXPECT_FALSE(hers.served);
+  EXPECT_FALSE(hers.written);
+  Result bare = Submit(eve, "/submit", bobs, {{"title", "eve's"}}, false);
+  EXPECT_EQ(0, bare.allowed);
+  EXPECT_FALSE(bare.written);
+  EXPECT_NE("eve's", Head(bobs, "title"));
+}
+
 /* ---- create is checked against the container the path names ---------------- */
 
 TEST_F(EntryPath, CreateIsCheckedAgainstTheContainerThePathNames) {

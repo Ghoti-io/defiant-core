@@ -156,6 +156,83 @@ PY
   done
 }
 
+# plantm <name> <exe> <expect> <file> <old> <new> [<file> <old> <new> ...]
+# A plant whose defect needs edits in more than one file (a variable one file
+# sets and another reads). Every anchor must match exactly once in its file;
+# every file named must differ from the original afterwards.
+plantm() {
+  name=$1 exe=$2 expect=$3
+  shift 3
+  dir="$PLANT_SCRATCH/$name"
+  cp -a "$PLANT_SCRATCH/control" "$dir"
+  python3 - "$dir" "$@" <<'PY'
+import sys
+root = sys.argv[1]
+args = sys.argv[2:]
+if len(args) == 0 or len(args) % 3 != 0:
+    sys.stderr.write("plantm: edits must come in file/old/new triples\n")
+    sys.exit(2)
+for i in range(0, len(args), 3):
+    path = root + "/" + args[i]
+    old, new = args[i + 1], args[i + 2]
+    text = open(path).read()
+    n = text.count(old)
+    if n != 1:
+        sys.stderr.write("plantm: anchor matched %d times in %s: %r\n" % (n, path, old))
+        sys.exit(3)
+    if old == new:
+        sys.stderr.write("plantm: an edit that changes nothing: %r\n" % old)
+        sys.exit(3)
+    open(path, "w").write(text.replace(old, new, 1))
+PY
+  rc=$?
+  if [ $rc -ne 0 ]; then
+    printf 'plant: %s: THE EDIT DID NOT APPLY, nothing was tested\n' "$name" >&2
+    PLANT_FAIL=1
+    return
+  fi
+  files=$(python3 - "$@" <<'PY'
+import sys
+a = sys.argv[1:]
+print(" ".join(sorted(set(a[i] for i in range(0, len(a), 3)))))
+PY
+)
+  for file in $files; do
+    if cmp -s "$PLANT_ROOT/$file" "$dir/$file"; then
+      printf 'plant: %s: %s equals the original, nothing was tested\n' "$name" "$file" >&2
+      PLANT_FAIL=1
+      return
+    fi
+    touch "$dir/$file"
+  done
+  rm -f "$dir/$PLANT_BUILD"/apps/test*
+  filter=$(printf '%s' "$expect" | tr ' ' ':')
+  log="$dir.log"
+  if plant_run "$dir" "$exe" "$filter" "$log"; then
+    printf 'plant: %s: %s PASSED with the defect planted\n' "$name" "$expect" >&2
+    PLANT_FAIL=1
+    return
+  fi
+  if ! grep -Eq '\[==========\] .* ran\.' "$log"; then
+    printf 'plant: %s: the run failed without finishing (a build error or a crash), which is not a test catching a defect - read %s\n' \
+      "$name" "$log" >&2
+    tail -30 "$log" >&2
+    PLANT_FAIL=1
+    return
+  fi
+  for t in $expect; do
+    if ! grep -Eq "\[  FAILED  \] $t( |\$)" "$log"; then
+      printf 'plant: %s: the run failed, but %s was not among the failures - read %s\n' \
+        "$name" "$t" "$log" >&2
+      grep -E '\[  FAILED  \]' "$log" >&2
+      PLANT_FAIL=1
+      return
+    fi
+    printf 'plant: %s: caught by %s\n' "$name" "$t"
+    grep -E "\[  FAILED  \] $t( |\$)" "$log" | head -1 | sed 's/^/plant:   /'
+  done
+}
+
 plant_finish() {
   if [ "$PLANT_FAIL" -ne 0 ]; then
     exit 1
