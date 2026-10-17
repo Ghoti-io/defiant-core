@@ -17,6 +17,13 @@ projection whose type is `i` and whose entity argument is the public id.
 Reading by the public id uses that index. The document's `entity` field is the
 public id, not the key.
 
+No function in this document checks a permission (SPEC decision 7): each runs
+at the trust of its caller, and the path in front of it asks `gdefcore_access_can()`
+(access.md). The one exception is the template check that apply still makes for a
+changeset that has a request, which story A8 retires. `gdefcore_entity_values()`
+and `gdefcore_entity_revision_values()` are the unfiltered previews; a principal
+reads through `gdefcore_access_read()` and `gdefcore_access_revision_values()`.
+
 ## The entity record
 
 An entity is a small record plus append-only revisions (SPEC decisions 9-11).

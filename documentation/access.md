@@ -141,6 +141,29 @@ nothing is allowed, and the request carries `defiant.condition.failed`. Read,
 list, permits and the render key follow this; the render key names the acting
 principal when it is not the principal.
 
+## The actions
+
+A permission names any action a module likes. These are the ones the kernel and
+its entity paths ask about, with a constant each (`access.h`) so a path and the
+grant it needs are spelled once:
+
+| Constant | Action | What it lets a path do |
+| --- | --- | --- |
+| `GDEFCORE_ACTION_CREATE` | `create` | Add an entity. Asked of **the container the path names**, or at type level; see below. |
+| `GDEFCORE_ACTION_READ` | `read` | See an entity as readers do. Needs the published flag. |
+| `GDEFCORE_ACTION_UPDATE` | `update` | Save a draft. Decided on the entity as stored, before the change. |
+| `GDEFCORE_ACTION_PUBLISH` | `publish` | Set the published flag and make the head active; and `unpublish`, which is the same permission. |
+| `GDEFCORE_ACTION_DELETE` | `delete` | Clear the entity: unpublished, no active revision, every revision kept. |
+| `GDEFCORE_ACTION_REVISIONS_READ` | `revisions.read` | View history and the head draft, field by field. |
+| `GDEFCORE_ACTION_REVISIONS_REVERT` | `revisions.revert` | Append a copy of an earlier revision and make it active. |
+| `GDEFCORE_ACTION_REVISIONS_ACTIVATE` | `revisions.activate` | Make an existing revision the active one. |
+
+The revision actions are asked of the entity's **active state**: the permission
+`revisions.read` is decided on the entity as stored (its active revision and its
+creator), not on the revision being looked at, and it does not need the
+published flag, because a revision view shows drafts that readers do not see.
+A grant of any of them is rated at least an edit.
+
 ## The matrix
 
 `gdefcore_access_matrix()` lists every effective grant: each role's grants
@@ -161,16 +184,20 @@ keeps showing it.
 
 ### The risk of a grant
 
-`gdefcore_access_grant_risk()` is a pure function of the action, whether the
-permission covers one field, the condition, and whether the grant reaches the
+`gdefcore_access_grant_risk_on()` is a pure function of the action, the field
+the permission covers (if any), the condition, and whether the grant reaches the
 anonymous state (the role `anonymous`, or a module grant whose condition does
 not read the principal). The action is read in its dot-separated parts: an
 action with a strong word (`delete`, `remove`, `erase`, `publish`, `unpublish`,
-`admin`, `grant`, `revert`, `restore`, `install`, `enable`, `disable`) is
-strong; else one with an edit word (`update`, `edit`, `create`, `save`,
-`draft`, `write`) is an edit; else one with a read word (`read`, `view`,
-`list`, `search`, `count`, `export`) is a read; an action with none of them is
-strong, so a name nobody recognises never lowers a rating.
+`admin`, `grant`, `revert`, `restore`, `activate`, `install`, `enable`,
+`disable`) is strong; else one with an edit word (`update`, `edit`, `create`,
+`save`, `draft`, `write`) is an edit; else one with a read word (`read`,
+`view`, `list`, `search`, `count`, `export`) is a read; an action with none of
+them is strong, so a name nobody recognises never lowers a rating. A part
+`revisions` makes the action **at least an edit**, whatever its verb says:
+`revisions.read` has the word `read`, but it shows drafts that nobody has
+published, so it is not rated as the read it looks like. `revisions.revert` and
+`revisions.activate` are strong already.
 
 - **High** when the condition bounds nothing (it names no type and reads
   nothing of the entity: `true`, a condition about the time or the principal
@@ -182,6 +209,24 @@ strong, so a name nobody recognises never lowers a rating.
 - **Medium** otherwise: a grant of one field, an edit that nothing narrows, a
   read that nothing narrows.
 
+Then one more rule, which looks at what the holder could do with the grant
+(D15): a grant whose condition **tests a field that the same grant lets the
+holder change** is rated one step higher (low to medium, medium to high). Take
+`update` where `(= field.group "a")`: its holder can set `group` on a post they
+may edit, and move it into the group that lets them edit it, or move one of
+theirs out of reach of anyone else's grant; the grant can widen itself. The
+actions that can change what a condition reads are `update`, `edit`, `save`,
+`draft`, `write`, `revert`, `restore` and `activate` (so also
+`revisions.revert` and `revisions.activate`). A grant of a single field is
+asked about that field only; an entity-wide grant is asked about every field
+its condition names. A `create` is not one of them: its condition is evaluated
+on the container the path names, and the holder does not change that. `own`
+tests the creator, which no one can change, so it is never raised.
+`gdefcore_access_grant_risk()` is the same function without the field and so
+without this rule; the matrix and the enable confirmation use the `_on` form,
+and the matrix says it in words after the condition: "the holder can change
+the field that decides who may edit, so this is rated one step higher".
+
 The story that defined this said "no type constraint" for the first high case.
 A grant is always for one type, and a condition that reads the entity's data
 bounds it, so a condition that names no type but reads a field is not high on
@@ -191,9 +236,10 @@ that ground.
 
 `gdefcore_access_can(catalog, request, permission, type, entity_id, &allowed)`
 is the single answer to "may this principal do this to that". The route check
-(`gdefcore_access_route_check()`), the tab list (`gdefcore_routes_tabs_visible()`)
-and the template editor (`gdefcore_template_authorize()`) all ask it, so a
-button, the page behind it and the write it guards cannot disagree. It is the
+(`gdefcore_access_route_check()`), the tab list (`gdefcore_routes_tabs_visible()`),
+the signed-form path (`gdefcore_form_authorize()`) and the template editor
+(`gdefcore_template_authorize()`) all ask it, so a button, the page behind it
+and the write it guards cannot disagree. It is the
 one evaluator: roles, then the grants of enabled modules, with conditions
 decided as for read, list and permits, and bounded by an acting principal's
 ceiling.
@@ -252,13 +298,85 @@ ceiling.
   caller's to log. They never allow and are not remembered. Bad arguments are
   `GDEFCORE_ERR_INVALID`.
 
-Protection is on the path, not in the function (SPEC decision 7): no library
-function that writes checks a permission, and `gdefcore_changeset_enforce_access()`
-is gone. The route check, the tab list, the signed-form path and the template
-editor ask `can()` before they hand control to code; the equivalence gate
-(`Can.TheDecisionIsTheOperation`) compares `can()` with whether the path is served
-and the entity changes. The one check left inside a library function is the
-template check in `gdefcore_changeset_apply()`, which story A8 moves to the path.
+## Protection is on the path
+
+SPEC decision 7: **a library function runs at the trust of its caller.**
+`gdefcore_entity_save()`, `_save_draft()`, `_publish()`, `_unpublish()`,
+`_activate()`, `gdefcore_changeset_revert()`, `gdefcore_form_submit()` and
+`gdefcore_form_publish()` check no permission, there is no second, guarded copy
+of any of them, and `gdefcore_changeset_enforce_access()` and the flag behind it
+are gone. A system job, an importer and a handler call them with the authority
+they have. What stands in front of them is the **path**: a route that names the
+permission it needs and the capture of the entity it is about, dispatched
+through `gdefcore_access_route_check()`; the menu drawn by
+`gdefcore_routes_tabs_visible()`; a button. The handler behind the route calls
+the entity operation, and is reached only when the decision was a yes. The
+equivalence gate (`Can.TheDecisionIsTheOperation`) compares `can()` with whether
+the *path* is served and the entity changes, for every action in the vocabulary,
+over twenty kinds of principal (an agent's ceiling and a module's grant among
+them), with both outcomes counted.
+
+One exception remains, and is not this rule's to fix: `gdefcore_changeset_apply()`
+still calls `gdefcore_template_authorize()` for a changeset that has a request
+(templates.md). It is a permission check inside a library function that story A8
+retires with the template veto.
+
+**A condition is evaluated only on the stored entity the path names, never on
+submitted data (SPEC decision 8).** The evaluator has no parameter for values and
+reads the active revision with no changeset (`gdefcore_entity_values()` with a
+NULL changeset), so a body cannot enter it; what the paths must get right is
+*which* entity is asked about and *when*:
+
+- **The target comes from the token.** A signed form binds its target and its
+  base revision with the session and the principal. `gdefcore_form_authorize()`
+  asks `can()` about the token's target; the id the request itself names (a route
+  capture, a hidden field) is only checked against it, and a request whose id is
+  not the token's target is refused, not decided on either one.
+  `gdefcore_form_submit_authorized()` is the path for an update: that question,
+  then `gdefcore_form_submit()`.
+- **Before the change, on what is stored.** The question is asked first, before
+  anything is staged, of the entity's active revision: `update` over
+  `(= field.group "a")` holds for a post that is in group a now, whatever the
+  body says the group will be; a post can be moved out of the group by someone who
+  may edit it, and cannot be moved in by someone who may not.
+- **Never the head.** A newer draft beside the active revision is not what is
+  asked about (a post that is group a as published and group b as drafted is still
+  group a).
+- **The actor is the system's.** The creator of a revision is the principal of the
+  request that wrote it, set by `gdefcore_changeset_prepare()`; `own` is the
+  entity's creator, recorded at its first revision. No field of a form can name
+  either, and a field called `author` is only a field.
+
+**Create has no stored entity,** so no condition is evaluated on what is about to
+be written. `gdefcore_access_can_create(catalog, request, container, ..., type,
+fields...)` is checked against **the container the path names**: a route such as
+`/group/:id/new` captures the container's id and its handler passes that capture
+(never a value from the form), and the question is `create` of the container's
+type, on the container as stored. With no container it is a type-level grant of
+`create` on the type. Then, field by field, `gdefcore_access_can_field()`: a
+field that no `create` permission limits is free, and one that a permission
+declared for that field limits needs a grant that holds, with no stored entity to
+look at. (Group is only an example; the kernel has no group type and no group
+permission. The tests use a container type of their own.) An `update` permission
+declared for one field is not enforced field by field by the signed-form path;
+`gdefcore_access_can_field()` answers the question for a path that wants it.
+
+## Revision views
+
+`gdefcore_access_revision_values()` is the read behind a revision view. It asks
+`revisions.read` of the entity as stored, then the field-read grants of the field,
+as a live read applies them, and returns one field of one recorded revision. It
+does not need the published flag. Not permitted, an entity that is not there, a
+field the type lacks and a sequence that is no revision of the entity are one
+answer (`GDEFCORE_ERR_INVALID`). A field the principal may not read, and a field
+with no value in that revision, are `GDEFCORE_REVISION_ABSENT` with no text, and
+cannot be told apart. A **personal** field is never shown as the ciphertext it is
+stored as: the answer is `GDEFCORE_REVISION_PERSONAL` and no text.
+`gdefcore_subject_revision_marker()` turns that into `GDEFCORE_REVISION_ERASED`
+and the text `[erased]` when the subject ledger names the person the value belongs
+to (the caller names them, as for `gdefcore_subject_read()`); a revision view
+never decrypts. `gdefcore_entity_revision_values()` is the unfiltered preview
+that it is built on.
 
 ## The render key
 

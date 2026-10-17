@@ -236,7 +236,9 @@ request's. The permission is asked of `gdefcore_access_can()` about the
 template entity being written, for the kind it will be and the kind it was, so
 the editor's answer is the route's and the tab's: roles, the grants of enabled
 modules, conditions, and an acting principal's ceiling all count. (The
-decision hook below is still consulted after it, until it is retired.) A changeset with no request is the operator's, such as the kit
+decision hook below is still consulted after it, until it is retired. This is
+the one permission check left inside a library function: SPEC decision 7 puts
+protection on the path, and story A8 moves this one there with the veto.) A changeset with no request is the operator's, such as the kit
 install or a tool run with the changeset API, and is not asked. A refusal is
 `GDEFCORE_ERR_INVALID`, the code a principal gets for an id it may not see,
 and writes nothing. It is checked before the confirmation, the conflict check

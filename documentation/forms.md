@@ -33,6 +33,29 @@ refused. A missing token is refused. None of those write.
 Signing does not write the entity. Re-signing checks the token and the
 constraints and returns a new token. It does not write either.
 
+## The signed-form path
+
+Signing, re-signing and submitting are library functions, and like every library
+function they ask nobody (access.md, "Protection is on the path"). The entry
+point a route's handler calls is `gdefcore_form_submit_authorized()`: it opens the
+token, asks `gdefcore_access_can()` for `update` about **the token's target**,
+before anything is staged, and only then submits. `gdefcore_form_authorize()` asks
+the same question for any action without writing, for a button or a preview.
+
+- The entity asked about is the token's target, which the token binds with the
+  session, the principal and the base revision. The optional `claimed` argument is
+  the id the request itself names (a route capture, a hidden field). If it is not
+  the token's target the answer is no: the request is not about one entity, and
+  neither the URL's entity nor the token's is trusted for it.
+- The condition is evaluated on the entity as stored, its active revision, not on
+  the values in the token and not on a newer draft. A body that sets `group` to
+  `a` for a group b post, or an `author` field to the submitter's id, changes what
+  would be written and not what is asked.
+- A refusal is `GDEFCORE_ERR_INVALID` with `out_allowed` 0, the same whichever
+  way the request was wrong, and nothing is staged or written.
+- A token that does not verify is the error `gdefcore_form_check()` gives, never a
+  yes.
+
 ## Personal fields
 
 A personal value is never stored as the caller's text. The plain route,
@@ -69,7 +92,8 @@ refused at submit rather than sealed a second time.
 
 ## Draft and publish
 
-`gdefcore_form_submit` appends a revision. It becomes the head, and the
+`gdefcore_form_submit` appends a revision (it checks no permission; the path in
+front of it does, above). It becomes the head, and the
 active revision and the published flag are left as they were (an entity's first
 revision is the exception: it becomes active, unpublished). A second submit
 whose base revision is no longer current is a conflict and writes nothing.
