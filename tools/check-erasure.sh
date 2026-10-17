@@ -82,7 +82,8 @@ for t in Erasure.Scanner Erasure.Channels Erasure.Sweep Erasure.SnapshotCarriesN
     Erasure.EntitySavePersonal Erasure.RevertKeepsCiphertext \
     Erasure.ParsePersonalPatch Erasure.PlaintextHistoryIsNotRestored \
     Erasure.FormSubjectRoute Erasure.FormUnknownSubject \
-    Erasure.FormSubjectBinding Erasure.PlaintextRevisionIsNotActivated; do
+    Erasure.FormSubjectBinding Erasure.PlaintextRevisionIsNotActivated \
+    Erasure.RevisionViewsAndAnActivatedOldRevisionOfAnErasedSubject; do
   if ! run_test "$SCRATCH/control" "$t"; then
     printf 'check-erasure: %s failed on the real tree\n' "$t" >&2
     tail -30 "$SCRATCH/control.run" >&2
@@ -355,6 +356,25 @@ plant seal-takes-sealed src/subject/subject.c Erasure.FormSubjectRoute \
 #     plaintext for a personal field.
 plant parse-takes-personal src/entity/entity.c Erasure.ParsePersonalPatch \
   "$ENTITY_GATE_OLD" "$ENTITY_GATE_NEW"
+
+# 12. A revision view shows a personal field as it is stored, the ciphertext.
+plant revision-view-shows-ciphertext src/access/access.c \
+  Erasure.RevisionViewsAndAnActivatedOldRevisionOfAnErasedSubject \
+  '  if (field_is_personal(catalog, type_name, type_len, field, field_len)) {' \
+  '  if (0 && field_is_personal(catalog, type_name, type_len, field, field_len)) {'
+
+# 13. The erased marker is never shown: a view of an erased person's history
+#     says "a personal value is here" as it does for everyone.
+plant erased-marker-never-shown src/subject/subject.c \
+  Erasure.RevisionViewsAndAnActivatedOldRevisionOfAnErasedSubject \
+  '  if (!erased) {
+    return GDEFCORE_OK;
+  }
+  /* The key is gone: what the revision holds decrypts to nothing, and says' \
+  '  if (1 || !erased) {
+    return GDEFCORE_OK;
+  }
+  /* The key is gone: what the revision holds decrypts to nothing, and says'
 
 if [ "$fail" -ne 0 ]; then
   exit 1

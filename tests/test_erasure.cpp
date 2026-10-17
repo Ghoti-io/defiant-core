@@ -570,14 +570,16 @@ class Erasure : public ::testing::Test {
     for (i = 0; i < 2; i++) {
       for (j = 0; j < 2; j++) {
         int view;
-        for (view = 0; view < 2; view++) {
+        for (view = 0; view < 3; view++) {
           char ** texts = NULL;
           size_t * lens = NULL;
           size_t n = 0;
           Bytes joined;
           size_t t;
           if (gdefcore_entity_values(catalog_, NULL,
-                  view == 0 ? GDEFCORE_VIEW_PUBLISHED : GDEFCORE_VIEW_DRAFT,
+                  view == 0   ? GDEFCORE_VIEW_PUBLISHED
+                  : view == 1 ? GDEFCORE_VIEW_DRAFT
+                              : GDEFCORE_VIEW_ACTIVE,
                   ids[i], strlen(ids[i]), langs[j], 2, kField, strlen(kField),
                   &texts, &lens, &n) == GDEFCORE_OK) {
             for (t = 0; t < n; t++) {
@@ -592,14 +594,16 @@ class Erasure : public ::testing::Test {
     if (ef_[0] != '\0') {
       for (j = 0; j < 2; j++) {
         int view;
-        for (view = 0; view < 2; view++) {
+        for (view = 0; view < 3; view++) {
           char ** texts = NULL;
           size_t * lens = NULL;
           size_t n = 0;
           Bytes joined;
           size_t t;
           if (gdefcore_entity_values(catalog_, NULL,
-                  view == 0 ? GDEFCORE_VIEW_PUBLISHED : GDEFCORE_VIEW_DRAFT,
+                  view == 0   ? GDEFCORE_VIEW_PUBLISHED
+                  : view == 1 ? GDEFCORE_VIEW_DRAFT
+                              : GDEFCORE_VIEW_ACTIVE,
                   ef_, strlen(ef_), langs[j], 2, kField, strlen(kField), &texts,
                   &lens, &n) == GDEFCORE_OK) {
             for (t = 0; t < n; t++) {
@@ -619,6 +623,32 @@ class Erasure : public ::testing::Test {
           AddText(out, "output: read of a (form route) " + stage, B(text, tn));
         }
         gdefcore_subject_free(subjects_, text);
+      }
+    }
+    /* The revision views: every recorded revision of every entity, in both
+     * languages, as the logged-in administrator is shown it, with the erased
+     * marker where the person is erased. A view must not hold the value, the
+     * ciphertext or anything made from either. */
+    {
+      const char * viewed[3] = {ea_, eb_, ef_};
+      const char * owners[3] = {a_, b_, a_};
+      size_t v;
+      for (v = 0; v < 3; v++) {
+        size_t count = 0;
+        size_t seq;
+        if (viewed[v][0] == '\0' ||
+            gdefcore_entity_revision_count(catalog_, viewed[v], strlen(viewed[v]),
+                &count) != GDEFCORE_OK) {
+          continue;
+        }
+        for (seq = 1; seq <= count; seq++) {
+          for (j = 0; j < 2; j++) {
+            AddText(out,
+                std::string("output: revision view of ") + (v == 1 ? "b " : "a ") +
+                    stage,
+                Bytes(RevisionView(viewed[v], seq, langs[j], owners[v])));
+          }
+        }
       }
     }
     for (i = 0; i < 2; i++) {
@@ -644,6 +674,67 @@ class Erasure : public ::testing::Test {
     }
     AddText(out, "rendered page / " + stage, Page("/"));
     AddText(out, "rendered page welcome " + stage, Page("welcome"));
+  }
+
+  /* Let the logged-in admin view the revisions of a person. */
+  void GrantHistory() {
+    GDEFCORE_Permission permission;
+    memset(&permission, 0, sizeof permission);
+    permission.size = sizeof permission;
+    permission.label = "View person history";
+    permission.label_len = strlen(permission.label);
+    permission.module_name = "site";
+    permission.module_name_len = 4;
+    permission.action = GDEFCORE_ACTION_REVISIONS_READ;
+    permission.action_len = strlen(GDEFCORE_ACTION_REVISIONS_READ);
+    permission.condition = GDEFCORE_ACCESS_ANY;
+    permission.type_name = "site.person";
+    permission.type_name_len = 11;
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_access_declare(catalog_, &permission));
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_access_grant(catalog_, "admin", 5, permission.label,
+            permission.label_len, "core.role", 9));
+  }
+
+  /* What a revision view shows of the personal field of one revision, for the
+   * person named: "personal", "erased:[erased]", "absent", "shown:<text>" or
+   * "<denied>". The subject store only ever turns "personal" into "erased". */
+  std::string RevisionView(const char * entity, uint64_t seq, const char * lang,
+      const char * subject) {
+    char ** texts = NULL;
+    size_t * lens = NULL;
+    size_t n = 0;
+    int status = 0;
+    std::string out;
+    GDEFCORE_Result rc = gdefcore_access_revision_values(catalog_, request_, entity,
+        strlen(entity), seq, lang, 2, kField, strlen(kField), &status, &texts,
+        &lens, &n);
+    if (rc != GDEFCORE_OK) {
+      return "<denied>";
+    }
+    if (status == GDEFCORE_REVISION_PERSONAL && subject != NULL) {
+      char * text = NULL;
+      size_t tn = 0;
+      int shown = 0;
+      EXPECT_EQ(GDEFCORE_OK,
+          gdefcore_subject_revision_marker(subjects_, subject, strlen(subject),
+              status, &shown, &text, &tn));
+      status = shown;
+      if (text != NULL) {
+        out = ":" + std::string(text, tn);
+      }
+      gdefcore_subject_free(subjects_, text);
+    }
+    for (size_t t = 0; t < n; t++) {
+      out += ":" + std::string(texts[t], lens[t]);
+    }
+    gdefcore_values_free(catalog_, texts, lens, n);
+    return std::string(status == GDEFCORE_REVISION_SHOWN     ? "shown"
+                       : status == GDEFCORE_REVISION_ABSENT   ? "absent"
+                       : status == GDEFCORE_REVISION_PERSONAL ? "personal"
+                       : status == GDEFCORE_REVISION_ERASED   ? "erased"
+                                                              : "?") +
+           out;
   }
 
   /* The forms of a subject's data that must be gone after erasure. */
@@ -740,6 +831,7 @@ class Erasure : public ::testing::Test {
     SaveValue(b_, eb_, "en", kSurvivor);
     SaveValue(b_, eb_, "fr", kSurvivor);
     Login();
+    GrantHistory();
     PublishPost();
   }
 
@@ -1537,6 +1629,83 @@ TEST_F(Erasure, PlaintextRevisionIsNotActivated) {
 /* A patch is untrusted input. Parsed under the same rule: its personal value
  * is accepted only when it is sealed, and a patch that carries plaintext for
  * a personal field is refused. */
+/* A revision view is an output like any other (story A5b task 8). Before the
+ * person is erased it says a personal value is there and shows none of it; after
+ * it says [erased]; the survivor's is not touched. Making an old revision of the
+ * erased person active puts its ciphertext in front of readers and nothing
+ * else: no output carries the value, the ciphertext, or a form of either. */
+TEST_F(Erasure, RevisionViewsAndAnActivatedOldRevisionOfAnErasedSubject) {
+  std::vector<Artifact> pre;
+  std::vector<Artifact> post;
+  std::vector<Artifact> activated;
+  std::vector<std::string> values;
+  std::vector<std::string> leaks;
+  Populate();
+  if (HasFatalFailure()) {
+    return;
+  }
+  PopulateForm();
+  if (HasFatalFailure()) {
+    return;
+  }
+  values.push_back(kCanary);
+  values.push_back(kCanaryLater);
+  values.push_back(kCanaryFr);
+  values.push_back(kCanaryForm);
+  Needles(a_, values, WrappedKey(a_), &needles_);
+  ASSERT_FALSE(HasFatalFailure());
+
+  /* CONTROLS, before erasure. The view of the first revision says a personal
+   * value is there; it does not show it, and it is not the survivor's. */
+  ASSERT_EQ(3u, Revisions(ea_));
+  EXPECT_EQ("personal", RevisionView(ea_, 1, "en", a_));
+  EXPECT_EQ("personal", RevisionView(ea_, 3, "fr", a_));
+  EXPECT_EQ("personal", RevisionView(eb_, 1, "en", b_));
+  EXPECT_EQ("<denied>", RevisionView(ea_, 9, "en", a_));     /* no such revision */
+  Collect(&pre, "before");
+  ASSERT_FALSE(HasFatalFailure());
+  EXPECT_TRUE(FoundIn(pre, Bytes("personal"), "output: revision view of a"));
+  EXPECT_FALSE(FoundIn(pre, Bytes("erased"), "output: revision view of a"));
+  EXPECT_FALSE(FoundIn(pre, Bytes("s1:"), "output: revision view of a"))
+      << "a revision view showed the stored ciphertext";
+  EXPECT_TRUE(FoundIn(pre, Bytes("s1:"), "entity values"));
+
+  Erase(a_);
+
+  /* After: the same view is the marker, for a, and only for a. */
+  EXPECT_EQ("erased:[erased]", RevisionView(ea_, 1, "en", a_));
+  EXPECT_EQ("erased:[erased]", RevisionView(ef_, 1, "en", a_));
+  EXPECT_EQ("personal", RevisionView(eb_, 1, "en", b_));
+  EXPECT_EQ("personal", RevisionView(ea_, 1, "en", NULL));   /* no subject named */
+  Collect(&post, "after");
+  ASSERT_FALSE(HasFatalFailure());
+  EXPECT_TRUE(FoundIn(post, Bytes("erased:[erased]"), "output: revision view of a"));
+  EXPECT_TRUE(FoundIn(post, Bytes("personal"), "output: revision view of b"));
+  EXPECT_FALSE(FoundIn(post, Bytes("s1:"), "output: revision view"));
+  leaks = Sweep(post, needles_);
+  EXPECT_TRUE(leaks.empty()) << Joined(leaks);
+
+  /* Make the first revision (the first canary's ciphertext) active again. */
+  {
+    GDEFCORE_Changeset * cs = NULL;
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_entity_activate(cs, ea_, strlen(ea_), 1));
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, NULL, 0));
+    gdefcore_changeset_destroy(cs);
+  }
+  EXPECT_EQ(0u, Stored(ea_, GDEFCORE_VIEW_ACTIVE).compare(0, 3, "s1:"));
+  EXPECT_EQ(GDEFCORE_SUBJECT_ERASED, ReadAs(a_, ea_));
+  EXPECT_EQ("erased:[erased]", RevisionView(ea_, 1, "en", a_));
+  Collect(&activated, "activated");
+  ASSERT_FALSE(HasFatalFailure());
+  leaks = Sweep(activated, needles_);
+  EXPECT_TRUE(leaks.empty()) << "an activated old revision of an erased subject "
+                                "reached an output:" << Joined(leaks);
+  /* The sweep still sees the survivor: it did not go blind. */
+  EXPECT_FALSE(FoundIn(activated, Bytes("s1:"), "output: revision view"));
+  EXPECT_TRUE(FoundIn(activated, kSurvivor, "output: export of b"));
+}
+
 TEST_F(Erasure, ParsePersonalPatch) {
   GDEFCORE_Changeset * cs = NULL;
   GDEFCORE_Patch * files = NULL;

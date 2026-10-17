@@ -67,3 +67,22 @@ erased.
 Export is one JSON document of the plaintext values, returned to the
 caller. It is not written into the tenant store. After erasure the
 document says erased and does not contain the plaintext.
+
+## Revision views
+
+A revision view (`gdefcore_access_revision_values()`, access.md) is an output
+too. It never shows a personal value, whether or not the person is erased: the
+answer for a personal field is `GDEFCORE_REVISION_PERSONAL` and no text, and the
+stored ciphertext is never returned. `gdefcore_subject_revision_marker()` turns
+that answer into `GDEFCORE_REVISION_ERASED` and the eight bytes `[erased]` when
+the ledger names the person the caller says the value belongs to, so the history
+of an erased person says so in the same word a read does. It does not decrypt, and
+it asks no principal; the permission and the field filter were the access
+layer's.
+
+Making an old revision of an erased person active (`gdefcore_entity_activate()`)
+puts its ciphertext in front of readers and nothing else: the key is gone, so it
+decrypts to nothing, and a revision that holds a personal value that is not
+sealed is refused (entities.md).
+`Erasure.RevisionViewsAndAnActivatedOldRevisionOfAnErasedSubject` sweeps every
+output for the value, its hashes and the key after both.
