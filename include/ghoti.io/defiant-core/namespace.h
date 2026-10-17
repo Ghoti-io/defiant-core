@@ -207,8 +207,6 @@
   GHOTIIO_DEFCORE(gdefcore_changeset_serialize)
 #define gdefcore_entity_revision_values \
   GHOTIIO_DEFCORE(gdefcore_entity_revision_values)
-#define gdefcore_changeset_enforce_access \
-  GHOTIIO_DEFCORE(gdefcore_changeset_enforce_access)
 #define gdefcore_changeset_set_request                                         \
   GHOTIIO_DEFCORE(gdefcore_changeset_set_request)
 #define gdefcore_changeset_stage_module                                        \

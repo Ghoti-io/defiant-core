@@ -4591,68 +4591,6 @@ void gdefcore_changeset_set_request(GDEFCORE_Changeset * changeset,
   changeset->request = request;
 }
 
-void gdefcore_changeset_enforce_access(GDEFCORE_Changeset * changeset,
-    int enforce) {
-  if (changeset == NULL) {
-    return;
-  }
-  changeset->enforce_access = enforce != 0;
-}
-
-static const char kAccessRefused[] = "That edit is not allowed.";
-
-/*
- * With access enforced, each entity the changeset writes is asked of
- * gdefcore_access_can(): a save or a draft is an `update`, a publish a
- * `publish`, a clear a `delete`. Anything but a yes refuses the changeset.
- * Templates have their own permission and are left to it.
- */
-static GDEFCORE_Result authorize_writes(GDEFCORE_Changeset * changeset) {
-  size_t touched = gdefcore_changeset_touched_count(changeset);
-  size_t i;
-  if (changeset->request == NULL) {
-    (void)gdefcore_changeset_set_refusal(changeset, kAccessRefused,
-        sizeof kAccessRefused - 1);
-    return GDEFCORE_ERR_INVALID;
-  }
-  for (i = 0; i < touched; i++) {
-    const char * id = NULL;
-    size_t id_len = 0;
-    const char * type = NULL;
-    size_t type_len = 0;
-    int op = 0;
-    char canon[GDEFCORE_PUBLIC_ID_LEN + 1];
-    const char * action;
-    int allowed = 0;
-    GDEFCORE_Result rc;
-    if (gdefcore_changeset_touched_at(changeset, i, &id, &id_len, &type,
-            &type_len, &op) != GDEFCORE_OK ||
-        type == NULL) {
-      continue;
-    }
-    if (type_len == strlen(GDEFCORE_TEMPLATE_TYPE) &&
-        memcmp(type, GDEFCORE_TEMPLATE_TYPE, type_len) == 0) {
-      continue;
-    }
-    action = op == GDEFCORE_TOUCH_PUBLISH || op == GDEFCORE_TOUCH_UNPUBLISH
-                 ? "publish"
-             : op == GDEFCORE_TOUCH_CLEAR ? "delete"
-                                          : "update";
-    if (gdefcore_id_canonical(id, id_len, canon) != GDEFCORE_OK) {
-      rc = GDEFCORE_ERR_INVALID;
-    } else {
-      rc = gdefcore_access_can(changeset->catalog, changeset->request, action,
-          strlen(action), type, type_len, canon, &allowed);
-    }
-    if (rc != GDEFCORE_OK || !allowed) {
-      (void)gdefcore_changeset_set_refusal(changeset, kAccessRefused,
-          sizeof kAccessRefused - 1);
-      return rc != GDEFCORE_OK ? rc : GDEFCORE_ERR_INVALID;
-    }
-  }
-  return GDEFCORE_OK;
-}
-
 GDEFCORE_Result gdefcore_changeset_stage_module(GDEFCORE_Changeset * changeset,
     const char * name, size_t name_len, int enable) {
   GDEFCORE_Op * op;
@@ -4771,12 +4709,6 @@ GDEFCORE_Result gdefcore_changeset_apply(GDEFCORE_Changeset * changeset,
    */
   if (changeset->request != NULL) {
     rc = gdefcore_template_authorize(changeset, changeset->request);
-    if (rc != GDEFCORE_OK) {
-      return rc;
-    }
-  }
-  if (changeset->enforce_access) {
-    rc = authorize_writes(changeset);
     if (rc != GDEFCORE_OK) {
       return rc;
     }

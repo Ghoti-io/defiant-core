@@ -116,7 +116,6 @@ struct GDEFCORE_Changeset {
   GDEFCORE_Text * lines;
   size_t nlines;
   int applied;
-  int enforce_access;
   GDEFCORE_Request * request;
   int accept_sealed;
 };

@@ -640,25 +640,6 @@ GDEFCORE_API void gdefcore_changeset_set_request(GDEFCORE_Changeset * changeset,
     GDEFCORE_Request * request);
 
 /**
- * @brief Make apply ask whether the changeset's request may do what it writes.
- *
- * Off by default, and then a changeset writes whatever it stages, as it
- * always has. On, apply asks gdefcore_access_can() for each entity the
- * changeset touches, with the request set by gdefcore_changeset_set_request():
- * a save or a draft is the permission `update`, a publish is `publish`, and a
- * clear (a revert to nothing) is `delete`, each on the entity's type. One
- * that is not allowed refuses the whole changeset, writes nothing, and sets
- * the refusal; so does asking for this with no request. A new entity has no
- * actor yet, so an `own` grant does not allow its first save. Templates are
- * left to their own permission (gdefcore_template_authorize()).
- *
- * @param changeset The changeset. NULL is ignored.
- * @param enforce Non-zero to turn it on, zero to turn it off.
- */
-GDEFCORE_API void gdefcore_changeset_enforce_access(
-    GDEFCORE_Changeset * changeset, int enforce);
-
-/**
  * @brief Stage enabling or disabling a module. Apply commits it.
  *
  * The operation is high risk. @p name is lowercase letters, digits and

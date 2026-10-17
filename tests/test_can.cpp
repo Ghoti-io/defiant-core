@@ -90,6 +90,121 @@ void PageWithTabs(const GDEFCORE_Route_Call * call) {
   gdefcore_request_set_resolution(call->request, out.data(), out.size());
 }
 
+/*
+ * The entry paths. Protection is on the path and not in the function (SPEC
+ * decision 7): a route names a permission and the capture of the entity it is
+ * about, dispatch asks the decision, and only a handler that was let through
+ * calls the entity operation, which asks nothing. Each handler below is the
+ * smallest real one: it performs the operation as the request's principal
+ * and says what happened.
+ */
+struct PathRun {
+  GDEFCORE_Catalog * catalog = NULL;
+  int ran = 0;                           /* a handler was entered */
+  GDEFCORE_Result rc = GDEFCORE_ERR_INVALID;  /* what its operation returned */
+  int created = 0;                       /* a create handler made an entity */
+};
+PathRun g_run;
+
+GDEFCORE_Result Apply(GDEFCORE_Changeset * cs, GDEFCORE_Result staged,
+    const char * confirmation = NULL) {
+  GDEFCORE_Result rc = staged;
+  if (rc == GDEFCORE_OK) {
+    rc = gdefcore_changeset_apply(cs, confirmation,
+        confirmation == NULL ? 0 : strlen(confirmation));
+  }
+  gdefcore_changeset_destroy(cs);
+  return rc;
+}
+
+/** One handler for every operation; the route's machine name says which. */
+void DoOperation(const GDEFCORE_Route_Call * call) {
+  const char * idp = NULL;
+  size_t idn = 0;
+  size_t pn = 0;
+  const char * principal = gdefcore_request_principal(call->request, &pn);
+  std::string machine(call->machine, call->machine_len);
+  GDEFCORE_Changeset * cs = NULL;
+  GDEFCORE_Value value;
+  const char * text = "changed";
+  size_t len = 7;
+  g_run.ran = 1;
+  g_run.rc = GDEFCORE_ERR_INVALID;
+  if (!gdefcore_route_call_capture(call, "id", 2, &idp, &idn)) {
+    return;
+  }
+  std::string id(idp, idn);
+  memset(&value, 0, sizeof value);
+  value.size = sizeof value;
+  value.field = "title";
+  value.field_len = 5;
+  value.texts = &text;
+  value.text_lens = &len;
+  value.count = 1;
+  GDEFCORE_Catalog * catalog = g_run.catalog;
+  if (machine == "post.read") {
+    char ** texts = NULL;
+    size_t * lens = NULL;
+    size_t n = 0;
+    g_run.rc = gdefcore_access_read(catalog, call->request, id.data(), id.size(),
+        "en", 2, "title", 5, &texts, &lens, &n);
+    gdefcore_values_free(catalog, texts, lens, n);
+  } else if (machine == "post.history") {
+    char ** texts = NULL;
+    size_t * lens = NULL;
+    size_t n = 0;
+    int status = 0;
+    g_run.rc = gdefcore_access_revision_values(catalog, call->request, id.data(),
+        id.size(), 1, "en", 2, "title", 5, &status, &texts, &lens, &n);
+    gdefcore_values_free(catalog, texts, lens, n);
+  } else if (machine == "post.new") {
+    /* The id captured is the container's. */
+    const char * fields[1] = {"title"};
+    size_t field_lens[1] = {5};
+    int allowed = 0;
+    g_run.rc = gdefcore_access_can_create(catalog, call->request, id.data(),
+        id.size(), kPost, strlen(kPost), fields, field_lens, 1, &allowed);
+    if (g_run.rc == GDEFCORE_OK && !allowed) {
+      g_run.rc = GDEFCORE_ERR_INVALID;
+    }
+    if (g_run.rc == GDEFCORE_OK) {
+      char fresh[GDEFCORE_PUBLIC_ID_LEN + 1];
+      g_run.rc = gdefcore_entity_create(catalog, kPost, strlen(kPost), fresh, NULL);
+      if (g_run.rc == GDEFCORE_OK &&
+          gdefcore_changeset_prepare(catalog, principal, pn, &cs) == GDEFCORE_OK) {
+        g_run.rc = Apply(cs,
+            gdefcore_entity_save_draft(cs, fresh, strlen(fresh), "en", 2, &value, 1));
+        g_run.created = g_run.rc == GDEFCORE_OK;
+      }
+    }
+  } else if (gdefcore_changeset_prepare(catalog, principal, pn, &cs) == GDEFCORE_OK) {
+    if (machine == "post.edit") {
+      g_run.rc = Apply(cs,
+          gdefcore_entity_save_draft(cs, id.data(), id.size(), "en", 2, &value, 1));
+    } else if (machine == "post.publish") {
+      g_run.rc = Apply(cs, gdefcore_entity_publish(cs, id.data(), id.size()));
+    } else if (machine == "post.activate") {
+      g_run.rc = Apply(cs, gdefcore_entity_activate(cs, id.data(), id.size(), 1));
+    } else {
+      gdefcore_changeset_destroy(cs);
+      cs = NULL;
+      if (machine == "post.delete") {
+        /* Reverting the first revision is clearing the entity. */
+        if (gdefcore_changeset_revert(catalog, id.data(), id.size(), principal,
+                pn, &cs) == GDEFCORE_OK) {
+          g_run.rc = Apply(cs, GDEFCORE_OK, "core.role");
+        }
+      } else if (machine == "post.revert") {
+        if (gdefcore_changeset_revert_to(catalog, id.data(), id.size(), 1,
+                principal, pn, &cs) == GDEFCORE_OK) {
+          g_run.rc = Apply(cs, GDEFCORE_OK);
+        }
+      }
+    }
+  }
+  gdefcore_request_set_resolution(call->request, call->machine, call->machine_len);
+}
+
 struct Ans {
   GDEFCORE_Result rc;
   int allowed;
@@ -193,61 +308,6 @@ class Can : public GrantsFixture {
     EXPECT_EQ(GDEFCORE_OK,
         gdefcore_entity_revision(catalog_, id.data(), id.size(), &seq));
     return (size_t)seq;
-  }
-
-  /** A guarded save of @p title, as @p req. */
-  GDEFCORE_Result GuardedSave(GDEFCORE_Request * req, const std::string & id,
-      const char * title) {
-    GDEFCORE_Changeset * cs = NULL;
-    GDEFCORE_Value value;
-    const char * text = title;
-    size_t len = strlen(title);
-    GDEFCORE_Result rc;
-    memset(&value, 0, sizeof value);
-    value.size = sizeof value;
-    value.field = "title";
-    value.field_len = 5;
-    value.texts = &text;
-    value.text_lens = &len;
-    value.count = 1;
-    EXPECT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
-    gdefcore_changeset_set_request(cs, req);
-    gdefcore_changeset_enforce_access(cs, 1);
-    rc = gdefcore_entity_save(cs, id.data(), id.size(), "en", 2, &value, 1);
-    if (rc == GDEFCORE_OK) {
-      rc = gdefcore_changeset_apply(cs, NULL, 0);
-    }
-    gdefcore_changeset_destroy(cs);
-    return rc;
-  }
-
-  GDEFCORE_Result GuardedPublish(GDEFCORE_Request * req, const std::string & id) {
-    GDEFCORE_Changeset * cs = NULL;
-    GDEFCORE_Result rc;
-    EXPECT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
-    gdefcore_changeset_set_request(cs, req);
-    gdefcore_changeset_enforce_access(cs, 1);
-    rc = gdefcore_entity_publish(cs, id.data(), id.size());
-    if (rc == GDEFCORE_OK) {
-      rc = gdefcore_changeset_apply(cs, NULL, 0);
-    }
-    gdefcore_changeset_destroy(cs);
-    return rc;
-  }
-
-  /** A guarded revert of an entity that has one revision: a clear. */
-  GDEFCORE_Result GuardedDelete(GDEFCORE_Request * req, const std::string & id) {
-    GDEFCORE_Changeset * cs = NULL;
-    GDEFCORE_Result rc;
-    rc = gdefcore_changeset_revert(catalog_, id.data(), id.size(), NULL, 0, &cs);
-    if (rc != GDEFCORE_OK) {
-      return rc;
-    }
-    gdefcore_changeset_set_request(cs, req);
-    gdefcore_changeset_enforce_access(cs, 1);
-    rc = gdefcore_changeset_apply(cs, "core.role", 9);
-    gdefcore_changeset_destroy(cs);
-    return rc;
   }
 
   /** A post saved as a draft, so that it can be published. */
@@ -1179,10 +1239,24 @@ enum {
   kRoleGroupA = 2,   /* edit posts of group a */
   kRoleOwn = 4,      /* edit their own */
   kRolePublish = 8,
-  kRoleDelete = 16
+  kRoleDelete = 16,
+  kRoleHistory = 32,   /* view the revisions of any post */
+  kRoleRevert = 64,    /* revert any post to an earlier revision */
+  kRoleActivate = 128, /* make a revision active, for posts of group a */
+  kRoleCreate = 256    /* create posts in the open containers */
 };
-enum { kCeilRead = 1, kCeilUpdate = 2, kCeilPublish = 4, kCeilDelete = 8 };
-enum { kOpUpdate, kOpPublish, kOpDelete, kOpRead };
+enum {
+  kCeilRead = 1,
+  kCeilUpdate = 2,
+  kCeilPublish = 4,
+  kCeilDelete = 8,
+  kCeilHistory = 16,
+  kCeilRevert = 32,
+  kCeilActivate = 64,
+  kCeilCreate = 128
+};
+enum { kOpUpdate, kOpPublish, kOpDelete, kOpRead, kOpHistory, kOpRevert,
+  kOpActivate, kOpCreate };
 
 struct Person {
   std::string name;
@@ -1197,7 +1271,10 @@ struct Person {
  * the fixture's rules to compare with. The module grants update of posts in
  * group b to everyone; the roles are as the table says; an acting principal
  * must hold the same permission by its own roles (a module grant is not part
- * of its set); reading is of what readers see: published entities only.
+ * of its set); reading is of what readers see: published entities only. The
+ * rest of the actions are not about what is published: a condition reads the
+ * entity's active revision, and the first revision of an entity is active
+ * from the start.
  */
 bool Model(const Person & p, int op, char group, const std::string & actor,
     bool draft) {
@@ -1206,10 +1283,6 @@ bool Model(const Person & p, int op, char group, const std::string & actor,
   unsigned need = 0;
   switch (op) {
     case kOpUpdate:
-      /* A condition reads the entity's active revision and its creator,
-       * whether or not it is published, and the first revision of an entity
-       * is active from the start: so an unpublished draft is editable by
-       * exactly the people a published post is. */
       mine = ((p.roles & kRoleGroupA) && group == 'a') ||
              ((p.roles & kRoleOwn) && own) || group == 'b';
       need = kCeilUpdate;
@@ -1221,6 +1294,23 @@ bool Model(const Person & p, int op, char group, const std::string & actor,
     case kOpDelete:
       mine = (p.roles & kRoleDelete) != 0;
       need = kCeilDelete;
+      break;
+    case kOpHistory:
+      mine = (p.roles & kRoleHistory) != 0;
+      need = kCeilHistory;
+      break;
+    case kOpRevert:
+      mine = (p.roles & kRoleRevert) != 0;
+      need = kCeilRevert;
+      break;
+    case kOpActivate:
+      mine = (p.roles & kRoleActivate) != 0 && group == 'a';
+      need = kCeilActivate;
+      break;
+    case kOpCreate:
+      /* `group` stands for the container's kind here: a is open. */
+      mine = (p.roles & kRoleCreate) != 0 && group == 'a';
+      need = kCeilCreate;
       break;
     default:
       mine = (p.roles & kRoleRead) != 0 && !draft;
@@ -1238,17 +1328,33 @@ bool Model(const Person & p, int op, char group, const std::string & actor,
 TEST_F(Can, TheDecisionIsTheOperation) {
   /* A generated site: principals with role grants, with module grants, with
    * own, any and field conditions, agents with a ceiling; entities that are
-   * theirs or not, in each group, draft and published. For every (principal,
-   * entity), the decision is asked first, then the operation is done with
-   * access enforced on a changeset of that request, and the two must agree:
-   * an update, a publish, a delete (a revert to nothing), a read, and the
-   * route and the tab that stand for an edit and a publish. */
+   * theirs or not, in each group, draft and published. Each operation is
+   * performed by a PATH: a route that names the permission and the capture of
+   * the entity, whose handler calls the entity operation, which asks nothing.
+   * For every (principal, entity) the decision is asked, the path is
+   * dispatched, and the two must agree: the handler runs exactly when the
+   * decision is a yes, and the entity changes exactly when it runs. Both
+   * outcomes of every path are counted. An independent model of the fixture
+   * is held to the decision as well. */
   DefinePost();
+  GDEFCORE_Field kind_field = Field("kind");
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_type_define(catalog_, "test.container", 14, GDEFCORE_TYPE_CONTENT,
+          &kind_field, 1));
   Declare(Perm("Read posts", "read", GDEFCORE_ACCESS_ANY));
   Declare(Perm("Edit posts", "update", GDEFCORE_ACCESS_ANY));
   Declare(Perm("Edit own posts", "update", GDEFCORE_ACCESS_OWN));
   Declare(Perm("Publish posts", "publish", GDEFCORE_ACCESS_ANY));
   Declare(Perm("Delete posts", "delete", GDEFCORE_ACCESS_ANY));
+  Declare(Perm("View post history", GDEFCORE_ACTION_REVISIONS_READ,
+      GDEFCORE_ACCESS_ANY));
+  Declare(Perm("Revert posts", GDEFCORE_ACTION_REVISIONS_REVERT,
+      GDEFCORE_ACCESS_ANY));
+  Declare(Perm("Activate posts", GDEFCORE_ACTION_REVISIONS_ACTIVATE,
+      GDEFCORE_ACCESS_ANY));
+  /* A test-only container: posts are created in it. */
+  Declare(Perm("Create in containers", GDEFCORE_ACTION_CREATE,
+      GDEFCORE_ACCESS_ANY, "test.container"));
   Role("r-read");
   Role("r-ga");
   Role("r-author");
@@ -1256,12 +1362,24 @@ TEST_F(Can, TheDecisionIsTheOperation) {
   Role("r-del");
   Role("r-all");
   Role("r-pubonly");
+  Role("r-hist");
+  Role("r-rev");
+  Role("r-act");
+  Role("r-create");
   Grant("r-read", "Read posts");
   ASSERT_EQ(GDEFCORE_OK, GrantWhen("r-ga", "Edit posts", kGroupA));
   Grant("r-author", "Edit own posts");
   Grant("r-pub", "Publish posts");
   Grant("r-del", "Delete posts");
-  for (const char * label : {"Read posts", "Edit posts", "Publish posts", "Delete posts"}) {
+  Grant("r-hist", "View post history");
+  Grant("r-rev", "Revert posts");
+  ASSERT_EQ(GDEFCORE_OK,
+      GrantWhen("r-act", "Activate posts", kGroupA));
+  ASSERT_EQ(GDEFCORE_OK,
+      GrantWhen("r-create", "Create in containers", "(= field.kind \"open\")"));
+  for (const char * label : {"Read posts", "Edit posts", "Publish posts",
+           "Delete posts", "View post history", "Revert posts", "Activate posts",
+           "Create in containers"}) {
     Grant("r-all", label);
   }
   Grant("r-pubonly", "Publish posts");
@@ -1272,12 +1390,25 @@ TEST_F(Can, TheDecisionIsTheOperation) {
   ASSERT_EQ(GDEFCORE_OK,
       Enable("blog", {GrantLine("blog", "blog.update", "high", kGroupB)}))
       << last_error_;
+  g_run.catalog = catalog_;
   Route("post.view", "/post/:id", GDEFCORE_ROUTE_PAGE, NULL, NULL, NULL, 10,
       PageWithTabs);
+  Route("post.read", "/post/:id/read", GDEFCORE_ROUTE_TAB, "post.view", "read",
+      "id", 1, DoOperation);
   Route("post.edit", "/post/:id/edit", GDEFCORE_ROUTE_TAB, "post.view", "update",
-      "id", 1);
+      "id", 2, DoOperation);
   Route("post.publish", "/post/:id/publish", GDEFCORE_ROUTE_TAB, "post.view",
-      "publish", "id", 2);
+      "publish", "id", 3, DoOperation);
+  Route("post.delete", "/post/:id/delete", GDEFCORE_ROUTE_TAB, "post.view",
+      "delete", "id", 4, DoOperation);
+  Route("post.history", "/post/:id/history", GDEFCORE_ROUTE_TAB, "post.view",
+      GDEFCORE_ACTION_REVISIONS_READ, "id", 5, DoOperation);
+  Route("post.revert", "/post/:id/revert", GDEFCORE_ROUTE_TAB, "post.view",
+      GDEFCORE_ACTION_REVISIONS_REVERT, "id", 6, DoOperation);
+  Route("post.activate", "/post/:id/activate", GDEFCORE_ROUTE_TAB, "post.view",
+      GDEFCORE_ACTION_REVISIONS_ACTIVATE, "id", 7, DoOperation);
+  Route("post.new", "/container/:id/new", GDEFCORE_ROUTE_ACTION, NULL,
+      GDEFCORE_ACTION_CREATE, "id", 1, DoOperation);
   ASSERT_EQ(GDEFCORE_OK,
       gdefcore_routes_set_check(routes_, gdefcore_access_route_check, catalog_));
   std::string author = Principal("r-author");
@@ -1289,11 +1420,20 @@ TEST_F(Can, TheDecisionIsTheOperation) {
   ASSERT_EQ(GDEFCORE_OK,
       gdefcore_access_principal_add_role(catalog_, mixed.data(), mixed.size(),
           "r-pub", 5));
+  std::string hist = Principal("r-hist");
+  std::string rev = Principal("r-rev");
+  std::string act = Principal("r-act");
+  std::string creator = Principal("r-create");
+  std::string both = Principal("r-create");
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_access_principal_add_role(catalog_, both.data(), both.size(),
+          "r-hist", 6));
   std::string nobody = Principal();
   std::string ag_all = Principal("r-all");
   std::string ag_pub = Principal("r-pubonly");
   std::string ag_none = Principal();
-  const unsigned all = kCeilRead | kCeilUpdate | kCeilPublish | kCeilDelete;
+  const unsigned all = kCeilRead | kCeilUpdate | kCeilPublish | kCeilDelete |
+                       kCeilHistory | kCeilRevert | kCeilActivate | kCeilCreate;
   const Person people[] = {
       {"anonymous", "", "", 0, 0},
       {"nobody", nobody, "", 0, 0},
@@ -1303,18 +1443,53 @@ TEST_F(Can, TheDecisionIsTheOperation) {
       {"pub", pub, "", kRolePublish, 0},
       {"del", del, "", kRoleDelete, 0},
       {"mixed", mixed, "", kRoleGroupA | kRolePublish, 0},
+      {"hist", hist, "", kRoleHistory, 0},
+      {"rev", rev, "", kRoleRevert, 0},
+      {"act", act, "", kRoleActivate, 0},
+      {"creator", creator, "", kRoleCreate, 0},
       {"ga/all", ga, ag_all, kRoleGroupA, all},
       {"ga/none", ga, ag_none, kRoleGroupA, 0},
       {"mixed/pub", mixed, ag_pub, kRoleGroupA | kRolePublish, kCeilPublish},
       {"author/all", author, ag_all, kRoleOwn, all},
-      {"del/pub", del, ag_pub, kRoleDelete, kCeilPublish},
+      {"hist/all", hist, ag_all, kRoleHistory, all},
+      {"act/pub", act, ag_pub, kRoleActivate, kCeilPublish},
+      {"creator/all", creator, ag_all, kRoleCreate, all},
       {"nobody/all", nobody, ag_all, 0, all},
-      {"nobody/none", nobody, ag_none, 0, 0},
+      {"act/all", act, ag_all, kRoleActivate, all},
+      {"creator+hist", both, "", kRoleCreate | kRoleHistory, 0},
   };
   const char * groups[] = {"a", "b", "c"};
-  int seen[7][2] = {};   /* operation x (no, yes) */
-  enum { kUpdate, kPublish, kDelete, kRead, kRoute, kTabs, kPage };
+  int seen[8][2] = {};   /* operation x (no, yes) */
+  int menu[2] = {};      /* the tab list: nothing offered, something offered */
   size_t checks = 0;
+  /* One path: dispatch it as the person, and return what the path did. */
+  struct Done {
+    bool served;       /* the route matched and its handler ran */
+    bool ok;           /* ... and the entity operation succeeded */
+    bool moved;        /* the entity (or the store) changed */
+  };
+  auto Walk = [&](const Person & who, const std::string & url,
+                  const char * machine, const std::string & entity) -> Done {
+    uint64_t before = 0;
+    uint64_t after = 0;
+    Done d;
+    g_run.ran = 0;
+    g_run.rc = GDEFCORE_ERR_INVALID;
+    g_run.created = 0;
+    if (!entity.empty()) {
+      EXPECT_EQ(GDEFCORE_OK,
+          gdefcore_entity_version(catalog_, entity.data(), entity.size(), &before));
+    }
+    d.served = Dispatch(Req(who.id, who.acting), url) == machine;
+    d.ok = d.served && g_run.ran && g_run.rc == GDEFCORE_OK;
+    EXPECT_EQ(d.served, g_run.ran != 0) << url;
+    if (!entity.empty()) {
+      EXPECT_EQ(GDEFCORE_OK,
+          gdefcore_entity_version(catalog_, entity.data(), entity.size(), &after));
+    }
+    d.moved = after != before;
+    return d;
+  };
   for (const Person & who : people) {
     for (const char * group : groups) {
       /* theirs, someone's, no one's: the author varies only where an `own`
@@ -1329,82 +1504,112 @@ TEST_F(Can, TheDecisionIsTheOperation) {
             std::string id = draft ? Draft(actor, "t", group) : Save(actor, "t", group);
             return id;
           };
-          /* update */
+          struct Op {
+            int op;
+            const char * action;
+            const char * machine;
+            const char * tail;
+            bool writes;
+            bool own_entity;
+          };
+          /* The order matters and is part of the design: what a decision
+           * reads (the group, the creator, the active revision) is never
+           * changed by an earlier operation, and a read comes before the
+           * publish that would change what readers see. A delete would leave
+           * nothing to act on, so it has an entity of its own. */
+          const Op ops[] = {
+              {kOpRead, "read", "post.read", "/read", false, false},
+              {kOpHistory, GDEFCORE_ACTION_REVISIONS_READ, "post.history",
+                  "/history", false, false},
+              {kOpUpdate, "update", "post.edit", "/edit", true, false},
+              {kOpActivate, GDEFCORE_ACTION_REVISIONS_ACTIVATE, "post.activate",
+                  "/activate", true, false},
+              {kOpRevert, GDEFCORE_ACTION_REVISIONS_REVERT, "post.revert",
+                  "/revert", true, false},
+              {kOpPublish, "publish", "post.publish", "/publish", true, false},
+              {kOpDelete, "delete", "post.delete", "/delete", true, true},
+          };
+          const std::string shared = Make();
+          /* the menu: the tabs of the page, as dispatch serves them */
           {
-            std::string id = Make();
-            bool want = Yes(Req(who.id, who.acting), "update", id);
-            bool got = GuardedSave(Req(who.id, who.acting), id, "changed") == GDEFCORE_OK;
-            EXPECT_EQ(want, got) << "update " << label;
-            EXPECT_EQ(Model(who, kOpUpdate, group[0], actor, draft != 0), want)
-                << "update " << label;
-            seen[kUpdate][want]++;
-            checks++;
-          }
-          /* publish */
-          {
-            std::string id = Make();
-            bool want = Yes(Req(who.id, who.acting), "publish", id);
-            bool got = GuardedPublish(Req(who.id, who.acting), id) == GDEFCORE_OK;
-            EXPECT_EQ(want, got) << "publish " << label;
-            EXPECT_EQ(Model(who, kOpPublish, group[0], actor, draft != 0), want)
-                << "publish " << label;
-            seen[kPublish][want]++;
-            checks++;
-          }
-          /* delete: a revert of an entity with one revision (of a published
-           * one: a draft that was never published has nothing to revert to) */
-          {
-            std::string id = Save(actor, "t", group);
-            bool want = Yes(Req(who.id, who.acting), "delete", id);
-            bool got = GuardedDelete(Req(who.id, who.acting), id) == GDEFCORE_OK;
-            EXPECT_EQ(want, got) << "delete " << label;
-            EXPECT_EQ(Model(who, kOpDelete, group[0], actor, false), want)
-                << "delete " << label;
-            seen[kDelete][want]++;
-            checks++;
-          }
-          /* read: the decision is the filtered read's */
-          {
-            std::string id = Make();
-            bool want = Yes(Req(who.id, who.acting), "read", id);
-            bool got = Read(Req(who.id, who.acting), id) != "<denied>";
-            EXPECT_EQ(want, got) << "read " << label;
-            EXPECT_EQ(Model(who, kOpRead, group[0], actor, draft != 0), want)
-                << "read " << label;
-            seen[kRead][want]++;
-            checks++;
-          }
-          /* the route and the tab that stand for an edit and a publish */
-          {
-            std::string id = Make();
-            bool edit = Yes(Req(who.id, who.acting), "update", id);
-            bool publish = Yes(Req(who.id, who.acting), "publish", id);
-            std::string page = Dispatch(Req(who.id, who.acting), "/post/" + id);
-            EXPECT_EQ(edit ? "post.edit" : page,
-                Dispatch(Req(who.id, who.acting), "/post/" + id + "/edit"))
-                << "route " << label;
-            EXPECT_EQ(publish ? "post.publish" : page,
-                Dispatch(Req(who.id, who.acting), "/post/" + id + "/publish"))
-                << "route " << label;
-            seen[kRoute][edit]++;
-            seen[kRoute][publish]++;
-            EXPECT_EQ(std::string("tabs:") + (edit ? "post.edit," : "") +
-                          (publish ? "post.publish," : ""),
-                page)
+            std::string tabs = "tabs:";
+            const char * names[] = {"post.read", "post.edit", "post.publish",
+                "post.delete", "post.history", "post.revert", "post.activate"};
+            const char * actions[] = {"read", "update", "publish", "delete",
+                GDEFCORE_ACTION_REVISIONS_READ, GDEFCORE_ACTION_REVISIONS_REVERT,
+                GDEFCORE_ACTION_REVISIONS_ACTIVATE};
+            bool any = false;
+            for (size_t k = 0; k < 7; k++) {
+              if (Yes(Req(who.id, who.acting), actions[k], shared)) {
+                tabs += std::string(names[k]) + ",";
+                any = true;
+              }
+            }
+            EXPECT_EQ(tabs, Dispatch(Req(who.id, who.acting), "/post/" + shared))
                 << "tabs " << label;
-            seen[kTabs][edit || publish]++;
+            menu[any]++;
+            checks++;
+          }
+          for (const Op & o : ops) {
+            std::string id = o.own_entity ? Make() : shared;
+            bool want = Yes(Req(who.id, who.acting), o.action, id);
+            Done got = Walk(who, "/post/" + id + o.tail, o.machine, o.writes ? id : "");
+            EXPECT_EQ(want, got.served) << o.action << " path " << label;
+            EXPECT_EQ(want, got.ok) << o.action << " operation " << label;
+            if (o.writes) {
+              EXPECT_EQ(want, got.moved) << o.action << " changed the entity " << label;
+            }
+            EXPECT_EQ(Model(who, o.op, group[0], actor, draft != 0), want)
+                << o.action << " " << label;
+            seen[o.op][want]++;
             checks += 3;
           }
         }
       }
     }
   }
+  /* Create is checked against the container the path names. */
+  for (const Person & who : people) {
+    for (const char * kind : {"open", "closed"}) {
+      char cid[GDEFCORE_PUBLIC_ID_LEN + 1];
+      GDEFCORE_Changeset * cs = nullptr;
+      const char * txt = kind;
+      size_t tl = strlen(kind);
+      GDEFCORE_Value v;
+      memset(&v, 0, sizeof v);
+      v.size = sizeof v;
+      v.field = "kind";
+      v.field_len = 4;
+      v.texts = &txt;
+      v.text_lens = &tl;
+      v.count = 1;
+      ASSERT_EQ(GDEFCORE_OK,
+          gdefcore_entity_create(catalog_, "test.container", 14, cid, NULL));
+      ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
+      ASSERT_EQ(GDEFCORE_OK, gdefcore_entity_save(cs, cid, strlen(cid), "en", 2, &v, 1));
+      ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, NULL, 0));
+      gdefcore_changeset_destroy(cs);
+      const std::string container(cid);
+      bool want = Yes(Req(who.id, who.acting), GDEFCORE_ACTION_CREATE, container,
+          "test.container");
+      Done got = Walk(who, "/container/" + container + "/new", "post.new", "");
+      EXPECT_EQ(want, got.served) << "create path " << who.name << "/" << kind;
+      EXPECT_EQ(want, got.ok) << "create " << who.name << "/" << kind;
+      EXPECT_EQ(want, g_run.created != 0) << "created " << who.name << "/" << kind;
+      EXPECT_EQ(Model(who, kOpCreate, kind[0] == 'o' ? 'a' : 'z', "", false), want)
+          << "create " << who.name << "/" << kind;
+      seen[kOpCreate][want]++;
+      checks += 3;
+    }
+  }
   /* The sweep is wide, and saw both outcomes of each operation. */
-  EXPECT_GE(checks, 500u);
-  for (int op = kUpdate; op <= kTabs; op++) {
+  EXPECT_GE(checks, 1500u);
+  for (int op = kOpUpdate; op <= kOpCreate; op++) {
     EXPECT_GE(seen[op][0], 3) << "operation " << op << " never refused";
     EXPECT_GE(seen[op][1], 3) << "operation " << op << " never allowed";
   }
+  EXPECT_GE(menu[0], 3);
+  EXPECT_GE(menu[1], 3);
 }
 
 TEST_F(Can, TemplateSaveIsTheDecision) {

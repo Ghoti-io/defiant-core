@@ -178,7 +178,6 @@ static const Surface kSurface[] = {
     {"gdefcore_changeset_parse", "W"},
     {"gdefcore_catalog_tenant", "P"},
     {"gdefcore_catalog_bind_host", "W"},
-    {"gdefcore_changeset_enforce_access", "W"},
     {"gdefcore_changeset_set_request", "W"},
     {"gdefcore_changeset_stage_module", "W"},
     {"gdefcore_changeset_module_count", "P"},

@@ -190,8 +190,7 @@ that ground.
 ## One can()
 
 `gdefcore_access_can(catalog, request, permission, type, entity_id, &allowed)`
-is the single answer to "may this principal do this to that". The write path
-(with `gdefcore_changeset_enforce_access()`), the route check
+is the single answer to "may this principal do this to that". The route check
 (`gdefcore_access_route_check()`), the tab list (`gdefcore_routes_tabs_visible()`)
 and the template editor (`gdefcore_template_authorize()`) all ask it, so a
 button, the page behind it and the write it guards cannot disagree. It is the
@@ -253,14 +252,13 @@ ceiling.
   caller's to log. They never allow and are not remembered. Bad arguments are
   `GDEFCORE_ERR_INVALID`.
 
-`gdefcore_changeset_enforce_access(changeset, 1)` makes apply ask `can()` for
-each entity the changeset touches, with the changeset's request: a save or a
-draft is `update`, a publish or an unpublish `publish`, an activate and a revert
-`update`, a clear (a revert to nothing) `delete`. It is off by default, so no
-existing writer is asked anything new. Templates keep their own permission. A
-new entity has no creator yet, so an `own` grant does not allow its first save.
-(This is the interim form of write protection: SPEC decision 7 puts protection
-on the path, not inside the function, and story A5b retires it.)
+Protection is on the path, not in the function (SPEC decision 7): no library
+function that writes checks a permission, and `gdefcore_changeset_enforce_access()`
+is gone. The route check, the tab list, the signed-form path and the template
+editor ask `can()` before they hand control to code; the equivalence gate
+(`Can.TheDecisionIsTheOperation`) compares `can()` with whether the path is served
+and the entity changes. The one check left inside a library function is the
+template check in `gdefcore_changeset_apply()`, which story A8 moves to the path.
 
 ## The render key
 

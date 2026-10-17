@@ -17,7 +17,7 @@
 #   memo-unbounded                       Can.MemoIsBounded
 #   type-level-used-for-an-entity        Can.TypeLevelIsNotTheEntityQuestion
 #   template-authorize-skips-modules     Can.TemplateSaveIsTheDecision
-#   write-path-not-asked                 Can.TheDecisionIsTheOperation
+#   route-check-skips-can                Can.TheDecisionIsTheOperation
 #   ceiling-not-set-up                   Can.AnAgentIsBoundByItsCeiling
 #   draft-readable                       Can.TheDecisionIsTheOperation, Oracle.Entities
 #   missing-answers-unlike-hidden        Oracle.Entities
@@ -206,12 +206,19 @@ plant template-authorize-skips-modules src/template/template.c testCan 'Can.Temp
       }
     }'
 
-# Plant 12: apply does not ask the decision for what it writes.
-plant write-path-not-asked src/entity/entity.c testCan 'Can.TheDecisionIsTheOperation' \
-  '  if (changeset->enforce_access) {
-    rc = authorize_writes(changeset);' \
-  '  if (0 && changeset->enforce_access) {
-    rc = authorize_writes(changeset);'
+# Plant 12: the ready-made route check lets any entity capture through, so a
+# path is served whatever the decision says. The path is where protection
+# lives (SPEC decision 7): there is no check inside the entity operations for
+# this to hide behind.
+plant route-check-skips-can $ACCESS testCan 'Can.TheDecisionIsTheOperation' \
+  '  rc = gdefcore_access_can(catalog, call->request, permission, permission_len,
+      type, type_len, canon, &allowed);
+  gdefcore_text_free(catalog, type);
+  return rc == GDEFCORE_OK && allowed;' \
+  '  rc = gdefcore_access_can(catalog, call->request, permission, permission_len,
+      type, type_len, canon, &allowed);
+  gdefcore_text_free(catalog, type);
+  return rc == GDEFCORE_OK;'
 
 # Plant 13: the decision never sets up the acting principal's ceiling.
 plant ceiling-not-set-up $ACCESS testCan 'Can.AnAgentIsBoundByItsCeiling' \
