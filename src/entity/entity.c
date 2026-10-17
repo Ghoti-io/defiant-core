@@ -3755,6 +3755,41 @@ GDEFCORE_Result gdefcore_entity_values(GDEFCORE_Catalog * catalog,
   return rc;
 }
 
+GDEFCORE_Result gdefcore_entity_revision_values(GDEFCORE_Catalog * catalog,
+    const char * id, size_t id_len, uint64_t seq, const char * lang,
+    size_t lang_len, const char * field, size_t field_len, char *** out_texts,
+    size_t ** out_lens, size_t * out_count) {
+  char canon[GDEFCORE_PUBLIC_ID_LEN + 1];
+  uint64_t row = 0;
+  char * type_name = NULL;
+  size_t type_len = 0;
+  GDEFCORE_Doc doc;
+  GDEFCORE_Result rc;
+  if (catalog == NULL || out_texts == NULL || out_lens == NULL ||
+      out_count == NULL || field == NULL || lang == NULL || seq == 0) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  if (gdefcore_id_canonical(id, id_len, canon) != GDEFCORE_OK) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  rc = lookup_id(catalog, canon, GDEFCORE_PUBLIC_ID_LEN, &row, &type_name,
+      &type_len, NULL, NULL);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  gcu_allocator_free(catalog->alloc, type_name);
+  memset(&doc, 0, sizeof doc);
+  rc = rev_doc(catalog, row, seq, &doc);
+  if (rc != GDEFCORE_OK) {
+    /* A sequence that was never recorded is no revision of this entity. */
+    return GDEFCORE_ERR_INVALID;
+  }
+  rc = values_from(catalog, &doc, lang, lang_len, field, field_len, out_texts,
+      out_lens, out_count);
+  doc_free(catalog->alloc, &doc);
+  return rc;
+}
+
 static int cmp_cstr(const void * a, const void * b) {
   return strcmp(*(char *const *)a, *(char *const *)b);
 }

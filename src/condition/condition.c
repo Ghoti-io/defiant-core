@@ -803,6 +803,28 @@ int gdefcore_condition_constrains_type(const GDEFCORE_Condition * condition) {
   return condition != NULL && node_constrains_type(condition, condition->root);
 }
 
+int gdefcore_condition_tests_field(const GDEFCORE_Condition * condition,
+    const char * field, size_t field_len) {
+  size_t i;
+  if (condition == NULL) {
+    return 0;
+  }
+  for (i = 0; i < condition->nnodes; i++) {
+    const CNode * node = &condition->nodes[i];
+    if (node->kind != kField) {
+      continue;
+    }
+    if (field == NULL) {
+      return 1;
+    }
+    if (node->str_len == field_len &&
+        memcmp(condition->pool + node->str, field, field_len) == 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
 /* ---- validation ------------------------------------------------------- */
 
 /* 1 when the type has a non-personal field called name. */

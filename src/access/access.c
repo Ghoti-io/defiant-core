@@ -2249,6 +2249,160 @@ GDEFCORE_Result gdefcore_access_read(GDEFCORE_Catalog * catalog,
       out_lens, out_count);
 }
 
+/* 1 when the type's field is personal (AD-19). A field the type lacks is not. */
+static int field_is_personal(GDEFCORE_Catalog * catalog, const char * type,
+    size_t type_len, const char * field, size_t field_len) {
+  size_t count = 0;
+  size_t i;
+  if (gdefcore_type_field_count(catalog, type, type_len, &count) !=
+      GDEFCORE_OK) {
+    return 0;
+  }
+  for (i = 0; i < count; i++) {
+    char * name = NULL;
+    size_t name_len = 0;
+    int required = 0;
+    int many = 0;
+    int personal = 0;
+    int match;
+    if (gdefcore_type_field(catalog, type, type_len, i, &name, &name_len,
+            &required, &many) != GDEFCORE_OK) {
+      return 0;
+    }
+    match = same(name, name_len, field, field_len);
+    gdefcore_text_free(catalog, name);
+    if (match) {
+      return gdefcore_type_field_personal(catalog, type, type_len, i,
+                 &personal) == GDEFCORE_OK &&
+             personal;
+    }
+  }
+  return 0;
+}
+
+/* An answer with no values. Outputs are written only on success. */
+static GDEFCORE_Result revision_answer(int * out_status, int status,
+    char *** out_texts, size_t ** out_lens, size_t * out_count) {
+  *out_status = status;
+  *out_texts = NULL;
+  *out_lens = NULL;
+  *out_count = 0;
+  return GDEFCORE_OK;
+}
+
+GDEFCORE_Result gdefcore_access_revision_values(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Request * request, const char * id, size_t id_len, uint64_t seq,
+    const char * lang, size_t lang_len, const char * field, size_t field_len,
+    int * out_status, char *** out_texts, size_t ** out_lens,
+    size_t * out_count) {
+  char canon[GDEFCORE_PUBLIC_ID_LEN + 1];
+  char * type_name = NULL;
+  size_t type_len = 0;
+  char * actor = NULL;
+  size_t actor_len = 0;
+  const char * principal = NULL;
+  size_t principal_len = 0;
+  Grant grants[kGrantMax];
+  Grant decls[kGrantMax];
+  size_t ngrants = 0;
+  size_t ndecls = 0;
+  int read_principal = 0;
+  Eval ev;
+  int may_view = 0;
+  int granted = 1;
+  GDEFCORE_Result rc;
+  if (catalog == NULL || request == NULL || out_status == NULL ||
+      out_texts == NULL || out_lens == NULL || out_count == NULL ||
+      field == NULL || lang == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  if (gdefcore_id_canonical(id, id_len, canon) != GDEFCORE_OK) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  rc = ensure(catalog);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  rc = gdefcore_entity_type(catalog, canon, GDEFCORE_PUBLIC_ID_LEN, &type_name,
+      &type_len);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  /* The question is asked of the entity as it is stored, its active
+   * revision: not of the revision being viewed, and not of anything the
+   * caller supplies. */
+  rc = gdefcore_access_can(catalog, request, GDEFCORE_ACTION_REVISIONS_READ,
+      strlen(GDEFCORE_ACTION_REVISIONS_READ), type_name, type_len, canon,
+      &may_view);
+  if (rc != GDEFCORE_OK || !may_view ||
+      !type_has_field(catalog, type_name, type_len, field, field_len)) {
+    /* No permission, no such entity and no such field answer alike. */
+    gdefcore_text_free(catalog, type_name);
+    return GDEFCORE_ERR_INVALID;
+  }
+  {
+    uint64_t head = 0;
+    rc = gdefcore_entity_revision(catalog, canon, GDEFCORE_PUBLIC_ID_LEN, &head);
+    if (rc != GDEFCORE_OK || seq == 0 || seq > head) {
+      gdefcore_text_free(catalog, type_name);
+      return GDEFCORE_ERR_INVALID;
+    }
+  }
+  rc = gdefcore_entity_creator(catalog, canon, GDEFCORE_PUBLIC_ID_LEN, &actor,
+      &actor_len);
+  if (rc != GDEFCORE_OK) {
+    gdefcore_text_free(catalog, type_name);
+    return GDEFCORE_ERR_INVALID;
+  }
+  principal = gdefcore_request_principal(request, &principal_len);
+  rc = load_effective(catalog, request, grants, kGrantMax, &ngrants,
+      &read_principal);
+  if (rc == GDEFCORE_OK) {
+    rc = load_decls(catalog, decls, kGrantMax, &ndecls);
+  }
+  if (rc != GDEFCORE_OK) {
+    gdefcore_text_free(catalog, type_name);
+    gdefcore_text_free(catalog, actor);
+    return rc;
+  }
+  eval_init(&ev, catalog, request, lang, lang_len);
+  (void)setup_ceiling(&ev);
+  ev.id = canon;
+  /* The same field-by-field filter as a live read. */
+  if (field_restricted(decls, ndecls, type_name, type_len, field, field_len)) {
+    granted = field_granted(&ev, grants, ngrants, type_name, type_len, field,
+        field_len, actor, actor_len, principal, principal_len);
+  }
+  eval_done(&ev);
+  gdefcore_text_free(catalog, actor);
+  if (!granted) {
+    gdefcore_text_free(catalog, type_name);
+    return revision_answer(out_status, GDEFCORE_REVISION_ABSENT, out_texts,
+        out_lens, out_count);
+  }
+  if (field_is_personal(catalog, type_name, type_len, field, field_len)) {
+    /* Never the ciphertext it is stored as. Whether the value can be
+     * recovered is the subject store's to say (AD-19). */
+    gdefcore_text_free(catalog, type_name);
+    return revision_answer(out_status, GDEFCORE_REVISION_PERSONAL, out_texts,
+        out_lens, out_count);
+  }
+  gdefcore_text_free(catalog, type_name);
+  rc = gdefcore_entity_revision_values(catalog, canon, GDEFCORE_PUBLIC_ID_LEN,
+      seq, lang, lang_len, field, field_len, out_texts, out_lens, out_count);
+  if (rc == GDEFCORE_OK) {
+    *out_status = GDEFCORE_REVISION_SHOWN;
+    return GDEFCORE_OK;
+  }
+  if (rc == GDEFCORE_ERR_INVALID) {
+    /* The revision exists (checked above), so this is a field with no value
+     * in it: the absence a field the principal may not read is. */
+    return revision_answer(out_status, GDEFCORE_REVISION_ABSENT, out_texts,
+        out_lens, out_count);
+  }
+  return rc;
+}
+
 struct Listed {
   char * id;
   char * key;
@@ -3210,8 +3364,8 @@ static int in_words(const char * word, size_t n, const char * const * list) {
  * must not be lowered by a name it does not recognise. */
 static int action_class(const char * action, size_t len) {
   static const char * const kStrong[] = {"delete", "remove", "erase", "publish",
-      "unpublish", "admin", "grant", "revert", "restore", "install", "enable",
-      "disable", NULL};
+      "unpublish", "admin", "grant", "revert", "restore", "activate", "install",
+      "enable", "disable", NULL};
   static const char * const kEdit[] = {"update", "edit", "create", "save",
       "draft", "write", NULL};
   static const char * const kRead[] = {"read", "view", "list", "search",
@@ -3219,6 +3373,7 @@ static int action_class(const char * action, size_t len) {
   int strong = 0;
   int edit = 0;
   int read = 0;
+  int revisions = 0;
   size_t start = 0;
   size_t i;
   if (action == NULL) {
@@ -3227,7 +3382,11 @@ static int action_class(const char * action, size_t len) {
   for (i = 0; i <= len; i++) {
     if (i == len || action[i] == '.') {
       size_t n = i - start;
-      if (in_words(action + start, n, kStrong)) {
+      if (n == 9 && memcmp(action + start, "revisions", 9) == 0) {
+        /* History shows drafts nobody has published, and acts on them: never
+         * lower than an edit, whatever the verb after it says (D15). */
+        revisions = 1;
+      } else if (in_words(action + start, n, kStrong)) {
         strong = 1;
       } else if (in_words(action + start, n, kEdit)) {
         edit = 1;
@@ -3240,15 +3399,51 @@ static int action_class(const char * action, size_t len) {
   if (strong) {
     return kClassStrong;
   }
-  if (edit) {
+  if (edit || revisions) {
     return kClassEdit;
   }
   return read ? kClassRead : kClassStrong;
 }
 
-int gdefcore_access_grant_risk(const char * action, size_t action_len,
-    int has_field, const char * condition_text, size_t condition_len,
-    int reaches_anonymous) {
+/* Whether holding the action lets a person change the content a condition
+ * reads: an edit of the entity, or a move to other content (a revert, a
+ * restore, an activate). A create is not one: its condition is evaluated on
+ * the container the path names, and the holder does not change that. */
+static int action_changes_content(const char * action, size_t len) {
+  static const char * const kChange[] = {"update", "edit", "save", "draft",
+      "write", "revert", "restore", "activate", NULL};
+  size_t start = 0;
+  size_t i;
+  if (action == NULL) {
+    return 0;
+  }
+  for (i = 0; i <= len; i++) {
+    if (i == len || action[i] == '.') {
+      if (in_words(action + start, i - start, kChange)) {
+        return 1;
+      }
+      start = i + 1;
+    }
+  }
+  return 0;
+}
+
+/* The grant's condition tests a field that the same grant lets the holder
+ * change: the field the grant names, or, for an entity-wide grant, any field
+ * at all. */
+static int grant_changes_its_own_field(const char * action, size_t action_len,
+    const char * field, size_t field_len, const GDEFCORE_Condition * cond) {
+  if (!action_changes_content(action, action_len)) {
+    return 0;
+  }
+  return gdefcore_condition_tests_field(cond, field_len > 0 ? field : NULL,
+      field_len);
+}
+
+/* The rating before the self-reference rule, and whether the grant is one. */
+static int risk_base(const char * action, size_t action_len, int has_field,
+    const char * field, size_t field_len, const char * condition_text,
+    size_t condition_len, int reaches_anonymous, int * out_self) {
   GDEFCORE_Condition * cond = NULL;
   int cls = action_class(action, action_len);
   unsigned uses;
@@ -3263,6 +3458,12 @@ int gdefcore_access_grant_risk(const char * action, size_t action_len,
   }
   uses = gdefcore_condition_uses(cond);
   constrains = gdefcore_condition_constrains_type(cond);
+  if (out_self != NULL) {
+    *out_self = has_field && field_len == 0
+                    ? 0
+                    : grant_changes_its_own_field(action, action_len, field,
+                          field_len, cond);
+  }
   gdefcore_condition_free(cond);
   narrowing = (uses & (GDEFCORE_CONDITION_USES_ENTITY |
                    GDEFCORE_CONDITION_USES_PRINCIPAL)) != 0;
@@ -3291,6 +3492,42 @@ int gdefcore_access_grant_risk(const char * action, size_t action_len,
     return GDEFCORE_ACCESS_RISK_LOW;
   }
   return GDEFCORE_ACCESS_RISK_MEDIUM;
+}
+
+int gdefcore_access_grant_risk(const char * action, size_t action_len,
+    int has_field, const char * condition_text, size_t condition_len,
+    int reaches_anonymous) {
+  return risk_base(action, action_len, has_field, NULL, 0, condition_text,
+      condition_len, reaches_anonymous, NULL);
+}
+
+int gdefcore_access_grant_changes_own_field(const char * action,
+    size_t action_len, const char * field, size_t field_len,
+    const char * condition_text, size_t condition_len) {
+  int self = 0;
+  GDEFCORE_Condition * cond = NULL;
+  if (condition_text == NULL ||
+      gdefcore_condition_parse_stored(condition_text, condition_len, &cond,
+          NULL) != GDEFCORE_OK) {
+    return 0;
+  }
+  self = grant_changes_its_own_field(action, action_len, field, field_len, cond);
+  gdefcore_condition_free(cond);
+  return self;
+}
+
+int gdefcore_access_grant_risk_on(const char * action, size_t action_len,
+    const char * field, size_t field_len, const char * condition_text,
+    size_t condition_len, int reaches_anonymous) {
+  int self = 0;
+  int risk = risk_base(action, action_len, field_len > 0, field, field_len,
+      condition_text, condition_len, reaches_anonymous, &self);
+  /* A grant that lets its holder change the very field its condition tests
+   * can widen itself, so it is rated one step above what its breadth says. */
+  if (self && risk < GDEFCORE_ACCESS_RISK_HIGH) {
+    risk += 1;
+  }
+  return risk;
 }
 
 const char * gdefcore_access_risk_name(int risk) {
@@ -3343,7 +3580,7 @@ GDEFCORE_Result gdefcore_access_stage_module_grant(
   }
   /* Not held by a role: it reaches the anonymous state unless the condition
    * reads the principal. */
-  risk = gdefcore_access_grant_risk(action, action_len, field_len > 0,
+  risk = gdefcore_access_grant_risk_on(action, action_len, field, field_len,
       condition_text, condition_len,
       (gdefcore_condition_uses(cond) & GDEFCORE_CONDITION_USES_PRINCIPAL) == 0);
   gdefcore_condition_free(cond);
@@ -3443,6 +3680,33 @@ static size_t shown_label_len(const char * label, size_t len) {
   return len - kWhenHex - mark;
 }
 
+/* What the matrix says of a grant that lets its holder change the field its
+ * own condition tests (D15). */
+static const char kSelfNote[] =
+    "; the holder can change the field that decides who may edit, so this is "
+    "rated one step higher";
+
+static GDEFCORE_Result mx_join(GDEFCORE_Catalog * catalog, const char * a,
+    size_t an, const char * b, size_t bn, char ** out, size_t * out_len) {
+  char * both = NULL;
+  GDEFCORE_Result rc;
+  char * tmp = (char *)gcu_allocator_malloc(alloc_default(), an + bn + 1);
+  if (tmp == NULL) {
+    return GDEFCORE_ERR_OOM;
+  }
+  memcpy(tmp, a, an);
+  memcpy(tmp + an, b, bn);
+  tmp[an + bn] = '\0';
+  rc = gdefcore_text_dup(catalog, tmp, an + bn, &both);
+  gcu_allocator_free(alloc_default(), tmp);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  *out = both;
+  *out_len = an + bn;
+  return GDEFCORE_OK;
+}
+
 /* Add one row. @p cond is the canonical text, or NULL when @p cond_raw is all
  * that is known (a condition that cannot be parsed). */
 static GDEFCORE_Result mx_add(MatrixBuild * b, const char * source,
@@ -3480,8 +3744,8 @@ static GDEFCORE_Result mx_add(MatrixBuild * b, const char * source,
   if (rc != GDEFCORE_OK) {
     return rc;
   }
-  row->risk = gdefcore_access_grant_risk(action, action_len, field_len > 0, cond,
-      cond_len, reaches_anonymous);
+  row->risk = gdefcore_access_grant_risk_on(action, action_len, field,
+      field_len, cond, cond_len, reaches_anonymous);
   rc = mx_text(b->catalog, source, source_len, &row->source, &row->source_len);
   if (rc == GDEFCORE_OK) {
     rc = mx_text(b->catalog, label, shown_label_len(label, label_len),
@@ -3510,6 +3774,21 @@ static GDEFCORE_Result mx_add(MatrixBuild * b, const char * source,
                    &row->explain, &row->explain_len);
   }
   gdefcore_condition_text_free(explain);
+  if (rc == GDEFCORE_OK &&
+      gdefcore_access_grant_changes_own_field(action, action_len, field,
+          field_len, cond, cond_len)) {
+    /* Said in words, beside the condition: the rating is one step higher
+     * for it, and a reader of the matrix should see why. */
+    char * joined = NULL;
+    size_t joined_len = 0;
+    rc = mx_join(b->catalog, row->explain, row->explain_len, kSelfNote,
+        sizeof kSelfNote - 1, &joined, &joined_len);
+    if (rc == GDEFCORE_OK) {
+      gdefcore_text_free(b->catalog, (char *)row->explain);
+      row->explain = joined;
+      row->explain_len = joined_len;
+    }
+  }
   if (rc != GDEFCORE_OK) {
     mx_free_row(b->catalog, row);
     return rc;

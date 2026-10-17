@@ -245,6 +245,15 @@ GDEFCORE_API int gdefcore_condition_constrains_type(
     const GDEFCORE_Condition * condition);
 
 /**
+ * @brief Whether @p condition reads the entity field @p field anywhere, even
+ * under `not`. A NULL @p field asks whether it reads any field at all. The
+ * access matrix uses this to find a grant whose holder could change what its
+ * own condition tests. 0 for a NULL condition.
+ */
+GDEFCORE_API int gdefcore_condition_tests_field(
+    const GDEFCORE_Condition * condition, const char * field, size_t field_len);
+
+/**
  * @brief Plain English for @p condition. English only; deterministic.
  *
  * Built from the canonical form, so two spellings of one condition read

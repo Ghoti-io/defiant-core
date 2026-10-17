@@ -30,6 +30,25 @@
 #   stale-version-accepted       Revisions.AStalePatchOfTheNewOperationsIsAConflict
 #   patch-drops-version          Revisions.TheNewOperationsRoundTripThroughAPatch
 #   form-tree-skips-active       Form.TreeFallsBackToTheActiveRevision
+#   revisions-not-edit-class    ActionRating.RevisionsActionsAreAtLeastAnEdit
+#   activate-not-strong         ActionRating.RevisionsActionsAreAtLeastAnEdit
+#   self-reference-not-raised   ActionRating.AGrantThatCanChangeItsOwnFieldIsRatedOneStepHigher,
+#                               Actions.TheMatrixSaysItInWords
+#   self-reference-blind-to-whole-entity-grants
+#                               ActionRating.AGrantThatCanChangeItsOwnFieldIsRatedOneStepHigher
+#   self-reference-ignores-the-grants-field
+#                               ActionRating.AGrantThatCanChangeItsOwnFieldIsRatedOneStepHigher
+#   matrix-silent-on-self-reference
+#                               Actions.TheMatrixSaysItInWords
+#   revision-view-skips-permission
+#                               Actions.RevisionViewNeedsThePermissionAndNotTheFlag
+#   revision-view-skips-sequence-check
+#                               Actions.RevisionViewRefusalsAreOneAnswer
+#   revision-view-skips-field-filter
+#                               Actions.RevisionViewIsFilteredFieldByField
+#   revision-view-shows-personal
+#                               Actions.RevisionViewNeverShowsAPersonalFieldAsStored
+#   condition-reads-head        Actions.RevisionViewAsksTheActiveStateNotTheViewedRevision
 #   (activate-skips-sealed-check is in check-erasure.sh, which owns the
 #    personal-value fixtures: Erasure.PlaintextRevisionIsNotActivated)
 #
@@ -46,6 +65,7 @@ plant_setup "$@"
 
 plant_control testRevisions 'Revisions.*'
 plant_control testForm 'Form.TreeFallsBackToTheActiveRevision'
+plant_control testActions 'ActionVocabulary.*:ActionRating.*:Actions.*'
 
 ENT=src/entity/entity.c
 
@@ -252,5 +272,87 @@ plant form-tree-skips-active src/form/form.c testForm \
   'Form.TreeFallsBackToTheActiveRevision' \
   '    rc = gdefcore_entity_values(catalog, NULL, GDEFCORE_VIEW_ACTIVE, id,' \
   '    rc = gdefcore_entity_values(catalog, NULL, GDEFCORE_VIEW_PUBLISHED, id,'
+
+# ---- the action vocabulary, the rating and the revision views (task 4) ----
+
+ACC=src/access/access.c
+
+# Plant 24: a `revisions` action is rated by its verb, so `revisions.read` is
+# the read it looks like.
+plant revisions-not-edit-class $ACC testActions \
+  'ActionRating.RevisionsActionsAreAtLeastAnEdit' \
+  '  if (edit || revisions) {' \
+  '  if (edit || (0 && revisions)) {'
+
+# Plant 25: `activate` is not a strong word, so `revisions.activate` is only
+# an edit.
+plant activate-not-strong $ACC testActions \
+  'ActionRating.RevisionsActionsAreAtLeastAnEdit' \
+  '"restore", "activate", "install",' \
+  '"restore", "install",'
+
+# Plant 26: a grant that can change the field its own condition tests is
+# rated as its breadth says.
+plant self-reference-not-raised $ACC testActions \
+  'ActionRating.AGrantThatCanChangeItsOwnFieldIsRatedOneStepHigher Actions.TheMatrixSaysItInWords' \
+  '  if (self && risk < GDEFCORE_ACCESS_RISK_HIGH) {' \
+  '  if (0 && self && risk < GDEFCORE_ACCESS_RISK_HIGH) {'
+
+# Plant 27: an entity-wide grant is not asked about every field.
+plant self-reference-blind-to-whole-entity-grants $ACC testActions \
+  'ActionRating.AGrantThatCanChangeItsOwnFieldIsRatedOneStepHigher' \
+  '  return gdefcore_condition_tests_field(cond, field_len > 0 ? field : NULL,
+      field_len);' \
+  '  return gdefcore_condition_tests_field(cond, field_len > 0 ? field : "",
+      field_len);'
+
+# Plant 28: a grant of one field is asked about every field.
+plant self-reference-ignores-the-grants-field $ACC testActions \
+  'ActionRating.AGrantThatCanChangeItsOwnFieldIsRatedOneStepHigher' \
+  '  return gdefcore_condition_tests_field(cond, field_len > 0 ? field : NULL,
+      field_len);' \
+  '  return gdefcore_condition_tests_field(cond, field != NULL ? NULL : NULL,
+      field_len);'
+
+# Plant 29: the matrix rates the grant higher and does not say why.
+plant matrix-silent-on-self-reference $ACC testActions \
+  'Actions.TheMatrixSaysItInWords' \
+  '  if (rc == GDEFCORE_OK &&
+      gdefcore_access_grant_changes_own_field(action, action_len, field,' \
+  '  if (0 && rc == GDEFCORE_OK &&
+      gdefcore_access_grant_changes_own_field(action, action_len, field,'
+
+# Plant 30: the revision view does not ask `revisions.read`.
+plant revision-view-skips-permission $ACC testActions \
+  'Actions.RevisionViewNeedsThePermissionAndNotTheFlag' \
+  '  if (rc != GDEFCORE_OK || !may_view ||' \
+  '  if (rc != GDEFCORE_OK ||'
+
+# Plant 31: the revision view takes any sequence for a revision.
+plant revision-view-skips-sequence-check $ACC testActions \
+  'Actions.RevisionViewRefusalsAreOneAnswer' \
+  '    if (rc != GDEFCORE_OK || seq == 0 || seq > head) {' \
+  '    if (rc != GDEFCORE_OK) {'
+
+# Plant 32: the revision view does not apply the field-read grants.
+plant revision-view-skips-field-filter $ACC testActions \
+  'Actions.RevisionViewIsFilteredFieldByField' \
+  '  if (field_restricted(decls, ndecls, type_name, type_len, field, field_len)) {
+    granted = field_granted(' \
+  '  if (0 && field_restricted(decls, ndecls, type_name, type_len, field, field_len)) {
+    granted = field_granted('
+
+# Plant 33: a personal field is shown as it is stored.
+plant revision-view-shows-personal $ACC testActions \
+  'Actions.RevisionViewNeverShowsAPersonalFieldAsStored' \
+  '  if (field_is_personal(catalog, type_name, type_len, field, field_len)) {' \
+  '  if (0 && field_is_personal(catalog, type_name, type_len, field, field_len)) {'
+
+# Plant 34: a condition reads the head revision, the newest draft, where the
+# permission to view history is asked of the entity as it is stored.
+plant condition-reads-head src/condition/condition_eval.c testActions \
+  'Actions.RevisionViewAsksTheActiveStateNotTheViewedRevision' \
+  '  rc = gdefcore_entity_values(ctx->catalog, NULL, GDEFCORE_VIEW_ACTIVE,' \
+  '  rc = gdefcore_entity_values(ctx->catalog, NULL, GDEFCORE_VIEW_DRAFT,'
 
 plant_finish

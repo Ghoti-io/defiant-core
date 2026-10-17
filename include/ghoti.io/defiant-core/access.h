@@ -45,6 +45,44 @@
 extern "C" {
 #endif
 
+/*
+ * The action vocabulary. A permission names any action a module likes; these
+ * are the ones the kernel and its entity paths ask about, spelled once. The
+ * decision gdefcore_access_can() is asked with them, and the risk rating
+ * knows their classes (read, edit, strong).
+ *
+ * - `create`: add an entity. Checked against the **container the path names**
+ *   (a permission on the container's type, asked of the container), or at type
+ *   level; a permission with a field limits what may be supplied, field by
+ *   field. Never a condition on the values
+ *   being written.
+ * - `read`: see an entity's published, active revision. Needs the published flag.
+ * - `update`: save a draft. Decided on the entity as stored, before the change.
+ * - `publish`: set the published flag and make the head revision active; and
+ *   take it away again (`unpublish` is the same permission).
+ * - `delete`: clear the entity (it is unpublished and has no active revision;
+ *   its revisions stay).
+ * - `revisions.read`: view history and the head draft, field by field.
+ * - `revisions.revert`: append a copy of an earlier revision and make it active.
+ * - `revisions.activate`: make an existing revision the active one.
+ */
+/** Add an entity. */
+#define GDEFCORE_ACTION_CREATE "create"
+/** See an entity as readers see it. */
+#define GDEFCORE_ACTION_READ "read"
+/** Change an entity's content (saves a draft). */
+#define GDEFCORE_ACTION_UPDATE "update"
+/** Publish, and unpublish. */
+#define GDEFCORE_ACTION_PUBLISH "publish"
+/** Clear an entity. */
+#define GDEFCORE_ACTION_DELETE "delete"
+/** View the revisions of an entity, filtered field by field. */
+#define GDEFCORE_ACTION_REVISIONS_READ "revisions.read"
+/** Revert an entity to an earlier revision (appends a copy). */
+#define GDEFCORE_ACTION_REVISIONS_REVERT "revisions.revert"
+/** Make an existing revision the active one. */
+#define GDEFCORE_ACTION_REVISIONS_ACTIVATE "revisions.activate"
+
 /** The condition matches every entity of the type. */
 #define GDEFCORE_ACCESS_ANY 1
 /** The condition matches when the entity actor is the request principal. */
@@ -141,6 +179,17 @@ typedef struct GDEFCORE_Access_Matrix_Row {
   int risk;                   ///< ::GDEFCORE_ACCESS_RISK_LOW, _MEDIUM or _HIGH.
 } GDEFCORE_Access_Matrix_Row;
 
+/** A revision's field: the values were returned. */
+#define GDEFCORE_REVISION_SHOWN 1
+/** A revision's field the principal may not read, or that has no value in that
+ * revision: nothing is returned, and the two cannot be told apart. */
+#define GDEFCORE_REVISION_ABSENT 2
+/** A revision's personal field. The stored ciphertext is never returned. */
+#define GDEFCORE_REVISION_PERSONAL 3
+/** A revision's personal field of a subject whose key was destroyed: the
+ * value is gone, and the marker ::GDEFCORE_SUBJECT_ERASED is returned. */
+#define GDEFCORE_REVISION_ERASED 4
+
 /**
  * @brief A filtered list. Begins with @ref size.
  *
@@ -160,6 +209,39 @@ typedef struct GDEFCORE_Access_List {
   const char * sort_field;      ///< Field to sort by, or NULL.
   size_t sort_field_len;        ///< Length of @ref sort_field.
 } GDEFCORE_Access_List;
+
+/**
+ * @brief One field of one recorded revision, as a principal may see it.
+ *
+ * The read behind a revision view (history, the head draft, an earlier
+ * revision). Two checks, in this order, both on the entity **as it is stored**
+ * (its active revision and its creator), never on the revision being viewed
+ * and never on anything supplied by the caller:
+ *
+ * 1. `revisions.read` (::GDEFCORE_ACTION_REVISIONS_READ) by gdefcore_access_can().
+ *    It does not need the published flag, because a revision view shows drafts
+ *    that readers do not see; it is rated at least an edit (see
+ *    gdefcore_access_grant_risk()).
+ * 2. The field-read grants of the field, as a live read applies them.
+ *
+ * No permission, an unknown entity, an unknown field, a sequence that is not a
+ * revision of the entity and an id that is not an id are one answer,
+ * ::GDEFCORE_ERR_INVALID. A field the principal may not read, and a field with
+ * no value in that revision, are @p out_status ::GDEFCORE_REVISION_ABSENT with
+ * no texts; they cannot be told apart. A personal field is
+ * ::GDEFCORE_REVISION_PERSONAL with no texts: the stored text is ciphertext
+ * and is never shown (gdefcore_subject_revision_values() recovers an erased
+ * subject's marker). Otherwise ::GDEFCORE_REVISION_SHOWN and the texts, to be
+ * freed with gdefcore_values_free().
+ *
+ * @param seq A recorded revision sequence of the entity.
+ * @param lang The language, e.g. `en`. Required.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_access_revision_values(
+    GDEFCORE_Catalog * catalog, GDEFCORE_Request * request, const char * id,
+    size_t id_len, uint64_t seq, const char * lang, size_t lang_len,
+    const char * field, size_t field_len, int * out_status, char *** out_texts,
+    size_t ** out_lens, size_t * out_count);
 
 /** @brief Free a list of texts from this header. NULL is ignored. */
 GDEFCORE_API void gdefcore_access_free(GDEFCORE_Catalog * catalog,
@@ -281,10 +363,13 @@ GDEFCORE_API GDEFCORE_Result gdefcore_access_permission_info(
  * The action decides its class: `read`, `view`, `list`, `search`, `count`,
  * `export` are reads; `update`, `edit`, `create`, `save`, `draft`, `write`
  * are edits; `delete`, `remove`, `erase`, `publish`, `unpublish`, `admin`,
- * `grant`, `revert`, `restore`, `install`, `enable`, `disable` are strong. The
- * words are taken from the action's dot-separated parts; an action that has a
- * strong word is strong, then one with an edit word is an edit, then a read;
- * an action with none of them is strong. The condition decides the rest.
+ * `grant`, `revert`, `restore`, `activate`, `install`, `enable`, `disable` are
+ * strong. The words are taken from the action's dot-separated parts; an action
+ * that has a strong word is strong, then one with an edit word is an edit, then
+ * a read; an action with none of them is strong. A `revisions` part makes the
+ * action at least an edit, whatever its other words say: `revisions.read`
+ * shows drafts nobody published, so it is not rated as a read of what readers
+ * see. The condition decides the rest.
  *
  * - **High**: the condition bounds nothing (it neither names a type, see
  *   gdefcore_condition_constrains_type(), nor reads the entity: `true`, or a
@@ -307,6 +392,35 @@ GDEFCORE_API GDEFCORE_Result gdefcore_access_permission_info(
 GDEFCORE_API int gdefcore_access_grant_risk(const char * action,
     size_t action_len, int has_field, const char * condition_text,
     size_t condition_len, int reaches_anonymous);
+
+/**
+ * @brief gdefcore_access_grant_risk() that also knows the field the grant
+ * covers, so it can tell a grant that lets its holder change the very field
+ * its condition tests.
+ *
+ * A holder of `(= field.group "a")` for `update` can set `group` and so move
+ * a post into the group that lets them edit it: the grant can widen itself.
+ * The action must be one that changes content (`update`, `edit`, `save`,
+ * `draft`, `write`, `revert`, `restore`, `activate`, including as the last part
+ * of `revisions.revert` and `revisions.activate`; not `create`, whose
+ * condition is on the container the path names), and the condition must test
+ * the grant's @p field, or, for an entity-wide grant (@p field_len 0), any
+ * field. Such a grant is rated **one step higher** than gdefcore_access_grant_risk()
+ * rates it (low to medium, medium to high, high stays), and the matrix says
+ * so in the row's explanation.
+ */
+GDEFCORE_API int gdefcore_access_grant_risk_on(const char * action,
+    size_t action_len, const char * field, size_t field_len,
+    const char * condition_text, size_t condition_len, int reaches_anonymous);
+
+/**
+ * @brief Whether a grant of @p action covering @p field (empty for the whole
+ * entity) lets its holder change a field its condition tests. The test
+ * gdefcore_access_grant_risk_on() applies, on its own.
+ */
+GDEFCORE_API int gdefcore_access_grant_changes_own_field(const char * action,
+    size_t action_len, const char * field, size_t field_len,
+    const char * condition_text, size_t condition_len);
 
 /** @brief `low`, `medium` or `high` for a rating; `unknown` otherwise. */
 GDEFCORE_API const char * gdefcore_access_risk_name(int risk);

@@ -66,4 +66,14 @@ plant read-skips-filter src/access/access.c testOracle 'Oracle.Entities' \
             entity_visible(&ev, grants, ngrants, type_name, type_len, actor,
                 actor_len, principal, principal_len));'
 
+# A revision view that tells an entity the principal may not look at (one that
+# exists) from one that does not exist.
+plant revision-view-tells-hidden-from-missing src/access/access.c testOracle 'Oracle.Entities' \
+  '    /* No permission, no such entity and no such field answer alike. */
+    gdefcore_text_free(catalog, type_name);
+    return GDEFCORE_ERR_INVALID;' \
+  '    /* No permission, no such entity and no such field answer alike. */
+    gdefcore_text_free(catalog, type_name);
+    return may_view ? GDEFCORE_ERR_INVALID : GDEFCORE_ERR_LIMIT;'
+
 plant_finish

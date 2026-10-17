@@ -473,6 +473,21 @@ GDEFCORE_API GDEFCORE_Result gdefcore_entity_values(GDEFCORE_Catalog * catalog,
     size_t field_len, char *** out_texts, size_t ** out_lens,
     size_t * out_count);
 
+/**
+ * @brief Read field values of one recorded revision, unfiltered.
+ *
+ * Like gdefcore_entity_values(), a preview for the host and for
+ * gdefcore_access_revision_values(), which is the read a principal uses. A
+ * personal field comes out as the sealed text it was stored as. @p seq is a
+ * revision sequence of the entity; one never recorded, a missing id and a field
+ * with no value in that revision are ::GDEFCORE_ERR_INVALID. Free the texts
+ * with gdefcore_values_free().
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_entity_revision_values(
+    GDEFCORE_Catalog * catalog, const char * id, size_t id_len, uint64_t seq,
+    const char * lang, size_t lang_len, const char * field, size_t field_len,
+    char *** out_texts, size_t ** out_lens, size_t * out_count);
+
 /** @brief Free texts from gdefcore_entity_values(). */
 GDEFCORE_API void gdefcore_values_free(GDEFCORE_Catalog * catalog,
     char ** texts, size_t * lens, size_t count);

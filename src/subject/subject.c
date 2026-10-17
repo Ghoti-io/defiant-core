@@ -1486,6 +1486,46 @@ GDEFCORE_Result gdefcore_subject_read(GDEFCORE_Subjects * subjects,
   return rc;
 }
 
+GDEFCORE_Result gdefcore_subject_revision_marker(GDEFCORE_Subjects * subjects,
+    const char * subject, size_t subject_len, int status, int * out_status,
+    char ** out_text, size_t * out_len) {
+  char sid[GDEFCORE_PUBLIC_ID_LEN + 1];
+  char * ledger = NULL;
+  size_t ledger_len = 0;
+  int erased;
+  GDEFCORE_Result rc;
+  if (subjects == NULL || out_status == NULL || out_text == NULL ||
+      out_len == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  *out_status = status;
+  *out_text = NULL;
+  *out_len = 0;
+  if (status != GDEFCORE_REVISION_PERSONAL) {
+    return GDEFCORE_OK;
+  }
+  rc = canon_id(subject, subject_len, sid);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  rc = ledger_load(subjects, &ledger, &ledger_len);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  erased = ledger_has(ledger, ledger_len, sid);
+  gcu_allocator_free(subjects->alloc, ledger);
+  if (!erased) {
+    return GDEFCORE_OK;
+  }
+  /* The key is gone: what the revision holds decrypts to nothing, and says
+   * so in the one word every erased value is shown as. */
+  rc = erased_text(subjects, out_text, out_len);
+  if (rc == GDEFCORE_OK) {
+    *out_status = GDEFCORE_REVISION_ERASED;
+  }
+  return rc;
+}
+
 static GDEFCORE_Result delete_blinds(GDEFSTOR_Write * write, const char * subject,
     const char * text, size_t n) {
   size_t at = 0;

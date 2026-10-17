@@ -140,11 +140,11 @@ plant risk-edit-unconstrained-low $ACCESS testGrants 'Grants.RiskRatings' \
   '  return GDEFCORE_ACCESS_RISK_MEDIUM;
 }
 
-const char * gdefcore_access_risk_name' \
+int gdefcore_access_grant_risk(const char * action,' \
   '  return GDEFCORE_ACCESS_RISK_LOW;
 }
 
-const char * gdefcore_access_risk_name'
+int gdefcore_access_grant_risk(const char * action,'
 
 # Plant 9: anyone may read the matrix.
 plant matrix-visible-to-everyone $ACCESS testGrants 'Grants.MatrixOnlyForAdmin' \

@@ -628,6 +628,38 @@ inline std::string ReadLine(World & w, const std::string & who,
   return out + Diag(w, req);
 }
 
+/** One field of the first revision, as the revision view answers it. */
+inline std::string RevisionLine(World & w, const std::string & who,
+    const std::string & id, uint64_t seq, const char * field) {
+  Fresh fresh(w, who);
+  GDEFCORE_Request * req = fresh.req;
+  char ** texts = (char **)0x1;
+  size_t * lens = (size_t *)0x1;
+  size_t count = 99;
+  int status = 99;
+  std::string out;
+  GDEFCORE_Result rc;
+  Note("gdefcore_access_revision_values");
+  rc = gdefcore_access_revision_values(w.site.catalog, req, id.data(), id.size(),
+      seq, "en", 2, field, strlen(field), &status, &texts, &lens, &count);
+  out = "rc=" + Rc(rc);
+  if (texts == (char **)0x1 && lens == (size_t *)0x1 && count == 99 &&
+      status == 99) {
+    out += " untouched";
+  } else if (rc != GDEFCORE_OK) {
+    out += " WROTE-ON-FAILURE";
+  }
+  if (rc == GDEFCORE_OK) {
+    size_t i;
+    out += " status=" + std::to_string(status) + " count=" + std::to_string(count);
+    for (i = 0; i < count; i++) {
+      out += " [" + std::string(texts[i], lens[i]) + "]";
+    }
+    gdefcore_values_free(w.site.catalog, texts, lens, count);
+  }
+  return out + Diag(w, req);
+}
+
 inline std::string ListLine(World & w, const std::string & who, const char * type,
     const char * ff, const std::string & ft, const char * sf,
     const char * lang = "en") {
@@ -821,6 +853,8 @@ inline Obs Observe(World & w, const std::string & who, const Ask & ask) {
     o.kv[pre + "read.title"] = ReadLine(w, who, target, "title");
     o.kv[pre + "read.secret"] = ReadLine(w, who, target, "secret");
     o.kv[pre + "read.nope"] = ReadLine(w, who, target, "nope");
+    o.kv[pre + "revisions.title"] = RevisionLine(w, who, target, 1, "title");
+    o.kv[pre + "revisions.secret"] = RevisionLine(w, who, target, 1, "secret");
     o.kv[pre + "resolve.echo"] =
         ResolveLine(w, who, true, "/echo/" + name, true);
     o.kv[pre + "cond.false"] = CondLine(w, who, target, false);

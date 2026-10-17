@@ -182,6 +182,25 @@ GDEFCORE_API void gdefcore_subject_free(GDEFCORE_Subjects * subjects,
     void * bytes);
 
 /**
+ * @brief Say what a revision view shows for an erased person.
+ *
+ * gdefcore_access_revision_values() never returns the stored ciphertext of a
+ * personal field: it answers ::GDEFCORE_REVISION_PERSONAL and no text. Give
+ * that answer and @p subject (the person the value belongs to; the caller
+ * names them, as for gdefcore_subject_read()) to this function, and when the
+ * ledger names the person it makes the answer ::GDEFCORE_REVISION_ERASED with
+ * @p out_text the marker ::GDEFCORE_SUBJECT_ERASED, which is what the history
+ * of an erased person says in place of what they wrote. A person not erased
+ * stays ::GDEFCORE_REVISION_PERSONAL with no text: a revision view never
+ * decrypts. Any other @p status is returned as it is. No principal is asked
+ * here and nothing is read of the entity; the permission and the field filter
+ * were the access layer's. Free @p out_text with gdefcore_subject_free().
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_subject_revision_marker(
+    GDEFCORE_Subjects * subjects, const char * subject, size_t subject_len,
+    int status, int * out_status, char ** out_text, size_t * out_len);
+
+/**
  * @brief Destroy the subject key.
  *
  * @p confirmation is the subject's public id, one line. A wrong id writes

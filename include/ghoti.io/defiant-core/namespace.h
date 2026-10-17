@@ -111,7 +111,13 @@
 #define gdefcore_access_permission_info \
   GHOTIIO_DEFCORE(gdefcore_access_permission_info)
 #define gdefcore_access_grant_risk GHOTIIO_DEFCORE(gdefcore_access_grant_risk)
+#define gdefcore_access_grant_risk_on \
+  GHOTIIO_DEFCORE(gdefcore_access_grant_risk_on)
+#define gdefcore_access_grant_changes_own_field \
+  GHOTIIO_DEFCORE(gdefcore_access_grant_changes_own_field)
 #define gdefcore_access_risk_name GHOTIIO_DEFCORE(gdefcore_access_risk_name)
+#define gdefcore_access_revision_values \
+  GHOTIIO_DEFCORE(gdefcore_access_revision_values)
 #define gdefcore_access_matrix GHOTIIO_DEFCORE(gdefcore_access_matrix)
 #define gdefcore_access_matrix_free GHOTIIO_DEFCORE(gdefcore_access_matrix_free)
 #define gdefcore_access_stage_module_grant \
@@ -143,6 +149,8 @@
   GHOTIIO_DEFCORE(gdefcore_condition_uses)
 #define gdefcore_condition_constrains_type                                     \
   GHOTIIO_DEFCORE(gdefcore_condition_constrains_type)
+#define gdefcore_condition_tests_field \
+  GHOTIIO_DEFCORE(gdefcore_condition_tests_field)
 #define gdefcore_condition_explain \
   GHOTIIO_DEFCORE(gdefcore_condition_explain)
 #define gdefcore_condition_eval \
@@ -195,6 +203,8 @@
 #define gdefcore_changeset_revert_to GHOTIIO_DEFCORE(gdefcore_changeset_revert_to)
 #define gdefcore_changeset_serialize                                           \
   GHOTIIO_DEFCORE(gdefcore_changeset_serialize)
+#define gdefcore_entity_revision_values \
+  GHOTIIO_DEFCORE(gdefcore_entity_revision_values)
 #define gdefcore_changeset_enforce_access \
   GHOTIIO_DEFCORE(gdefcore_changeset_enforce_access)
 #define gdefcore_changeset_set_request                                         \
@@ -392,6 +402,8 @@
 #define gdefcore_subject_key GHOTIIO_DEFCORE(gdefcore_subject_key)
 #define gdefcore_subject_open GHOTIIO_DEFCORE(gdefcore_subject_open)
 #define gdefcore_subject_read GHOTIIO_DEFCORE(gdefcore_subject_read)
+#define gdefcore_subject_revision_marker \
+  GHOTIIO_DEFCORE(gdefcore_subject_revision_marker)
 #define gdefcore_subject_save GHOTIIO_DEFCORE(gdefcore_subject_save)
 #define gdefcore_subject_seal GHOTIIO_DEFCORE(gdefcore_subject_seal)
 #define gdefcore_subject_snapshot GHOTIIO_DEFCORE(gdefcore_subject_snapshot)

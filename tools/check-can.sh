@@ -256,11 +256,13 @@ plant own-is-the-last-writer-read $ACCESS testCan 'Can.OwnIsTheCreatorNotTheLast
   '  rc = gdefcore_entity_creator(catalog, canon, GDEFCORE_PUBLIC_ID_LEN, &actor,
       &actor_len);
   if (rc != GDEFCORE_OK) {
-    gdefcore_text_free(catalog, type_name);' \
+    gdefcore_text_free(catalog, type_name);
+    return rc;' \
   '  rc = gdefcore_entity_actor(catalog, canon, GDEFCORE_PUBLIC_ID_LEN, &actor,
       &actor_len);
   if (rc != GDEFCORE_OK) {
-    gdefcore_text_free(catalog, type_name);'
+    gdefcore_text_free(catalog, type_name);
+    return rc;'
 
 # Plant 18: the same in a list.
 plant own-is-the-last-writer-list $ACCESS testCan 'Can.OwnIsTheCreatorNotTheLastWriter' \
