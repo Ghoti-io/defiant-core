@@ -448,6 +448,51 @@ inline void BuildS(World * w, bool with_hidden) {
 }
 
 /**
+ * World "U": the unpublished. Readers (the anonymous state, which the kit lets
+ * read posts) see one published post in both worlds. With @p with_hidden the
+ * second world also holds a post that was never published (a draft) and a
+ * post that was published and then unpublished, and nothing else differs. A
+ * list that does not ask whether a post is published, a read, a route or an
+ * alias that does not, shows in the first world and not in the second.
+ */
+inline void BuildU(World * w, bool with_hidden) {
+  Site & s = w->site;
+  w->Open();
+  s.DefineNote();
+  s.InstallKit();
+  w->posts = true;
+  s.Login();
+  w->principal["none"] = s.Principal();
+  w->titles = {"ShownTitle", "DraftHiddenTitle", "UnpubHiddenTitle", "nothing"};
+  w->secrets = {"ShownBody", "DraftBodyCanary", "UnpubBodyCanary"};
+  w->Target("note1", "", true);
+  w->Target("note2", "", true);
+  w->Target("pub", s.Post("/shown", "ShownTitle", "ShownBody", true), false);
+  w->Target("draft",
+      with_hidden ? s.Post("/draft-hidden", "DraftHiddenTitle",
+                        "DraftBodyCanary", false)
+                  : "",
+      true);
+  {
+    std::string un = with_hidden ? s.Post("/unpub-hidden", "UnpubHiddenTitle",
+                                       "UnpubBodyCanary", true)
+                                 : "";
+    if (with_hidden) {
+      GDEFCORE_Changeset * cs = NULL;
+      EXPECT_EQ(GDEFCORE_OK,
+          gdefcore_changeset_prepare(s.catalog, NULL, 0, &cs));
+      EXPECT_EQ(GDEFCORE_OK, gdefcore_entity_unpublish(cs, un.data(), un.size()));
+      EXPECT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, NULL, 0));
+      gdefcore_changeset_destroy(cs);
+    }
+    w->Target("unpub", un, true);
+  }
+  w->Target("dup", "", true);
+  w->Target("missing", "", false);
+  w->Routes();
+}
+
+/**
  * World "T": a principal who may read their own notes and not the field
  * `secret`. Variant X also holds other people's notes; variant Y does not,
  * and the two own notes carry swapped secrets, so the only differences are
@@ -716,7 +761,8 @@ inline std::string CondLine(World & w, const std::string & who,
     const std::string & id, bool holds) {
   static const char kFalse[] =
       "(or (= field.title \"no-such-title-anywhere\") (= type \"no.such.type\")"
-      " (= state \"nonesuch\") (= actor \"nobody\") (= principal \"nobody\"))";
+      " (= state \"nonesuch\") (= creator \"nobody\")"
+      " (= revision.creator \"nobody\") (= principal \"nobody\"))";
   static const char kTrue[] = "(in type (\"site.note\" \"site.post\"))";
   const char * text = holds ? kTrue : kFalse;
   Fresh fresh(w, who);
@@ -875,7 +921,8 @@ inline Obs Observe(World & w, const std::string & who, const Ask & ask) {
         ListLine(w, who, "site.post", NULL, "", "title");
     {
       static const char * const kPaths[] = {"/", "/pub-hidden", "/draft-hidden",
-          "/dup-hidden", "/no-such", "/pub-hidden/", "/echo/missing"};
+          "/dup-hidden", "/no-such", "/pub-hidden/", "/echo/missing",
+          "/unpub-hidden", "/shown"};
       for (i = 0; i < sizeof kPaths / sizeof kPaths[0]; i++) {
         o.kv[std::string("g:page") + kPaths[i]] = PageLine(w, who, true, kPaths[i]);
         o.kv[std::string("g:page-noroutes") + kPaths[i]] =

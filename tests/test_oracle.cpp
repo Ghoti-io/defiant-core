@@ -194,6 +194,43 @@ TEST(Oracle, Entities) {
   absent.Close();
 }
 
+/* An entity that readers may not see because it is not published (never
+ * published, or unpublished) answers every surface as one that was never
+ * created, to a reader who may read every post. The control is the published
+ * post both worlds hold: it is listed, and read, in both, so the sweep can
+ * see a post at all. */
+TEST(Oracle, Unpublished) {
+  World hidden;
+  World absent;
+  BuildU(&hidden, true);
+  BuildU(&absent, false);
+  Ask ask = AskEverything(true, {"pub", "draft", "unpub", "note1", "note2", "missing"});
+  Obs a = Observe(hidden, "", ask);
+  Obs b = Observe(absent, "", ask);
+  EXPECT_GT(a.kv.size(), 60u) << "the sweep asked too little to mean anything";
+  EXPECT_EQ(a.kv.size(), b.kv.size());
+  EXPECT_TRUE(Differences(a, b).empty())
+      << "an unpublished entity changed an answer:" << Join(Differences(a, b));
+  EXPECT_TRUE(HiddenVsMissing(hidden, a).empty())
+      << "an unpublished id answers unlike a missing one:"
+      << Join(HiddenVsMissing(hidden, a));
+  EXPECT_TRUE(HiddenVsMissing(absent, b).empty()) << Join(HiddenVsMissing(absent, b));
+  /* Control: the published post is there in both, by the list and by a read. */
+  EXPECT_NE(std::string::npos, a.kv["g:list.posts"].find("ids=pub"))
+      << a.kv["g:list.posts"];
+  EXPECT_NE(std::string::npos, b.kv["g:list.posts"].find("ids=pub"))
+      << b.kv["g:list.posts"];
+  EXPECT_NE(std::string::npos, a.kv["t:pub:read.title"].find("count=1"))
+      << a.kv["t:pub:read.title"];
+  EXPECT_NE(std::string::npos, b.kv["t:pub:read.title"].find("count=1"))
+      << b.kv["t:pub:read.title"];
+  /* and the hidden ones are not in it */
+  EXPECT_EQ(std::string::npos, a.kv["g:list.posts"].find("draft"));
+  EXPECT_EQ(std::string::npos, a.kv["g:list.posts"].find("unpub"));
+  hidden.Close();
+  absent.Close();
+}
+
 TEST(Oracle, Fields) {
   /* The principal may read their own notes and may not read `secret`. The
    * two worlds hold other people's notes in one and not in the other, and

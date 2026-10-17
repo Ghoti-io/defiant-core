@@ -65,6 +65,13 @@ keeps its own creator.
 | clear (a revert of the first revision) | none | `d:` removed | none, `a:` removed | 0 | +1 |
 | type definition | yes | moves | the new one | 1 | +1 |
 
+`gdefcore_entity_save` builds on the **active** revision, not on the head: a
+save made while a newer draft sits beside the active revision starts from the
+active content and does not carry the draft's edits (the draft stays in the
+history). That is "save overwrites"; a path that wants to keep editing a draft
+uses `gdefcore_entity_save_draft`, which starts from the head, as the form path
+does.
+
 A draft never moves the active revision; only a save, a publish, an activate
 and a revert do. Publishing and activating are different acts: a publish makes
 the head active *and* sets the flag; an activate moves the pointer to any

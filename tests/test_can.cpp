@@ -447,21 +447,162 @@ TEST_F(Can, MemoServesTheSecondQuestion) {
 
 TEST_F(Can, AWriteInTheRequestIsANewQuestion) {
   DefinePost();
-  Declare(Perm("Edit own posts", "update", GDEFCORE_ACCESS_OWN));
+  Declare(Perm("Edit posts", "update", GDEFCORE_ACCESS_ANY));
   Role("authors");
-  Grant("authors", "Edit own posts");
+  ASSERT_EQ(GDEFCORE_OK, GrantWhen("authors", "Edit posts", kGroupA));
   std::string me = Principal("authors");
   std::string you = Principal("authors");
   std::string post = Save(me, "mine", "a");
+  std::string other = Save(me, "also mine", "a");
   GDEFCORE_Request * req = Req(me);
   size_t before = Revision(post);
   EXPECT_TRUE(Yes(req, "update", post));
   EXPECT_TRUE(Yes(req, "update", post));   /* remembered */
-  /* Somebody else saves it: it is theirs now, by the revision the entity has. */
+  /* Somebody else saves it into another group: it is no longer one the grant
+   * covers. (It used to be that it became theirs; ownership is the creator's
+   * now, and does not move, so the grant here is on a field instead.) */
   {
     GDEFCORE_Changeset * cs = NULL;
     GDEFCORE_Value value;
-    const char * text = "yours now";
+    const char * text = "b";
+    size_t len = strlen(text);
+    memset(&value, 0, sizeof value);
+    value.size = sizeof value;
+    value.field = "group";
+    value.field_len = 5;
+    value.texts = &text;
+    value.text_lens = &len;
+    value.count = 1;
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_changeset_prepare(catalog_, you.data(), you.size(), &cs));
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_entity_save(cs, post.data(), post.size(), "en", 2, &value, 1));
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, NULL, 0));
+    gdefcore_changeset_destroy(cs);
+  }
+  EXPECT_GT(Revision(post), before);
+  /* The same request, the same question, a fresh answer. */
+  EXPECT_FALSE(Yes(req, "update", post));
+  EXPECT_FALSE(Yes(Req(you), "update", post));
+  /* Control: an entity nobody touched is still yes, and was not forgotten. */
+  EXPECT_TRUE(Yes(req, "update", other));
+  size_t entries = 0;
+  gdefcore_request_memo_stats(req, &entries, NULL, NULL);
+  EXPECT_EQ(3u, entries);   /* one per (entity, version), and the other post */
+}
+
+/* Publishing and unpublishing move no revision, so a memo keyed on the
+ * revision answered a question about an entity that had become another one: a
+ * request that had asked "may I read this" of a draft was told no after the
+ * publish, and yes after the unpublish. The memo is keyed on the version. */
+TEST_F(Can, APublishInTheRequestIsANewQuestion) {
+  DefinePost();
+  Declare(Perm("Read posts", "read", GDEFCORE_ACCESS_ANY));
+  Role("readers");
+  Grant("readers", "Read posts");
+  std::string reader = Principal("readers");
+  std::string post = Draft("", "d", "a");
+  GDEFCORE_Request * req = Req(reader);
+  EXPECT_FALSE(Yes(req, "read", post));
+  EXPECT_FALSE(Yes(req, "read", post));   /* remembered */
+  auto Change = [&](bool publish) {
+    GDEFCORE_Changeset * cs = NULL;
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
+    ASSERT_EQ(GDEFCORE_OK,
+        publish ? gdefcore_entity_publish(cs, post.data(), post.size())
+                : gdefcore_entity_unpublish(cs, post.data(), post.size()));
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, NULL, 0));
+    gdefcore_changeset_destroy(cs);
+  };
+  size_t revision = Revision(post);
+  Change(true);
+  EXPECT_EQ(revision, Revision(post));   /* the number the memo used to use */
+  EXPECT_TRUE(Yes(req, "read", post));
+  Change(false);
+  EXPECT_EQ(revision, Revision(post));
+  EXPECT_FALSE(Yes(req, "read", post));
+  /* Control: the same sequence in a request that only ever asks once agrees,
+   * so it is the memo and not the decision that the revision key broke. */
+  Change(true);
+  EXPECT_TRUE(Yes(Req(reader), "read", post));
+}
+
+/* Readers see published entities. A principal who may read every post is not
+ * shown one that was never published, one that was unpublished, or one that
+ * was cleared: not by a read, not by can(read), not in a list (which used to
+ * list them, so the id of an unpublished post leaked to an `any` reader),
+ * and each answers exactly as an id nobody ever created does. The author of
+ * the unpublished one can still edit it. */
+TEST_F(Can, AnUnpublishedEntityIsNotThereForReaders) {
+  DefinePost();
+  Declare(Perm("Read posts", "read", GDEFCORE_ACCESS_ANY));
+  Declare(Perm("Edit own posts", "update", GDEFCORE_ACCESS_OWN));
+  Role("readers");
+  Grant("readers", "Read posts");
+  Role("authors");
+  Grant("authors", "Edit own posts");
+  std::string reader = Principal("readers");
+  std::string author = Principal("authors");
+  std::string pub = Save(author, "pub", "a");
+  std::string never = Draft(author, "never", "a");
+  std::string unpub = Save(author, "unpub", "a");
+  std::string cleared = Save(author, "cleared", "a");
+  {
+    GDEFCORE_Changeset * cs = NULL;
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_entity_unpublish(cs, unpub.data(), unpub.size()));
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, NULL, 0));
+    gdefcore_changeset_destroy(cs);
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_changeset_revert(catalog_, cleared.data(), cleared.size(), NULL,
+            0, &cs));
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, "core.role", 9));
+    gdefcore_changeset_destroy(cs);
+  }
+  std::string missing = FreshIdText();
+  /* the control: the published one is there by every route */
+  EXPECT_NE("<denied>", Read(Req(reader), pub));
+  EXPECT_TRUE(Yes(Req(reader), "read", pub));
+  EXPECT_EQ(std::vector<std::string>({"pub"}), List(reader));
+  /* the others answer as the missing one does */
+  for (const std::string & id : {never, unpub, cleared, missing}) {
+    EXPECT_EQ("<denied>", Read(Req(reader), id)) << id;
+    EXPECT_FALSE(Yes(Req(reader), "read", id)) << id;
+    GDEFCORE_Result rc = GDEFCORE_ERR_INTERNAL;
+    EXPECT_EQ(GDEFCORE_OK, CanOn(Req(reader), "read", id).rc);
+    (void)rc;
+  }
+  /* the author can still edit what is unpublished: the grant is on the
+   * creator and the active revision, neither of which needs the flag */
+  EXPECT_TRUE(Yes(Req(author), "update", never));
+  EXPECT_TRUE(Yes(Req(author), "update", unpub));
+  EXPECT_FALSE(Yes(Req(reader), "update", never));
+  /* and the author, who may not read posts, learns nothing by the list */
+  EXPECT_EQ(std::vector<std::string>(), List(author));
+}
+
+/* `own` is the entity's creator. An editor who saves someone's post becomes
+ * the creator of their revision and of nothing else: the author keeps the
+ * post and the editor does not gain it. This held the other way before (own
+ * followed whoever saved last, so the author lost a post to anyone who edited
+ * it), by the read, by the list and by can(), which all answer from the same
+ * creator now. */
+TEST_F(Can, OwnIsTheCreatorNotTheLastWriter) {
+  DefinePost();
+  Declare(Perm("Edit own posts", "update", GDEFCORE_ACCESS_OWN));
+  Declare(Perm("Read own posts", "read", GDEFCORE_ACCESS_OWN));
+  Role("authors");
+  Grant("authors", "Edit own posts");
+  Grant("authors", "Read own posts");
+  std::string me = Principal("authors");
+  std::string you = Principal("authors");
+  std::string post = Save(me, "mine", "a");
+  EXPECT_TRUE(Yes(Req(me), "update", post));
+  EXPECT_FALSE(Yes(Req(you), "update", post));
+  {
+    GDEFCORE_Changeset * cs = NULL;
+    GDEFCORE_Value value;
+    const char * text = "edited by you";
     size_t len = strlen(text);
     memset(&value, 0, sizeof value);
     value.size = sizeof value;
@@ -477,13 +618,19 @@ TEST_F(Can, AWriteInTheRequestIsANewQuestion) {
     ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, NULL, 0));
     gdefcore_changeset_destroy(cs);
   }
-  EXPECT_GT(Revision(post), before);
-  /* The same request, the same question, a fresh answer. */
-  EXPECT_FALSE(Yes(req, "update", post));
-  EXPECT_TRUE(Yes(Req(you), "update", post));
-  size_t entries = 0;
-  gdefcore_request_memo_stats(req, &entries, NULL, NULL);
-  EXPECT_EQ(2u, entries);   /* one per revision */
+  /* the revision is yours; the post is still mine */
+  char * who = NULL;
+  size_t who_len = 0;
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_entity_actor(catalog_, post.data(), post.size(), &who, &who_len));
+  EXPECT_EQ(you, std::string(who, who_len));
+  gdefcore_text_free(catalog_, who);
+  EXPECT_TRUE(Yes(Req(me), "update", post));
+  EXPECT_FALSE(Yes(Req(you), "update", post));
+  EXPECT_EQ("edited by you", Read(Req(me), post));
+  EXPECT_EQ("<denied>", Read(Req(you), post));
+  EXPECT_EQ(std::vector<std::string>({"edited by you"}), List(me));
+  EXPECT_EQ(std::vector<std::string>(), List(you));
 }
 
 TEST_F(Can, MemoIsPerPrincipal) {
@@ -831,6 +978,58 @@ TEST_F(Can, MarksTheRequestAndRecordsWhatItRead) {
   }
 }
 
+/* The render key's read set names each entity at its version, not at its
+ * latest revision: an unpublish, a publish or an activate moves no revision
+ * and changes what the page showed, so a fragment keyed on the revision
+ * outlived it (defect 1.5.2). */
+TEST_F(Can, TheReadSetIsKeyedOnTheVersion) {
+  DefinePost();
+  Declare(Perm("Edit posts", "update", GDEFCORE_ACCESS_ANY));
+  Role("editors");
+  Grant("editors", "Edit posts");
+  std::string ed = Principal("editors");
+  std::string post = Save(Admin(), "p", "a");
+  auto Key = [&](GDEFCORE_Request * r) {
+    char * k = NULL;
+    size_t n = 0;
+    EXPECT_EQ(GDEFCORE_OK,
+        gdefcore_access_render_key(catalog_, r, NULL, 0, NULL, 0, &k, &n));
+    std::string out(k, n);
+    gdefcore_text_free(catalog_, k);
+    return out;
+  };
+  auto Dependency = [&](GDEFCORE_Request * r) {
+    const char * id = NULL;
+    size_t id_len = 0;
+    uint64_t version = 0;
+    EXPECT_EQ(1, gdefcore_request_dependency_at(r, 0, &id, &id_len, &version));
+    return version;
+  };
+  GDEFCORE_Request * before = Req(ed);
+  EXPECT_TRUE(Yes(before, "update", post));
+  std::string key = Key(before);
+  uint64_t version = 0;
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_entity_version(catalog_, post.data(), post.size(), &version));
+  EXPECT_EQ(version, Dependency(before));
+  size_t revision = Revision(post);
+  /* a write that moves no revision */
+  GDEFCORE_Changeset * cs = NULL;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_entity_unpublish(cs, post.data(), post.size()));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, NULL, 0));
+  gdefcore_changeset_destroy(cs);
+  EXPECT_EQ(revision, Revision(post));
+  GDEFCORE_Request * after = Req(ed);
+  EXPECT_TRUE(Yes(after, "update", post));   /* an editor still edits it */
+  EXPECT_EQ(version + 1, Dependency(after));
+  EXPECT_NE(key, Key(after));
+  /* control: asked again with nothing changed, the key is the same */
+  GDEFCORE_Request * again = Req(ed);
+  EXPECT_TRUE(Yes(again, "update", post));
+  EXPECT_EQ(Key(after), Key(again));
+}
+
 /* ---- routes and tabs ---------------------------------------------------- */
 
 TEST_F(Can, RouteAndTabsFollowTheDecision) {
@@ -998,7 +1197,7 @@ struct Person {
  * the fixture's rules to compare with. The module grants update of posts in
  * group b to everyone; the roles are as the table says; an acting principal
  * must hold the same permission by its own roles (a module grant is not part
- * of its set); reading is of the published projection.
+ * of its set); reading is of what readers see: published entities only.
  */
 bool Model(const Person & p, int op, char group, const std::string & actor,
     bool draft) {
@@ -1007,13 +1206,12 @@ bool Model(const Person & p, int op, char group, const std::string & actor,
   unsigned need = 0;
   switch (op) {
     case kOpUpdate:
-      /* The actor is the first revision's, which is active even while the
-       * entity is unpublished, so `own` holds on a draft. A field condition
-       * still reads the published projection, which a draft that was never
-       * published does not have. */
-      mine = (!draft && (((p.roles & kRoleGroupA) && group == 'a') ||
-                            group == 'b')) ||
-             ((p.roles & kRoleOwn) && own);
+      /* A condition reads the entity's active revision and its creator,
+       * whether or not it is published, and the first revision of an entity
+       * is active from the start: so an unpublished draft is editable by
+       * exactly the people a published post is. */
+      mine = ((p.roles & kRoleGroupA) && group == 'a') ||
+             ((p.roles & kRoleOwn) && own) || group == 'b';
       need = kCeilUpdate;
       break;
     case kOpPublish:

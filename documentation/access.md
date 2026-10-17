@@ -16,13 +16,16 @@ lose it and cannot be removed.
 
 A permission has a plain-language label, the module that declared it, an
 action, and a condition. The condition is `any` entity of a type, or
-`own`. `own` is true when the entity's actor is the request principal.
-An entity with no actor is not anyone's own. There is no separate
+`own`. `own` is true when the entity's **creator** is the request principal:
+the principal of its first revision, recorded on the entity record then and
+never changed. An editor who saves someone's post becomes the creator of their
+revision and not of the post, so the author keeps `own` and the editor does not
+gain it. An entity with no creator is not anyone's own. There is no separate
 permission named "own".
 
 A condition can also be an expression (conditions.md), declared with
 `condition_text` instead of the integer. `any` and `own` are the expressions
-`(= type "T")` and `(and (= type "T") (= actor principal))`, and a grant that
+`(= type "T")` and `(and (= type "T") (= creator principal))`, and a grant that
 uses the integers keeps its exact meaning. Access is default deny and purely
 additive: a condition only says which entities a grant covers, and a
 condition that cannot be decided covers none.
@@ -205,25 +208,33 @@ ceiling.
   them, by the edit, that it is there; grant the read as well to avoid that. (It
   was chosen over requiring the read because the template editor has always
   worked on a grant to edit alone.) The permission `read` is the exception that
-  follows from what a read is: it is of the published projection, so an entity
-  that has none (a draft never published) is not readable and answers as one
-  that is not there, as `gdefcore_access_read()` does. The oracle sweep found
-  this: the first version told an anonymous visitor that a draft existed.
-  A condition that reads the entity's fields or actor reads the published
-  projection too, so such a grant does not hold for a draft that was never
-  published, and `own` does not match it.
+  follows from what a read is: it is of what readers see, so an entity that is
+  not published (never published, unpublished, or cleared) is not readable and
+  answers as one that is not there, as `gdefcore_access_read()` and
+  `gdefcore_access_list()` do. All three ask the one helper, `reader_sees`, so
+  they cannot disagree about it; the oracle sweep found the first version
+  telling an anonymous visitor that a draft existed, and the list went on
+  listing such entities until it asked too. A condition reads the entity's
+  **active revision** and its creator whether or not it is published (see
+  conditions.md), so a grant on `update` over group a holds for an unpublished
+  group a entity, and `own` matches its creator: its author can edit it while
+  readers cannot see it.
 - **With no entity** (type level): whether the principal could hold it for some
   entity of the type, the question `gdefcore_access_permits()` asks. It is not
   safe for deciding an operation on a specific entity and says nothing about
   one; a page, a tab or a button passes the entity.
 - **Memo.** The answer is remembered on the request, keyed by principal, acting
-  principal, permission, type, entity and the entity's revision (the config
-  epoch at type level), so a question asked twice is answered once, an entity
+  principal, permission, type, entity and the entity's version (the config
+  epoch at type level). The version is `gdefcore_entity_version()`, which every
+  write that touches the entity bumps, a publish, an unpublish, an activate and a
+  clear included; the latest revision number moves for none of those, and a
+  memo keyed on it answered a question about an entity that had become another
+  one, so a question asked twice is answered once, an entity
   written within the request is a new question, and no principal's answer is
   served to another. The memo holds `GDEFCORE_REQUEST_MEMO_MAX` (256) answers
   and then starts over. Failures are not remembered.
 - **Render key.** A call marks the request principal-dependent and records
-  the (entity, revision) it read in the request's read set
+  the (entity, version) it read in the request's read set
   (`gdefcore_request_record_dependency()`). `gdefcore_access_render_key()` adds a
   `reads:` line, a digest of the set, when there is one, so a fragment that
   depended on an entity is a different fragment once the entity changes; a set
@@ -244,10 +255,12 @@ ceiling.
 
 `gdefcore_changeset_enforce_access(changeset, 1)` makes apply ask `can()` for
 each entity the changeset touches, with the changeset's request: a save or a
-draft is `update`, a publish `publish`, a clear (a revert to nothing) `delete`.
-It is off by default, so no existing writer is asked anything new. Templates
-keep their own permission. A new entity has no actor yet, so an `own` grant does
-not allow its first save.
+draft is `update`, a publish or an unpublish `publish`, an activate and a revert
+`update`, a clear (a revert to nothing) `delete`. It is off by default, so no
+existing writer is asked anything new. Templates keep their own permission. A
+new entity has no creator yet, so an `own` grant does not allow its first save.
+(This is the interim form of write protection: SPEC decision 7 puts protection
+on the path, not inside the function, and story A5b retires it.)
 
 ## The render key
 
@@ -258,7 +271,7 @@ principal's public id when a compiled condition read the principal, or
 it read. The
 hash covers labels, conditions (an expression by the hash of its canonical
 text), types, fields and actions. A condition that reads the principal
-(`principal`, `actor`) makes the key depend on who asks. It does not
+(`principal`, `creator`, `revision.creator`) makes the key depend on who asks. It does not
 cover role names. This edition is empty. The live overlay is `live`.
 
 A fragment for any other overlay is not stored in a shared cache. A
@@ -281,6 +294,6 @@ For a grant whose condition is an integer, held means a role was granted a
 permission with that action, as it always did: the permission is not about one
 entity. For an expression it means the condition could apply to something:
 it holds for a hypothetical entity of the grant's type (which has no state,
-no actor and no values) or for some entity of that type that exists. So an
+no creator and no values) or for some entity of that type that exists. So an
 `any` expression is held on a type with no entities yet, and an own
 expression is held when the principal has authored one.

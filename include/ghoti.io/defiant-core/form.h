@@ -98,8 +98,8 @@ GDEFCORE_API GDEFCORE_Result gdefcore_form_field(const GDEFCORE_Form * form,
 /**
  * @brief Build the tree for @p type_name.
  *
- * Current values come from the draft projection when it exists, otherwise
- * the published one. @p id NULL builds a tree with no values. @p out is not
+ * Current values come from the head revision when it has a projection,
+ * otherwise from the active revision, published or not. @p id NULL builds a tree with no values. @p out is not
  * written on failure.
  */
 GDEFCORE_API GDEFCORE_Result gdefcore_form_tree(GDEFCORE_Catalog * catalog,

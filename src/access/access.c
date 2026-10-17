@@ -946,7 +946,7 @@ static ExprSlot * expr_slot(Eval * ev, const Grant * grant) {
     slot->expr = grant->expr;
     slot->expr_len = grant->expr_len;
     if (grant->expr != NULL &&
-        gdefcore_condition_parse(grant->expr, grant->expr_len, &slot->cond,
+        gdefcore_condition_parse_stored(grant->expr, grant->expr_len, &slot->cond,
             NULL) == GDEFCORE_OK) {
       slot->bad = 0;
     }
@@ -959,7 +959,7 @@ static ExprSlot * expr_slot(Eval * ev, const Grant * grant) {
   if (read_values(ev->catalog, id, "condition", &texts, &lens, &n) ==
           GDEFCORE_OK &&
       n == 1) {
-    if (gdefcore_condition_parse(texts[0], lens[0], &slot->cond, NULL) ==
+    if (gdefcore_condition_parse_stored(texts[0], lens[0], &slot->cond, NULL) ==
         GDEFCORE_OK) {
       slot->bad = 0;
     }
@@ -1046,6 +1046,24 @@ static int condition_ok(Eval * ev, const Grant * grant, const char * actor,
   return base_condition_ok(ev, grant, actor, actor_len, principal,
              principal_len) &&
          ceiling_allows(ev, grant, actor, actor_len, principal, principal_len);
+}
+
+/*
+ * Whether readers may see the entity at all: it is published. The one place
+ * this is asked, so that read, list and can(read) cannot disagree about what
+ * an unpublished entity is. A grant's condition says who among readers; this
+ * says whether there are readers. An answer that cannot be had (the record is
+ * unreadable) is a no and marks the evaluation failed, so it is neither
+ * remembered nor taken for a plain "no such entity".
+ */
+static int reader_sees(GDEFCORE_Catalog * catalog, const char * id, Eval * ev) {
+  int state = 0;
+  if (gdefcore_entity_state(catalog, id, GDEFCORE_PUBLIC_ID_LEN, &state) !=
+      GDEFCORE_OK) {
+    ev->failed = 1;
+    return 0;
+  }
+  return state == GDEFCORE_STATE_PUBLISHED;
 }
 
 static int entity_visible(Eval * ev, const Grant * grants, size_t ngrants,
@@ -2176,7 +2194,8 @@ GDEFCORE_Result gdefcore_access_read(GDEFCORE_Catalog * catalog,
   if (rc != GDEFCORE_OK) {
     return rc;
   }
-  rc = gdefcore_entity_actor(catalog, canon, GDEFCORE_PUBLIC_ID_LEN, &actor,
+  /* `own` is the entity's creator, not whoever wrote the revision readers see. */
+  rc = gdefcore_entity_creator(catalog, canon, GDEFCORE_PUBLIC_ID_LEN, &actor,
       &actor_len);
   if (rc != GDEFCORE_OK) {
     gdefcore_text_free(catalog, type_name);
@@ -2196,8 +2215,10 @@ GDEFCORE_Result gdefcore_access_read(GDEFCORE_Catalog * catalog,
   eval_init(&ev, catalog, request, lang, lang_len);
   (void)setup_ceiling(&ev);
   ev.id = canon;
-  visible = entity_visible(&ev, grants, ngrants, type_name, type_len, actor,
-      actor_len, principal, principal_len);
+  /* An entity readers may not see answers as one that is not there. */
+  visible = reader_sees(catalog, canon, &ev) &&
+            entity_visible(&ev, grants, ngrants, type_name, type_len, actor,
+                actor_len, principal, principal_len);
   if (visible && type_has_field(catalog, type_name, type_len, field,
                      field_len) &&
       field_restricted(decls, ndecls, type_name, type_len, field, field_len)) {
@@ -2336,14 +2357,17 @@ static GDEFCORE_Result list_impl(Eval * ev, GDEFCORE_Catalog * catalog,
     char ** texts = NULL;
     size_t * lens = NULL;
     size_t n = 0;
-    rc = gdefcore_entity_actor(catalog, ids[i], GDEFCORE_PUBLIC_ID_LEN, &actor,
+    rc = gdefcore_entity_creator(catalog, ids[i], GDEFCORE_PUBLIC_ID_LEN, &actor,
         &actor_len);
     if (rc != GDEFCORE_OK) {
       drop_rows(catalog, rows, nrows, ids, count);
       return rc;
     }
     ev->id = ids[i];
-    if (!entity_visible(ev, grants, ngrants, local.type_name,
+    /* Not published is not listed: the id of an entity readers may not see
+     * must not leak through a list that a direct read refuses. */
+    if (!reader_sees(catalog, ids[i], ev) ||
+        !entity_visible(ev, grants, ngrants, local.type_name,
             local.type_name_len, actor, actor_len, principal, principal_len)) {
       gdefcore_text_free(catalog, actor);
       continue;
@@ -3232,8 +3256,8 @@ int gdefcore_access_grant_risk(const char * action, size_t action_len,
   int narrowing;
   int own_like;
   if (condition_text == NULL ||
-      gdefcore_condition_parse(condition_text, condition_len, &cond, NULL) !=
-          GDEFCORE_OK) {
+      gdefcore_condition_parse_stored(condition_text, condition_len, &cond,
+          NULL) != GDEFCORE_OK) {
     /* A condition that cannot be read has a breadth nobody can state. */
     return GDEFCORE_ACCESS_RISK_HIGH;
   }
@@ -3448,7 +3472,8 @@ static GDEFCORE_Result mx_add(MatrixBuild * b, const char * source,
   row->size = sizeof *row;
   row->from_module = from_module;
   rc = GDEFCORE_OK;
-  if (gdefcore_condition_parse(cond, cond_len, &parsed, NULL) == GDEFCORE_OK) {
+  if (gdefcore_condition_parse_stored(cond, cond_len, &parsed, NULL) ==
+      GDEFCORE_OK) {
     rc = gdefcore_condition_explain(parsed, &explain, &explain_len);
     gdefcore_condition_free(parsed);
   }
@@ -3683,8 +3708,8 @@ GDEFCORE_Result gdefcore_access_matrix(GDEFCORE_Catalog * catalog,
       action = info.action;
       action_len = info.action_len;
     }
-    if (gdefcore_condition_parse(item->condition, item->condition_len, &parsed,
-            NULL) == GDEFCORE_OK) {
+    if (gdefcore_condition_parse_stored(item->condition, item->condition_len,
+            &parsed, NULL) == GDEFCORE_OK) {
       anonymous = (gdefcore_condition_uses(parsed) &
                       GDEFCORE_CONDITION_USES_PRINCIPAL) == 0;
       if (gdefcore_condition_canonical(parsed, &canon, &canon_len) !=
@@ -3772,7 +3797,7 @@ static GDEFCORE_Result can_decide(GDEFCORE_Catalog * catalog,
           permission_len, type, type_len);
     }
   } else {
-    rc = gdefcore_entity_actor(catalog, canon, GDEFCORE_PUBLIC_ID_LEN, &actor,
+    rc = gdefcore_entity_creator(catalog, canon, GDEFCORE_PUBLIC_ID_LEN, &actor,
         &actor_len);
     if (rc != GDEFCORE_OK) {
       eval_done(&ev);
@@ -3793,17 +3818,11 @@ static GDEFCORE_Result can_decide(GDEFCORE_Catalog * catalog,
     }
     gdefcore_text_free(catalog, actor);
     if (allowed && same(permission, permission_len, "read", 4)) {
-      /* To read is to read the published projection, as gdefcore_access_read()
-       * does: an entity that has none (a draft) is not there for a reader, and
-       * must answer as one that is not there. Other permissions are not about
+      /* To read is to read what readers see, as gdefcore_access_read() does:
+       * an entity that is not published is not there for a reader, and must
+       * answer as one that is not there. Other permissions are not about
        * what is published. */
-      int state = 0;
-      if (gdefcore_entity_state(catalog, canon, GDEFCORE_PUBLIC_ID_LEN,
-              &state) != GDEFCORE_OK) {
-        ev.failed = 1;
-      } else if (state != GDEFCORE_STATE_PUBLISHED) {
-        allowed = 0;
-      }
+      allowed = reader_sees(catalog, canon, &ev);
     }
   }
   failed = ev.failed;
@@ -3872,7 +3891,10 @@ GDEFCORE_Result gdefcore_access_can(GDEFCORE_Catalog * catalog,
       return GDEFCORE_OK;
     }
     gdefcore_text_free(catalog, actual_type);
-    rc = gdefcore_entity_revision(catalog, canon, GDEFCORE_PUBLIC_ID_LEN,
+    /* The entity's version, not its latest revision: a publish, an
+     * unpublish, an activate and a clear change what a condition reads or
+     * whom a reader sees and move no revision. */
+    rc = gdefcore_entity_version(catalog, canon, GDEFCORE_PUBLIC_ID_LEN,
         &version);
     if (rc == GDEFCORE_ERR_INVALID) {
       return GDEFCORE_OK;

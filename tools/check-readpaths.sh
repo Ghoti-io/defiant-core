@@ -23,12 +23,20 @@ plant_control testReadpaths 'Paths.*:Principals.*'
 
 # A read that skips the filter, in each of the places that makes one.
 plant read-skips-filter src/access/access.c testReadpaths 'Paths.NoPermission' \
-  '  visible = entity_visible(&ev,' \
-  '  visible = 1 || entity_visible(&ev,'
+  '  visible = reader_sees(catalog, canon, &ev) &&
+            entity_visible(&ev, grants, ngrants, type_name, type_len, actor,
+                actor_len, principal, principal_len);' \
+  '  visible = 1 || (reader_sees(catalog, canon, &ev) &&
+            entity_visible(&ev, grants, ngrants, type_name, type_len, actor,
+                actor_len, principal, principal_len));'
 
 plant list-skips-visibility src/access/access.c testReadpaths 'Paths.NoPermission' \
-  '    if (!entity_visible(ev, grants, ngrants, local.type_name,' \
-  '    if (0 && !entity_visible(ev, grants, ngrants, local.type_name,'
+  '    if (!reader_sees(catalog, ids[i], ev) ||
+        !entity_visible(ev, grants, ngrants, local.type_name,
+            local.type_name_len, actor, actor_len, principal, principal_len)) {' \
+  '    if (!reader_sees(catalog, ids[i], ev) ||
+        (0 && !entity_visible(ev, grants, ngrants, local.type_name,
+            local.type_name_len, actor, actor_len, principal, principal_len))) {'
 
 # The render path reads fields through the filter; this one reads them raw.
 plant render-reads-unfiltered src/render/render.c testReadpaths 'Paths.NoPermission' \

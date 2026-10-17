@@ -21,6 +21,13 @@
 #   ceiling-not-set-up                   Can.AnAgentIsBoundByItsCeiling
 #   draft-readable                       Can.TheDecisionIsTheOperation, Oracle.Entities
 #   missing-answers-unlike-hidden        Oracle.Entities
+#   memo-keyed-on-revision               Can.APublishInTheRequestIsANewQuestion, Can.TheReadSetIsKeyedOnTheVersion
+#   own-is-the-last-writer-decision      Can.OwnIsTheCreatorNotTheLastWriter
+#   own-is-the-last-writer-read          Can.OwnIsTheCreatorNotTheLastWriter
+#   own-is-the-last-writer-list          Can.OwnIsTheCreatorNotTheLastWriter
+#   list-lists-unpublished               Can.AnUnpublishedEntityIsNotThereForReaders
+#   reader-sees-everything               Can.AnUnpublishedEntityIsNotThereForReaders
+#   list-lists-unpublished-oracle        Oracle.Unpublished
 #
 # Every test has a control (the same call that must be a yes is made beside
 # the one that must be a no, and the sweep counts both outcomes of every
@@ -220,5 +227,67 @@ plant draft-readable $ACCESS testCan 'Can.TheDecisionIsTheOperation' \
 plant draft-readable-oracle $ACCESS testOracle 'Oracle.Entities' \
   '    if (allowed && same(permission, permission_len, "read", 4)) {' \
   '    if (0 && allowed && same(permission, permission_len, "read", 4)) {'
+
+# Plant 15 (access-conditions A5b): can() remembers an answer by the entity's
+# latest revision, which a publish, an unpublish and an activate do not move
+# (defect 1.5.2), so a request is told its first answer after the entity
+# became another one.
+plant memo-keyed-on-revision $ACCESS testCan \
+  'Can.APublishInTheRequestIsANewQuestion Can.TheReadSetIsKeyedOnTheVersion' \
+  '    rc = gdefcore_entity_version(catalog, canon, GDEFCORE_PUBLIC_ID_LEN,
+        &version);' \
+  '    rc = gdefcore_entity_revision(catalog, canon, GDEFCORE_PUBLIC_ID_LEN,
+        &version);'
+
+# Plant 16: the decision for `own` asks for the revision's creator, not the
+# entity's, so the editor who saved last owns it.
+plant own-is-the-last-writer-decision $ACCESS testCan 'Can.OwnIsTheCreatorNotTheLastWriter' \
+  '    rc = gdefcore_entity_creator(catalog, canon, GDEFCORE_PUBLIC_ID_LEN, &actor,
+        &actor_len);
+    if (rc != GDEFCORE_OK) {
+      eval_done(&ev);' \
+  '    rc = gdefcore_entity_actor(catalog, canon, GDEFCORE_PUBLIC_ID_LEN, &actor,
+        &actor_len);
+    if (rc != GDEFCORE_OK) {
+      eval_done(&ev);'
+
+# Plant 17: the same in a read.
+plant own-is-the-last-writer-read $ACCESS testCan 'Can.OwnIsTheCreatorNotTheLastWriter' \
+  '  rc = gdefcore_entity_creator(catalog, canon, GDEFCORE_PUBLIC_ID_LEN, &actor,
+      &actor_len);
+  if (rc != GDEFCORE_OK) {
+    gdefcore_text_free(catalog, type_name);' \
+  '  rc = gdefcore_entity_actor(catalog, canon, GDEFCORE_PUBLIC_ID_LEN, &actor,
+      &actor_len);
+  if (rc != GDEFCORE_OK) {
+    gdefcore_text_free(catalog, type_name);'
+
+# Plant 18: the same in a list.
+plant own-is-the-last-writer-list $ACCESS testCan 'Can.OwnIsTheCreatorNotTheLastWriter' \
+  '    rc = gdefcore_entity_creator(catalog, ids[i], GDEFCORE_PUBLIC_ID_LEN, &actor,
+        &actor_len);' \
+  '    rc = gdefcore_entity_actor(catalog, ids[i], GDEFCORE_PUBLIC_ID_LEN, &actor,
+        &actor_len);'
+
+# Plant 19: a list does not ask whether an entity is published.
+plant list-lists-unpublished $ACCESS testCan 'Can.AnUnpublishedEntityIsNotThereForReaders' \
+  '    if (!reader_sees(catalog, ids[i], ev) ||
+        !entity_visible(ev, grants, ngrants, local.type_name,' \
+  '    if (!entity_visible(ev, grants, ngrants, local.type_name,'
+
+# Plant 20: reader_sees says yes to everything, so can(read) holds for an
+# entity readers may not see.
+plant reader-sees-everything $ACCESS testCan 'Can.AnUnpublishedEntityIsNotThereForReaders' \
+  '  return state == GDEFCORE_STATE_PUBLISHED;
+}' \
+  '  return state == GDEFCORE_STATE_PUBLISHED || state != 0;
+}'
+
+# Plant 21: the same, seen by the oracle sweep: an `any` reader's list of
+# posts names a draft and an unpublished post that every other surface hides.
+plant list-lists-unpublished-oracle $ACCESS testOracle 'Oracle.Unpublished' \
+  '    if (!reader_sees(catalog, ids[i], ev) ||
+        !entity_visible(ev, grants, ngrants, local.type_name,' \
+  '    if (!entity_visible(ev, grants, ngrants, local.type_name,'
 
 plant_finish

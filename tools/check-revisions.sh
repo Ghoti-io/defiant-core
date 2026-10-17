@@ -29,6 +29,7 @@
 #   legacy-revert-from-head      Revisions.TheLegacyRevertStepsBackFromTheActiveRevision
 #   stale-version-accepted       Revisions.AStalePatchOfTheNewOperationsIsAConflict
 #   patch-drops-version          Revisions.TheNewOperationsRoundTripThroughAPatch
+#   form-tree-skips-active       Form.TreeFallsBackToTheActiveRevision
 #   (activate-skips-sealed-check is in check-erasure.sh, which owns the
 #    personal-value fixtures: Erasure.PlaintextRevisionIsNotActivated)
 #
@@ -44,6 +45,7 @@ set -u
 plant_setup "$@"
 
 plant_control testRevisions 'Revisions.*'
+plant_control testForm 'Form.TreeFallsBackToTheActiveRevision'
 
 ENT=src/entity/entity.c
 
@@ -243,5 +245,12 @@ plant patch-drops-version $ENT testRevisions \
       /* The version the op was staged against: a patch made against a' \
   '    if (0 && op->have_ver) {
       /* The version the op was staged against: a patch made against a'
+
+# Plant 23: the form tree falls back to the published revision, so an entity
+# restored but not published opens as an empty form.
+plant form-tree-skips-active src/form/form.c testForm \
+  'Form.TreeFallsBackToTheActiveRevision' \
+  '    rc = gdefcore_entity_values(catalog, NULL, GDEFCORE_VIEW_ACTIVE, id,' \
+  '    rc = gdefcore_entity_values(catalog, NULL, GDEFCORE_VIEW_PUBLISHED, id,'
 
 plant_finish

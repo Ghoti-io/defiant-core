@@ -316,6 +316,64 @@ TEST_F(Form, Tree) {
   gdefcore_form_destroy(form);
 }
 
+/* The tree shows what an editor is editing: the head revision, and when a
+ * clear removed the head, the active revision, whether or not it is published
+ * (it used to look for a published one, so a restored but unpublished entity
+ * opened as an empty form). */
+TEST_F(Form, TreeFallsBackToTheActiveRevision) {
+  GDEFCORE_Field field = Field("title", 1, 2, 12, 0, 0, 0, NULL);
+  GDEFCORE_Value value;
+  const char * slot = NULL;
+  size_t len_slot = 0;
+  char id[GDEFCORE_PUBLIC_ID_LEN + 1];
+  auto Apply = [&](GDEFCORE_Changeset * cs) {
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, NULL, 0));
+    gdefcore_changeset_destroy(cs);
+  };
+  auto Shown = [&]() {
+    GDEFCORE_Form * form = NULL;
+    const char * const * texts = NULL;
+    const size_t * lens = NULL;
+    size_t count = 99;
+    std::string out;
+    EXPECT_EQ(GDEFCORE_OK,
+        gdefcore_form_tree(catalog_, kPost, strlen(kPost), id, strlen(id), "en", 2,
+            &form));
+    EXPECT_EQ(GDEFCORE_OK,
+        gdefcore_form_field(form, 0, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+            NULL, NULL, NULL, NULL, NULL, &texts, &lens, &count));
+    out = count == 0 ? "<none>" : std::string(texts[0], lens[0]);
+    gdefcore_form_destroy(form);
+    return out;
+  };
+  Define(&field, 1);
+  Create(id);
+  for (const char * text : {"First", "Second"}) {
+    GDEFCORE_Changeset * cs = NULL;
+    OneValue(&value, "title", text, &slot, &len_slot);
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_entity_save(cs, id, strlen(id), "en", 2, &value, 1));
+    Apply(cs);
+  }
+  EXPECT_EQ("Second", Shown());   /* control: the head */
+  GDEFCORE_Changeset * cs = NULL;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_entity_activate(cs, id, strlen(id), 1));
+  Apply(cs);
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_changeset_revert(catalog_, id, strlen(id), NULL, 0, &cs));
+  Apply(cs);                       /* the active revision is the first: a clear */
+  EXPECT_EQ("<none>", Shown());   /* cleared: nothing to edit */
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_entity_activate(cs, id, strlen(id), 1));
+  Apply(cs);                       /* restored, not the head, not published */
+  int state = 0;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_entity_state(catalog_, id, strlen(id), &state));
+  ASSERT_EQ(GDEFCORE_STATE_DRAFT, state);
+  EXPECT_EQ("First", Shown());
+}
+
 TEST_F(Form, Constraint) {
   GDEFCORE_Field field = Field("title", 1, 3, 5, 0, 0, 0, NULL);
   GDEFCORE_Value value;

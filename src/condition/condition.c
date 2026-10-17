@@ -66,6 +66,8 @@ static const char kMsgChar[] = "an unexpected character";
 static const char kMsgInt[] = "an invalid integer";
 static const char kMsgBigInt[] = "an integer is too large";
 static const char kMsgRelated[] = "relations are not available yet";
+static const char kMsgRenamed[] =
+    "actor is revision.creator since edition 2; creator is the entity's";
 static const char kMsgTrail[] = "unexpected text after the condition";
 static const char kMsgFieldName[] = "a field name was expected after field.";
 static const char kMsgNoField[] = "no such field";
@@ -410,7 +412,20 @@ static int parse_operand(Parser * p) {
     return idx;
   }
   if (word_is(p->s + start, n, "actor")) {
-    idx = new_node(p, kActor, start);
+    /* The edition 1 spelling. Stored conditions are upcast before they are
+     * parsed (gdefcore_condition_upcast); text a person writes now is not. */
+    return fail(p, start, kMsgRenamed);
+  }
+  if (word_is(p->s + start, n, "revision.creator")) {
+    idx = new_node(p, kRevCreator, start);
+    if (idx >= 0) {
+      p->c->uses |= GDEFCORE_CONDITION_USES_ENTITY |
+                    GDEFCORE_CONDITION_USES_PRINCIPAL;
+    }
+    return idx;
+  }
+  if (word_is(p->s + start, n, "creator")) {
+    idx = new_node(p, kCreator, start);
     if (idx >= 0) {
       p->c->uses |= GDEFCORE_CONDITION_USES_ENTITY |
                     GDEFCORE_CONDITION_USES_PRINCIPAL;
@@ -1066,8 +1081,11 @@ static void render(const GDEFCORE_Condition * c, int idx, Buf * out) {
     case kState:
       buf_str(out, "state");
       break;
-    case kActor:
-      buf_str(out, "actor");
+    case kRevCreator:
+      buf_str(out, "revision.creator");
+      break;
+    case kCreator:
+      buf_str(out, "creator");
       break;
     case kPrincipal:
       buf_str(out, "principal");
@@ -1274,7 +1292,7 @@ GDEFCORE_Result gdefcore_condition_builtin(int builtin, const char * type_name,
   buf_quoted(&raw, type_name, type_name_len);
   buf_str(&raw, ")");
   if (builtin == GDEFCORE_CONDITION_BUILTIN_OWN) {
-    buf_str(&raw, " (= actor principal))");
+    buf_str(&raw, " (= creator principal))");
   }
   if (raw.oom) {
     gcu_allocator_free(alloc_default(), raw.p);
@@ -1287,6 +1305,92 @@ GDEFCORE_Result gdefcore_condition_builtin(int builtin, const char * type_name,
   }
   rc = gdefcore_condition_canonical(c, out_text, out_len);
   gdefcore_condition_free(c);
+  return rc;
+}
+
+/* ---- editions --------------------------------------------------------- */
+
+/*
+ * Edition 1 called the operand that names who wrote the entity's content
+ * `actor`. Edition 2 splits it in two: `creator` is who created the entity
+ * (immutable, and what `own` means) and `revision.creator` is who wrote the
+ * revision that is now active. A stored edition 1 `actor` means the second,
+ * which is what it read, so the upcaster is a rename of that one atom outside
+ * text constants. Text that is already edition 2 contains no bare `actor` (the
+ * parser refuses it), so the upcast is the identity on it: a stored condition
+ * need not say which edition it is.
+ */
+GDEFCORE_Result gdefcore_condition_upcast(const char * text, size_t len,
+    int from_edition, char ** out_text, size_t * out_len) {
+  static const char kOld[] = "actor";
+  static const char kNew[] = "revision.creator";
+  Buf b;
+  size_t i = 0;
+  if (out_text == NULL || (text == NULL && len != 0) ||
+      (from_edition != 1 && from_edition != 2)) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  *out_text = NULL;
+  if (out_len != NULL) {
+    *out_len = 0;
+  }
+  memset(&b, 0, sizeof b);
+  while (i < len) {
+    unsigned char ch = (unsigned char)text[i];
+    if (ch == '"') {
+      /* A text constant: copied whole, its escapes included. */
+      size_t j = i + 1;
+      while (j < len && text[j] != '"') {
+        j += text[j] == '\\' && j + 1 < len ? 2 : 1;
+      }
+      j = j < len ? j + 1 : len;
+      buf_add(&b, text + i, j - i);
+      i = j;
+    } else if (is_delim(ch)) {
+      buf_add(&b, text + i, 1);
+      i += 1;
+    } else {
+      size_t j = i;
+      while (j < len && !is_delim((unsigned char)text[j]) && text[j] != '"') {
+        j += 1;
+      }
+      if (from_edition == 1 && j - i == sizeof kOld - 1 &&
+          memcmp(text + i, kOld, sizeof kOld - 1) == 0) {
+        buf_add(&b, kNew, sizeof kNew - 1);
+      } else {
+        buf_add(&b, text + i, j - i);
+      }
+      i = j;
+    }
+  }
+  if (b.oom) {
+    gcu_allocator_free(alloc_default(), b.p);
+    return GDEFCORE_ERR_OOM;
+  }
+  if (b.p == NULL) {
+    b.p = (char *)gcu_allocator_malloc(alloc_default(), 1);
+    if (b.p == NULL) {
+      return GDEFCORE_ERR_OOM;
+    }
+    b.p[0] = '\0';
+  }
+  *out_text = b.p;
+  if (out_len != NULL) {
+    *out_len = b.n;
+  }
+  return GDEFCORE_OK;
+}
+
+GDEFCORE_Result gdefcore_condition_parse_stored(const char * text, size_t len,
+    GDEFCORE_Condition ** out_condition, GDEFCORE_Condition_Error * out_error) {
+  char * up = NULL;
+  size_t up_len = 0;
+  GDEFCORE_Result rc = gdefcore_condition_upcast(text, len, 1, &up, &up_len);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  rc = gdefcore_condition_parse(up, up_len, out_condition, out_error);
+  gcu_allocator_free(alloc_default(), up);
   return rc;
 }
 
@@ -1316,8 +1420,11 @@ static void say_operand(const GDEFCORE_Condition * c, int idx, Buf * out) {
     case kState:
       buf_str(out, "the state");
       break;
-    case kActor:
-      buf_str(out, "the author");
+    case kRevCreator:
+      buf_str(out, "the author of the revision");
+      break;
+    case kCreator:
+      buf_str(out, "the creator");
       break;
     case kPrincipal:
       buf_str(out, "the person");

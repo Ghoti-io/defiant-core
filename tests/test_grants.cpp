@@ -739,11 +739,17 @@ TEST_F(Grants, RiskRatings) {
           GDEFCORE_ACCESS_RISK_LOW},
       {"read", 0, "(and (= type \"t\") (= principal \"x\"))", 0,
           GDEFCORE_ACCESS_RISK_LOW},
-      {"read", 1, "(and (= type \"t\") (= actor principal))", 0,
+      {"read", 1, "(and (= type \"t\") (= creator principal))", 0,
+          GDEFCORE_ACCESS_RISK_LOW},
+      {"update", 0, "(and (= type \"t\") (= creator principal))", 0,
+          GDEFCORE_ACCESS_RISK_LOW},
+      {"delete", 0, "(and (= type \"t\") (= creator principal))", 0,
+          GDEFCORE_ACCESS_RISK_LOW},
+      /* The revision's creator is as personal as the entity's; and a text stored
+       * in edition 1 is rated as the same condition in edition 2. */
+      {"update", 0, "(and (= type \"t\") (= revision.creator principal))", 0,
           GDEFCORE_ACCESS_RISK_LOW},
       {"update", 0, "(and (= type \"t\") (= actor principal))", 0,
-          GDEFCORE_ACCESS_RISK_LOW},
-      {"delete", 0, "(and (= type \"t\") (= actor principal))", 0,
           GDEFCORE_ACCESS_RISK_LOW},
       /* A read reaches the anonymous state without raising the rating. */
       {"read", 0, "(and (= type \"t\") (= field.group \"a\"))", 1,

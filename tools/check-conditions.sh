@@ -10,6 +10,7 @@
 #   and-as-or                  Cond.BooleanTruthTables
 #   not-dropped                Cond.BooleanTruthTables
 #   own-matches-no-actor       Cond.OwnNeedsAnActor, CondAccess.OwnExpressionNeedsAnActor
+#   revision-creator-matches-none Cond.CreatorIsTheEntitysAndRevisionCreatorIsTheRevisions
 #   absent-field-wildcard      Cond.AbsentFieldIsNotAWildcard
 #   depth-limit-moved          Cond.LimitDepth
 #   node-limit-moved           Cond.LimitNodes
@@ -22,6 +23,12 @@
 #   hash-before-canonical      Cond.CanonicalAndHash
 #   list-counts-before-filter  CondAccess.ListCountsWhatIsGranted
 #   lookup-failure-reseeds     CondAccess.FailureNeverGrants (two plants)
+#   list-skips-the-flag        CondAccess.ReadAndListHonorTheExpression
+#   condition-reads-head       Cond.TheActiveRevisionIsWhatIsRead
+#   condition-reads-published  Cond.TheActiveRevisionIsWhatIsRead
+#   actor-still-written        Cond.EditionOneActorIsUpcastAndNotWrittenAnyMore
+#   upcast-does-nothing        Cond.EditionOneActorIsUpcastAndNotWrittenAnyMore, CondAccess.AStoredEditionOneGrantStillMeansWhatItMeant
+#   upcast-rewrites-constants  Cond.EditionOneActorIsUpcastAndNotWrittenAnyMore
 #
 # Every test has a control (the condition that matches DOES grant, the same
 # input with no failure DOES hold, a valid sibling of every refused text is
@@ -76,10 +83,28 @@ plant not-dropped $EVAL testCondition 'Cond.BooleanTruthTables' \
   '      return ctx->failed ? 0 : !r;' \
   '      return ctx->failed ? 0 : r;'
 
-# Plant 5: an absent actor and an absent principal read as the empty text, so
-# an entity with no actor is an anonymous request's own.
+# Plant 5: an absent creator and an absent principal read as the empty text,
+# so an entity with no creator is an anonymous request's own. (The operand was
+# `actor` until edition 2; `own` is the creator, so this is the block `own`
+# goes through.)
 plant own-matches-no-actor $EVAL testCondition \
   'Cond.OwnNeedsAnActor CondAccess.OwnExpressionNeedsAnActor' \
+  '      if (ctx->creator != NULL && ctx->creator_len > 0) {
+        vals_one(vals, ctx->creator, ctx->creator_len);
+      }
+      return 1;' \
+  '      vals_one(vals, ctx->creator != NULL ? ctx->creator : kEmpty, ctx->creator_len);
+      return 1;' \
+  '      if (p != NULL && n > 0) {
+        vals_one(vals, p, n);
+      }
+      return 1;' \
+  '      vals_one(vals, p != NULL ? p : kEmpty, p != NULL ? n : 0);
+      return 1;'
+
+# Plant 5b: the same for the revision's creator.
+plant revision-creator-matches-none $EVAL testCondition \
+  'Cond.CreatorIsTheEntitysAndRevisionCreatorIsTheRevisions' \
   '      if (ctx->actor != NULL && ctx->actor_len > 0) {
         vals_one(vals, ctx->actor, ctx->actor_len);
       }
@@ -175,10 +200,12 @@ plant hash-before-canonical $PARSE testCondition 'Cond.CanonicalAndHash' \
 # candidates and not the entities a grant holds for.
 plant list-counts-before-filter $ACCESS testCondition \
   'CondAccess.ListCountsWhatIsGranted CondAccess.ReadAndListHonorTheExpression' \
-  '    if (!entity_visible(ev, grants, ngrants, local.type_name,
+  '    if (!reader_sees(catalog, ids[i], ev) ||
+        !entity_visible(ev, grants, ngrants, local.type_name,
             local.type_name_len, actor, actor_len, principal, principal_len)) {' \
-  '    if (0 && !entity_visible(ev, grants, ngrants, local.type_name,
-            local.type_name_len, actor, actor_len, principal, principal_len)) {'
+  '    if (0 && (!reader_sees(catalog, ids[i], ev) ||
+        !entity_visible(ev, grants, ngrants, local.type_name,
+            local.type_name_len, actor, actor_len, principal, principal_len))) {'
 
 # Plant 13 (a defect found on the way): a lookup that failed reads as "no such
 # entity", and the next call seeds the roles again.
@@ -192,5 +219,50 @@ plant lookup-failure-reseeds $ACCESS testCondition 'CondAccess.FailureNeverGrant
     /* Not "no admin role yet"' \
   '  if (0) {
     /* Not "no admin role yet"'
+
+# Plant 14 (access-conditions A5b): a list does not ask whether an entity is
+# published, so an `any` reader is told the id of one a direct read refuses.
+plant list-skips-the-flag $ACCESS testCondition 'CondAccess.ReadAndListHonorTheExpression' \
+  '    if (!reader_sees(catalog, ids[i], ev) ||
+        !entity_visible(ev, grants, ngrants, local.type_name,' \
+  '    if (!entity_visible(ev, grants, ngrants, local.type_name,'
+
+# Plant 15: a condition reads the head revision, so a draft beside the active
+# revision decides who may do what.
+plant condition-reads-head $EVAL testCondition 'Cond.TheActiveRevisionIsWhatIsRead' \
+  '  rc = gdefcore_entity_values(ctx->catalog, NULL, GDEFCORE_VIEW_ACTIVE,' \
+  '  rc = gdefcore_entity_values(ctx->catalog, NULL, GDEFCORE_VIEW_DRAFT,'
+
+# Plant 16: a condition reads what readers see, so an entity that is not
+# published has no fields for a grant to hold on and its author cannot edit it.
+plant condition-reads-published $EVAL testCondition 'Cond.TheActiveRevisionIsWhatIsRead' \
+  '  rc = gdefcore_entity_values(ctx->catalog, NULL, GDEFCORE_VIEW_ACTIVE,' \
+  '  rc = gdefcore_entity_values(ctx->catalog, NULL, GDEFCORE_VIEW_PUBLISHED,'
+
+# Plant 17: the parser still takes the edition 1 `actor`, as the new operand,
+# from a person writing a condition.
+plant actor-still-written $PARSE testCondition 'Cond.EditionOneActorIsUpcastAndNotWrittenAnyMore' \
+  '    return fail(p, start, kMsgRenamed);' \
+  '    (void)kMsgRenamed;
+    return new_node(p, kRevCreator, start);'
+
+# Plant 18: the upcaster leaves an edition 1 `actor` as it found it, so a
+# stored grant stops meaning what it meant.
+plant upcast-does-nothing $PARSE testCondition 'Cond.EditionOneActorIsUpcastAndNotWrittenAnyMore CondAccess.AStoredEditionOneGrantStillMeansWhatItMeant' \
+  '      if (from_edition == 1 && j - i == sizeof kOld - 1 &&' \
+  '      if (0 && from_edition == 1 && j - i == sizeof kOld - 1 &&'
+
+# Plant 19: the upcaster rewrites inside a text constant too.
+plant upcast-rewrites-constants $PARSE testCondition 'Cond.EditionOneActorIsUpcastAndNotWrittenAnyMore' \
+  '      buf_add(&b, text + i, j - i);
+      i = j;
+    } else if (is_delim(ch)) {' \
+  '      if (j - i == 7 && memcmp(text + i, "\"actor\"", 7) == 0) {
+        buf_add(&b, "\"revision.creator\"", 18);
+      } else {
+        buf_add(&b, text + i, j - i);
+      }
+      i = j;
+    } else if (is_delim(ch)) {'
 
 plant_finish

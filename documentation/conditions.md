@@ -1,7 +1,7 @@
 # Conditions
 
 A condition is a small boolean expression, stored as text, that says which
-entities a grant covers. Its format is `defiant-condition/1` (AD-34). The same
+entities a grant covers. Its format is `defiant-condition/2` (AD-34; see "Editions" below for what changed from `/1`). The same
 text is parsed, checked against the catalog, written in one canonical form,
 explained in English, and evaluated on one entity. Everything is in
 `condition.h`.
@@ -16,7 +16,7 @@ An s-expression. UTF-8, no NUL. White space is space, tab, CR and LF.
 
 ```
 (and (= type "site.blog") (in field.group ("a" "b")))
-(and (= type "site.blog") (= actor principal))
+(and (= type "site.blog") (= creator principal))
 (and (= state "published") (< now field.embargo))
 ```
 
@@ -27,7 +27,8 @@ condition := "true" | "false"
            | "(" cmp operand operand ")"
            | "(" "in" operand "(" constant+ ")" ")"
 cmp       := "=" | "!=" | "<" | "<=" | ">" | ">="
-operand   := "type" | "state" | "actor" | "principal" | "now"
+operand   := "type" | "state" | "creator" | "revision.creator" | "principal"
+           | "now"
            | "field." name | constant
 constant  := "text" | integer
 name      := [A-Za-z0-9_]+                  (at most 64 bytes)
@@ -67,21 +68,32 @@ Every operand is a set of texts.
 | Operand | The texts |
 |---|---|
 | `type` | the entity's type name |
-| `state` | `published` when the entity has a published projection (a later draft beside it does not change that), else `draft`. There is no third state. |
-| `actor` | the actor of the entity's published revision, or none |
+| `state` | `published` when the entity's published flag is set (a newer draft beside the active revision does not change that), else `draft`. An entity that was never published, was unpublished or was cleared is `draft`. There is no third state. |
+| `creator` | the entity's creator: the principal of its first revision, recorded then and never changed, or none |
+| `revision.creator` | the creator of the active revision (whoever wrote that revision), or none |
 | `principal` | the request principal's public id, or none (an anonymous request) |
 | `now` | the request clock in seconds since the epoch, as decimal text |
 | `field.f` | the field's values in the language of the call, or the single empty text when the field has none |
 | a constant | itself |
 
-`actor` and `principal` are *none*, not the empty text, when absent, so an
-entity with no actor is nobody's own and an anonymous request is nobody: two
-absences never equal each other. An absent field is the empty text (the spec's
+`creator`, `revision.creator` and `principal` are *none*, not the empty text,
+when absent, so an entity with no creator is nobody's own and an anonymous
+request is nobody: two absences never equal each other. An absent field is the empty text (the spec's
 rule), so `(= field.group "x")` is false on it and `(= field.group "")` is true.
 
-Field values are read from the published projection in the language of the
-call, with no fallback to another language, as the filter reads them. A
-many-valued field is all its values (at most 64).
+Field values, `creator`, `revision.creator` and `state` are read from the
+entity as it is stored: the **active revision**, whether or not the entity is
+published, and never from a newer draft beside it and never from data being
+written (the evaluator has no parameter for values, so a submitted value cannot
+steer a check). A condition says what the entity is; whether readers may see it
+at all is a separate question that `read`, `list` and the route check ask for
+themselves (`reader_sees` in access.c), so a stored `(= state "published")` is
+not implied by `read` and not needed in it. A grant on `update` over group a
+therefore holds for an unpublished group a entity, and its author can edit it
+before anyone can see it. An entity with no active revision (nothing saved,
+or cleared) has no fields: a field condition cannot hold on it. Values are read
+in the language of the call, with no fallback to another language, as the
+filter reads them. A many-valued field is all its values (at most 64).
 
 The request clock is `gdefcore_request_set_time()`. A request that never set
 it reads the wall clock once, at the first use, and keeps that value, so it is
@@ -139,8 +151,10 @@ the author wrote; it can never print an entity's value.
 ```
 (and (= type "site.blog") (in field.group ("a" "b")))
   the type is site.blog and the group field is one of: a, b
-(and (= type "site.blog") (= actor principal))
-  the author is the person and the type is site.blog
+(and (= type "site.blog") (= creator principal))
+  the creator is the person and the type is site.blog
+(= revision.creator principal)
+  the author of the revision is the person
 ```
 
 ## Evaluation
@@ -159,7 +173,7 @@ administrator or a module wrote, never one a principal supplied.
   `failed` is set to 1. This holds under `not` too: a failure never becomes a
   grant.
 - With no entity and a type, the subject is a hypothetical entity of that type
-  (no state, no actor, no values).
+  (no state, no creator, no values).
 
 Evaluation is bounded: the node limit bounds the work, and a field read per
 operand evaluation is the only I/O. `and` and `or` stop at the first operand
@@ -173,7 +187,9 @@ validated against the permission's type and stored in canonical form on the
 `core.permission` entity. Roles keep granting by label. `any` and `own` stay
 integers: they are stored as before, evaluated by the existing fast path, and
 a test proves them identical to `(= type "T")` and
-`(and (= type "T") (= actor principal))` through read, list and permits.
+`(and (= type "T") (= creator principal))` through read, list and permits.
+`own` is the entity's creator: an editor who saves someone's post does not
+become its owner.
 
 `gdefcore_access_read`, `_list` and `_permits` evaluate an expression per
 candidate entity, in memory (compiling it into the query is a later story).
@@ -186,3 +202,31 @@ condition holds only for entities of some stated type; the risk rating uses it.
 access.md and modules.md have the rest.
 
 Not here yet: relations, the list compiler, callbacks, and `can()`.
+
+## Editions
+
+`defiant-condition/2` is the first edition that is not `/1`. Nothing is
+released, but the stored form is versioned data (AD-15, AD-34), so the one
+change is made the way a later one would be:
+
+- Edition 1 had the operand `actor`: "who wrote the entity's published
+  revision". It could not tell the entity's author from the last editor, so
+  `own` followed whoever saved last.
+- Edition 2 splits it. `creator` is the entity's, set at its first revision
+  and never changed, and is what `own` means. `revision.creator` is the old
+  `actor`: the creator of the revision that is now active.
+- A person writing `actor` now is refused, with a message that names the new
+  spellings. Silently reading it as one of the two would pick a meaning for
+  them.
+
+`gdefcore_condition_upcast(text, len, 1, ...)` is the upcaster: it renames the
+operand `actor` to `revision.creator` (what `actor` read) outside text constants,
+and nothing else. From edition 2 it copies. Text that is already in edition 2
+has no bare `actor`, so upcasting it changes nothing and a stored condition need
+not say which edition it is in. `gdefcore_condition_parse_stored()` is the
+upcast followed by the parse; it is what reads a stored grant, a module's
+declared grant and a stored text being rated or explained. `gdefcore_condition_parse()`
+is for text being written. The upcaster is a rename and is as trivial as it
+looks; `Cond.EditionOneActorIsUpcastAndNotWrittenAnyMore` and
+`CondAccess.AStoredEditionOneGrantStillMeansWhatItMeant` pin it, and
+tools/check-conditions.sh plants the three ways it can go wrong.

@@ -24,13 +24,16 @@
  * @stability free
  *
  * A condition is a small boolean expression stored as text
- * (`defiant-condition/1`, AD-34). A grant carries one. The text is an
+ * (`defiant-condition/2`, AD-34). A grant carries one. The text is an
  * s-expression; documentation/conditions.md gives the grammar. In short:
  *
  *     (and (= type "site.blog") (in field.group ("a" "b")))
  *
- * Operands: `type`, `state`, `actor`, `principal`, `now`, `field.<name>`,
- * text constants and integer constants. Operators: `=`, `!=`, `<`, `<=`,
+ * Operands: `type`, `state`, `creator`, `revision.creator`, `principal`,
+ * `now`, `field.<name>`, text constants and integer constants. `creator` is
+ * who created the entity (immutable, and what `own` means);
+ * `revision.creator` is who wrote the revision that is now active. Edition 1
+ * called the second `actor`; see gdefcore_condition_upcast(). Operators: `=`, `!=`, `<`, `<=`,
  * `>`, `>=`, `in`, `and`, `or`, `not`, and the words `true` and `false`.
  * `related` is reserved for relations and is refused for now.
  *
@@ -56,7 +59,9 @@ extern "C" {
 #endif
 
 /** The registered format name and version (AD-34). */
-#define GDEFCORE_CONDITION_FORMAT "defiant-condition/1"
+#define GDEFCORE_CONDITION_FORMAT "defiant-condition/2"
+/** The edition before it, whose stored text gdefcore_condition_upcast() reads. */
+#define GDEFCORE_CONDITION_FORMAT_PREVIOUS "defiant-condition/1"
 /** Deepest nesting of parentheses. */
 #define GDEFCORE_CONDITION_MAX_DEPTH 16
 /** Most nodes (operators, operands, constants, list members) in one condition. */
@@ -68,17 +73,19 @@ extern "C" {
 /** Length of a hash in hex, not counting the NUL. */
 #define GDEFCORE_CONDITION_HASH_LEN 64
 
-/** The condition reads the request principal (`principal`, or `actor`). */
+/** The condition reads the request principal (`principal`, `creator` or
+ * `revision.creator`). */
 #define GDEFCORE_CONDITION_USES_PRINCIPAL 1
-/** The condition reads the entity (`state`, `actor` or a field). */
+/** The condition reads the entity (`state`, `creator`, `revision.creator` or
+ * a field). */
 #define GDEFCORE_CONDITION_USES_ENTITY 2
 /** The condition reads the request time (`now`). */
 #define GDEFCORE_CONDITION_USES_TIME 4
 
 /** The grant covers every entity of the type: `(= type "<T>")`. */
 #define GDEFCORE_CONDITION_BUILTIN_ANY 1
-/** The grant covers the entity's author:
- * `(and (= type "<T>") (= actor principal))`. */
+/** The grant covers the entity's creator:
+ * `(and (= type "<T>") (= creator principal))`. */
 #define GDEFCORE_CONDITION_BUILTIN_OWN 2
 
 /** A parsed condition. Opaque. Free with gdefcore_condition_free(). */
@@ -166,6 +173,35 @@ GDEFCORE_API GDEFCORE_Result gdefcore_condition_canonical(
 
 /** @brief Free text from this header. NULL is ignored. */
 GDEFCORE_API void gdefcore_condition_text_free(char * text);
+
+/**
+ * @brief Read condition text written in an earlier edition as the current one.
+ *
+ * Edition 1 named the operand for who wrote the entity's content `actor`.
+ * Edition 2 splits it: `creator` (the entity's, immutable) and
+ * `revision.creator` (the active revision's). A stored `actor` meant the
+ * second, so from edition 1 this renames that one operand to
+ * `revision.creator`, leaving text constants alone. From edition 2 it copies.
+ * Text already in edition 2 has no bare `actor`, so upcasting it is the
+ * identity and a stored condition need not say which edition it is in.
+ * Free @p out_text with gdefcore_condition_text_free().
+ *
+ * @param from_edition 1 or 2; anything else is ::GDEFCORE_ERR_INVALID.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_condition_upcast(const char * text,
+    size_t len, int from_edition, char ** out_text, size_t * out_len);
+
+/**
+ * @brief gdefcore_condition_parse() for text read from storage: upcast from
+ * edition 1 first.
+ *
+ * Text a person writes now goes to gdefcore_condition_parse(), which refuses
+ * `actor`; text read back from a stored grant or a module's manifest goes
+ * here.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_condition_parse_stored(const char * text,
+    size_t len, GDEFCORE_Condition ** out_condition,
+    GDEFCORE_Condition_Error * out_error);
 
 /**
  * @brief SHA-256 of the canonical text of @p text, in lowercase hex.

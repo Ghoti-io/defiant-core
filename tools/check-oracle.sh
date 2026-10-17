@@ -46,13 +46,24 @@ plant alias-resolves-unfiltered src/form/form.c testOracle 'Oracle.Entities' \
     rc = gdefcore_entity_values(catalog, NULL, GDEFCORE_VIEW_PUBLISHED, target, target_len, lang, lang_len,'
 
 # A list that shows rows the principal may not read: count and order differ.
+# (The list asks two things of a row, whether it is published and whether a
+# grant covers it; this turns off the second. The first is planted by
+# list-lists-unpublished-oracle in check-can.sh.)
 plant list-skips-visibility src/access/access.c testOracle 'Oracle.Entities' \
-  '    if (!entity_visible(ev, grants, ngrants, local.type_name,' \
-  '    if (0 && !entity_visible(ev, grants, ngrants, local.type_name,'
+  '    if (!reader_sees(catalog, ids[i], ev) ||
+        !entity_visible(ev, grants, ngrants, local.type_name,
+            local.type_name_len, actor, actor_len, principal, principal_len)) {' \
+  '    if (!reader_sees(catalog, ids[i], ev) ||
+        (0 && !entity_visible(ev, grants, ngrants, local.type_name,
+            local.type_name_len, actor, actor_len, principal, principal_len))) {'
 
 # A read that answers for a hidden id as if the principal could see it.
 plant read-skips-filter src/access/access.c testOracle 'Oracle.Entities' \
-  '  visible = entity_visible(&ev,' \
-  '  visible = 1 || entity_visible(&ev,'
+  '  visible = reader_sees(catalog, canon, &ev) &&
+            entity_visible(&ev, grants, ngrants, type_name, type_len, actor,
+                actor_len, principal, principal_len);' \
+  '  visible = 1 || (reader_sees(catalog, canon, &ev) &&
+            entity_visible(&ev, grants, ngrants, type_name, type_len, actor,
+                actor_len, principal, principal_len));'
 
 plant_finish

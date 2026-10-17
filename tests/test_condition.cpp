@@ -414,7 +414,7 @@ TEST(Cond, AcceptsAndNormalizes) {
   EXPECT_EQ("(<= field.r 1)", Canon("(<= field.r 1)"));
   EXPECT_EQ("(> field.r 1)", Canon("(> field.r 1)"));
   EXPECT_EQ("(>= field.r 1)", Canon("(>= field.r 1)"));
-  EXPECT_EQ("(!= actor principal)", Canon("(!= actor principal)"));
+  EXPECT_EQ("(!= creator principal)", Canon("(!= creator principal)"));
   EXPECT_EQ("(< now field.embargo)", Canon("(< now field.embargo)"));
 }
 
@@ -611,8 +611,8 @@ TEST(Cond, LimitBytes) {
 TEST(Cond, ExplainsInPlainEnglish) {
   EXPECT_EQ("the type is t.blog and the group field is one of: a, b",
       Explain("(and (= type \"t.blog\") (in field.group (\"b\" \"a\")))"));
-  EXPECT_EQ("the author is the person and the type is t.blog",
-      Explain(std::string("(and (= type \"t.blog\") (= actor principal))")));
+  EXPECT_EQ("the creator is the person and the type is t.blog",
+      Explain(std::string("(and (= type \"t.blog\") (= creator principal))")));
   EXPECT_EQ("the current time is less than the embargo field",
       Explain("(< now field.embargo)"));
   EXPECT_EQ("the state is published or the rank field is at least 3",
@@ -644,7 +644,7 @@ TEST(Cond, BuiltinsAreExpressions) {
   ASSERT_EQ(GDEFCORE_OK,
       gdefcore_condition_builtin(GDEFCORE_CONDITION_BUILTIN_OWN, kBlog,
           strlen(kBlog), &own, &n));
-  EXPECT_EQ("(and (= actor principal) (= type \"t.blog\"))", std::string(own, n));
+  EXPECT_EQ("(and (= creator principal) (= type \"t.blog\"))", std::string(own, n));
   gdefcore_condition_text_free(any);
   gdefcore_condition_text_free(own);
   char * none = (char *)0x1;
@@ -653,7 +653,7 @@ TEST(Cond, BuiltinsAreExpressions) {
   /* What a condition reads. */
   {
     GDEFCORE_Condition * c = NULL;
-    c = P("(= actor principal)");
+    c = P("(= creator principal)");
     EXPECT_EQ(GDEFCORE_CONDITION_USES_PRINCIPAL | GDEFCORE_CONDITION_USES_ENTITY,
         gdefcore_condition_uses(c));
     gdefcore_condition_free(c);
@@ -693,7 +693,7 @@ TEST(Cond, ValidatesAgainstTheType) {
   /* A field of a type that is not defined. */
   EXPECT_EQ("no such field@3", Validate(env, "(= field.group 1)", "t.undefined"));
   /* No field operand: any type name is fine for validation. */
-  EXPECT_EQ("", Validate(env, "(= actor principal)", "t.undefined"));
+  EXPECT_EQ("", Validate(env, "(= creator principal)", "t.undefined"));
 }
 
 TEST(Cond, PersonalFieldRefused) {
@@ -906,6 +906,191 @@ TEST(Cond, StateFollowsTheProjection) {
   }
 }
 
+/* Write another revision of an existing entity: a save (published, active) or
+ * a draft (head only), by @p actor. */
+void Resave(Env & env, const std::string & id, const std::string & actor,
+    const char * field, const char * value, bool draft) {
+  GDEFCORE_Changeset * cs = NULL;
+  GDEFCORE_Value v;
+  const char * t = value;
+  size_t tl = strlen(value);
+  memset(&v, 0, sizeof v);
+  v.size = sizeof v;
+  v.field = field;
+  v.field_len = strlen(field);
+  v.texts = &t;
+  v.text_lens = &tl;
+  v.count = 1;
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_changeset_prepare(env.catalog, actor.empty() ? NULL : actor.data(),
+          actor.size(), &cs));
+  ASSERT_EQ(GDEFCORE_OK,
+      (draft ? gdefcore_entity_save_draft : gdefcore_entity_save)(
+          cs, id.data(), id.size(), "en", 2, &v, 1));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, NULL, 0));
+  gdefcore_changeset_destroy(cs);
+}
+
+/* An unpublished entity is evaluated on its active revision, so a grant can
+ * hold for it, and `state` still says it is a draft. A newer draft beside the
+ * active revision is not what a condition reads. */
+TEST(Cond, TheActiveRevisionIsWhatIsRead) {
+  Env env;
+  const std::string group_a = "(= field.group \"a\")";
+  const std::string published = "(= state \"published\")";
+  std::string unpublished =
+      env.Make(kBlog, "", V({{"title", "T"}, {"group", "a"}}), 1);
+  /* control: the same entity on the old rule, where nothing of it was read */
+  EXPECT_EQ((Answer{1, 0}), Eval(env, group_a, unpublished));
+  EXPECT_EQ((Answer{0, 0}), Eval(env, published, unpublished));
+  EXPECT_EQ((Answer{0, 0}), Eval(env, "(= field.group \"b\")", unpublished));
+  /* A published entity with a newer draft: the conditions read the active. */
+  std::string pub = env.Make(kBlog, "", V({{"title", "T"}, {"group", "a"}}));
+  Resave(env, pub, "", "group", "b", true);
+  EXPECT_EQ((Answer{1, 0}), Eval(env, group_a, pub));
+  EXPECT_EQ((Answer{0, 0}), Eval(env, "(= field.group \"b\")", pub));
+  EXPECT_EQ((Answer{1, 0}), Eval(env, published, pub));
+  /* Publishing the draft moves what is read. */
+  env.Publish(pub);
+  EXPECT_EQ((Answer{0, 0}), Eval(env, group_a, pub));
+  EXPECT_EQ((Answer{1, 0}), Eval(env, "(= field.group \"b\")", pub));
+  /* Unpublishing keeps what is read and changes the state. */
+  {
+    GDEFCORE_Changeset * cs = NULL;
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(env.catalog, NULL, 0, &cs));
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_entity_unpublish(cs, pub.data(), pub.size()));
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, NULL, 0));
+    gdefcore_changeset_destroy(cs);
+  }
+  EXPECT_EQ((Answer{1, 0}), Eval(env, "(= field.group \"b\")", pub));
+  EXPECT_EQ((Answer{0, 0}), Eval(env, published, pub));
+  EXPECT_EQ((Answer{1, 0}), Eval(env, "(= state \"draft\")", pub));
+  /* A cleared entity has no active revision: a field condition cannot hold. */
+  std::string gone = env.Make(kBlog, "", V({{"title", "T"}, {"group", "a"}}));
+  {
+    GDEFCORE_Changeset * cs = NULL;
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_changeset_revert(env.catalog, gone.data(), gone.size(), NULL, 0,
+            &cs));
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, NULL, 0));
+    gdefcore_changeset_destroy(cs);
+  }
+  EXPECT_EQ((Answer{0, 0}), Eval(env, group_a, gone));
+}
+
+/* `creator` is who created the entity and never changes; `revision.creator` is
+ * who wrote the revision that is active. An editor who saves someone's entity
+ * becomes the second and not the first. */
+TEST(Cond, CreatorIsTheEntitysAndRevisionCreatorIsTheRevisions) {
+  Env env;
+  const std::string alice = FreshId();
+  const std::string bob = FreshId();
+  const std::string by_creator = "(= creator principal)";
+  const std::string by_revision = "(= revision.creator principal)";
+  std::string e = env.Make(kBlog, alice, V({{"title", "T"}}));
+  EXPECT_EQ((Answer{1, 0}), Eval(env, by_creator, e, env.Req(alice)));
+  EXPECT_EQ((Answer{1, 0}), Eval(env, by_revision, e, env.Req(alice)));
+  EXPECT_EQ((Answer{0, 0}), Eval(env, by_creator, e, env.Req(bob)));
+  Resave(env, e, bob, "title", "edited", false);
+  EXPECT_EQ((Answer{1, 0}), Eval(env, by_creator, e, env.Req(alice)));
+  EXPECT_EQ((Answer{0, 0}), Eval(env, by_creator, e, env.Req(bob)));
+  EXPECT_EQ((Answer{0, 0}), Eval(env, by_revision, e, env.Req(alice)));
+  EXPECT_EQ((Answer{1, 0}), Eval(env, by_revision, e, env.Req(bob)));
+  /* A draft beside the active revision is by neither: the active one is read. */
+  Resave(env, e, alice, "title", "later draft", true);
+  EXPECT_EQ((Answer{1, 0}), Eval(env, by_revision, e, env.Req(bob)));
+  EXPECT_EQ((Answer{0, 0}), Eval(env, by_revision, e, env.Req(alice)));
+  /* An entity with no creator is nobody's, and an anonymous request is not
+   * equal to it. */
+  std::string anon = env.Make(kBlog, "", V({{"title", "T"}}));
+  EXPECT_EQ((Answer{0, 0}), Eval(env, by_creator, anon, env.Req(alice)));
+  EXPECT_EQ((Answer{0, 0}), Eval(env, by_creator, anon, env.Req("")));
+  EXPECT_EQ((Answer{0, 0}), Eval(env, by_revision, anon, env.Req(alice)));
+  EXPECT_EQ((Answer{0, 0}), Eval(env, by_revision, anon, env.Req("")));
+  /* The operands read the entity and the person. */
+  GDEFCORE_Condition * c = P(by_creator);
+  EXPECT_EQ(GDEFCORE_CONDITION_USES_PRINCIPAL | GDEFCORE_CONDITION_USES_ENTITY,
+      gdefcore_condition_uses(c));
+  gdefcore_condition_free(c);
+  c = P(by_revision);
+  EXPECT_EQ(GDEFCORE_CONDITION_USES_PRINCIPAL | GDEFCORE_CONDITION_USES_ENTITY,
+      gdefcore_condition_uses(c));
+  gdefcore_condition_free(c);
+  EXPECT_EQ("(= creator principal)", Canon(by_creator));
+  EXPECT_EQ("(= revision.creator principal)", Canon(by_revision));
+  EXPECT_EQ("the creator is the person", Explain(by_creator));
+  EXPECT_EQ("the author of the revision is the person", Explain(by_revision));
+}
+
+/* Edition 2 renamed `actor`. Text a person writes now is refused with a
+ * message that says where it went; text stored in edition 1 is upcast, which
+ * is a rename of that one operand and leaves text constants and fields named
+ * actor alone; edition 2 text passes through untouched. */
+TEST(Cond, EditionOneActorIsUpcastAndNotWrittenAnyMore) {
+  GDEFCORE_Condition * c = NULL;
+  GDEFCORE_Condition_Error err;
+  memset(&err, 0, sizeof err);
+  err.size = sizeof err;
+  EXPECT_EQ(GDEFCORE_ERR_INVALID,
+      gdefcore_condition_parse("(= actor principal)", 19, &c, &err));
+  EXPECT_NE(nullptr, err.message);
+  EXPECT_NE(std::string::npos, std::string(err.message).find("revision.creator"));
+  EXPECT_EQ(3u, err.offset);
+  auto Up = [](const std::string & text, int from) {
+    char * out = NULL;
+    size_t n = 0;
+    GDEFCORE_Result rc = gdefcore_condition_upcast(text.data(), text.size(), from, &out, &n);
+    std::string s = rc == GDEFCORE_OK ? std::string(out, n) : "<refused>";
+    gdefcore_condition_text_free(out);
+    return s;
+  };
+  EXPECT_EQ("(= revision.creator principal)", Up("(= actor principal)", 1));
+  EXPECT_EQ("(and (= type \"t\") (!= revision.creator \"x\"))",
+      Up("(and (= type \"t\") (!= actor \"x\"))", 1));
+  /* only the operand: not a constant, not a longer word, not a field */
+  EXPECT_EQ("(= field.title \"actor\")", Up("(= field.title \"actor\")", 1));
+  EXPECT_EQ("(= field.actor \"x\")", Up("(= field.actor \"x\")", 1));
+  EXPECT_EQ("(= type \"a\\\" actor\")", Up("(= type \"a\\\" actor\")", 1));
+  EXPECT_EQ("(= field.f actors)", Up("(= field.f actors)", 1));
+  EXPECT_EQ("(in revision.creator (\"actor\"))", Up("(in actor (\"actor\"))", 1));
+  /* edition 2 is the identity, and so is the upcast of an upcast */
+  EXPECT_EQ("(= creator principal)", Up("(= creator principal)", 2));
+  EXPECT_EQ("(= actor principal)", Up("(= actor principal)", 2));   /* copied */
+  EXPECT_EQ(Up("(= revision.creator principal)", 1),
+      Up(Up("(= actor principal)", 1), 1));
+  EXPECT_EQ("<refused>", Up("x", 3));
+  EXPECT_EQ("<refused>", Up("x", 0));
+  EXPECT_EQ("", Up("", 1));
+  /* the stored form parses as the new operand and evaluates as it */
+  Env env;
+  const std::string alice = FreshId();
+  const std::string bob = FreshId();
+  std::string e = env.Make(kBlog, alice, V({{"title", "T"}}));
+  Resave(env, e, bob, "title", "edited", false);
+  GDEFCORE_Condition * stored = NULL;
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_condition_parse_stored("(= actor principal)", 19, &stored, NULL));
+  GDEFCORE_Condition_Subject subject;
+  memset(&subject, 0, sizeof subject);
+  subject.size = sizeof subject;
+  subject.entity = e.data();
+  subject.entity_len = e.size();
+  int failed = 0;
+  EXPECT_EQ(0, gdefcore_condition_eval(env.catalog, env.Req(alice), stored,
+                   &subject, &failed));
+  EXPECT_EQ(1, gdefcore_condition_eval(env.catalog, env.Req(bob), stored,
+                   &subject, &failed));
+  gdefcore_condition_free(stored);
+  /* parse_stored does not loosen what a person may write */
+  EXPECT_EQ(GDEFCORE_ERR_INVALID,
+      gdefcore_condition_parse_stored("(= bogus principal)", 19, &stored, NULL));
+  EXPECT_EQ(GDEFCORE_OK,
+      gdefcore_condition_parse_stored("(= creator principal)", 21, &stored, NULL));
+  gdefcore_condition_free(stored);
+  EXPECT_STREQ("defiant-condition/2", GDEFCORE_CONDITION_FORMAT);
+  EXPECT_STREQ("defiant-condition/1", GDEFCORE_CONDITION_FORMAT_PREVIOUS);
+}
+
 TEST(Cond, BooleanTruthTables) {
   Env env;
   std::string e = env.Make(kBlog, "", V({{"title", "T"}}));
@@ -946,7 +1131,7 @@ TEST(Cond, OwnNeedsAnActor) {
   const std::string bob = FreshId();
   std::string mine = env.Make(kBlog, alice, V({{"title", "T"}}));
   std::string noactor = env.Make(kBlog, "", V({{"title", "T"}}));
-  const std::string own = "(and (= type \"t.blog\") (= actor principal))";
+  const std::string own = "(and (= type \"t.blog\") (= creator principal))";
   EXPECT_EQ((Answer{1, 0}), Eval(env, own, mine, env.Req(alice)));
   EXPECT_EQ((Answer{0, 0}), Eval(env, own, mine, env.Req(bob)));
   EXPECT_EQ((Answer{0, 0}), Eval(env, own, mine, env.Req("")));
@@ -954,10 +1139,10 @@ TEST(Cond, OwnNeedsAnActor) {
    * not an anonymous request's either. */
   EXPECT_EQ((Answer{0, 0}), Eval(env, own, noactor, env.Req(alice)));
   EXPECT_EQ((Answer{0, 0}), Eval(env, own, noactor, env.Req("")));
-  EXPECT_EQ((Answer{0, 0}), Eval(env, "(= actor \"\")", noactor, env.Req("")));
+  EXPECT_EQ((Answer{0, 0}), Eval(env, "(= creator \"\")", noactor, env.Req("")));
   EXPECT_EQ((Answer{0, 0}), Eval(env, "(= principal \"\")", mine, env.Req("")));
   /* The same absence read the other way: != is the negation. */
-  EXPECT_EQ((Answer{1, 0}), Eval(env, "(!= actor principal)", noactor, env.Req(alice)));
+  EXPECT_EQ((Answer{1, 0}), Eval(env, "(!= creator principal)", noactor, env.Req(alice)));
 }
 
 TEST(Cond, AbsentFieldIsNotAWildcard) {
@@ -1010,7 +1195,7 @@ TEST(Cond, HiddenEqualsMissing) {
   const std::string junk = "not an id";
   const std::string cond =
       "(or (= field.title \"no-such\") (= type \"t.vault\") (= state \"draft\") "
-      "(= actor \"nobody\"))";
+      "(= creator \"nobody\"))";
   /* False on an entity that exists, and on ids that do not: one answer. */
   EXPECT_EQ((Answer{0, 0}), Eval(env, cond, exists));
   EXPECT_EQ((Answer{0, 0}), Eval(env, cond, never));
@@ -1038,7 +1223,7 @@ TEST(Cond, HypotheticalEntity) {
   EXPECT_EQ(0, failed);
   gdefcore_condition_free(c);
   /* No state, no actor, no values. */
-  c = P("(or (= state \"published\") (= actor principal) (= field.group \"x\"))");
+  c = P("(or (= state \"published\") (= creator principal) (= field.group \"x\"))");
   ASSERT_TRUE(c != NULL);
   EXPECT_EQ(0, gdefcore_condition_eval(env.catalog, env.req, c, &s, &failed));
   EXPECT_EQ(0, failed);
@@ -1412,7 +1597,9 @@ TEST(CondAccess, ReadAndListHonorTheExpression) {
   EXPECT_EQ("No error|1|a2", env.Read(env.Req(pa), a2, "title"));
   EXPECT_EQ("Invalid argument|untouched", env.Read(env.Req(pa), b1, "title"));
   EXPECT_EQ("Invalid argument|untouched", env.Read(env.Req(pa), none, "title"));
-  /* A draft-only entity has no published group, so it is not group a. */
+  /* A draft-only entity is not published, so a reader does not see it, even
+   * though its active revision is in group a (the condition holds on it: the
+   * control below publishes it and the same principal reads it). */
   EXPECT_EQ("Invalid argument|untouched", env.Read(env.Req(pa), drafted, "title"));
   /* Controls: the int grant sees them all; a principal with no role none. */
   EXPECT_EQ("No error|1|b1", env.Read(env.Req(pall), b1, "title"));
@@ -1421,15 +1608,30 @@ TEST(CondAccess, ReadAndListHonorTheExpression) {
   size_t count = 0;
   EXPECT_EQ("a1,a2", env.List(env.Req(pa), kBlog, &count));
   EXPECT_EQ(2u, count);
-  /* The draft-only entity is listed (it is an entity of the type) and has no
-   * published title to show: the helper prints "?" for it. */
-  EXPECT_EQ("a1,a2,b1,none,?", env.List(env.Req(pall), kBlog, &count));
-  EXPECT_EQ(5u, count);
+  /* The draft-only entity is not listed. It used to be (the list never asked
+   * whether an entity was published, so an `any` reader was told the id of
+   * one that a direct read refused). The list now asks, as a read does. */
+  EXPECT_EQ("a1,a2,b1,none", env.List(env.Req(pall), kBlog, &count));
+  EXPECT_EQ(4u, count);
   EXPECT_EQ("", env.List(env.Req(pnone), kBlog, &count));
   EXPECT_EQ(0u, count);
   /* The anonymous state holds no role grant here. */
   EXPECT_EQ("", env.List(env.Req(""), kBlog, &count));
   EXPECT_EQ(0u, count);
+  /* Control: the same entity, published, is read by the group a reader and
+   * listed to both: it was the flag that hid it, not the grant. */
+  {
+    GDEFCORE_Changeset * cs = NULL;
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(env.catalog, NULL, 0, &cs));
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_entity_publish(cs, drafted.data(), drafted.size()));
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, NULL, 0));
+    gdefcore_changeset_destroy(cs);
+  }
+  EXPECT_EQ("No error|1|dr", env.Read(env.Req(pa), drafted, "title"));
+  EXPECT_EQ("a1,a2,dr", env.List(env.Req(pa), kBlog, &count));
+  EXPECT_EQ(3u, count);
+  EXPECT_EQ(5u, [&] { env.List(env.Req(pall), kBlog, &count); return count; }());
 }
 
 TEST(CondAccess, ListCountsWhatIsGranted) {
@@ -1670,6 +1872,107 @@ TEST(CondAccess, PermitsFollowsTheExpression) {
   EXPECT_EQ(0, env.Permits(env.Req(p), "demo.edit.nope"));
 }
 
+/* A grant stored before edition 2 says `actor`. It still means what it read:
+ * who wrote the revision readers see, which is now `revision.creator`. A grant
+ * written in edition 2 as `creator` is the entity's, and an editor who saves
+ * someone's entity does not become its creator. */
+TEST(CondAccess, AStoredEditionOneGrantStillMeansWhatItMeant) {
+  AEnv env;
+  env.DeclareOk("Edit what I wrote last", "update", 0,
+      "(= revision.creator principal)");
+  env.DeclareOk("Edit what I created", "update", 0, "(= creator principal)");
+  env.DeclareOk("Edit by int own", "demo.own", GDEFCORE_ACCESS_OWN, NULL);
+  env.Role("last");
+  env.Role("created");
+  env.Grant("last", "Edit what I wrote last");
+  env.Grant("created", "Edit what I created");
+  /* Rewrite the first permission's stored text as edition 1 wrote it. */
+  {
+    char ** ids = NULL;
+    size_t n = 0;
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_entity_ids(env.catalog, "core.permission", 15, &ids, &n));
+    bool done = false;
+    for (size_t i = 0; i < n && !done; i++) {
+      char ** vals = NULL;
+      size_t * lens = NULL;
+      size_t c = 0;
+      if (gdefcore_entity_values(env.catalog, NULL, GDEFCORE_VIEW_PUBLISHED,
+              ids[i], GDEFCORE_PUBLIC_ID_LEN, "en", 2, "label", 5, &vals, &lens,
+              &c) != GDEFCORE_OK) {
+        continue;
+      }
+      if (c > 0 && std::string(vals[0], lens[0]) == "Edit what I wrote last") {
+        const char * text = "(and (= type \"t.blog\") (= actor principal))";
+        size_t len = strlen(text);
+        GDEFCORE_Value value;
+        GDEFCORE_Changeset * cs = NULL;
+        memset(&value, 0, sizeof value);
+        value.size = sizeof value;
+        value.field = "condition";
+        value.field_len = 9;
+        value.texts = &text;
+        value.text_lens = &len;
+        value.count = 1;
+        ASSERT_EQ(GDEFCORE_OK,
+            gdefcore_changeset_prepare(env.catalog, NULL, 0, &cs));
+        ASSERT_EQ(GDEFCORE_OK,
+            gdefcore_entity_save(cs, ids[i], GDEFCORE_PUBLIC_ID_LEN, "en", 2,
+                &value, 1));
+        ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, "core.permission", 15));
+        gdefcore_changeset_destroy(cs);
+        done = true;
+      }
+      gdefcore_values_free(env.catalog, vals, lens, c);
+    }
+    gdefcore_ids_free(env.catalog, ids, n);
+    ASSERT_TRUE(done);
+  }
+  std::string alice = env.Principal("last");
+  std::string bob = env.Principal("last");
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_access_principal_add_role(env.catalog, alice.data(), alice.size(),
+          "created", 7));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_access_principal_add_role(env.catalog, bob.data(), bob.size(),
+          "created", 7));
+  /* alice creates it, bob edits it */
+  std::string e = env.Make(kBlog, alice, V({{"title", "T"}}));
+  Resave(env, e, bob, "title", "edited", false);
+  auto Can = [&](const std::string & who) {
+    int allowed = -1;
+    EXPECT_EQ(GDEFCORE_OK,
+        gdefcore_access_can(env.catalog, env.Req(who), "update", 6, kBlog,
+            strlen(kBlog), e.c_str(), &allowed));
+    return allowed;
+  };
+  /* Both grants are held by both of them: update is asked once, and the
+   * answer is the union. So take each grant alone. */
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_access_principal_remove_role(env.catalog, alice.data(), alice.size(),
+          "created", 7));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_access_principal_remove_role(env.catalog, bob.data(), bob.size(),
+          "created", 7));
+  EXPECT_EQ(0, Can(alice));   /* stored `actor` = revision.creator = bob */
+  EXPECT_EQ(1, Can(bob));
+  /* control: the same two people under the edition 2 grant on creator */
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_access_principal_remove_role(env.catalog, alice.data(), alice.size(),
+          "last", 4));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_access_principal_remove_role(env.catalog, bob.data(), bob.size(),
+          "last", 4));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_access_principal_add_role(env.catalog, alice.data(), alice.size(),
+          "created", 7));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_access_principal_add_role(env.catalog, bob.data(), bob.size(),
+          "created", 7));
+  EXPECT_EQ(1, Can(alice));
+  EXPECT_EQ(0, Can(bob));
+}
+
 TEST(CondAccess, RenderKeyNamesTheExpression) {
   /* The key carries the canonical expression, so two spellings of one
    * condition give one key, and a different condition gives another. Three
@@ -1693,7 +1996,7 @@ TEST(CondAccess, RenderKeyNamesTheExpression) {
    * one that does not, does not. */
   {
     AEnv env;
-    env.DeclareOk("Read mine", "read", 0, "(and (= type \"t.blog\") (= actor principal))");
+    env.DeclareOk("Read mine", "read", 0, "(and (= type \"t.blog\") (= creator principal))");
     env.DeclareOk("Read a", "read", 0, "(= field.group \"a\")");
     env.Role("rm");
     env.Role("ra");
@@ -2154,7 +2457,7 @@ void Print(const T & t, Rng & r, std::string * out, bool * last_atom) {
         atom("state");
         break;
       case T::Actor:
-        atom("actor");
+        atom("creator");
         break;
       case T::Principal:
         atom("principal");
@@ -2298,7 +2601,7 @@ TEST(CondSweep, HostileBytesNeverCrashAndStayBounded) {
   Rng r(0xbadc0ffee0ddf00dULL);
   static const char * const pieces[] = {"(", ")", "(and ", "(or ", "(not ",
       "(= ", "(!= ", "(< ", "(in ", " ", "\n", "\"", "\\", "\"a\"", "type",
-      "state", "actor", "principal", "now", "field.group", "field.", "true",
+      "state", "actor", "creator", "revision.creator", "principal", "now", "field.group", "field.", "true",
       "false", "0", "-", "12", "related", "\xC3\xA9", "\xFF", "\x01", "\x7f",
       "\"\\\"", "(in type (", "))", "((((((((((((((((((", "1234567890123456789"};
   const size_t npieces = sizeof pieces / sizeof pieces[0];

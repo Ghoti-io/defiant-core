@@ -95,6 +95,8 @@ static const Surface kSurface[] = {
     {"gdefcore_condition_text_free", "P"},
     {"gdefcore_condition_hash", "P"},
     {"gdefcore_condition_builtin", "P"},
+    {"gdefcore_condition_upcast", "P"},
+    {"gdefcore_condition_parse_stored", "P"},
     {"gdefcore_condition_uses", "P"},
     {"gdefcore_condition_constrains_type", "P"},
     {"gdefcore_condition_explain", "P"},

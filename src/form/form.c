@@ -1350,7 +1350,9 @@ static GDEFCORE_Result fill_current(GDEFCORE_Catalog * catalog, FormField * fiel
       id, id_len, lang, lang_len, field->name, field->name_len, &texts, &lens,
       &count);
   if (rc == GDEFCORE_ERR_INVALID) {
-    rc = gdefcore_entity_values(catalog, NULL, GDEFCORE_VIEW_PUBLISHED, id,
+    /* No head (a clear removed it): what the entity currently is, published
+     * or not. A form is for the people who edit, not for readers. */
+    rc = gdefcore_entity_values(catalog, NULL, GDEFCORE_VIEW_ACTIVE, id,
         id_len, lang, lang_len, field->name, field->name_len, &texts, &lens,
         &count);
   }

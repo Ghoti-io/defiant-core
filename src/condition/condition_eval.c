@@ -26,8 +26,8 @@
  * failure is also reported through a flag, never as a grant.
  *
  * An operand is a set of texts. `type`, `state`, `now` and constants are one
- * text. `actor` and `principal` are one text, or none when there is no actor
- * or no principal, so that an absent actor and an anonymous request are never
+ * text. `creator`, `revision.creator` and `principal` are one text, or none when there is no creator
+ * or no principal, so that an absent creator and an anonymous request are never
  * equal. A field is its values in the call's language, or the single empty
  * text when it has none. A comparison holds when some text on the left stands
  * in the stated relation to some text on the right.
@@ -67,9 +67,12 @@ typedef struct Ctx {
   const char * type;      /* the type name (owned when type_owned) */
   size_t type_len;
   char * type_owned;
-  int actor_loaded;
+  int actor_loaded;       /* revision.creator */
   char * actor;
   size_t actor_len;
+  int creator_loaded;     /* creator */
+  char * creator;
+  size_t creator_len;
   int state_loaded;
   int state;
   int failed;
@@ -142,7 +145,11 @@ static int read_field(Ctx * ctx, const CNode * node, Vals * vals) {
     vals_one(vals, kEmpty, 0);
     return 1;
   }
-  rc = gdefcore_entity_values(ctx->catalog, NULL, GDEFCORE_VIEW_PUBLISHED,
+  /* The active revision, whether or not the entity is published: a condition
+   * is about what the entity is, and whether readers may see it is a separate
+   * question the reader-facing actions ask for themselves. The NULL is the
+   * changeset: staged data can never enter. */
+  rc = gdefcore_entity_values(ctx->catalog, NULL, GDEFCORE_VIEW_ACTIVE,
       ctx->id, GDEFCORE_PUBLIC_ID_LEN, ctx->lang, ctx->lang_len, name,
       name_len, &texts, &lens, &n);
   if (rc == GDEFCORE_ERR_INVALID) {
@@ -201,7 +208,21 @@ static int operand(Ctx * ctx, int idx, Vals * vals) {
         vals_one(vals, p, n);
       }
       return 1;
-    case kActor:
+    case kCreator:
+      if (!ctx->creator_loaded) {
+        if (ctx->real &&
+            gdefcore_entity_creator(ctx->catalog, ctx->id,
+                GDEFCORE_PUBLIC_ID_LEN, &ctx->creator, &ctx->creator_len) !=
+                GDEFCORE_OK) {
+          return ctx_fail(ctx);
+        }
+        ctx->creator_loaded = 1;
+      }
+      if (ctx->creator != NULL && ctx->creator_len > 0) {
+        vals_one(vals, ctx->creator, ctx->creator_len);
+      }
+      return 1;
+    case kRevCreator:
       if (!ctx->actor_loaded) {
         if (ctx->real &&
             gdefcore_entity_actor(ctx->catalog, ctx->id,
@@ -437,5 +458,6 @@ int gdefcore_condition_eval(GDEFCORE_Catalog * catalog,
   }
   gdefcore_text_free(catalog, ctx.type_owned);
   gdefcore_text_free(catalog, ctx.actor);
+  gdefcore_text_free(catalog, ctx.creator);
   return r != 0;
 }
