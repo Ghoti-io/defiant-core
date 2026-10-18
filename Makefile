@@ -1029,6 +1029,10 @@ else
 	@printf "check-symbols: skipped (Linux only)\n"
 endif
 
+# A gate copies the finished build into its scratch tree (tools/plant-lib.sh),
+# so under make -j no gate may start before every test executable is linked.
+$(TEST_GATES): | $(APP_DIR)/$(TARGET) $(TEST_EXECUTABLES)
+
 test: ## Make and run the unit tests
 test: $(APP_DIR)/$(TARGET) $(TEST_EXECUTABLES) $(TEST_GATES)
 # `|| exit 1` is what makes this a gate at all. Without it the loop ran every

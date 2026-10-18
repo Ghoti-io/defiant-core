@@ -21,7 +21,9 @@
 #     crash of the whole binary, or a different test failing, does not count.
 #
 # The caller sets nothing; it calls pl_init, then pl_control and pl_plant.
-# Nothing here writes outside $ROOT/build/plants, which is removed on exit.
+# Nothing here writes outside $ROOT/build/plants-fibers-<pid>, which is removed
+# on exit; the pid keeps gates that share this file apart when make runs them
+# in parallel.
 
 pl_init() {
   MAKE_CMD="${1:?usage: <make> <build-dir> [make args]}"
@@ -30,7 +32,7 @@ pl_init() {
   PL_MARGS="-j${GHOTI_CHECK_JOBS:-$(n=$(nproc 2>/dev/null || echo 4); [ "$n" -gt 4 ] && n=4; echo "$n")} $*"
   unset MAKEFLAGS MFLAGS
   PL_ROOT=$(pwd)
-  PL_SCRATCH="$PL_ROOT/build/plants"
+  PL_SCRATCH="$PL_ROOT/build/plants-fibers-$$"
   PL_FAIL=0
   rm -rf "$PL_SCRATCH"
   mkdir -p "$PL_SCRATCH"
@@ -47,6 +49,20 @@ pl_copy_tree() {
     [ -e "$PL_ROOT/$d" ] && cp -a "$PL_ROOT/$d" "$dest/"
   done
   cp -a "$PL_ROOT/Makefile" "$PL_ROOT/Doxyfile" "$dest/"
+  pl_warm "$PL_ROOT" "$dest" "$BUILD_DIR"
+}
+
+# The copy also takes the main tree's build output for this build directory,
+# with its timestamps, so make recompiles only what the plant edited (and,
+# through the .d files, whatever includes an edited header) and relinks.
+# Without it every plant was a cold rebuild of the whole library.
+# GHOTI_CHECK_COLD=1 copies no build output, for comparing the two.
+pl_warm() {
+  [ -n "${GHOTI_CHECK_COLD:-}" ] && return 0
+  case "$3" in /*|*..*|'') return 0 ;; esac
+  [ -d "$1/$3" ] || return 0
+  mkdir -p "$2/$(dirname "$3")"
+  cp -a "$1/$3" "$2/$3"
 }
 
 # pl_build <dir> <exe>: build one test executable in <dir>.

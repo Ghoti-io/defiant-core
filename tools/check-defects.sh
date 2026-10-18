@@ -45,6 +45,20 @@ copy_tree() {
   done
   cp -a "$ROOT/Makefile" "$ROOT/Doxyfile" "$dest/"
   rm -rf "$dest/tests/fuzz/corpus"
+  warm_build "$dest" "$BUILD_DIR"
+}
+
+# The copy also takes the main tree's build output for this build directory,
+# with its timestamps, so make recompiles only what the plant edited (and,
+# through the .d files, whatever includes an edited header) and relinks.
+# Without it every plant was a cold rebuild of the whole library.
+# GHOTI_CHECK_COLD=1 copies no build output, for comparing the two.
+warm_build() {
+  [ -n "${GHOTI_CHECK_COLD:-}" ] && return 0
+  case "$2" in /*|*..*|'') return 0 ;; esac
+  [ -d "$ROOT/$2" ] || return 0
+  mkdir -p "$1/$(dirname "$2")"
+  cp -a "$ROOT/$2" "$1/$2"
 }
 
 fail=0
