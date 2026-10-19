@@ -224,53 +224,48 @@ plant keeps-blind-rows src/subject/subject.c Erasure.Sweep \
   '  rc = delete_blinds(write, sid, row.blinds, row.blinds_len);' \
   '  rc = GDEFCORE_OK;'
 
-# 3. Erasure that leaves the wrapped subject key in its row.
+# 3. Erasure that leaves the wrapped subject key where it is kept: the key
+#    store is never asked to destroy it (story S5b moved it there from the
+#    side store's row).
 plant keeps-key src/subject/subject.c Erasure.Sweep \
-  '    rc = from_stor(gdefstor_projection_put(write, kSubjectType,
-        strlen(kSubjectType), sid, GDEFCORE_PUBLIC_ID_LEN, columns, 2));' \
-  '    columns[2].name = "key";
-    columns[2].name_len = 3;
-    columns[2].value = row.key;
-    columns[2].value_len = row.key_len;
-    rc = from_stor(gdefstor_projection_put(write, kSubjectType,
-        strlen(kSubjectType), sid, GDEFCORE_PUBLIC_ID_LEN, columns, 3));'
+  '    rc = from_stor(gdefstor_keystore_erase(subjects->keys,
+        (const char *)subjects->tenant, subjects->tenant_len, sid,
+        GDEFCORE_PUBLIC_ID_LEN, when));' \
+  '    rc = GDEFCORE_OK;
+    (void)when;'
 
-# 4. Erasure survives restore: a snapshot that carries a key. The ledger copy
-#    in the snapshot gains a line whose second column is the tenant keyring
-#    wrap, in hex. The line is well formed, so import still works and only
-#    the key travels.
+# 4. Erasure survives restore: a snapshot that carries a key. The data set is
+#    taken with the tenant keyring's wrap filed in the tenant store first, as
+#    a row of its own, so import still works and only the key travels.
 plant snapshot-key src/subject/subject.c Erasure.SnapshotCarriesNoKey \
-  '  rc = from_stor(gdefstor_snapshot_export_ledger(tenant_store,
-      (const char *)subjects->tenant, subjects->tenant_len, NULL,
-      (const uint8_t *)ledger, ledger_len, out_bytes, out_len));
-  gcu_allocator_free(subjects->alloc, ledger);
-  return rc;' \
+  '  return from_stor(gdefstor_snapshot_export_at(tenant_store,
+      (const char *)subjects->tenant, subjects->tenant_len, NULL, taken,
+      out_bytes, out_len));' \
   '  {
     uint8_t wrap[kWrap];
     int found = 0;
-    char * hex = NULL;
-    size_t hex_len = 0;
-    Buf kept;
-    memset(&kept, 0, sizeof kept);
-    kept.alloc = subjects->alloc;
-    buf_add(&kept, ledger, ledger_len);
-    if (wrap_load(subjects->side, subjects->tenant, subjects->tenant_len, wrap,
-            &found) == GDEFCORE_OK && found &&
-        hex_encode(subjects->alloc, wrap, kWrap, &hex, &hex_len) ==
-            GDEFCORE_OK) {
-      buf_add(&kept, "AAAAAAAAAAAAAAAAAAAAAAAAAAAA ", GDEFCORE_PUBLIC_ID_LEN + 1);
-      buf_add(&kept, hex, hex_len);
-      buf_add(&kept, "\n", 1);
-      gcu_allocator_free(subjects->alloc, hex);
+    GDEFSTOR_Write * kw = NULL;
+    GDEFSTOR_Column kc;
+    if (wrap_load(subjects->keys, subjects->alloc, subjects->tenant,
+            subjects->tenant_len, wrap, &found) == GDEFCORE_OK && found &&
+        gdefstor_write_begin(tenant_store, (const char *)subjects->tenant,
+            subjects->tenant_len, NULL, &kw) == GDEFSTOR_OK) {
+      memset(&kc, 0, sizeof kc);
+      kc.name = "bytes";
+      kc.name_len = 5;
+      kc.value = wrap;
+      kc.value_len = kWrap;
+      if (gdefstor_projection_put(kw, "core.keyring", 12, "wrap", 4, &kc, 1) ==
+          GDEFSTOR_OK) {
+        (void)gdefstor_write_commit(kw);
+      } else {
+        gdefstor_write_abort(kw);
+      }
     }
-    rc = from_stor(gdefstor_snapshot_export_ledger(tenant_store,
-        (const char *)subjects->tenant, subjects->tenant_len, NULL,
-        (const uint8_t *)(kept.p == NULL ? "" : kept.p), kept.n, out_bytes,
-        out_len));
-    buf_free(&kept);
   }
-  gcu_allocator_free(subjects->alloc, ledger);
-  return rc;'
+  return from_stor(gdefstor_snapshot_export_at(tenant_store,
+      (const char *)subjects->tenant, subjects->tenant_len, NULL, taken,
+      out_bytes, out_len));'
 
 # AD-19 on the form route. Every plant below edits the real source of the
 # library, and the named test must go red BY NAME.

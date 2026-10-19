@@ -27,15 +27,18 @@
  * The subject is then erased and every byte the library can hand back is
  * searched for the canary as plaintext, hex and base64, as the blind-index
  * HMAC and every other tenant-key HMAC or hash of it, and for the subject's
- * key. "Every byte" is: all three stores exported to snapshots (and
- * unpacked, so a compressed member cannot hide a hit), the snapshot the
- * library itself makes, each revision document, each value read back, the
- * subject export, rendered pages, and what the process wrote to standard
- * output and standard error.
+ * key. "Every byte" is: all three data stores exported to snapshots (and
+ * unpacked, so a compressed member cannot hide a hit), the data set and the
+ * key set the library itself makes, each revision document, each value read
+ * back, the subject export, rendered pages, and what the process wrote to
+ * standard output and standard error. The key store (keystore_rig.h picks its
+ * backend) is where keys belong: its key set is searched too, and after the
+ * erasure it must hold nothing of the subject but the ledger row.
  *
  * A sweep that cannot see passes. So before erasure each test requires
  * that the same machinery finds the canary where it must be (the export,
- * the side store, the revision ciphertext), and that a survivor's data is
+ * the blind store, the key set, the revision ciphertext), and that a
+ * survivor's data is
  * still found after the erasure. The scanner is itself checked against
  * synthetic haystacks. tools/check-erasure.sh plants the defects.
  */
@@ -52,6 +55,8 @@
 #include <ghoti.io/security/sha256.h>
 
 #include <gtest/gtest.h>
+
+#include "keystore_rig.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -176,7 +181,7 @@ std::vector<Bytes> Base64Middles(const Bytes & raw) {
 struct Needle {
   std::string label;
   Bytes bytes;
-  bool tenant_only;  // may legitimately sit in the side store or registry
+  bool tenant_only;  // may legitimately sit in the key set or the registry
 };
 
 void AddForms(std::vector<Needle> * out, const std::string & label,
@@ -221,7 +226,7 @@ Bytes Sha256(const Bytes & message) {
 struct Artifact {
   std::string label;
   Bytes view;         // every byte, members unpacked
-  bool tenant_data;   // false for the side store and the registry
+  bool tenant_data;   // false for the key set and the registry
 };
 
 /* The archive, as stored, followed by each member's name (hex keys also
@@ -339,7 +344,9 @@ class Erasure : public ::testing::Test {
  protected:
   GDEFSTOR_Store * registry_;
   GDEFSTOR_Store * site_;
-  GDEFSTOR_Store * side_;
+  GDEFSTOR_Store * side_;    // the blind store: a data store
+  GDEFSTOR_KeyStore * keys_;
+  ksrig::Counts counts_;
   GDEFCORE_Inst * inst_;
   GDEFCORE_Catalog * catalog_;
   GDEFCORE_Subjects * subjects_;
@@ -362,6 +369,7 @@ class Erasure : public ::testing::Test {
     registry_ = NULL;
     site_ = NULL;
     side_ = NULL;
+    keys_ = NULL;
     inst_ = NULL;
     catalog_ = NULL;
     subjects_ = NULL;
@@ -374,8 +382,9 @@ class Erasure : public ::testing::Test {
     ASSERT_EQ(GDEFSMEMORY_OK, gdefsmemory_store_create(NULL, NULL, &registry_));
     ASSERT_EQ(GDEFSMEMORY_OK, gdefsmemory_store_create(NULL, NULL, &site_));
     ASSERT_EQ(GDEFSMEMORY_OK, gdefsmemory_store_create(NULL, NULL, &side_));
+    ASSERT_EQ(GDEFSTOR_OK, ksrig::Open(ksrig::Chosen(), &counts_, &keys_));
     ASSERT_EQ(GDEFCORE_OK,
-        gdefcore_inst_open_side(registry_, site_, side_, root_, sizeof root_, "",
+        gdefcore_inst_open_keys(registry_, site_, keys_, root_, sizeof root_, "",
             0, NULL, &inst_));
     ASSERT_EQ(GDEFCORE_OK, gdefcore_inst_default(inst_, tenant_));
     ASSERT_EQ(GDEFCORE_OK,
@@ -383,7 +392,7 @@ class Erasure : public ::testing::Test {
     ASSERT_EQ(GDEFCORE_OK,
         gdefcore_inst_catalog_open(inst_, tenant_, strlen(tenant_), &catalog_));
     ASSERT_EQ(GDEFCORE_OK,
-        gdefcore_subject_open(side_, storage_, sizeof storage_, root_,
+        gdefcore_subject_open(keys_, side_, storage_, sizeof storage_, root_,
             sizeof root_,
             gdefcore_inst_tenant_keyring(inst_, tenant_, strlen(tenant_)), NULL,
             &subjects_));
@@ -399,9 +408,50 @@ class Erasure : public ::testing::Test {
     gdefcore_subject_destroy(subjects_);
     gdefcore_catalog_destroy(catalog_);
     gdefcore_inst_destroy(inst_);
+    gdefstor_keystore_destroy(keys_);
     gdefstor_store_destroy(side_);
     gdefstor_store_destroy(site_);
     gdefstor_store_destroy(registry_);
+  }
+
+  /* The key set, as the library takes it: wrapped keys, the keyring's wrap
+   * and the ledger. Not tenant data. */
+  Bytes Keyset() {
+    uint8_t * set = NULL;
+    size_t n = 0;
+    Bytes out;
+    EXPECT_EQ(GDEFCORE_OK, gdefcore_subject_keyset(subjects_, &set, &n));
+    if (set != NULL) {
+      out = B(set, n);
+    }
+    gdefstor_bytes_free(NULL, set);
+    return out;
+  }
+
+  /* The key set as hex is how its bytes are written; a needle in raw form is
+   * found in it decoded, so both are searched. */
+  void AddKeyset(std::vector<Artifact> * out, const std::string & label) {
+    Artifact art;
+    Bytes set = Keyset();
+    Bytes decoded;
+    size_t at = 0;
+    art.label = label;
+    art.tenant_data = false;
+    art.view = set;
+    while (at < set.size()) {
+      size_t nl = set.find('\n', at);
+      size_t sp = set.rfind(' ', nl == Bytes::npos ? Bytes::npos : nl);
+      if (nl == Bytes::npos) {
+        nl = set.size();
+      }
+      if (sp != Bytes::npos && sp >= at && HexDecode(set.substr(sp + 1, nl - sp - 1),
+              &decoded)) {
+        art.view += "\n" + decoded;
+      }
+      at = nl + 1;
+    }
+    EXPECT_GT(set.size(), 0u) << label;
+    out->push_back(art);
   }
 
   GDEFCORE_Keyring * Ring() {
@@ -540,7 +590,8 @@ class Erasure : public ::testing::Test {
     AddZip(out, "library subject snapshot " + stage, B(zip, zip_len), true);
     gdefstor_bytes_free(NULL, zip);
     AddZip(out, "side store snapshot " + stage,
-        StorageExport(side_, storage_, sizeof storage_), false);
+        StorageExport(side_, storage_, sizeof storage_), true);
+    AddKeyset(out, "key set " + stage);
     AddZip(out, "registry snapshot " + stage,
         StorageExport(registry_, kRegistryTenant, sizeof kRegistryTenant), false);
     /* Revision documents are keyed by decimal row id, not public id, so walk
@@ -794,24 +845,19 @@ class Erasure : public ::testing::Test {
     }
   }
 
-  /* The subject's wrapped key, exactly as it sits in the side store. */
+  /* The subject's wrapped key, exactly as the key store holds it. */
   Bytes WrappedKey(const char * subject) {
-    GDEFSTOR_Projection * row = NULL;
+    uint8_t * got = NULL;
+    size_t n = 0;
+    int erased = 0;
     Bytes out;
-    size_t i;
-    if (gdefstor_projection_get(side_, reinterpret_cast<const char *>(storage_),
-            sizeof storage_, "core.subject", 12, subject,
-            GDEFCORE_PUBLIC_ID_LEN, &row) != GDEFSTOR_OK) {
-      return out;
+    if (gdefstor_keystore_subject_sealed(keys_,
+            reinterpret_cast<const char *>(storage_), sizeof storage_, subject,
+            strlen(subject), &erased, &got, &n) == GDEFSTOR_OK &&
+        got != NULL) {
+      out = B(got, n);
     }
-    for (i = 0; i < gdefstor_projection_column_count(row); i++) {
-      GDEFSTOR_Column column;
-      if (gdefstor_projection_column(row, i, &column) == GDEFSTOR_OK &&
-          column.name_len == 3 && memcmp(column.name, "key", 3) == 0) {
-        out = B(column.value, column.value_len);
-      }
-    }
-    gdefstor_projection_free(row);
+    gdefstor_bytes_free(NULL, got);
     return out;
   }
 
@@ -1140,7 +1186,7 @@ TEST_F(Erasure, Sweep) {
   EXPECT_TRUE(FoundIn(pre, mac_later, "side store snapshot"));
   EXPECT_TRUE(FoundIn(pre, Hex(mac_later, false), "side store snapshot"));
   EXPECT_TRUE(FoundIn(pre, mac_fr, "side store snapshot"));
-  EXPECT_TRUE(FoundIn(pre, wrapped, "side store snapshot"));
+  EXPECT_TRUE(FoundIn(pre, wrapped, "key set"));
   EXPECT_TRUE(FoundIn(pre, Bytes("s1:"), "site storage snapshot"));
   EXPECT_TRUE(FoundIn(pre, Bytes("s1:"), "revision document"));
   EXPECT_TRUE(FoundIn(pre, Bytes("s1:"), "library subject snapshot"));
@@ -1150,8 +1196,9 @@ TEST_F(Erasure, Sweep) {
   EXPECT_FALSE(Sweep(pre, needles_).empty())
       << "the control found nothing: the sweep cannot see";
   {
-    /* The whole control, by name: the value is in the outputs, the HMAC and
-     * the key are in the side store, and nothing is yet in the tenant data. */
+    /* The whole control, by name: the value is in the outputs, the HMAC is
+     * in the blind store, the wrapped key in the key set, and nothing is yet
+     * in the tenant data. */
     std::vector<std::string> before = Sweep(pre, needles_);
     size_t i;
     bool export_has_plain = false;
@@ -1165,7 +1212,7 @@ TEST_F(Erasure, Sweep) {
           std::string::npos) {
         side_has_mac = true;
       }
-      if (before[i].find("wrapped subject key raw in side store") !=
+      if (before[i].find("wrapped subject key raw in key set") !=
           std::string::npos) {
         side_has_key = true;
       }
@@ -1194,7 +1241,7 @@ TEST_F(Erasure, Sweep) {
    * that went blind between the two halves would fail here. */
   EXPECT_FALSE(leaks.empty()) << "the sweep no longer sees the survivor";
   EXPECT_TRUE(FoundIn(post, mac_survivor, "side store snapshot"));
-  EXPECT_TRUE(FoundIn(post, survivor_wrapped, "side store snapshot"));
+  EXPECT_TRUE(FoundIn(post, survivor_wrapped, "key set"));
   EXPECT_TRUE(FoundIn(post, kSurvivor, "output: export of b"));
   EXPECT_TRUE(FoundIn(post, Bytes("s1:"), "site storage snapshot"));
   EXPECT_TRUE(FoundIn(post, Bytes("[erased]"), "output: read of a"));
@@ -1208,10 +1255,10 @@ TEST_F(Erasure, Sweep) {
   EXPECT_FALSE(FoundIn(post, Hex(mac_first, false), ""));
 }
 
-/* Erasure survives restore (AD-19). A snapshot holds ciphertext, the ledger
- * copy and no key of any kind: not the subject's, not the tenant's, not a
- * key derived from it. The restore then reads as erased and brings no key
- * back into the side store. */
+/* Erasure survives restore (AD-19). The data set holds ciphertext and no key
+ * of any kind: not the subject's, not the tenant's, not a key derived from
+ * it, and no ledger (the key set carries that). The restore of the pair then
+ * reads as erased and brings no key back, into the key store or anywhere. */
 TEST_F(Erasure, SnapshotCarriesNoKey) {
   std::vector<Artifact> snap;
   std::vector<Artifact> after;
@@ -1241,30 +1288,41 @@ TEST_F(Erasure, SnapshotCarriesNoKey) {
   Needles(a_, values, wrapped, &needles);
   ASSERT_FALSE(HasFatalFailure());
 
-  /* The snapshot, taken while the subject is alive. */
+  /* The pair, taken while the subject is alive: the data set, then the key
+   * set. */
   ASSERT_EQ(GDEFCORE_OK, gdefcore_subject_snapshot(subjects_, site_, &zip, &zip_len));
   taken = B(zip, zip_len);
+  gdefstor_bytes_free(NULL, zip);
+  zip = NULL;
+  Bytes keys = Keyset();
   AddZip(&snap, "library subject snapshot", taken, true);
   AddZip(&snap, "storage snapshot of the tenant store",
       StorageExport(site_, storage_, sizeof storage_), true);
-  /* Control: the keys are real, and the scanner finds them where they live. */
+  /* Control: the keys are real, and the scanner finds them where they live:
+   * the key set. */
   {
-    std::vector<Artifact> side;
-    AddZip(&side, "side store snapshot",
-        StorageExport(side_, storage_, sizeof storage_), false);
-    AddZip(&side, "registry snapshot",
-        StorageExport(registry_, kRegistryTenant, sizeof kRegistryTenant), false);
-    EXPECT_TRUE(FoundIn(side, wrapped, "side store snapshot"));
+    std::vector<Artifact> kept;
+    AddKeyset(&kept, "key set");
+    EXPECT_TRUE(FoundIn(kept, wrapped, "key set"));
     {
       uint8_t wrap[GDEFCORE_KEYRING_WRAP_LEN];
       ASSERT_EQ(GDEFCORE_OK, gdefcore_keyring_export(Ring(), wrap, sizeof wrap));
-      EXPECT_TRUE(FoundIn(side, B(wrap, sizeof wrap), "side store snapshot"));
+      EXPECT_TRUE(FoundIn(kept, B(wrap, sizeof wrap), "key set"));
       EXPECT_FALSE(FoundIn(snap, B(wrap, sizeof wrap), "library subject"))
           << "the snapshot carries the tenant keyring wrap";
     }
   }
-  EXPECT_TRUE(FoundIn(snap, Bytes("ledger"), "library subject snapshot"));
+  EXPECT_TRUE(FoundIn(snap, Bytes("taken_ms"), "library subject snapshot"));
   EXPECT_TRUE(FoundIn(snap, Bytes("s1:"), "library subject snapshot"));
+  {
+    uint8_t * ledger = NULL;
+    size_t ledger_len = 9;
+    ASSERT_EQ(GDEFSTOR_OK, gdefstor_snapshot_ledger(site_,
+        reinterpret_cast<const uint8_t *>(taken.data()), taken.size(), NULL,
+        &ledger, &ledger_len));
+    EXPECT_EQ(0u, ledger_len) << "the data set carries a ledger";
+    gdefstor_bytes_free(NULL, ledger);
+  }
   leaks = Sweep(snap, needles);
   EXPECT_TRUE(leaks.empty()) << "a snapshot carries a key or a value:"
                              << Joined(leaks);
@@ -1273,8 +1331,9 @@ TEST_F(Erasure, SnapshotCarriesNoKey) {
   Erase(a_);
   ASSERT_EQ(GDEFSMEMORY_OK, gdefsmemory_store_create(NULL, NULL, &empty));
   ASSERT_EQ(GDEFCORE_OK,
-      gdefcore_subject_import(subjects_, empty,
-          reinterpret_cast<const uint8_t *>(taken.data()), taken.size()));
+      gdefcore_subject_restore(subjects_, empty,
+          reinterpret_cast<const uint8_t *>(taken.data()), taken.size(),
+          reinterpret_cast<const uint8_t *>(keys.data()), keys.size()));
   ASSERT_EQ(GDEFCORE_OK,
       gdefcore_catalog_open(empty, storage_, sizeof storage_, NULL, NULL,
           &restored));
@@ -1301,7 +1360,8 @@ TEST_F(Erasure, SnapshotCarriesNoKey) {
   AddZip(&after, "restored tenant store snapshot",
       StorageExport(empty, storage_, sizeof storage_), true);
   AddZip(&after, "side store snapshot after restore",
-      StorageExport(side_, storage_, sizeof storage_), false);
+      StorageExport(side_, storage_, sizeof storage_), true);
+  AddKeyset(&after, "key set after restore");
   ASSERT_EQ(GDEFCORE_OK, gdefcore_subject_snapshot(subjects_, empty, &zip, &zip_len));
   AddZip(&after, "library subject snapshot after restore", B(zip, zip_len), true);
   gdefstor_bytes_free(NULL, zip);
@@ -2189,5 +2249,5 @@ TEST_F(Erasure, FormSubjectBinding) {
 
 int main(int argc, char ** argv) {
   ::testing::InitGoogleTest(&argc, argv);
-  return RUN_ALL_TESTS();
+  return ksrig::RunAll();
 }

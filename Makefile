@@ -485,12 +485,24 @@ SQL_CFLAGS := $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_LOOKUP_PATH) pkg-config --cfl
 SQL_LIBS := $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_LOOKUP_PATH) pkg-config --libs $(SQL_PC) 2>/dev/null)
 INCLUDE += $(SQL_CFLAGS)
 
+# And the Postgres backend, where it is: its key store is the third the
+# subject suite runs on (make test-keystore-postgres, story S5b). It needs
+# libpq, which only defiant-storage-postgres's derived image has, so here it
+# is optional. Found, the tests are built with it; not found, the Postgres arm
+# is not built and that target says where it runs.
+PG_PC ?= ghoti.io-defiant-storage-postgres$(BRANCH)
+PG_CFLAGS := $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_LOOKUP_PATH) pkg-config --cflags $(PG_PC) 2>/dev/null)
+PG_LIBS := $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_LOOKUP_PATH) pkg-config --libs $(PG_PC) 2>/dev/null)
+ifneq ($(strip $(PG_LIBS)),)
+INCLUDE += $(PG_CFLAGS) -DGDEFCORE_TEST_HAVE_PG
+endif
+
 # A private PREFIX does not hold cutil, defiant-storage or security. Test
 # binaries need those -L directories at run time. They stay off LDFLAGS: an
 # rpath there is recorded in the installed library and names this build machine.
 # First occurrence wins. Alphabetical sort put an older copy of the same
 # soname ahead of the one pkg-config compiled against.
-DEP_LIB_DIRS := $(shell printf '%s\n' $(patsubst -L%,%,$(filter -L%,$(STOR_LIBS) $(CUTIL_LIBS) $(SEC_LIBS) $(TEXT_LIBS) $(REGEX_LIBS) $(LTANG_LIBS) $(ARC_LIBS) $(MEM_LIBS) $(SQL_LIBS))) | awk '!seen[$$0]++')
+DEP_LIB_DIRS := $(shell printf '%s\n' $(patsubst -L%,%,$(filter -L%,$(STOR_LIBS) $(CUTIL_LIBS) $(SEC_LIBS) $(TEXT_LIBS) $(REGEX_LIBS) $(LTANG_LIBS) $(ARC_LIBS) $(MEM_LIBS) $(SQL_LIBS) $(PG_LIBS))) | awk '!seen[$$0]++')
 empty :=
 space := $(empty) $(empty)
 DEP_LD_PATH := $(subst $(space),:,$(strip $(DEP_LIB_DIRS)))
@@ -508,7 +520,7 @@ TESTFLAGS := `PKG_CONFIG_PATH=$(PKG_CONFIG_LOOKUP_PATH) pkg-config --libs --cfla
 # coverage target does, because --coverage links the gcov runtime, whose
 # mangle_path check-symbols is right to reject in a shipping library and
 # wrong to reject in an instrumented one. Spelled as text's TEST_GATES is.
-TEST_GATES ?= check-symbols check-aliasing check-seams check-prefix check-labels check-access check-account check-inst check-subject check-form check-render check-erasure check-oracle check-readpaths check-routes check-tenant check-renderkey check-wait check-contexts check-bus check-defects check-safeout check-templates check-tpermission check-manifest check-conditions check-grants check-can check-revisions check-paths check-listplan check-relations
+TEST_GATES ?= check-symbols check-aliasing check-seams check-prefix check-labels check-access check-account check-inst check-subject check-keystore check-keystores check-form check-render check-erasure check-oracle check-readpaths check-routes check-tenant check-renderkey check-wait check-contexts check-bus check-defects check-safeout check-templates check-tpermission check-manifest check-conditions check-grants check-can check-revisions check-paths check-listplan check-relations
 
 # Valgrind flags (exclude "still reachable" as it's not a leak)
 # --suppressions: see tests/valgrind.supp. It holds allocations that are
@@ -718,7 +730,7 @@ $(APP_DIR)/$2$(EXE_EXTENSION): $$(TEST_OBJ_$1) $(TEST_HELPER_OBJ) \
 		$(APP_DIR)/$(STATIC_TARGET) | $(APP_DIR)/$(TARGET)
 	@printf "\n### Linking Test: $2 ###\n"
 	@mkdir -p $$(@D)
-	$(CXX) $(CXXFLAGS) -o $$@ $$(TEST_OBJ_$1) $(TEST_HELPER_OBJ) $(LDFLAGS) $(TEST_LDFLAGS) $(MODELLIBRARY) $(STOR_LIBS) $(CUTIL_LIBS) $(SEC_LIBS) $(TEXT_LIBS) $(REGEX_LIBS) $(LTANG_LIBS) $(ARC_LIBS) $(MEM_LIBS) $(SQL_LIBS) $(TESTFLAGS)
+	$(CXX) $(CXXFLAGS) -o $$@ $$(TEST_OBJ_$1) $(TEST_HELPER_OBJ) $(LDFLAGS) $(TEST_LDFLAGS) $(MODELLIBRARY) $(STOR_LIBS) $(CUTIL_LIBS) $(SEC_LIBS) $(TEXT_LIBS) $(REGEX_LIBS) $(LTANG_LIBS) $(ARC_LIBS) $(MEM_LIBS) $(SQL_LIBS) $(PG_LIBS) $(TESTFLAGS)
 endef
 
 $(foreach pair,$(TEST_PAIRS),\
@@ -1273,7 +1285,7 @@ ASAN_TEST_OBJ_$1 := $(ASAN_OBJ_DIR)/tests/$(basename $(notdir $1)).o
 $(ASAN_APP_DIR)/$2$(EXE_EXTENSION): $$(ASAN_TEST_OBJ_$1) $(ASAN_APP_DIR)/$(ASAN_TARGET)
 	@printf "\n### Linking ASan Test: $2 ###\n"
 	@mkdir -p $$(@D)
-	$(CXX) $(ASAN_CXXFLAGS) -o $$@ $$(ASAN_TEST_OBJ_$1) $(ASAN_LDFLAGS) $(ASAN_MODELLIBRARY) $(STOR_LIBS) $(CUTIL_LIBS) $(SEC_LIBS) $(TEXT_LIBS) $(REGEX_LIBS) $(LTANG_LIBS) $(ARC_LIBS) $(MEM_LIBS) $(SQL_LIBS) $(TESTFLAGS)
+	$(CXX) $(ASAN_CXXFLAGS) -o $$@ $$(ASAN_TEST_OBJ_$1) $(ASAN_LDFLAGS) $(ASAN_MODELLIBRARY) $(STOR_LIBS) $(CUTIL_LIBS) $(SEC_LIBS) $(TEXT_LIBS) $(REGEX_LIBS) $(LTANG_LIBS) $(ARC_LIBS) $(MEM_LIBS) $(SQL_LIBS) $(PG_LIBS) $(TESTFLAGS)
 endef
 
 $(foreach pair,$(TEST_PAIRS),\
@@ -1615,12 +1627,12 @@ help: ## Display this help
 
 $(FLAGS_STAMP): force-flags
 	@mkdir -p $(@D)
-	@printf '%s\n' '$(CC) $(CXX) $(LIB_CFLAGS) $(CFLAGS) $(CXXFLAGS) $(LDFLAGS) $(INCLUDE) $(TEST_DATA) $(MODELLIBRARY) $(STOR_LIBS) $(CUTIL_LIBS) $(SEC_LIBS) $(TEXT_LIBS) $(REGEX_LIBS) $(LTANG_LIBS) $(ARC_LIBS) $(MEM_LIBS) $(SQL_LIBS) $(TESTFLAGS) $(TEST_LDFLAGS) $(OS_SPECIFIC_LIBRARY_NAME_FLAG) $(EXAMPLE_LINK) $(EXAMPLE_RPATH) $(MODULE_EXAMPLE_DEF) $(EFFECTIVE_DEF)' > $@.new
+	@printf '%s\n' '$(CC) $(CXX) $(LIB_CFLAGS) $(CFLAGS) $(CXXFLAGS) $(LDFLAGS) $(INCLUDE) $(TEST_DATA) $(MODELLIBRARY) $(STOR_LIBS) $(CUTIL_LIBS) $(SEC_LIBS) $(TEXT_LIBS) $(REGEX_LIBS) $(LTANG_LIBS) $(ARC_LIBS) $(MEM_LIBS) $(SQL_LIBS) $(PG_LIBS) $(TESTFLAGS) $(TEST_LDFLAGS) $(OS_SPECIFIC_LIBRARY_NAME_FLAG) $(EXAMPLE_LINK) $(EXAMPLE_RPATH) $(MODULE_EXAMPLE_DEF) $(EFFECTIVE_DEF)' > $@.new
 	@cmp -s $@.new $@ 2>/dev/null && rm -f $@.new || mv -f $@.new $@
 
 $(ASAN_FLAGS_STAMP): force-flags
 	@mkdir -p $(@D)
-	@printf '%s\n' '$(CC) $(CXX) $(ASAN_CFLAGS) $(ASAN_CXXFLAGS) $(ASAN_LDFLAGS) $(INCLUDE) $(TEST_DATA) $(ASAN_MODELLIBRARY) $(STOR_LIBS) $(CUTIL_LIBS) $(SEC_LIBS) $(TEXT_LIBS) $(REGEX_LIBS) $(LTANG_LIBS) $(ARC_LIBS) $(MEM_LIBS) $(SQL_LIBS) $(TESTFLAGS) $(ASAN_EXAMPLE_LINK) $(ASAN_MODULE_EXAMPLE_DEF) $(EFFECTIVE_DEF)' > $@.new
+	@printf '%s\n' '$(CC) $(CXX) $(ASAN_CFLAGS) $(ASAN_CXXFLAGS) $(ASAN_LDFLAGS) $(INCLUDE) $(TEST_DATA) $(ASAN_MODELLIBRARY) $(STOR_LIBS) $(CUTIL_LIBS) $(SEC_LIBS) $(TEXT_LIBS) $(REGEX_LIBS) $(LTANG_LIBS) $(ARC_LIBS) $(MEM_LIBS) $(SQL_LIBS) $(PG_LIBS) $(TESTFLAGS) $(ASAN_EXAMPLE_LINK) $(ASAN_MODULE_EXAMPLE_DEF) $(EFFECTIVE_DEF)' > $@.new
 	@cmp -s $@.new $@ 2>/dev/null && rm -f $@.new || mv -f $@.new $@
 
 $(FUZZ_FLAGS_STAMP): force-flags
@@ -1628,7 +1640,7 @@ $(FUZZ_FLAGS_STAMP): force-flags
 	@printf '%s\n' '$(FUZZ_CC) $(FUZZ_CXX) $(FUZZ_SAN) $(FUZZ_LIB_FLAGS) $(FUZZ_BIN_FLAGS) $(INCLUDE) $(STOR_LIBS) $(CUTIL_LIBS) $(SEC_LIBS) $(TEXT_LIBS) $(REGEX_LIBS) $(LTANG_LIBS) $(ARC_LIBS) $(MEM_LIBS) $(SQL_LIBS)' > $@.new
 	@cmp -s $@.new $@ 2>/dev/null && rm -f $@.new || mv -f $@.new $@
 
-.PHONY: check-seams check-prefix check-labels check-access check-account check-inst check-subject check-form check-render check-erasure check-oracle check-readpaths check-routes check-tenant check-renderkey check-wait check-contexts check-bus check-defects check-safeout check-templates check-tpermission check-manifest check-conditions check-grants check-can check-revisions check-paths check-listplan check-relations
+.PHONY: check-seams check-prefix check-labels check-access check-account check-inst check-subject check-keystore check-keystores check-form check-render check-erasure check-oracle check-readpaths check-routes check-tenant check-renderkey check-wait check-contexts check-bus check-defects check-safeout check-templates check-tpermission check-manifest check-conditions check-grants check-can check-revisions check-paths check-listplan check-relations
 check-seams: ## Fail if a subsystem includes another's private header
 	@tools/check-seams.sh .
 check-prefix: ## Fail if a derived Defiant prefix collides or a dependency is out of order
@@ -1669,6 +1681,25 @@ check-tpermission: $(APP_DIR)/testTpermission$(EXE_EXTENSION) ## Who may edit a 
 	@tools/check-tpermission.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX))
 check-subject: $(APP_DIR)/testSubject$(EXE_EXTENSION) ## Erasure survives restore, with a plant
 	@LD_LIBRARY_PATH="$(TEST_LD_PATH)" tools/check-subject.sh "$(APP_DIR)/testSubject$(EXE_EXTENSION)"
+check-keystore: $(APP_DIR)/testSubject$(EXE_EXTENSION) ## Keys and the ledger only in the key store, the erasure order, the backup pair; real-source plants
+	@tools/check-keystore.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX))
+# The subject suite and the erasure sweep on the SQLite key store (`make test`
+# runs both on the memory one). The Postgres arm needs a server, so it is a
+# target of its own, run in defiant-storage-postgres's derived image through
+# that library's tools/pg-test.sh; here it is reported as skipped, never as
+# passed.
+check-keystores: $(APP_DIR)/testSubject$(EXE_EXTENSION) $(APP_DIR)/testErasure$(EXE_EXTENSION) ## The subject suite and the erasure sweep with the key store on SQLite
+	@GDEFCORE_TEST_KEYSTORE=sqlite LD_LIBRARY_PATH="$(TEST_LD_PATH)" $(APP_DIR)/testSubject$(EXE_EXTENSION) --gtest_brief=1
+	@GDEFCORE_TEST_KEYSTORE=sqlite LD_LIBRARY_PATH="$(TEST_LD_PATH)" $(APP_DIR)/testErasure$(EXE_EXTENSION) --gtest_brief=1
+	@printf '%s\n' "check-keystores: SKIPPED: postgres: the Postgres key store arm is make test-keystore-postgres, in defiant-storage-postgres's image through its tools/pg-test.sh"
+.PHONY: test-keystore-postgres
+test-keystore-postgres: $(APP_DIR)/testSubject$(EXE_EXTENSION) $(APP_DIR)/testErasure$(EXE_EXTENSION) ## The subject suite and the erasure sweep with the key store on Postgres (a server: defiant-storage-postgres's tools/pg-test.sh)
+ifeq ($(strip $(PG_LIBS)),)
+	@printf '%s\n' "test-keystore-postgres: ghoti.io-defiant-storage-postgres was not found by pkg-config. It builds only in its derived image (ghoti-build:gcc16 plus libpq-dev, from defiant-storage-postgres's Containerfile): install it into PREFIX there and run this target through that library's tools/pg-test.sh." >&2; exit 1
+else
+	@GDEFCORE_TEST_KEYSTORE=postgres LD_LIBRARY_PATH="$(TEST_LD_PATH)" $(APP_DIR)/testSubject$(EXE_EXTENSION) --gtest_brief=1
+	@GDEFCORE_TEST_KEYSTORE=postgres LD_LIBRARY_PATH="$(TEST_LD_PATH)" $(APP_DIR)/testErasure$(EXE_EXTENSION) --gtest_brief=1
+endif
 check-form: $(APP_DIR)/testForm$(EXE_EXTENSION) ## A signed submit stores a draft, with a plant
 	@LD_LIBRARY_PATH="$(TEST_LD_PATH)" tools/check-form.sh "$(APP_DIR)/testForm$(EXE_EXTENSION)"
 check-render: $(APP_DIR)/testRender$(EXE_EXTENSION) ## A tiny scope returns a prefix, with a plant

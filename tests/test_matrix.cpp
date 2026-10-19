@@ -434,6 +434,8 @@ TEST(Result, StringCoversEveryCode) {
   }
   EXPECT_STREQ(gdefcore_result_string(GDEFCORE_RESULT_COUNT), "Unknown error");
   EXPECT_STREQ(gdefcore_result_string(GDEFCORE_ERR_BUSY), "Offload queue full");
+  EXPECT_STREQ(gdefcore_result_string(GDEFCORE_ERR_STALE),
+      "Key set older than its data set");
   EXPECT_STREQ(gdefcore_result_string(GDEFCORE_ERR_LIMIT), "Limit exceeded");
 }
 

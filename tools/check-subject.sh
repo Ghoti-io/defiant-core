@@ -2,9 +2,10 @@
 #
 # The erasure restore gate.
 #
-# A snapshot, then an erasure, then an import into an empty tenant still
-# reads as [erased]. A planted restore that keeps the snapshot's ledger and
-# drops a newer live row must turn the gate red.
+# A backup pair, then an erasure, then a restore into an empty tenant still
+# reads as [erased]. A planted restore that reads the ledger from the backup
+# only (the pair into a key store of its own, the live ledger with the newer
+# erasure never consulted) must turn the gate red.
 #
 # Usage: check-subject.sh <test_subject-binary>
 

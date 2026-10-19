@@ -39,6 +39,21 @@ Dependencies are `cutil` and `defiant-storage`, found only through pkg-config.
 `check-prefix` and `check-labels`. Each of the three Defiant gates is shown
 to fail on a planted defect.
 
+The subject tests run on a key store chosen by `GDEFCORE_TEST_KEYSTORE`
+(`memory`, the default, `sqlite` or `postgres`; documentation/subjects.md).
+`make test` runs them on memory and, through `check-keystores`, on SQLite.
+The Postgres arm is `make test-keystore-postgres`: it needs
+defiant-storage-postgres, which builds only in that library's derived image,
+and a server, which its `tools/pg-test.sh` starts:
+
+```bash
+sh ../defiant-storage-postgres/tools/pg-test.sh -- \
+  "make test-keystore-postgres PREFIX=/path/to/prefix"
+```
+
+Without a server it fails naming the fix, or with `GDEFSPG_TEST_SKIP_SERVER=1`
+prints `SKIPPED: postgres` and is not counted as passed.
+
 ## API
 
 `gdefcore_request_create` copies the tenant bytes onto an opaque handle.

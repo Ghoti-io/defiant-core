@@ -49,6 +49,8 @@ const char * gdefcore_result_string(GDEFCORE_Result result) {
       return "Internal error";
     case GDEFCORE_ERR_BUSY:
       return "Offload queue full";
+    case GDEFCORE_ERR_STALE:
+      return "Key set older than its data set";
     case GDEFCORE_RESULT_COUNT:
     default:
       return "Unknown error";

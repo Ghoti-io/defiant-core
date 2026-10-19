@@ -36,9 +36,11 @@ extern "C" {
 /**
  * @brief Result of a kernel call.
  *
- * `GDEFCORE_ERR_BUSY` is the one code past the suite's common list: the
+ * Two codes are past the suite's common list. `GDEFCORE_ERR_BUSY`: the
  * offload pool's queue is full, and the call returns without blocking the
- * thread.
+ * thread. `GDEFCORE_ERR_STALE`: a restore was handed a key set older than the
+ * data set it pairs with (subject.h), which would bring back a key erased
+ * after the key set was taken, and refused it.
  */
 typedef enum GDEFCORE_Result {
   GDEFCORE_OK = 0,          ///< Succeeded.
@@ -51,6 +53,7 @@ typedef enum GDEFCORE_Result {
   GDEFCORE_ERR_INVALID,     ///< A caller argument is wrong.
   GDEFCORE_ERR_INTERNAL,    ///< A library invariant failed.
   GDEFCORE_ERR_BUSY,        ///< The offload queue is full. The thread is not blocked.
+  GDEFCORE_ERR_STALE,       ///< A key set older than the data set it pairs with.
   GDEFCORE_RESULT_COUNT     ///< Not a result. Closes the string table.
 } GDEFCORE_Result;
 

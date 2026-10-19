@@ -38,6 +38,7 @@
 #include <ghoti.io/defiant-core/account.h>
 #include <ghoti.io/defiant-core/entity.h>
 #include <ghoti.io/defiant-storage/core.h>
+#include <ghoti.io/defiant-storage/keystore.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -133,14 +134,17 @@ GDEFCORE_API GDEFCORE_Result gdefcore_inst_open(GDEFSTOR_Store * registry,
     const GDEFCORE_Allocator * allocator, GDEFCORE_Inst ** out_inst);
 
 /**
- * @brief Open an installation that keeps tenant keyrings in @p side.
+ * @brief Open an installation that keeps tenant keyrings in @p keys.
  *
- * The first open copies each tenant keyring's wrapped bytes into @p side.
- * A later open adopts those bytes instead of drawing a new key. @p side is
- * borrowed and is not the site store. The raw key is not written there.
+ * The first open writes each tenant keyring's wrap into the key store, as
+ * the tenant secret ::GDEFCORE_SUBJECT_KEYRING_SECRET under the tenant's
+ * storage key (gdefcore_subject_bind_keyring()). A later open adopts that
+ * wrap instead of drawing a new key. @p keys is borrowed. It is a key store
+ * (AD-19), never a data store: no keyring wrap is written to @p registry or
+ * @p site. The raw key is not written anywhere.
  */
-GDEFCORE_API GDEFCORE_Result gdefcore_inst_open_side(GDEFSTOR_Store * registry,
-    GDEFSTOR_Store * site, GDEFSTOR_Store * side, const uint8_t * root,
+GDEFCORE_API GDEFCORE_Result gdefcore_inst_open_keys(GDEFSTOR_Store * registry,
+    GDEFSTOR_Store * site, GDEFSTOR_KeyStore * keys, const uint8_t * root,
     size_t root_len, const char * placement, size_t placement_len,
     const GDEFCORE_Allocator * allocator, GDEFCORE_Inst ** out_inst);
 

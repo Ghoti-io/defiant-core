@@ -21,10 +21,15 @@
 /**
  * @file
  *
- * Personal values are ciphertext in the tenant store. The subject key, the
- * tenant keyring wrap, the blind index and the erasure ledger stay in the
- * side store. Erasure destroys the key. A restored snapshot still reads as
- * erased because import replays the union of the ledgers first.
+ * Personal values are ciphertext in the tenant store. The subject keys
+ * (wrapped under the keyring's subject-wrap purpose), the tenant keyring's
+ * wrap and the erasure ledger are in the key store (defiant-storage's
+ * keystore.h), read and written only through its port. The blind index, and
+ * where each subject's values are, stay in the blind store, a data store
+ * apart from the tenant's. Erasure destroys the key in the key store first,
+ * then deletes the blind rows; every open and restore replays the ledger over
+ * the blind store, so a restored pair still reads as erased and an erasure cut
+ * short after its first step is finished.
  */
 
 #include <ghoti.io/defiant-core/macros.h>
@@ -67,8 +72,6 @@ _Static_assert(kKey == GDEFCORE_SUBJECT_KEY_LEN, "subject key length");
 _Static_assert(sizeof GDEFCORE_SUBJECT_ERASED - 1 == GDEFCORE_SUBJECT_ERASED_LEN,
     "erased text");
 
-static const char kWrapType[] = "core.keyring";
-static const char kWrapId[] = "wrap";
 static const char kSubjectType[] = "core.subject";
 static const char kBlindType[] = "core.blind";
 static const char kPurpose[] = "subject-wrap";
@@ -76,7 +79,8 @@ static const char kHex[] = "0123456789abcdef";
 
 struct GDEFCORE_Subjects {
   const GDEFCORE_Allocator * alloc;
-  GDEFSTOR_Store * side;
+  GDEFSTOR_KeyStore * keys; /* keys, the keyring's wrap, the ledger */
+  GDEFSTOR_Store * side;    /* the blind store: blind rows and locations */
   uint8_t * tenant;
   size_t tenant_len;
   uint8_t root[GDEFCORE_ACCOUNT_ROOT_LEN];
@@ -91,9 +95,9 @@ typedef struct Buf {
   int oom;
 } Buf;
 
+/* A subject's row in the blind store: its blind-index lines and the places
+ * its values are. It holds no key. */
 typedef struct SubjectRow {
-  uint8_t * key;
-  size_t key_len;
   char * blinds;
   size_t blinds_len;
   char * locs;
@@ -292,27 +296,7 @@ static GDEFCORE_Result side_get(GDEFSTOR_Store * side, const uint8_t * tenant,
       type, strlen(type), entity, entity_len, out));
 }
 
-static GDEFCORE_Result side_put(GDEFSTOR_Store * side, const uint8_t * tenant,
-    size_t tenant_len, const char * type, const char * entity, size_t entity_len,
-    const GDEFSTOR_Column * columns, size_t column_count) {
-  GDEFSTOR_Write * write = NULL;
-  GDEFCORE_Result rc = from_stor(gdefstor_write_begin(side, (const char *)tenant,
-      tenant_len, NULL, &write));
-  if (rc != GDEFCORE_OK) {
-    return rc;
-  }
-  rc = from_stor(gdefstor_projection_put(write, type, strlen(type), entity,
-      entity_len, columns, column_count));
-  if (rc != GDEFCORE_OK) {
-    gdefstor_write_abort(write);
-    return rc;
-  }
-  return from_stor(gdefstor_write_commit(write));
-}
-
 static void row_clear(const GDEFCORE_Allocator * alloc, SubjectRow * row) {
-  wipe(row->key, row->key_len);
-  gcu_allocator_free(alloc, row->key);
   gcu_allocator_free(alloc, row->blinds);
   gcu_allocator_free(alloc, row->locs);
   memset(row, 0, sizeof *row);
@@ -334,16 +318,6 @@ static GDEFCORE_Result row_load(GDEFCORE_Subjects * subjects, const char * id,
     return rc;
   }
   row->present = 1;
-  if (column_find(proj, "key", &val, &len) && len > 0) {
-    row->key = (uint8_t *)mem(subjects->alloc, len);
-    if (row->key == NULL) {
-      gdefstor_projection_free(proj);
-      row_clear(subjects->alloc, row);
-      return GDEFCORE_ERR_OOM;
-    }
-    memcpy(row->key, val, len);
-    row->key_len = len;
-  }
   if (column_find(proj, "blinds", &val, &len)) {
     row->blinds = dup_n(subjects->alloc, val, len);
     row->blinds_len = len;
@@ -366,77 +340,96 @@ static GDEFCORE_Result row_load(GDEFCORE_Subjects * subjects, const char * id,
   return GDEFCORE_OK;
 }
 
-static GDEFCORE_Result row_store(GDEFCORE_Subjects * subjects, const char * id,
-    const SubjectRow * row) {
-  GDEFSTOR_Column columns[3];
-  size_t n = 0;
-  memset(columns, 0, sizeof columns);
-  if (row->key != NULL && row->key_len > 0) {
-    columns[n].name = "key";
-    columns[n].name_len = 3;
-    columns[n].value = row->key;
-    columns[n].value_len = row->key_len;
-    n += 1;
-  }
-  columns[n].name = "blinds";
-  columns[n].name_len = 6;
-  columns[n].value = (const uint8_t *)(row->blinds == NULL ? "" : row->blinds);
-  columns[n].value_len = row->blinds_len;
-  n += 1;
-  columns[n].name = "locs";
-  columns[n].name_len = 4;
-  columns[n].value = (const uint8_t *)(row->locs == NULL ? "" : row->locs);
-  columns[n].value_len = row->locs_len;
-  n += 1;
-  return side_put(subjects->side, subjects->tenant, subjects->tenant_len,
-      kSubjectType, id, GDEFCORE_PUBLIC_ID_LEN, columns, n);
-}
+/* ---- the key store ----------------------------------------------------------
+ *
+ * Every byte that leaves the key store through these comes from its
+ * allocator, which subject.h requires to be this subsystem's. */
 
-static GDEFCORE_Result wrap_load(GDEFSTOR_Store * side, const uint8_t * tenant,
+static const char kKeyringSecret[] = GDEFCORE_SUBJECT_KEYRING_SECRET;
+
+/* The tenant keyring's wrap, kept in the key store as a tenant secret. */
+static GDEFCORE_Result wrap_load(GDEFSTOR_KeyStore * keys,
+    const GDEFCORE_Allocator * alloc, const uint8_t * tenant,
     size_t tenant_len, uint8_t * out, int * found) {
-  GDEFSTOR_Projection * proj = NULL;
-  const uint8_t * val = NULL;
+  uint8_t * got = NULL;
   size_t len = 0;
   GDEFCORE_Result rc;
   *found = 0;
-  rc = side_get(side, tenant, tenant_len, kWrapType, kWrapId, strlen(kWrapId),
-      &proj);
-  if (rc == GDEFCORE_ERR_INVALID) {
-    return GDEFCORE_OK;
-  }
-  if (rc != GDEFCORE_OK) {
+  rc = from_stor(gdefstor_keystore_secret_get(keys, (const char *)tenant,
+      tenant_len, kKeyringSecret, strlen(kKeyringSecret), found, &got, &len));
+  if (rc != GDEFCORE_OK || !*found) {
+    *found = 0;
     return rc;
   }
-  if (!column_find(proj, "bytes", &val, &len) || len != kWrap) {
-    gdefstor_projection_free(proj);
+  if (len != kWrap) {
+    wipe(got, len);
+    gcu_allocator_free(alloc, got);
+    *found = 0;
     return GDEFCORE_ERR_CORRUPT;
   }
-  memcpy(out, val, kWrap);
-  *found = 1;
-  gdefstor_projection_free(proj);
+  memcpy(out, got, kWrap);
+  wipe(got, len);
+  gcu_allocator_free(alloc, got);
   return GDEFCORE_OK;
 }
 
-static GDEFCORE_Result wrap_store(GDEFSTOR_Store * side, const uint8_t * tenant,
-    size_t tenant_len, const uint8_t * bytes) {
-  GDEFSTOR_Column column;
-  uint8_t existing[kWrap];
-  int found = 0;
-  GDEFCORE_Result rc = wrap_load(side, tenant, tenant_len, existing, &found);
-  wipe(existing, sizeof existing);
+/* Written once: the same wrap again changes nothing, another is refused. */
+static GDEFCORE_Result wrap_store(GDEFSTOR_KeyStore * keys,
+    const uint8_t * tenant, size_t tenant_len, const uint8_t * bytes) {
+  return from_stor(gdefstor_keystore_secret_put(keys, (const char *)tenant,
+      tenant_len, kKeyringSecret, strlen(kKeyringSecret), bytes, kWrap));
+}
+
+/* The subject's wrapped key. *out_erased for an erased subject (nothing in
+ * @p wrapped); ::GDEFCORE_ERR_INVALID for one the key store does not know. */
+static GDEFCORE_Result key_load(GDEFCORE_Subjects * subjects, const char * sid,
+    int * out_erased, uint8_t wrapped[kWrap]) {
+  uint8_t * got = NULL;
+  size_t len = 0;
+  int erased = 0;
+  GDEFCORE_Result rc = from_stor(gdefstor_keystore_subject_sealed(subjects->keys,
+      (const char *)subjects->tenant, subjects->tenant_len, sid,
+      GDEFCORE_PUBLIC_ID_LEN, &erased, &got, &len));
+  *out_erased = 0;
   if (rc != GDEFCORE_OK) {
     return rc;
   }
-  if (found) {
+  if (erased) {
+    *out_erased = 1;
     return GDEFCORE_OK;
   }
-  memset(&column, 0, sizeof column);
-  column.name = "bytes";
-  column.name_len = 5;
-  column.value = bytes;
-  column.value_len = kWrap;
-  return side_put(side, tenant, tenant_len, kWrapType, kWrapId, strlen(kWrapId),
-      &column, 1);
+  if (len != kWrap) {
+    wipe(got, len);
+    gcu_allocator_free(subjects->alloc, got);
+    return GDEFCORE_ERR_CORRUPT;
+  }
+  memcpy(wrapped, got, kWrap);
+  wipe(got, len);
+  gcu_allocator_free(subjects->alloc, got);
+  return GDEFCORE_OK;
+}
+
+/* Whether the subject is erased, and whether the key store knows it at all
+ * (it has its key, or erased it). */
+static GDEFCORE_Result subject_state(GDEFCORE_Subjects * subjects,
+    const char * sid, int * out_erased, int * out_known) {
+  uint8_t wrapped[kWrap];
+  GDEFCORE_Result rc = key_load(subjects, sid, out_erased, wrapped);
+  wipe(wrapped, sizeof wrapped);
+  *out_known = rc == GDEFCORE_OK;
+  if (rc == GDEFCORE_ERR_INVALID) {
+    *out_erased = 0;
+    return GDEFCORE_OK;
+  }
+  return rc;
+}
+
+static int64_t now_ms(void) {
+  struct timespec ts;
+  if (timespec_get(&ts, TIME_UTC) != TIME_UTC || ts.tv_sec < 0) {
+    return -1;
+  }
+  return (int64_t)ts.tv_sec * 1000 + (int64_t)(ts.tv_nsec / 1000000);
 }
 
 static GDEFCORE_Result adopt_wrap(const uint8_t * root, size_t root_len,
@@ -445,7 +438,7 @@ static GDEFCORE_Result adopt_wrap(const uint8_t * root, size_t root_len,
   return gdefcore_keyring_adopt(root, root_len, wrapped, kWrap, allocator, out);
 }
 
-GDEFCORE_Result gdefcore_subject_bind_keyring(GDEFSTOR_Store * side,
+GDEFCORE_Result gdefcore_subject_bind_keyring(GDEFSTOR_KeyStore * keys,
     const uint8_t * tenant, size_t tenant_len, const uint8_t * root,
     size_t root_len, const GDEFCORE_Allocator * allocator,
     GDEFCORE_Keyring ** inout) {
@@ -453,10 +446,11 @@ GDEFCORE_Result gdefcore_subject_bind_keyring(GDEFSTOR_Store * side,
   int found = 0;
   GDEFCORE_Keyring * adopted = NULL;
   GDEFCORE_Result rc;
-  if (side == NULL || inout == NULL || tenant == NULL || tenant_len == 0) {
+  if (keys == NULL || inout == NULL || tenant == NULL || tenant_len == 0) {
     return GDEFCORE_ERR_INVALID;
   }
-  rc = wrap_load(side, tenant, tenant_len, wrapped, &found);
+  rc = wrap_load(keys, use_alloc(allocator), tenant, tenant_len, wrapped,
+      &found);
   if (rc != GDEFCORE_OK) {
     wipe(wrapped, sizeof wrapped);
     return rc;
@@ -479,22 +473,25 @@ GDEFCORE_Result gdefcore_subject_bind_keyring(GDEFSTOR_Store * side,
   if (rc != GDEFCORE_OK) {
     return rc;
   }
-  rc = wrap_store(side, tenant, tenant_len, wrapped);
+  rc = wrap_store(keys, tenant, tenant_len, wrapped);
   wipe(wrapped, sizeof wrapped);
   return rc;
 }
 
-GDEFCORE_Result gdefcore_subject_open(GDEFSTOR_Store * side,
-    const uint8_t * tenant, size_t tenant_len, const uint8_t * root,
-    size_t root_len, const GDEFCORE_Keyring * keyring,
+static GDEFCORE_Result replay_ledger(GDEFCORE_Subjects * subjects);
+
+GDEFCORE_Result gdefcore_subject_open(GDEFSTOR_KeyStore * keys,
+    GDEFSTOR_Store * side, const uint8_t * tenant, size_t tenant_len,
+    const uint8_t * root, size_t root_len, const GDEFCORE_Keyring * keyring,
     const GDEFCORE_Allocator * allocator, GDEFCORE_Subjects ** out) {
   const GDEFCORE_Allocator * alloc;
   GDEFCORE_Subjects * subjects;
   uint8_t wrapped[kWrap];
   int found = 0;
   GDEFCORE_Result rc;
-  if (side == NULL || out == NULL || tenant == NULL || tenant_len == 0 ||
-      root == NULL || root_len != GDEFCORE_ACCOUNT_ROOT_LEN) {
+  if (keys == NULL || side == NULL || out == NULL || tenant == NULL ||
+      tenant_len == 0 || root == NULL ||
+      root_len != GDEFCORE_ACCOUNT_ROOT_LEN) {
     return GDEFCORE_ERR_INVALID;
   }
   alloc = use_alloc(allocator);
@@ -504,6 +501,7 @@ GDEFCORE_Result gdefcore_subject_open(GDEFSTOR_Store * side,
   }
   memset(subjects, 0, sizeof *subjects);
   subjects->alloc = alloc;
+  subjects->keys = keys;
   subjects->side = side;
   subjects->tenant = (uint8_t *)mem(alloc, tenant_len);
   if (subjects->tenant == NULL) {
@@ -513,7 +511,7 @@ GDEFCORE_Result gdefcore_subject_open(GDEFSTOR_Store * side,
   memcpy(subjects->tenant, tenant, tenant_len);
   subjects->tenant_len = tenant_len;
   memcpy(subjects->root, root, root_len);
-  rc = wrap_load(side, tenant, tenant_len, wrapped, &found);
+  rc = wrap_load(keys, alloc, tenant, tenant_len, wrapped, &found);
   if (rc != GDEFCORE_OK) {
     wipe(wrapped, sizeof wrapped);
     gdefcore_subject_destroy(subjects);
@@ -527,19 +525,95 @@ GDEFCORE_Result gdefcore_subject_open(GDEFSTOR_Store * side,
     }
     rc = gdefcore_keyring_export(keyring, wrapped, kWrap);
     if (rc == GDEFCORE_OK) {
-      rc = wrap_store(side, tenant, tenant_len, wrapped);
+      rc = wrap_store(keys, tenant, tenant_len, wrapped);
     }
   }
   if (rc == GDEFCORE_OK) {
     rc = adopt_wrap(root, root_len, wrapped, alloc, &subjects->keyring);
   }
   wipe(wrapped, sizeof wrapped);
+  if (rc == GDEFCORE_OK) {
+    /* An erasure cut short after its key-store step is finished here. */
+    rc = replay_ledger(subjects);
+  }
   if (rc != GDEFCORE_OK) {
     gdefcore_subject_destroy(subjects);
     return rc;
   }
   *out = subjects;
   return GDEFCORE_OK;
+}
+
+/* ---- the cipher a key store is given ------------------------------------- */
+
+static GDEFSTOR_Result cipher_random(void * ctx, uint8_t * out, size_t n) {
+  (void)ctx;
+  return gsec_random_bytes(out, n, NULL) == GSEC_OK ? GDEFSTOR_OK
+                                                    : GDEFSTOR_ERR_IO;
+}
+
+/* nonce (12) | ciphertext | tag (16), under a 32-byte key, no associated
+ * data: the key store binds a sealed value to its subject by the key. */
+static GDEFSTOR_Result cipher_seal(void * ctx, const GDEFSTOR_Allocator * alloc,
+    const uint8_t * key, const uint8_t * in, size_t n, uint8_t ** out,
+    size_t * out_len) {
+  uint8_t * o;
+  (void)ctx;
+  if (n > SIZE_MAX - kNonce - kTag) {
+    return GDEFSTOR_ERR_LIMIT;
+  }
+  o = (uint8_t *)gcu_allocator_malloc(alloc, kNonce + n + kTag);
+  if (o == NULL) {
+    return GDEFSTOR_ERR_OOM;
+  }
+  if (gsec_random_bytes(o, kNonce, NULL) != GSEC_OK ||
+      gsec_aes_gcm_encrypt(key, kKey, o, kNonce, NULL, 0, in, n, o + kNonce,
+          o + kNonce + n, kTag) != GSEC_OK) {
+    wipe(o, kNonce + n + kTag);
+    gcu_allocator_free(alloc, o);
+    return GDEFSTOR_ERR_IO;
+  }
+  *out = o;
+  *out_len = kNonce + n + kTag;
+  return GDEFSTOR_OK;
+}
+
+static GDEFSTOR_Result cipher_open(void * ctx, const GDEFSTOR_Allocator * alloc,
+    const uint8_t * key, const uint8_t * in, size_t n, uint8_t ** out,
+    size_t * out_len) {
+  uint8_t * o;
+  size_t plain;
+  (void)ctx;
+  if (n < kNonce + kTag) {
+    return GDEFSTOR_ERR_CORRUPT;
+  }
+  plain = n - kNonce - kTag;
+  o = (uint8_t *)gcu_allocator_malloc(alloc, plain == 0 ? 1 : plain);
+  if (o == NULL) {
+    return GDEFSTOR_ERR_OOM;
+  }
+  if (gsec_aes_gcm_decrypt(key, kKey, in, kNonce, NULL, 0, in + kNonce, plain,
+          o, in + kNonce + plain, kTag) != GSEC_OK) {
+    wipe(o, plain);
+    gcu_allocator_free(alloc, o);
+    return GDEFSTOR_ERR_CORRUPT;
+  }
+  *out = o;
+  *out_len = plain;
+  return GDEFSTOR_OK;
+}
+
+void gdefcore_subject_cipher(GDEFSTOR_KeyCipher * out) {
+  if (out == NULL) {
+    return;
+  }
+  memset(out, 0, sizeof *out);
+  out->size = sizeof *out;
+  out->ctx = NULL;
+  out->key_bytes = kKey;
+  out->random = cipher_random;
+  out->seal = cipher_seal;
+  out->open = cipher_open;
 }
 
 void gdefcore_subject_destroy(GDEFCORE_Subjects * subjects) {
@@ -614,61 +688,6 @@ static GDEFCORE_Result open_key(GDEFCORE_Subjects * subjects,
       sizeof aad, wrapped + 15, kKey, raw, wrapped + 47, kTag));
   wipe(sw, sizeof sw);
   return rc;
-}
-
-static int now_u64(uint64_t * out) {
-  time_t now = time(NULL);
-  if (now < 0) {
-    return 0;
-  }
-  *out = (uint64_t)now;
-  return 1;
-}
-
-static GDEFCORE_Result ledger_load(GDEFCORE_Subjects * subjects, char ** out,
-    size_t * out_len) {
-  GDEFSTOR_Projection * proj = NULL;
-  const uint8_t * val = NULL;
-  size_t len = 0;
-  GDEFCORE_Result rc = side_get(subjects->side, subjects->tenant,
-      subjects->tenant_len, GDEFCORE_SUBJECT_LEDGER_TYPE,
-      GDEFCORE_SUBJECT_LEDGER_ID, strlen(GDEFCORE_SUBJECT_LEDGER_ID), &proj);
-  if (rc == GDEFCORE_ERR_INVALID) {
-    *out = dup_n(subjects->alloc, "", 0);
-    *out_len = 0;
-    return *out == NULL ? GDEFCORE_ERR_OOM : GDEFCORE_OK;
-  }
-  if (rc != GDEFCORE_OK) {
-    return rc;
-  }
-  if (!column_find(proj, "text", &val, &len)) {
-    val = (const uint8_t *)"";
-    len = 0;
-  }
-  *out = dup_n(subjects->alloc, val, len);
-  *out_len = len;
-  gdefstor_projection_free(proj);
-  return *out == NULL ? GDEFCORE_ERR_OOM : GDEFCORE_OK;
-}
-
-static int ledger_has(const char * text, size_t n, const char * id) {
-  size_t i = 0;
-  while (i < n) {
-    size_t line = i;
-    while (i < n && text[i] != '\n') {
-      i += 1;
-    }
-    if (i - line >= GDEFCORE_PUBLIC_ID_LEN &&
-        memcmp(text + line, id, GDEFCORE_PUBLIC_ID_LEN) == 0 &&
-        (i - line == GDEFCORE_PUBLIC_ID_LEN ||
-            text[line + GDEFCORE_PUBLIC_ID_LEN] == ' ')) {
-      return 1;
-    }
-    if (i < n && text[i] == '\n') {
-      i += 1;
-    }
-  }
-  return 0;
 }
 
 static int line_span(const char * text, size_t n, size_t * at, size_t * line,
@@ -828,22 +847,22 @@ static GDEFCORE_Result encrypt_value(GDEFCORE_Subjects * subjects,
   uint8_t * packed = NULL;
   uint8_t * aad = NULL;
   size_t aad_len = GDEFCORE_PUBLIC_ID_LEN + 1 + field_len;
-  SubjectRow row;
+  uint8_t wrapped[kWrap];
+  int erased = 0;
   char * hex = NULL;
   size_t hex_len = 0;
   char * text = NULL;
   GDEFCORE_Result rc;
-  memset(&row, 0, sizeof row);
-  rc = row_load(subjects, subject, &row);
-  if (rc != GDEFCORE_OK) {
-    return rc;
+  /* A read of the key store, never a write: the save path writes the tenant
+   * store and the blind store only. */
+  rc = key_load(subjects, subject, &erased, wrapped);
+  if (rc == GDEFCORE_OK && erased) {
+    rc = GDEFCORE_ERR_INVALID;
   }
-  if (!row.present || row.key == NULL || row.key_len != kWrap) {
-    row_clear(subjects->alloc, &row);
-    return GDEFCORE_ERR_INVALID;
+  if (rc == GDEFCORE_OK) {
+    rc = open_key(subjects, wrapped, raw);
   }
-  rc = open_key(subjects, row.key, raw);
-  row_clear(subjects->alloc, &row);
+  wipe(wrapped, sizeof wrapped);
   if (rc != GDEFCORE_OK) {
     wipe(raw, sizeof raw);
     return rc;
@@ -986,7 +1005,6 @@ GDEFCORE_Result gdefcore_subject_create(GDEFCORE_Subjects * subjects,
   uint8_t raw[kKey];
   uint8_t wrapped[kWrap];
   char id[GDEFCORE_PUBLIC_ID_LEN + 1];
-  SubjectRow row;
   GDEFCORE_Result rc;
   if (subjects == NULL || out_id == NULL) {
     return GDEFCORE_ERR_INVALID;
@@ -1005,15 +1023,11 @@ GDEFCORE_Result gdefcore_subject_create(GDEFCORE_Subjects * subjects,
     wipe(wrapped, sizeof wrapped);
     return rc;
   }
-  memset(&row, 0, sizeof row);
-  row.present = 1;
-  row.key = wrapped;
-  row.key_len = kWrap;
-  row.blinds = (char *)"";
-  row.locs = (char *)"";
-  rc = row_store(subjects, id, &row);
+  /* The one key-store write of a subject's life before its erasure. */
+  rc = from_stor(gdefstor_keystore_subject_put(subjects->keys,
+      (const char *)subjects->tenant, subjects->tenant_len, id,
+      GDEFCORE_PUBLIC_ID_LEN, wrapped, kWrap));
   wipe(wrapped, sizeof wrapped);
-  row.key = NULL;
   if (rc != GDEFCORE_OK) {
     return rc;
   }
@@ -1060,7 +1074,7 @@ static GDEFCORE_Result remember(GDEFCORE_Subjects * subjects, const char * subje
   size_t line_len;
   GDEFSTOR_Write * write = NULL;
   GDEFSTOR_Column blind_cols[3];
-  GDEFSTOR_Column subject_cols[3];
+  GDEFSTOR_Column subject_cols[2];
   size_t nsub = 0;
   GDEFCORE_Result rc = row_load(subjects, subject, &row);
   if (rc != GDEFCORE_OK) {
@@ -1180,13 +1194,6 @@ static GDEFCORE_Result remember(GDEFCORE_Subjects * subjects, const char * subje
   if (rc == GDEFCORE_OK) {
     memset(subject_cols, 0, sizeof subject_cols);
     nsub = 0;
-    if (row.key != NULL && row.key_len > 0) {
-      subject_cols[nsub].name = "key";
-      subject_cols[nsub].name_len = 3;
-      subject_cols[nsub].value = row.key;
-      subject_cols[nsub].value_len = row.key_len;
-      nsub += 1;
-    }
     subject_cols[nsub].name = "blinds";
     subject_cols[nsub].name_len = 6;
     subject_cols[nsub].value = (const uint8_t *)row.blinds;
@@ -1247,17 +1254,14 @@ static int looks_sealed(const void * text, size_t n) {
   return 1;
 }
 
-/* A subject the ledger names takes no new value, and no new index row. */
+/* An erased subject takes no new value, and no new index row. */
 static GDEFCORE_Result not_erased(GDEFCORE_Subjects * subjects, const char * sid) {
-  char * ledger = NULL;
-  size_t ledger_len = 0;
-  int erased;
-  GDEFCORE_Result rc = ledger_load(subjects, &ledger, &ledger_len);
+  int erased = 0;
+  int known = 0;
+  GDEFCORE_Result rc = subject_state(subjects, sid, &erased, &known);
   if (rc != GDEFCORE_OK) {
     return rc;
   }
-  erased = ledger_has(ledger, ledger_len, sid);
-  gcu_allocator_free(subjects->alloc, ledger);
   return erased ? GDEFCORE_ERR_INVALID : GDEFCORE_OK;
 }
 
@@ -1428,12 +1432,11 @@ GDEFCORE_Result gdefcore_subject_read(GDEFCORE_Subjects * subjects,
     const char * lang, size_t lang_len, char ** out_text, size_t * out_len) {
   char sid[GDEFCORE_PUBLIC_ID_LEN + 1];
   char eid[GDEFCORE_PUBLIC_ID_LEN + 1];
-  char * ledger = NULL;
-  size_t ledger_len = 0;
   char ** texts = NULL;
   size_t * lens = NULL;
   size_t count = 0;
-  SubjectRow row;
+  uint8_t wrapped[kWrap];
+  int erased = 0;
   uint8_t raw[kKey];
   GDEFCORE_Result rc;
   if (subjects == NULL || catalog == NULL || out_text == NULL ||
@@ -1448,25 +1451,17 @@ GDEFCORE_Result gdefcore_subject_read(GDEFCORE_Subjects * subjects,
   if (rc != GDEFCORE_OK) {
     return rc;
   }
-  rc = ledger_load(subjects, &ledger, &ledger_len);
+  /* The key, unwrapped through the key store's answer: an erased subject has
+   * none, so it reads as erased from the moment the key store destroyed it. */
+  rc = key_load(subjects, sid, &erased, wrapped);
   if (rc != GDEFCORE_OK) {
     return rc;
   }
-  if (ledger_has(ledger, ledger_len, sid)) {
-    gcu_allocator_free(subjects->alloc, ledger);
+  if (erased) {
     return erased_text(subjects, out_text, out_len);
   }
-  gcu_allocator_free(subjects->alloc, ledger);
-  rc = row_load(subjects, sid, &row);
-  if (rc != GDEFCORE_OK) {
-    return rc;
-  }
-  if (!row.present || row.key == NULL || row.key_len != kWrap) {
-    row_clear(subjects->alloc, &row);
-    return GDEFCORE_ERR_INVALID;
-  }
-  rc = open_key(subjects, row.key, raw);
-  row_clear(subjects->alloc, &row);
+  rc = open_key(subjects, wrapped, raw);
+  wipe(wrapped, sizeof wrapped);
   if (rc != GDEFCORE_OK) {
     wipe(raw, sizeof raw);
     return rc;
@@ -1490,9 +1485,8 @@ GDEFCORE_Result gdefcore_subject_revision_marker(GDEFCORE_Subjects * subjects,
     const char * subject, size_t subject_len, int status, int * out_status,
     char ** out_text, size_t * out_len) {
   char sid[GDEFCORE_PUBLIC_ID_LEN + 1];
-  char * ledger = NULL;
-  size_t ledger_len = 0;
-  int erased;
+  int erased = 0;
+  int known = 0;
   GDEFCORE_Result rc;
   if (subjects == NULL || out_status == NULL || out_text == NULL ||
       out_len == NULL) {
@@ -1508,12 +1502,10 @@ GDEFCORE_Result gdefcore_subject_revision_marker(GDEFCORE_Subjects * subjects,
   if (rc != GDEFCORE_OK) {
     return rc;
   }
-  rc = ledger_load(subjects, &ledger, &ledger_len);
+  rc = subject_state(subjects, sid, &erased, &known);
   if (rc != GDEFCORE_OK) {
     return rc;
   }
-  erased = ledger_has(ledger, ledger_len, sid);
-  gcu_allocator_free(subjects->alloc, ledger);
   if (!erased) {
     return GDEFCORE_OK;
   }
@@ -1550,59 +1542,25 @@ static GDEFCORE_Result delete_blinds(GDEFSTOR_Write * write, const char * subjec
   return GDEFCORE_OK;
 }
 
-GDEFCORE_Result gdefcore_subject_erase(GDEFCORE_Subjects * subjects,
-    const char * subject, size_t subject_len, const char * confirmation,
-    size_t confirmation_len) {
-  char sid[GDEFCORE_PUBLIC_ID_LEN + 1];
-  char * ledger = NULL;
-  size_t ledger_len = 0;
-  char line[64];
-  uint64_t when = 0;
-  int kn;
+/* Erasure's second step, and the ledger replay's: the subject's blind-index
+ * rows go from the blind store. Idempotent: a subject with none writes
+ * nothing. The places its values are stay, as the revisions do. */
+static GDEFCORE_Result forget_blinds(GDEFCORE_Subjects * subjects,
+    const char * sid) {
   SubjectRow row;
   GDEFSTOR_Write * write = NULL;
-  GDEFSTOR_Column columns[3];
-  GDEFSTOR_Column ledger_col;
-  GDEFCORE_Result rc;
-  if (subjects == NULL || confirmation == NULL) {
-    return GDEFCORE_ERR_INVALID;
-  }
-  rc = canon_id(subject, subject_len, sid);
+  GDEFSTOR_Column columns[2];
+  GDEFCORE_Result rc = row_load(subjects, sid, &row);
   if (rc != GDEFCORE_OK) {
     return rc;
   }
-  if (confirmation_len != GDEFCORE_PUBLIC_ID_LEN ||
-      memcmp(confirmation, sid, GDEFCORE_PUBLIC_ID_LEN) != 0) {
-    return GDEFCORE_ERR_INVALID;
-  }
-  rc = row_load(subjects, sid, &row);
-  if (rc != GDEFCORE_OK) {
-    return rc;
-  }
-  if (!row.present) {
+  if (!row.present || row.blinds_len == 0) {
     row_clear(subjects->alloc, &row);
-    return GDEFCORE_ERR_INVALID;
-  }
-  rc = ledger_load(subjects, &ledger, &ledger_len);
-  if (rc != GDEFCORE_OK) {
-    row_clear(subjects->alloc, &row);
-    return rc;
-  }
-  if (!now_u64(&when)) {
-    gcu_allocator_free(subjects->alloc, ledger);
-    row_clear(subjects->alloc, &row);
-    return GDEFCORE_ERR_IO;
-  }
-  kn = snprintf(line, sizeof line, "%s %llu\n", sid, (unsigned long long)when);
-  if (kn <= 0 || (size_t)kn >= sizeof line) {
-    gcu_allocator_free(subjects->alloc, ledger);
-    row_clear(subjects->alloc, &row);
-    return GDEFCORE_ERR_LIMIT;
+    return GDEFCORE_OK;
   }
   rc = from_stor(gdefstor_write_begin(subjects->side,
       (const char *)subjects->tenant, subjects->tenant_len, NULL, &write));
   if (rc != GDEFCORE_OK) {
-    gcu_allocator_free(subjects->alloc, ledger);
     row_clear(subjects->alloc, &row);
     return rc;
   }
@@ -1620,33 +1578,60 @@ GDEFCORE_Result gdefcore_subject_erase(GDEFCORE_Subjects * subjects,
     rc = from_stor(gdefstor_projection_put(write, kSubjectType,
         strlen(kSubjectType), sid, GDEFCORE_PUBLIC_ID_LEN, columns, 2));
   }
-  if (rc == GDEFCORE_OK && !ledger_has(ledger, ledger_len, sid)) {
-    char * next = (char *)gcu_allocator_realloc(subjects->alloc, ledger,
-        ledger_len + (size_t)kn + 1);
-    if (next == NULL) {
-      rc = GDEFCORE_ERR_OOM;
-    } else {
-      memcpy(next + ledger_len, line, (size_t)kn);
-      next[ledger_len + (size_t)kn] = '\0';
-      ledger = next;
-      ledger_len += (size_t)kn;
-      memset(&ledger_col, 0, sizeof ledger_col);
-      ledger_col.name = "text";
-      ledger_col.name_len = 4;
-      ledger_col.value = (const uint8_t *)ledger;
-      ledger_col.value_len = ledger_len;
-      rc = from_stor(gdefstor_projection_put(write, GDEFCORE_SUBJECT_LEDGER_TYPE,
-          strlen(GDEFCORE_SUBJECT_LEDGER_TYPE), GDEFCORE_SUBJECT_LEDGER_ID,
-          strlen(GDEFCORE_SUBJECT_LEDGER_ID), &ledger_col, 1));
-    }
-  }
   if (rc == GDEFCORE_OK) {
     rc = from_stor(gdefstor_write_commit(write));
   } else {
     gdefstor_write_abort(write);
   }
-  gcu_allocator_free(subjects->alloc, ledger);
   row_clear(subjects->alloc, &row);
+  return rc;
+}
+
+GDEFCORE_Result gdefcore_subject_erase(GDEFCORE_Subjects * subjects,
+    const char * subject, size_t subject_len, const char * confirmation,
+    size_t confirmation_len) {
+  char sid[GDEFCORE_PUBLIC_ID_LEN + 1];
+  int64_t when;
+  int erased = 0;
+  int known = 0;
+  GDEFCORE_Result rc;
+  if (subjects == NULL || confirmation == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  rc = canon_id(subject, subject_len, sid);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  if (confirmation_len != GDEFCORE_PUBLIC_ID_LEN ||
+      memcmp(confirmation, sid, GDEFCORE_PUBLIC_ID_LEN) != 0) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  rc = subject_state(subjects, sid, &erased, &known);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  if (!known) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  when = now_ms();
+  if (when < 0) {
+    return GDEFCORE_ERR_IO;
+  }
+  /* 1. The key store destroys the key and appends the ledger row, in one
+   *    step of its own: from here every value of the subject is unreadable.
+   *    Nothing else runs unless it succeeded. An erased subject has done it. */
+  if (!erased) {
+    rc = from_stor(gdefstor_keystore_erase(subjects->keys,
+        (const char *)subjects->tenant, subjects->tenant_len, sid,
+        GDEFCORE_PUBLIC_ID_LEN, when));
+    if (rc != GDEFCORE_OK) {
+      return rc;
+    }
+  }
+  /* 2. Then the blind-index rows, in the blind store. */
+  rc = forget_blinds(subjects, sid);
+  /* 3. Then caches: core keeps no cache of a subject's values or key, so
+   *    there is nothing to purge yet. A cache that holds one purges here. */
   return rc;
 }
 
@@ -1715,8 +1700,8 @@ GDEFCORE_Result gdefcore_subject_export(GDEFCORE_Subjects * subjects,
     GDEFCORE_Catalog * catalog, const char * subject, size_t subject_len,
     char ** out_json, size_t * out_len) {
   char sid[GDEFCORE_PUBLIC_ID_LEN + 1];
-  char * ledger = NULL;
-  size_t ledger_len = 0;
+  int erased = 0;
+  int known = 0;
   SubjectRow row;
   Buf buf;
   size_t at = 0;
@@ -1729,12 +1714,11 @@ GDEFCORE_Result gdefcore_subject_export(GDEFCORE_Subjects * subjects,
   if (rc != GDEFCORE_OK) {
     return rc;
   }
-  rc = ledger_load(subjects, &ledger, &ledger_len);
+  rc = subject_state(subjects, sid, &erased, &known);
   if (rc != GDEFCORE_OK) {
     return rc;
   }
-  if (ledger_has(ledger, ledger_len, sid)) {
-    gcu_allocator_free(subjects->alloc, ledger);
+  if (erased) {
     *out_json = dup_n(subjects->alloc, "{\"erased\":\"[erased]\"}", 21);
     if (*out_json == NULL) {
       return GDEFCORE_ERR_OOM;
@@ -1742,7 +1726,6 @@ GDEFCORE_Result gdefcore_subject_export(GDEFCORE_Subjects * subjects,
     *out_len = 21;
     return GDEFCORE_OK;
   }
-  gcu_allocator_free(subjects->alloc, ledger);
   if (catalog == NULL) {
     return GDEFCORE_ERR_INVALID;
   }
@@ -1834,7 +1817,8 @@ GDEFCORE_Result gdefcore_subject_key(GDEFCORE_Subjects * subjects,
     const char * subject, size_t subject_len,
     uint8_t out[GDEFCORE_SUBJECT_KEY_LEN]) {
   char sid[GDEFCORE_PUBLIC_ID_LEN + 1];
-  SubjectRow row;
+  uint8_t wrapped[kWrap];
+  int erased = 0;
   GDEFCORE_Result rc;
   if (subjects == NULL || out == NULL) {
     return GDEFCORE_ERR_INVALID;
@@ -1843,19 +1827,17 @@ GDEFCORE_Result gdefcore_subject_key(GDEFCORE_Subjects * subjects,
   if (rc != GDEFCORE_OK) {
     return rc;
   }
-  rc = row_load(subjects, sid, &row);
-  if (rc != GDEFCORE_OK) {
-    return rc;
+  rc = key_load(subjects, sid, &erased, wrapped);
+  if (rc == GDEFCORE_OK && erased) {
+    rc = GDEFCORE_ERR_INVALID;
   }
-  if (!row.present || row.key == NULL || row.key_len != kWrap) {
-    row_clear(subjects->alloc, &row);
-    return GDEFCORE_ERR_INVALID;
+  if (rc == GDEFCORE_OK) {
+    rc = open_key(subjects, wrapped, out);
+    if (rc != GDEFCORE_OK) {
+      wipe(out, GDEFCORE_SUBJECT_KEY_LEN);
+    }
   }
-  rc = open_key(subjects, row.key, out);
-  row_clear(subjects->alloc, &row);
-  if (rc != GDEFCORE_OK) {
-    wipe(out, GDEFCORE_SUBJECT_KEY_LEN);
-  }
+  wipe(wrapped, sizeof wrapped);
   return rc;
 }
 
@@ -1863,6 +1845,8 @@ GDEFCORE_Result gdefcore_subject_blind_count(GDEFCORE_Subjects * subjects,
     const char * subject, size_t subject_len, size_t * out_count) {
   char sid[GDEFCORE_PUBLIC_ID_LEN + 1];
   SubjectRow row;
+  int erased = 0;
+  int known = 0;
   GDEFCORE_Result rc;
   if (subjects == NULL || out_count == NULL) {
     return GDEFCORE_ERR_INVALID;
@@ -1871,13 +1855,16 @@ GDEFCORE_Result gdefcore_subject_blind_count(GDEFCORE_Subjects * subjects,
   if (rc != GDEFCORE_OK) {
     return rc;
   }
-  rc = row_load(subjects, sid, &row);
+  rc = subject_state(subjects, sid, &erased, &known);
+  if (rc == GDEFCORE_OK && !known) {
+    rc = GDEFCORE_ERR_INVALID;
+  }
   if (rc != GDEFCORE_OK) {
     return rc;
   }
-  if (!row.present) {
-    row_clear(subjects->alloc, &row);
-    return GDEFCORE_ERR_INVALID;
+  rc = row_load(subjects, sid, &row);
+  if (rc != GDEFCORE_OK) {
+    return rc;
   }
   rc = count_lines(row.blinds, row.blinds_len, out_count);
   row_clear(subjects->alloc, &row);
@@ -1923,135 +1910,63 @@ GDEFCORE_Result gdefcore_subject_blind(GDEFCORE_Subjects * subjects,
   return GDEFCORE_ERR_INVALID;
 }
 
-static GDEFCORE_Result replay_ids(GDEFCORE_Subjects * subjects, const char * text,
-    size_t n) {
-  size_t at = 0;
-  GDEFSTOR_Write * write = NULL;
-  GDEFCORE_Result rc = from_stor(gdefstor_write_begin(subjects->side,
-      (const char *)subjects->tenant, subjects->tenant_len, NULL, &write));
+/* The ledger replay: erasure's second step again for every subject the key
+ * store's ledger names. Each is a no-op once done, so this writes only what
+ * an interrupted erasure left. */
+static GDEFCORE_Result replay_ledger(GDEFCORE_Subjects * subjects) {
+  GDEFSTOR_Ledger * ledger = NULL;
+  size_t i;
+  GDEFCORE_Result rc = from_stor(gdefstor_keystore_ledger(subjects->keys,
+      (const char *)subjects->tenant, subjects->tenant_len, &ledger));
   if (rc != GDEFCORE_OK) {
     return rc;
   }
-  while (at < n) {
-    size_t line = 0;
-    size_t len = 0;
-    char id[GDEFCORE_PUBLIC_ID_LEN + 1];
-    SubjectRow row;
-    GDEFSTOR_Column columns[2];
-    if (!line_span(text, n, &at, &line, &len)) {
-      continue;
-    }
-    if (len < GDEFCORE_PUBLIC_ID_LEN ||
-        (len > GDEFCORE_PUBLIC_ID_LEN && text[line + GDEFCORE_PUBLIC_ID_LEN] != ' ')) {
-      gdefstor_write_abort(write);
-      return GDEFCORE_ERR_CORRUPT;
-    }
-    memcpy(id, text + line, GDEFCORE_PUBLIC_ID_LEN);
-    id[GDEFCORE_PUBLIC_ID_LEN] = '\0';
-    rc = row_load(subjects, id, &row);
-    if (rc != GDEFCORE_OK) {
-      gdefstor_write_abort(write);
-      return rc;
-    }
-    if (row.present) {
-      rc = delete_blinds(write, id, row.blinds, row.blinds_len);
-      if (rc == GDEFCORE_OK) {
-        memset(columns, 0, sizeof columns);
-        columns[0].name = "blinds";
-        columns[0].name_len = 6;
-        columns[0].value = (const uint8_t *)"";
-        columns[0].value_len = 0;
-        columns[1].name = "locs";
-        columns[1].name_len = 4;
-        columns[1].value = (const uint8_t *)(row.locs == NULL ? "" : row.locs);
-        columns[1].value_len = row.locs_len;
-        rc = from_stor(gdefstor_projection_put(write, kSubjectType,
-            strlen(kSubjectType), id, GDEFCORE_PUBLIC_ID_LEN, columns, 2));
-      }
-    }
-    row_clear(subjects->alloc, &row);
-    if (rc != GDEFCORE_OK) {
-      gdefstor_write_abort(write);
-      return rc;
+  for (i = 0; rc == GDEFCORE_OK && i < gdefstor_ledger_count(ledger); i++) {
+    const char * id = NULL;
+    size_t id_len = 0;
+    int64_t when = 0;
+    char sid[GDEFCORE_PUBLIC_ID_LEN + 1];
+    rc = from_stor(gdefstor_ledger_row(ledger, i, &id, &id_len, &when));
+    if (rc == GDEFCORE_OK && canon_id(id, id_len, sid) == GDEFCORE_OK) {
+      /* A row that is not a public id is not one of ours to replay. */
+      rc = forget_blinds(subjects, sid);
     }
   }
-  return from_stor(gdefstor_write_commit(write));
-}
-
-static GDEFCORE_Result ledger_union(const GDEFCORE_Allocator * alloc,
-    const char * live, size_t live_len, const char * copy, size_t copy_len,
-    char ** out, size_t * out_len) {
-  Buf buf;
-  size_t at = 0;
-  memset(&buf, 0, sizeof buf);
-  buf.alloc = alloc;
-  buf_add(&buf, live, live_len);
-  while (at < copy_len) {
-    size_t line = 0;
-    size_t len = 0;
-    char id[GDEFCORE_PUBLIC_ID_LEN + 1];
-    if (!line_span(copy, copy_len, &at, &line, &len)) {
-      continue;
-    }
-    if (len < GDEFCORE_PUBLIC_ID_LEN) {
-      buf_free(&buf);
-      return GDEFCORE_ERR_CORRUPT;
-    }
-    memcpy(id, copy + line, GDEFCORE_PUBLIC_ID_LEN);
-    id[GDEFCORE_PUBLIC_ID_LEN] = '\0';
-    if (ledger_has(live, live_len, id) ||
-        (buf.p != NULL && ledger_has(buf.p, buf.n, id))) {
-      continue;
-    }
-    buf_add(&buf, copy + line, len);
-    buf_add(&buf, "\n", 1);
-  }
-  if (buf.oom) {
-    buf_free(&buf);
-    return GDEFCORE_ERR_OOM;
-  }
-  if (buf.p == NULL) {
-    buf.p = dup_n(alloc, "", 0);
-    if (buf.p == NULL) {
-      return GDEFCORE_ERR_OOM;
-    }
-  }
-  *out = buf.p;
-  *out_len = buf.n;
-  return GDEFCORE_OK;
-}
-
-static GDEFCORE_Result ledger_store(GDEFCORE_Subjects * subjects,
-    const char * text, size_t n) {
-  GDEFSTOR_Column column;
-  memset(&column, 0, sizeof column);
-  column.name = "text";
-  column.name_len = 4;
-  column.value = (const uint8_t *)(text == NULL ? "" : text);
-  column.value_len = n;
-  return side_put(subjects->side, subjects->tenant, subjects->tenant_len,
-      GDEFCORE_SUBJECT_LEDGER_TYPE, GDEFCORE_SUBJECT_LEDGER_ID,
-      strlen(GDEFCORE_SUBJECT_LEDGER_ID), &column, 1);
+  gdefstor_ledger_free(ledger);
+  return rc;
 }
 
 GDEFCORE_Result gdefcore_subject_snapshot(GDEFCORE_Subjects * subjects,
     GDEFSTOR_Store * tenant_store, uint8_t ** out_bytes, size_t * out_len) {
-  char * ledger = NULL;
-  size_t ledger_len = 0;
-  GDEFCORE_Result rc;
+  int64_t taken;
   if (subjects == NULL || tenant_store == NULL || tenant_store == subjects->side ||
       out_bytes == NULL || out_len == NULL) {
     return GDEFCORE_ERR_INVALID;
   }
-  rc = ledger_load(subjects, &ledger, &ledger_len);
-  if (rc != GDEFCORE_OK) {
-    return rc;
+  taken = now_ms();
+  if (taken < 0) {
+    return GDEFCORE_ERR_IO;
   }
-  rc = from_stor(gdefstor_snapshot_export_ledger(tenant_store,
-      (const char *)subjects->tenant, subjects->tenant_len, NULL,
-      (const uint8_t *)ledger, ledger_len, out_bytes, out_len));
-  gcu_allocator_free(subjects->alloc, ledger);
-  return rc;
+  /* The data set: the tenant's rows and when they were taken. No key, no
+   * keyring wrap and no ledger: those are the key set's. */
+  return from_stor(gdefstor_snapshot_export_at(tenant_store,
+      (const char *)subjects->tenant, subjects->tenant_len, NULL, taken,
+      out_bytes, out_len));
+}
+
+GDEFCORE_Result gdefcore_subject_keyset(GDEFCORE_Subjects * subjects,
+    uint8_t ** out_bytes, size_t * out_len) {
+  int64_t taken;
+  if (subjects == NULL || out_bytes == NULL || out_len == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  taken = now_ms();
+  if (taken < 0) {
+    return GDEFCORE_ERR_IO;
+  }
+  return from_stor(gdefstor_keystore_export(subjects->keys,
+      (const char *)subjects->tenant, subjects->tenant_len, taken, out_bytes,
+      out_len));
 }
 
 static int name_bad(const char * name, size_t n) {
@@ -2319,50 +2234,78 @@ static GDEFCORE_Result archive_refuse(const GDEFCORE_Allocator * alloc,
   return rc;
 }
 
-GDEFCORE_Result gdefcore_subject_import(GDEFCORE_Subjects * subjects,
-    GDEFSTOR_Store * tenant_store, const uint8_t * bytes, size_t len) {
-  uint8_t * copy = NULL;
-  size_t copy_len = 0;
-  char * live = NULL;
-  size_t live_len = 0;
-  char * united = NULL;
-  size_t united_len = 0;
+/* When the key set was taken, and whether its keyring wrap, if it has one,
+ * is this tenant's. */
+static GDEFCORE_Result keyset_check(GDEFCORE_Subjects * subjects,
+    const uint8_t * keys, size_t keys_len, int64_t * out_taken) {
+  GDEFSTOR_KeySet * set = NULL;
+  uint8_t wrap[kWrap];
+  size_t i;
+  GDEFCORE_Result rc = from_stor(gdefstor_keyset_parse(subjects->alloc, keys,
+      keys_len, &set));
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  *out_taken = gdefstor_keyset_taken(set);
+  rc = gdefcore_keyring_export(subjects->keyring, wrap, kWrap);
+  for (i = 0; rc == GDEFCORE_OK && i < gdefstor_keyset_count(set); i++) {
+    GDEFSTOR_KeyRow row;
+    rc = from_stor(gdefstor_keyset_row(set, i, &row));
+    if (rc == GDEFCORE_OK && row.kind == GDEFSTOR_KEYROW_SECRET &&
+        span_eq(row.name, row.name_len, kKeyringSecret, strlen(kKeyringSecret)) &&
+        (row.len != kWrap || memcmp(row.bytes, wrap, kWrap) != 0)) {
+      rc = GDEFCORE_ERR_INVALID; /* another tenant's, or another keyring's */
+    }
+  }
+  wipe(wrap, sizeof wrap);
+  gdefstor_keyset_free(set);
+  return rc;
+}
+
+GDEFCORE_Result gdefcore_subject_restore(GDEFCORE_Subjects * subjects,
+    GDEFSTOR_Store * tenant_store, const uint8_t * data, size_t data_len,
+    const uint8_t * keys, size_t keys_len) {
+  int found = 0;
+  int64_t data_taken = 0;
+  int64_t keys_taken = 0;
   GDEFCORE_Result rc;
   if (subjects == NULL || tenant_store == NULL || tenant_store == subjects->side ||
-      (bytes == NULL && len != 0)) {
+      (data == NULL && data_len != 0) || (keys == NULL && keys_len != 0)) {
     return GDEFCORE_ERR_INVALID;
   }
-  rc = archive_refuse(subjects->alloc, bytes, len);
+  rc = archive_refuse(subjects->alloc, data, data_len);
   if (rc != GDEFCORE_OK) {
     return rc;
   }
-  rc = from_stor(gdefstor_snapshot_ledger(tenant_store, bytes, len, NULL, &copy,
-      &copy_len));
-  if (rc != GDEFCORE_OK) {
-    return rc;
+  rc = from_stor(gdefstor_snapshot_taken(tenant_store, data, data_len, NULL,
+      &found, &data_taken));
+  if (rc == GDEFCORE_OK && !found) {
+    rc = GDEFCORE_ERR_FORMAT; /* not a data set: it says when it was taken */
   }
-  rc = from_stor(gdefstor_snapshot_import(tenant_store,
-      (const char *)subjects->tenant, subjects->tenant_len, bytes, len, NULL));
-  if (rc != GDEFCORE_OK) {
-    gdefstor_bytes_free(NULL, copy);
-    return rc;
-  }
-  rc = ledger_load(subjects, &live, &live_len);
-  if (rc != GDEFCORE_OK) {
-    gdefstor_bytes_free(NULL, copy);
-    return rc;
-  }
-  rc = ledger_union(subjects->alloc, live, live_len, (const char *)copy, copy_len,
-      &united, &united_len);
-  gcu_allocator_free(subjects->alloc, live);
-  gdefstor_bytes_free(NULL, copy);
-  if (rc != GDEFCORE_OK) {
-    return rc;
-  }
-  rc = ledger_store(subjects, united, united_len);
   if (rc == GDEFCORE_OK) {
-    rc = replay_ids(subjects, united, united_len);
+    rc = keyset_check(subjects, keys, keys_len, &keys_taken);
   }
-  gcu_allocator_free(subjects->alloc, united);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  /* A key set older than its data set may hold a key erased after it was
+   * taken and before the data set was: refused, and nothing is written. */
+  if (keys_taken < data_taken) {
+    return GDEFCORE_ERR_STALE;
+  }
+  /* The keys first: a merge that brings no key back for a subject either
+   * ledger names, and that a retry repeats as a no-op. */
+  rc = from_stor(gdefstor_keystore_import(subjects->keys,
+      (const char *)subjects->tenant, subjects->tenant_len, keys, keys_len));
+  if (rc == GDEFCORE_OK) {
+    rc = from_stor(gdefstor_snapshot_import(tenant_store,
+        (const char *)subjects->tenant, subjects->tenant_len, data, data_len,
+        NULL));
+  }
+  if (rc == GDEFCORE_OK) {
+    /* Then the ledger, the live one and the set's together now, before
+     * anything is served from the restored tenant. */
+    rc = replay_ledger(subjects);
+  }
   return rc;
 }
