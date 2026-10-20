@@ -2224,7 +2224,7 @@ GDEFCORE_Result gdefcore_entity_values(GDEFCORE_Catalog * catalog,
   if (catalog == NULL || out_texts == NULL || out_lens == NULL ||
       out_count == NULL ||
       (view != GDEFCORE_VIEW_PUBLISHED && view != GDEFCORE_VIEW_DRAFT &&
-          view != GDEFCORE_VIEW_ACTIVE)) {
+          view != GDEFCORE_VIEW_CURRENT)) {
     return GDEFCORE_ERR_INVALID;
   }
   if (gdefcore_id_canonical(id, id_len, canon) != GDEFCORE_OK) {
@@ -4826,7 +4826,7 @@ void gdefcore_catalog_limits(const GDEFCORE_Catalog * catalog,
   *out = catalog->limits;
 }
 
-GDEFCORE_Result gdefcore_entity_query_active(GDEFCORE_Catalog * catalog,
+GDEFCORE_Result gdefcore_entity_query_current(GDEFCORE_Catalog * catalog,
     const char * type_name, size_t type_name_len, const GDEFSTOR_Query * query,
     char *** out_ids, size_t * out_count, uint64_t * out_total) {
   GDEFSTOR_Query q;
@@ -5070,7 +5070,7 @@ GDEFCORE_Result gdefcore_entity_version(GDEFCORE_Catalog * catalog,
   return gdefcore_ent_version(catalog, canon, out_version);
 }
 
-GDEFCORE_Result gdefcore_entity_active_revision(GDEFCORE_Catalog * catalog,
+GDEFCORE_Result gdefcore_entity_current_revision(GDEFCORE_Catalog * catalog,
     const char * id, size_t id_len, int * out_has, uint64_t * out_seq) {
   char canon[GDEFCORE_PUBLIC_ID_LEN + 1];
   GDEFCORE_EntLook look;

@@ -2331,7 +2331,7 @@ GDEFCORE_Result gdefcore_access_revision_values(GDEFCORE_Catalog * catalog,
   if (rc != GDEFCORE_OK) {
     return rc;
   }
-  /* The question is asked of the entity as it is stored, its active
+  /* The question is asked of the entity as it is stored, its current
    * revision: not of the revision being viewed, and not of anything the
    * caller supplies. */
   rc = gdefcore_access_can(catalog, request, GDEFCORE_ACTION_REVISIONS_READ,
@@ -2821,7 +2821,7 @@ static GDEFCORE_Result list_planned(Eval * ev, GDEFCORE_Catalog * catalog,
   sq.language_len = ev->lang_len;
   sq.offset = spec->count_only ? 0 : q->offset;
   sq.limit = spec->count_only ? 1 : spec->limit;
-  rc = gdefcore_entity_query_active(catalog, q->type_name, q->type_name_len,
+  rc = gdefcore_entity_query_current(catalog, q->type_name, q->type_name_len,
       &sq, &ids, &n, &total);
   gdefcore_plan_free(plan);
   if (rc == GDEFCORE_ERR_LIMIT) {

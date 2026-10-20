@@ -227,12 +227,12 @@ class Revisions : public ::testing::Test {
     return state == GDEFCORE_STATE_PUBLISHED;
   }
 
-  /* The active revision's sequence, 0 when there is none. */
-  uint64_t Active(const std::string & id) {
+  /* The current revision's sequence, 0 when there is none. */
+  uint64_t Current(const std::string & id) {
     int has = 0;
     uint64_t seq = 99;
     EXPECT_EQ(GDEFCORE_OK,
-        gdefcore_entity_active_revision(catalog_, id.c_str(), id.size(), &has,
+        gdefcore_entity_current_revision(catalog_, id.c_str(), id.size(), &has,
             &seq));
     EXPECT_EQ(has ? 1 : 0, seq != 0 ? 1 : 0);
     return seq;
@@ -304,7 +304,7 @@ class Revisions : public ::testing::Test {
     memset(&q, 0, sizeof q);
     q.size = sizeof q;
     EXPECT_EQ(GDEFCORE_OK,
-        gdefcore_entity_query_active(catalog_, "site.note", 9, &q, &ids, &n,
+        gdefcore_entity_query_current(catalog_, "site.note", 9, &q, &ids, &n,
             NULL));
     for (size_t i = 0; i < n; i++) {
       found = found || id == ids[i];
@@ -360,12 +360,12 @@ TEST_F(Revisions, CreateReservesTheIdWithADraft) {
   int state = 0;
   ASSERT_EQ(GDEFCORE_OK, gdefcore_entity_state(catalog_, id.c_str(), id.size(), &state));
   EXPECT_EQ(GDEFCORE_STATE_DRAFT, state);
-  EXPECT_EQ(0u, Active(id));
+  EXPECT_EQ(0u, Current(id));
   EXPECT_EQ(0u, Head(id));
   EXPECT_EQ(0u, Version(id));
   EXPECT_EQ("<none>", Creator(id));
   EXPECT_EQ("<none>", Actor(id));
-  EXPECT_EQ("<none>", Title(GDEFCORE_VIEW_ACTIVE, id));
+  EXPECT_EQ("<none>", Title(GDEFCORE_VIEW_CURRENT, id));
   EXPECT_EQ("<none>", Title(GDEFCORE_VIEW_PUBLISHED, id));
   EXPECT_EQ("<none>", Title(GDEFCORE_VIEW_DRAFT, id));
   EXPECT_FALSE(Listed(id));
@@ -395,7 +395,7 @@ TEST_F(Revisions, TheFirstDraftMakesTheEntityWithNoRevision) {
   EXPECT_EQ(alice_, Creator(id));
   EXPECT_EQ("<none>", Actor(id));
   EXPECT_EQ("first", Title(GDEFCORE_VIEW_DRAFT, id));
-  EXPECT_EQ("<none>", Title(GDEFCORE_VIEW_ACTIVE, id));
+  EXPECT_EQ("<none>", Title(GDEFCORE_VIEW_CURRENT, id));
   EXPECT_EQ("<none>", Title(GDEFCORE_VIEW_PUBLISHED, id));
   EXPECT_FALSE(Listed(id));
   /* Control: publishing applies the draft as the first revision. Its author
@@ -424,7 +424,7 @@ TEST_F(Revisions, ADraftIsNeverARevision) {
   EXPECT_EQ(1u, Head(id));
   EXPECT_EQ(1u, Count(id));
   EXPECT_EQ(1, DraftBase(id));
-  EXPECT_EQ("first", Title(GDEFCORE_VIEW_ACTIVE, id));
+  EXPECT_EQ("first", Title(GDEFCORE_VIEW_CURRENT, id));
   EXPECT_EQ("first", Title(GDEFCORE_VIEW_PUBLISHED, id));
   EXPECT_EQ("second", Title(GDEFCORE_VIEW_DRAFT, id));
   EXPECT_EQ(alice_, Actor(id));
@@ -446,15 +446,15 @@ TEST_F(Revisions, SaveIsSaveAndPublish) {
   std::string id = Create();
   Save(alice_, id, "hello");
   EXPECT_TRUE(Published(id));
-  EXPECT_EQ(1u, Active(id));
+  EXPECT_EQ(1u, Current(id));
   EXPECT_EQ("hello", Title(GDEFCORE_VIEW_PUBLISHED, id));
-  EXPECT_EQ("hello", Title(GDEFCORE_VIEW_ACTIVE, id));
+  EXPECT_EQ("hello", Title(GDEFCORE_VIEW_CURRENT, id));
   /* a save of an unpublished entity publishes it */
   ASSERT_EQ(GDEFCORE_OK, Unpublish("", id));
   EXPECT_FALSE(Published(id));
   Save(bob_, id, "s");
   EXPECT_TRUE(Published(id));
-  EXPECT_EQ(2u, Active(id));
+  EXPECT_EQ(2u, Current(id));
   /* a save on top of a draft saves the working copy and consumes it */
   std::string other = Create();
   Draft(alice_, other, "d");
@@ -503,7 +503,7 @@ TEST_F(Revisions, ADraftOnAMovedHeadIsRefused) {
   gdefcore_changeset_destroy(cs);
   /* nothing was written, and the draft is still there to be looked at */
   EXPECT_EQ(3u, Head(id));
-  EXPECT_EQ("one", Title(GDEFCORE_VIEW_ACTIVE, id));
+  EXPECT_EQ("one", Title(GDEFCORE_VIEW_CURRENT, id));
   EXPECT_EQ(2, DraftBase(id));
   /* control: a draft made on the head it is applied on publishes */
   std::string other = Create();
@@ -564,9 +564,9 @@ TEST_F(Revisions, ClearUnpublishesDeletesAndDropsTheDraft) {
   ASSERT_TRUE(Published(id));
   Clear(id);
   EXPECT_FALSE(Published(id));
-  EXPECT_EQ(0u, Active(id));
+  EXPECT_EQ(0u, Current(id));
   EXPECT_EQ("<none>", Title(GDEFCORE_VIEW_PUBLISHED, id));
-  EXPECT_EQ("<none>", Title(GDEFCORE_VIEW_ACTIVE, id));
+  EXPECT_EQ("<none>", Title(GDEFCORE_VIEW_CURRENT, id));
   EXPECT_EQ("<none>", Title(GDEFCORE_VIEW_DRAFT, id));
   EXPECT_EQ(-1, DraftBase(id));
   EXPECT_FALSE(Listed(id));
@@ -583,7 +583,7 @@ TEST_F(Revisions, ClearUnpublishesDeletesAndDropsTheDraft) {
   ASSERT_EQ(GDEFCORE_OK, RevertTo("", id, 1));
   EXPECT_EQ(0, PortEntity(id).deleted);
   EXPECT_FALSE(Published(id));
-  EXPECT_EQ("x", Title(GDEFCORE_VIEW_ACTIVE, id));
+  EXPECT_EQ("x", Title(GDEFCORE_VIEW_CURRENT, id));
   EXPECT_EQ(1u, Head(id));
   EXPECT_TRUE(Listed(id));
 }
@@ -640,9 +640,9 @@ TEST_F(Revisions, TheRecordSurvivesASnapshotRoundTrip) {
     ASSERT_EQ(GDEFCORE_OK, gdefcore_entity_state(cat2, e.c_str(), e.size(), &s2));
     EXPECT_EQ(s1, s2);
     ASSERT_EQ(GDEFCORE_OK,
-        gdefcore_entity_active_revision(catalog_, e.c_str(), e.size(), &h1, &a1));
+        gdefcore_entity_current_revision(catalog_, e.c_str(), e.size(), &h1, &a1));
     ASSERT_EQ(GDEFCORE_OK,
-        gdefcore_entity_active_revision(cat2, e.c_str(), e.size(), &h2, &a2));
+        gdefcore_entity_current_revision(cat2, e.c_str(), e.size(), &h2, &a2));
     EXPECT_EQ(h1, h2);
     EXPECT_EQ(a1, a2);
     ASSERT_EQ(GDEFCORE_OK, gdefcore_entity_version(catalog_, e.c_str(), e.size(), &v1));
@@ -660,7 +660,7 @@ TEST_F(Revisions, TheRecordSurvivesASnapshotRoundTrip) {
     gdefcore_text_free(catalog_, c1);
     gdefcore_text_free(cat2, c2);
     /* the draft comes back too */
-    for (int view : {GDEFCORE_VIEW_DRAFT, GDEFCORE_VIEW_ACTIVE}) {
+    for (int view : {GDEFCORE_VIEW_DRAFT, GDEFCORE_VIEW_CURRENT}) {
       char ** t1 = NULL;
       char ** t2 = NULL;
       size_t * l1 = NULL;
@@ -713,12 +713,12 @@ TEST_F(Revisions, UnpublishClearsTheFlagAndNothingElse) {
   ASSERT_EQ(GDEFCORE_OK, Unpublish(carol_, id));
   EXPECT_FALSE(Published(id));
   /* the content, the history and the people stay */
-  EXPECT_EQ(2u, Active(id));
+  EXPECT_EQ(2u, Current(id));
   EXPECT_EQ(2u, Head(id));
   EXPECT_EQ(2u, Count(id));
   EXPECT_EQ(alice_, Creator(id));
   EXPECT_EQ(bob_, Actor(id));
-  EXPECT_EQ("two", Title(GDEFCORE_VIEW_ACTIVE, id));
+  EXPECT_EQ("two", Title(GDEFCORE_VIEW_CURRENT, id));
   EXPECT_EQ("two", Title(GDEFCORE_VIEW_DRAFT, id));
   EXPECT_EQ(version + 1, Version(id));
   /* but readers no longer see it */
@@ -737,8 +737,8 @@ TEST_F(Revisions, RevertToCopiesATargetAndKeepsTheFlag) {
   ASSERT_EQ(GDEFCORE_OK, RevertTo(carol_, id, 1));
   EXPECT_EQ(3u, Head(id));
   EXPECT_EQ(3u, Count(id));            /* a revert writes a revision */
-  EXPECT_EQ(3u, Active(id));
-  EXPECT_EQ("one", Title(GDEFCORE_VIEW_ACTIVE, id));
+  EXPECT_EQ(3u, Current(id));
+  EXPECT_EQ("one", Title(GDEFCORE_VIEW_CURRENT, id));
   EXPECT_EQ("one", Title(GDEFCORE_VIEW_DRAFT, id));
   /* the copy is a new revision, so its author is the one who reverted */
   EXPECT_EQ(carol_, Actor(id));
@@ -752,8 +752,8 @@ TEST_F(Revisions, RevertToCopiesATargetAndKeepsTheFlag) {
   ASSERT_EQ(GDEFCORE_OK, Unpublish("", down));
   ASSERT_EQ(GDEFCORE_OK, RevertTo(bob_, down, 1));
   EXPECT_FALSE(Published(down));
-  EXPECT_EQ(3u, Active(down));
-  EXPECT_EQ("d1", Title(GDEFCORE_VIEW_ACTIVE, down));
+  EXPECT_EQ(3u, Current(down));
+  EXPECT_EQ("d1", Title(GDEFCORE_VIEW_CURRENT, down));
   /* a target that was not recorded, and an entity that has none */
   GDEFCORE_Changeset * cs = NULL;
   EXPECT_EQ(GDEFCORE_ERR_INVALID,
@@ -773,10 +773,10 @@ TEST_F(Revisions, TheLegacyRevertStepsBackFromTheNewest) {
   Save(carol_, id, "three");
   Clear(id);                           /* revision 4: a copy of 2 */
   EXPECT_EQ(4u, Head(id));
-  EXPECT_EQ("two", Title(GDEFCORE_VIEW_ACTIVE, id));
+  EXPECT_EQ("two", Title(GDEFCORE_VIEW_CURRENT, id));
   Clear(id);                           /* revision 5: a copy of 3, one less than 4 */
   EXPECT_EQ(5u, Head(id));
-  EXPECT_EQ("three", Title(GDEFCORE_VIEW_ACTIVE, id));
+  EXPECT_EQ("three", Title(GDEFCORE_VIEW_CURRENT, id));
   /* and it needs a revision to step back from */
   std::string none = Create();
   GDEFCORE_Changeset * cs = NULL;
@@ -845,11 +845,11 @@ TEST_F(Revisions, TheNewOperationsRoundTripThroughAPatch) {
     } else if (which == 1) {
       EXPECT_EQ(2u, Head(id));
       EXPECT_EQ("drafted", Title(GDEFCORE_VIEW_DRAFT, id));
-      EXPECT_EQ("two", Title(GDEFCORE_VIEW_ACTIVE, id));
+      EXPECT_EQ("two", Title(GDEFCORE_VIEW_CURRENT, id));
     } else {
       EXPECT_EQ(3u, Head(id));
       EXPECT_EQ(3u, Count(id));
-      EXPECT_EQ("one", Title(GDEFCORE_VIEW_ACTIVE, id));
+      EXPECT_EQ("one", Title(GDEFCORE_VIEW_CURRENT, id));
     }
   }
 }

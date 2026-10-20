@@ -1292,7 +1292,7 @@ static GDEFCORE_Result export_values(GDEFCORE_Subjects * subjects,
   size_t * lens = NULL;
   size_t count = 0;
   size_t i;
-  GDEFCORE_Result rc = gdefcore_entity_values(catalog, NULL, GDEFCORE_VIEW_ACTIVE,
+  GDEFCORE_Result rc = gdefcore_entity_values(catalog, NULL, GDEFCORE_VIEW_CURRENT,
       eid, GDEFCORE_PUBLIC_ID_LEN, lang, lang_len, field, field_len, &texts,
       &lens, &count);
   if (rc == GDEFCORE_ERR_INVALID) {
@@ -1578,7 +1578,7 @@ GDEFCORE_Result gdefcore_subject_find(GDEFCORE_Subjects * subjects,
   q.where = &node;
   q.language = lang;
   q.language_len = lang_len;
-  rc = gdefcore_entity_query_active(catalog, type, type_len, &q, out_ids,
+  rc = gdefcore_entity_query_current(catalog, type, type_len, &q, out_ids,
       out_count, NULL);
   wipe(mac, sizeof mac);
   return rc;

@@ -344,13 +344,13 @@ class EntryPath : public GrantsFixture {
     return out;
   }
 
-  /** The active revision's value of a field, or "<none>". */
-  std::string Active(const std::string & id, const char * field) {
+  /** The current revision's value of a field, or "<none>". */
+  std::string Current(const std::string & id, const char * field) {
     char ** texts = NULL;
     size_t * lens = NULL;
     size_t count = 0;
     std::string out = "<none>";
-    if (gdefcore_entity_values(catalog_, NULL, GDEFCORE_VIEW_ACTIVE, id.data(),
+    if (gdefcore_entity_values(catalog_, NULL, GDEFCORE_VIEW_CURRENT, id.data(),
             id.size(), "en", 2, field, strlen(field), &texts, &lens, &count) ==
             GDEFCORE_OK &&
         count > 0) {
@@ -427,7 +427,7 @@ TEST_F(EntryPath, AGroupBPostResubmittedAsGroupAIsRefused) {
   EXPECT_FALSE(attack.written);
   EXPECT_EQ(before, Version(b1));
   EXPECT_EQ("b1", Head(b1, "title"));
-  EXPECT_EQ("b", Active(b1, "group"));
+  EXPECT_EQ("b", Current(b1, "group"));
   /* and it is the answer for a post that does not exist */
   EXPECT_EQ(Dispatch(Request(ga), "/post/" + b1 + "/submit"),
       Dispatch(Request(ga), "/post/" + FreshIdText() + "/submit"));
@@ -478,9 +478,9 @@ TEST_F(EntryPath, TheCheckIsOnTheStoredPostBeforeTheChange) {
   EXPECT_TRUE(out.written);
   EXPECT_EQ("moved", Head(a1, "title"));
   EXPECT_EQ("b", Head(a1, "group"));
-  /* The write was a draft: the active revision, which conditions read, is
+  /* The write was a draft: the current revision, which conditions read, is
    * still group a, so the post is still theirs until it is activated. */
-  EXPECT_EQ("a", Active(a1, "group"));
+  EXPECT_EQ("a", Current(a1, "group"));
   EXPECT_TRUE(Submit(ga, "/post/" + a1 + "/submit", a1, {{"title", "again"}}).written);
   /* Control: publish the move, and the next edit is refused. */
   {
@@ -490,7 +490,7 @@ TEST_F(EntryPath, TheCheckIsOnTheStoredPostBeforeTheChange) {
     ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, NULL, 0));
     gdefcore_changeset_destroy(cs);
   }
-  EXPECT_EQ("b", Active(a1, "group"));
+  EXPECT_EQ("b", Current(a1, "group"));
   Result late = Submit(ga, "/post/" + a1 + "/submit", a1, {{"title", "too late"}});
   EXPECT_FALSE(late.served);
   EXPECT_FALSE(late.written);
@@ -568,7 +568,7 @@ TEST_F(EntryPath, AnAuthorFieldSwappedToTheSubmittersIdIsRefused) {
   gdefcore_text_free(catalog_, creator);
 }
 
-TEST_F(EntryPath, TheCheckIsOnTheActiveRevisionNotTheNewestDraft) {
+TEST_F(EntryPath, TheCheckIsOnTheCurrentRevisionNotTheNewestDraft) {
   DefinePost();
   Declare(Perm("Edit posts", "update", GDEFCORE_ACCESS_ANY));
   Role("group-a");
@@ -579,7 +579,7 @@ TEST_F(EntryPath, TheCheckIsOnTheActiveRevisionNotTheNewestDraft) {
   std::string mine = Make(kPost, Admin(), {{"title", "mine"}, {"group", "a"}});
   Redraft(mine, {{"group", "b"}});
   EXPECT_EQ("b", Head(mine, "group"));
-  EXPECT_EQ("a", Active(mine, "group"));
+  EXPECT_EQ("a", Current(mine, "group"));
   Result ok = Submit(ga, "/post/" + mine + "/submit", mine, {{"title", "still mine"}});
   EXPECT_TRUE(ok.served);
   EXPECT_TRUE(ok.written);
@@ -587,7 +587,7 @@ TEST_F(EntryPath, TheCheckIsOnTheActiveRevisionNotTheNewestDraft) {
   std::string theirs = Make(kPost, Admin(), {{"title", "theirs"}, {"group", "b"}});
   Redraft(theirs, {{"group", "a"}});
   EXPECT_EQ("a", Head(theirs, "group"));
-  EXPECT_EQ("b", Active(theirs, "group"));
+  EXPECT_EQ("b", Current(theirs, "group"));
   Result no = Submit(ga, "/post/" + theirs + "/submit", theirs, {{"title", "mine now"}});
   EXPECT_FALSE(no.served);
   EXPECT_FALSE(no.written);
@@ -629,7 +629,7 @@ TEST_F(EntryPath, AnOpenChangesetDoesNotSteerTheCheck) {
     size_t * lens = NULL;
     size_t count = 0;
     ASSERT_EQ(GDEFCORE_OK,
-        gdefcore_entity_values(catalog_, cs, GDEFCORE_VIEW_ACTIVE, b1.data(),
+        gdefcore_entity_values(catalog_, cs, GDEFCORE_VIEW_CURRENT, b1.data(),
             b1.size(), "en", 2, "group", 5, &texts, &lens, &count));
     EXPECT_EQ("a", std::string(texts[0], lens[0]));
     gdefcore_values_free(catalog_, texts, lens, count);
@@ -663,7 +663,7 @@ TEST_F(EntryPath, TheStoredAuthorFieldDoesNotMakeAnOwner) {
     ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, NULL, 0));
     gdefcore_changeset_destroy(cs);
   }
-  EXPECT_EQ(eve.id, Active(bobs, "author"));
+  EXPECT_EQ(eve.id, Current(bobs, "author"));
   /* `own` is the entity's creator: bob still owns it (the control), and the
    * name in a field makes nobody its owner. */
   Result mine = Submit(bob, "/post/" + bobs + "/submit", bobs, {{"title", "bob again"}});

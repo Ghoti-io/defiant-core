@@ -224,12 +224,12 @@
 #define gdefcore_entity_actor GHOTIIO_DEFCORE(gdefcore_entity_actor)
 #define gdefcore_entity_creator GHOTIIO_DEFCORE(gdefcore_entity_creator)
 #define gdefcore_entity_version GHOTIIO_DEFCORE(gdefcore_entity_version)
-#define gdefcore_entity_active_revision                                        \
-  GHOTIIO_DEFCORE(gdefcore_entity_active_revision)
+#define gdefcore_entity_current_revision                                        \
+  GHOTIIO_DEFCORE(gdefcore_entity_current_revision)
 #define gdefcore_entity_state GHOTIIO_DEFCORE(gdefcore_entity_state)
 #define gdefcore_entity_create GHOTIIO_DEFCORE(gdefcore_entity_create)
 #define gdefcore_entity_ids GHOTIIO_DEFCORE(gdefcore_entity_ids)
-#define gdefcore_entity_query_active GHOTIIO_DEFCORE(gdefcore_entity_query_active)
+#define gdefcore_entity_query_current GHOTIIO_DEFCORE(gdefcore_entity_query_current)
 #define gdefcore_catalog_limits GHOTIIO_DEFCORE(gdefcore_catalog_limits)
 #define gdefcore_entity_publish GHOTIIO_DEFCORE(gdefcore_entity_publish)
 #define gdefcore_entity_unpublish GHOTIIO_DEFCORE(gdefcore_entity_unpublish)

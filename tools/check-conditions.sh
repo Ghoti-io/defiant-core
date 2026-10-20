@@ -239,13 +239,13 @@ plant list-skips-the-flag $ACCESS testCondition 'CondAccess.ReadAndListHonorTheE
 # Plant 15: a condition reads the head revision, so a draft beside the active
 # revision decides who may do what.
 plant condition-reads-head $EVAL testCondition 'Cond.TheNewestRevisionIsWhatIsRead' \
-  '  rc = gdefcore_entity_values(ctx->catalog, NULL, GDEFCORE_VIEW_ACTIVE,' \
+  '  rc = gdefcore_entity_values(ctx->catalog, NULL, GDEFCORE_VIEW_CURRENT,' \
   '  rc = gdefcore_entity_values(ctx->catalog, NULL, GDEFCORE_VIEW_DRAFT,'
 
 # Plant 16: a condition reads what readers see, so an entity that is not
 # published has no fields for a grant to hold on and its author cannot edit it.
 plant condition-reads-published $EVAL testCondition 'Cond.TheNewestRevisionIsWhatIsRead' \
-  '  rc = gdefcore_entity_values(ctx->catalog, NULL, GDEFCORE_VIEW_ACTIVE,' \
+  '  rc = gdefcore_entity_values(ctx->catalog, NULL, GDEFCORE_VIEW_CURRENT,' \
   '  rc = gdefcore_entity_values(ctx->catalog, NULL, GDEFCORE_VIEW_PUBLISHED,'
 
 # Plant 17: the parser still takes the edition 1 `actor`, as the new operand,

@@ -296,7 +296,7 @@ change is made the way a later one would be:
   `own` followed whoever saved last.
 - Edition 2 splits it. `creator` is the entity's, set at its first revision
   and never changed, and is what `own` means. `revision.creator` is the old
-  `actor`: the creator of the revision that is now active.
+  `actor`: the creator of the revision that is now current (the newest).
 - A person writing `actor` now is refused, with a message that names the new
   spellings. Silently reading it as one of the two would pick a meaning for
   them.

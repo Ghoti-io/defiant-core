@@ -432,7 +432,7 @@ plant revision-view-shows-personal $ACC testActions \
 # is asked of the entity as it is stored: its newest revision.
 plant condition-reads-draft src/condition/condition_eval.c testActions \
   'Actions.RevisionViewAsksTheCurrentStateNotTheViewedRevision' \
-  '  rc = gdefcore_entity_values(ctx->catalog, NULL, GDEFCORE_VIEW_ACTIVE,' \
+  '  rc = gdefcore_entity_values(ctx->catalog, NULL, GDEFCORE_VIEW_CURRENT,' \
   '  rc = gdefcore_entity_values(ctx->catalog, NULL, GDEFCORE_VIEW_DRAFT,'
 
 # Scheduled publish (story S6c) ------------------------------------------------

@@ -55,7 +55,7 @@ access SPEC decision 13 leaves them):
 
 `gdefcore_entity_values` takes the view: `GDEFCORE_VIEW_PUBLISHED` is the
 newest revision while the entity is published (a miss otherwise),
-`GDEFCORE_VIEW_ACTIVE` is the newest revision whether or not it is, and
+`GDEFCORE_VIEW_CURRENT` is the newest revision whether or not it is, and
 `GDEFCORE_VIEW_DRAFT` is the draft over it, where there is one. A draft is in
 no list, no query and no reader's view, and no condition reads it.
 
@@ -161,7 +161,7 @@ not looked up, and nothing is written.
 
 ## Querying a type's entities
 
-`gdefcore_entity_query_active()` is the unfiltered list with a predicate: it
+`gdefcore_entity_query_current()` is the unfiltered list with a predicate: it
 runs the port's query over entities (defiant-storage `query.h`, "Over
 entities") on the type's current tables, with the entities that are something
 now (saved, and not cleared) and the predicate the caller hands it, and

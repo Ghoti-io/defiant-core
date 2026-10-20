@@ -1349,8 +1349,8 @@ static GDEFCORE_Result fill_current(GDEFCORE_Catalog * catalog, FormField * fiel
   /* The draft where there is one, else what the entity currently is,
    * published or not: a form is for the people who edit, not for readers.
    * (The draft view falls back to the newest revision itself since story
-   * S6b; it used to stop at a cleared head and this read the active
-   * revision.) */
+   * S6b; it used to stop at a cleared head and this read what was then the
+   * active revision, a pointer since retired.) */
   GDEFCORE_Result rc = gdefcore_entity_values(catalog, NULL, GDEFCORE_VIEW_DRAFT,
       id, id_len, lang, lang_len, field->name, field->name_len, &texts, &lens,
       &count);

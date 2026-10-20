@@ -1080,7 +1080,7 @@ static VX compile_related(GDEFCORE_Plan * p, const GDEFCORE_Condition * c,
     return plain(NULL);
   }
   /* A row that is there now: saved and not removed, as
-   * gdefcore_entity_query_active() reads them for the evaluator. */
+   * gdefcore_entity_query_current() reads them for the evaluator. */
   memset(live, 0, sizeof live);
   live[0].type = GDEFSTOR_FIELD_BOOLEAN;
   live[1].type = GDEFSTOR_FIELD_INTEGER;

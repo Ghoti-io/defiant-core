@@ -206,7 +206,7 @@ static const Surface kSurface[] = {
     {"gdefcore_entity_ids", "RA"},
     /* The unfiltered index with a predicate. The access list builds the
      * principal's filter into the predicate it hands this; nothing else does. */
-    {"gdefcore_entity_query_active", "RA"},
+    {"gdefcore_entity_query_current", "RA"},
     {"gdefcore_catalog_limits", "P"},
     /* The plan only builds a query tree in memory: nothing here reads the
      * store, and the principal it is given is a string it compares with. */
@@ -243,7 +243,7 @@ static const Surface kSurface[] = {
     {"gdefcore_entity_actor", "RA"},
     {"gdefcore_entity_creator", "RA"},
     {"gdefcore_entity_version", "RA"},
-    {"gdefcore_entity_active_revision", "RA"},
+    {"gdefcore_entity_current_revision", "RA"},
     {"gdefcore_entity_state", "RA"},
     {"gdefcore_text_dup", "P"},
     {"gdefcore_changeset_catalog", "P"},

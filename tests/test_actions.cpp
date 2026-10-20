@@ -501,7 +501,7 @@ TEST_F(Actions, AClearedEntitysHistoryIsStillThere) {
   ASSERT_EQ(GDEFCORE_OK, Change(gdefcore_entity_unpublish, post));
   EXPECT_EQ("shown:t", View(Req(historian), post, 1, "title"));
   EXPECT_EQ("shown:t", View(Req(ga), post, 1, "title"));
-  /* Cleared: no active revision, so a condition on a field holds for no one,
+  /* Cleared: no current revision, so a condition on a field holds for no one,
    * and an unconditioned grant still does. */
   {
     GDEFCORE_Changeset * cs = NULL;

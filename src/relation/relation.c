@@ -288,7 +288,7 @@ static GDEFCORE_Result find_rows(GDEFCORE_Catalog * catalog,
   q.language = kLang;
   q.language_len = strlen(kLang);
   q.limit = limit;
-  return gdefcore_entity_query_active(catalog, kRowType, strlen(kRowType), &q,
+  return gdefcore_entity_query_current(catalog, kRowType, strlen(kRowType), &q,
       ids, n, NULL);
 }
 
@@ -314,7 +314,7 @@ static GDEFCORE_Result find_state(GDEFCORE_Catalog * catalog,
   q.language = kLang;
   q.language_len = strlen(kLang);
   q.limit = 1;
-  rc = gdefcore_entity_query_active(catalog, kStateType, strlen(kStateType), &q,
+  rc = gdefcore_entity_query_current(catalog, kStateType, strlen(kStateType), &q,
       &ids, &n, NULL);
   if (rc != GDEFCORE_OK) {
     return rc;
@@ -454,7 +454,7 @@ static GDEFCORE_Result stage_state(GDEFCORE_Catalog * catalog,
   const char * slot[2];
   size_t slot_len[2];
   GDEFCORE_Result rc = gdefcore_entity_values(catalog, NULL,
-      GDEFCORE_VIEW_ACTIVE, state_id, GDEFCORE_PUBLIC_ID_LEN, kLang,
+      GDEFCORE_VIEW_CURRENT, state_id, GDEFCORE_PUBLIC_ID_LEN, kLang,
       strlen(kLang), "changes", 7, &texts, &lens, &n);
   if (rc == GDEFCORE_OK && n == 1) {
     size_t i;

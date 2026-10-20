@@ -261,7 +261,7 @@ GDEFCORE_API GDEFCORE_Result gdefcore_subject_mac_sealed(
  * blind rows of each entity's current value version (GDEFSTOR_QUERY_BLIND):
  * an older value does not match, and neither does any value of an erased
  * subject, whose rows are gone. Read as the system: no principal's filter
- * is applied (gdefcore_entity_query_active()). Free @p out_ids with
+ * is applied (gdefcore_entity_query_current()). Free @p out_ids with
  * gdefcore_ids_free().
  */
 GDEFCORE_API GDEFCORE_Result gdefcore_subject_find(GDEFCORE_Subjects * subjects,

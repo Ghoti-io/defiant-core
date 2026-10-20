@@ -698,7 +698,7 @@ class Erasure : public ::testing::Test {
           if (gdefcore_entity_values(catalog_, NULL,
                   view == 0   ? GDEFCORE_VIEW_PUBLISHED
                   : view == 1 ? GDEFCORE_VIEW_DRAFT
-                              : GDEFCORE_VIEW_ACTIVE,
+                              : GDEFCORE_VIEW_CURRENT,
                   ids[i], strlen(ids[i]), langs[j], 2, kField, strlen(kField),
                   &texts, &lens, &n) == GDEFCORE_OK) {
             for (t = 0; t < n; t++) {
@@ -722,7 +722,7 @@ class Erasure : public ::testing::Test {
           if (gdefcore_entity_values(catalog_, NULL,
                   view == 0   ? GDEFCORE_VIEW_PUBLISHED
                   : view == 1 ? GDEFCORE_VIEW_DRAFT
-                              : GDEFCORE_VIEW_ACTIVE,
+                              : GDEFCORE_VIEW_CURRENT,
                   ef_, strlen(ef_), langs[j], 2, kField, strlen(kField), &texts,
                   &lens, &n) == GDEFCORE_OK) {
             for (t = 0; t < n; t++) {
@@ -1871,7 +1871,7 @@ TEST_F(Erasure, RevisionViewsAndARestoredOldRevisionOfAnErasedSubject) {
     ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, NULL, 0));
     gdefcore_changeset_destroy(cs);
   }
-  EXPECT_EQ(0u, Stored(ea_, GDEFCORE_VIEW_ACTIVE).compare(0, 3, "s1:"));
+  EXPECT_EQ(0u, Stored(ea_, GDEFCORE_VIEW_CURRENT).compare(0, 3, "s1:"));
   EXPECT_EQ(GDEFCORE_SUBJECT_ERASED, ReadAs(a_, ea_));
   EXPECT_EQ("erased:[erased]", RevisionView(ea_, 1, "en", a_));
   Collect(&restored, "restored");
@@ -1952,7 +1952,7 @@ TEST_F(Erasure, ARelationRowNamesAnErasedSubjectByItsPublicIdOnly) {
             strlen(GDEFCORE_RELATION_ROW_TYPE), &ids, &n));
     ASSERT_EQ(1u, n);
     ASSERT_EQ(GDEFCORE_OK,
-        gdefcore_entity_values(catalog_, NULL, GDEFCORE_VIEW_ACTIVE, ids[0],
+        gdefcore_entity_values(catalog_, NULL, GDEFCORE_VIEW_CURRENT, ids[0],
             GDEFCORE_PUBLIC_ID_LEN, "en", 2, "c0", 2, &texts, &lens, &count));
     ASSERT_EQ(1u, count);
     EXPECT_EQ(std::string(a_), std::string(texts[0], lens[0]));

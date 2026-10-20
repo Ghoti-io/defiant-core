@@ -424,7 +424,7 @@ std::string Titles(Site & site, const std::vector<std::string> & ids) {
     size_t * lens = NULL;
     size_t n = 0;
     std::string t = "?";
-    if (gdefcore_entity_values(site.catalog, NULL, GDEFCORE_VIEW_ACTIVE, id.data(),
+    if (gdefcore_entity_values(site.catalog, NULL, GDEFCORE_VIEW_CURRENT, id.data(),
             id.size(), "en", 2, "title", 5, &texts, &lens, &n) == GDEFCORE_OK &&
         n > 0) {
       t.assign(texts[0], lens[0]);
@@ -637,7 +637,7 @@ std::set<std::string> Compiled(Site & site, GDEFCORE_Condition * cond,
     q.language = lang;
     q.language_len = strlen(lang);
     EXPECT_EQ(GDEFCORE_OK,
-        gdefcore_entity_query_active(site.catalog, type, strlen(type), &q, &ids,
+        gdefcore_entity_query_current(site.catalog, type, strlen(type), &q, &ids,
             &n, NULL));
     for (size_t i = 0; i < n; i++) {
       out.insert(ids[i]);
@@ -1496,7 +1496,7 @@ TEST(ListPlan, TheQueryIsOfThePortsCurrentTables) {
     char ** ids = NULL;
     size_t n = 0;
     ASSERT_EQ(GDEFCORE_OK,
-        gdefcore_entity_query_active(site.catalog, kBlog, strlen(kBlog), &q, &ids,
+        gdefcore_entity_query_current(site.catalog, kBlog, strlen(kBlog), &q, &ids,
             &n, NULL));
     EXPECT_EQ("U,T", Titles(site, std::vector<std::string>(ids, ids + n)));
     gdefcore_ids_free(site.catalog, ids, n);

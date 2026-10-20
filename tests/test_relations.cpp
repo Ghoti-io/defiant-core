@@ -165,7 +165,7 @@ class Relations : public GrantsFixture {
     return v;
   }
 
-  /** How many rows there are: the ones with an active revision, not the ones
+  /** How many rows there are: the ones with a current revision, not the ones
    * a removal cleared. */
   size_t Rows() {
     GDEFSTOR_Query q;
@@ -175,7 +175,7 @@ class Relations : public GrantsFixture {
     memset(&q, 0, sizeof q);
     q.size = sizeof q;
     EXPECT_EQ(GDEFCORE_OK,
-        gdefcore_entity_query_active(catalog_, GDEFCORE_RELATION_ROW_TYPE,
+        gdefcore_entity_query_current(catalog_, GDEFCORE_RELATION_ROW_TYPE,
             strlen(GDEFCORE_RELATION_ROW_TYPE), &q, &ids, &n, &total));
     gdefcore_ids_free(catalog_, ids, n);
     return (size_t)total;
@@ -889,7 +889,7 @@ TEST_F(Relations, TheRowRecordsTheActorAndNoPersonalValue) {
   char ** texts = NULL;
   size_t * lens = NULL;
   size_t count = 0;
-  ASSERT_EQ(GDEFCORE_OK, gdefcore_entity_values(catalog_, NULL, GDEFCORE_VIEW_ACTIVE,
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_entity_values(catalog_, NULL, GDEFCORE_VIEW_CURRENT,
                              rows[0], GDEFCORE_PUBLIC_ID_LEN, "en", 2, "c0", 2,
                              &texts, &lens, &count));
   ASSERT_EQ(1u, count);

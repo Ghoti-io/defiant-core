@@ -1599,7 +1599,7 @@ GDEFCORE_Result gdefcore_condition_builtin(int builtin, const char * type_name,
  * Edition 1 called the operand that names who wrote the entity's content
  * `actor`. Edition 2 splits it in two: `creator` is who created the entity
  * (immutable, and what `own` means) and `revision.creator` is who wrote the
- * revision that is now active. A stored edition 1 `actor` means the second,
+ * revision that is now current. A stored edition 1 `actor` means the second,
  * which is what it read, so the upcaster is a rename of that one atom outside
  * text constants. Text that is already edition 2 contains no bare `actor` (the
  * parser refuses it), so the upcast is the identity on it: a stored condition

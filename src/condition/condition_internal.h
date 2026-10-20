@@ -45,7 +45,7 @@ enum {
   kIn,
   kType,
   kState,
-  kRevCreator,  /* revision.creator: who wrote the active revision */
+  kRevCreator,  /* revision.creator: who wrote the current revision */
   kCreator,     /* creator: who created the entity */
   kPrincipal,
   kNow,

@@ -128,11 +128,11 @@ static int read_field(Ctx * ctx, const CNode * node, Vals * vals) {
     vals_one(vals, kEmpty, 0);
     return 1;
   }
-  /* The active revision, whether or not the entity is published: a condition
+  /* The current revision, whether or not the entity is published: a condition
    * is about what the entity is, and whether readers may see it is a separate
    * question the reader-facing actions ask for themselves. The NULL is the
    * changeset: staged data can never enter. */
-  rc = gdefcore_entity_values(ctx->catalog, NULL, GDEFCORE_VIEW_ACTIVE,
+  rc = gdefcore_entity_values(ctx->catalog, NULL, GDEFCORE_VIEW_CURRENT,
       ctx->id, GDEFCORE_PUBLIC_ID_LEN, ctx->lang, ctx->lang_len, name,
       name_len, &texts, &lens, &n);
   if (rc == GDEFCORE_ERR_INVALID) {
@@ -589,7 +589,7 @@ static int eval_related(Ctx * ctx, const CNode * node) {
       q.limit = 1;
       q.language = GDEFCORE_RELATION_LANG;
       q.language_len = strlen(GDEFCORE_RELATION_LANG);
-      rc = gdefcore_entity_query_active(ctx->catalog, GDEFCORE_RELATION_ROW_TYPE,
+      rc = gdefcore_entity_query_current(ctx->catalog, GDEFCORE_RELATION_ROW_TYPE,
           strlen(GDEFCORE_RELATION_ROW_TYPE), &q, &ids, &nids, NULL);
       if (rc != GDEFCORE_OK) {
         bad = 1;

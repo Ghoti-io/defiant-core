@@ -327,7 +327,7 @@ TEST_F(Form, Tree) {
 }
 
 /* The tree shows what an editor is editing: the head revision, and when a
- * clear removed the head, the active revision, whether or not it is published
+ * clear removed the head, the current revision, whether or not it is published
  * (it used to look for a published one, so a restored but unpublished entity
  * opened as an empty form). */
 TEST_F(Form, TreeFallsBackToTheCurrentRevision) {

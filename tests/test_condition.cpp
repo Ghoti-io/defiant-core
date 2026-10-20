@@ -942,7 +942,7 @@ TEST(Cond, StateFollowsTheProjection) {
   }
 }
 
-/* Write another revision of an existing entity: a save (published, active) or
+/* Write another revision of an existing entity: a save (published, current) or
  * a draft (head only), by @p actor. */
 void Resave(Env & env, const std::string & id, const std::string & actor,
     const char * field, const char * value, bool draft) {
@@ -967,9 +967,9 @@ void Resave(Env & env, const std::string & id, const std::string & actor,
   gdefcore_changeset_destroy(cs);
 }
 
-/* An unpublished entity is evaluated on its active revision, so a grant can
+/* An unpublished entity is evaluated on its current revision, so a grant can
  * hold for it, and `state` still says it is a draft. A newer draft beside the
- * active revision is not what a condition reads. */
+ * current revision is not what a condition reads. */
 /* A condition reads the newest revision: never a draft, and nothing of an
  * entity that has no revision (decision 13: the newest revision is the
  * content). */
@@ -1023,7 +1023,7 @@ TEST(Cond, TheNewestRevisionIsWhatIsRead) {
 }
 
 /* `creator` is who created the entity and never changes; `revision.creator` is
- * who wrote the revision that is active. An editor who saves someone's entity
+ * who wrote the revision that is current. An editor who saves someone's entity
  * becomes the second and not the first. */
 TEST(Cond, CreatorIsTheEntitysAndRevisionCreatorIsTheRevisions) {
   Env env;
@@ -1040,7 +1040,7 @@ TEST(Cond, CreatorIsTheEntitysAndRevisionCreatorIsTheRevisions) {
   EXPECT_EQ((Answer{0, 0}), Eval(env, by_creator, e, env.Req(bob)));
   EXPECT_EQ((Answer{0, 0}), Eval(env, by_revision, e, env.Req(alice)));
   EXPECT_EQ((Answer{1, 0}), Eval(env, by_revision, e, env.Req(bob)));
-  /* A draft beside the active revision is by neither: the active one is read. */
+  /* A draft beside the current revision is by neither: the current one is read. */
   Resave(env, e, alice, "title", "later draft", true);
   EXPECT_EQ((Answer{1, 0}), Eval(env, by_revision, e, env.Req(bob)));
   EXPECT_EQ((Answer{0, 0}), Eval(env, by_revision, e, env.Req(alice)));
@@ -1655,7 +1655,7 @@ TEST(CondAccess, ReadAndListHonorTheExpression) {
   EXPECT_EQ("Invalid argument|untouched", env.Read(env.Req(pa), b1, "title"));
   EXPECT_EQ("Invalid argument|untouched", env.Read(env.Req(pa), none, "title"));
   /* A draft-only entity is not published, so a reader does not see it, even
-   * though its active revision is in group a (the condition holds on it: the
+   * though its current revision is in group a (the condition holds on it: the
    * control below publishes it and the same principal reads it). */
   EXPECT_EQ("Invalid argument|untouched", env.Read(env.Req(pa), drafted, "title"));
   EXPECT_EQ("Invalid argument|untouched", env.Read(env.Req(pa), held, "title"));

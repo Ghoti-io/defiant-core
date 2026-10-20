@@ -20,7 +20,7 @@
 #   evaluator-reads-open-changeset EntryPath.AnOpenChangesetDoesNotSteerTheCheck
 #   path-checks-after-staging      EntryPath.AGroupBPostResubmittedAsGroupAIsRefused
 #   path-checks-post-change-value  EntryPath.AGroupBPostResubmittedAsGroupAIsRefused
-#   path-checks-head-not-active    EntryPath.TheCheckIsOnTheActiveRevisionNotTheNewestDraft
+#   path-checks-head-not-current    EntryPath.TheCheckIsOnTheCurrentRevisionNotTheNewestDraft
 #   own-follows-the-author-field   EntryPath.TheStoredAuthorFieldDoesNotMakeAnOwner
 #
 # Every test has a control (the same path, the same principal, one thing
@@ -214,9 +214,9 @@ plant path-checks-post-change-value $FORM testEntrypaths \
 
 # Plant 10: the check reads the head revision, the newest draft, where it
 # should read the one in force.
-plant path-checks-head-not-active src/condition/condition_eval.c testEntrypaths \
-  'EntryPath.TheCheckIsOnTheActiveRevisionNotTheNewestDraft' \
-  '  rc = gdefcore_entity_values(ctx->catalog, NULL, GDEFCORE_VIEW_ACTIVE,' \
+plant path-checks-head-not-current src/condition/condition_eval.c testEntrypaths \
+  'EntryPath.TheCheckIsOnTheCurrentRevisionNotTheNewestDraft' \
+  '  rc = gdefcore_entity_values(ctx->catalog, NULL, GDEFCORE_VIEW_CURRENT,' \
   '  rc = gdefcore_entity_values(ctx->catalog, NULL, GDEFCORE_VIEW_DRAFT,'
 
 # Plant 11: `own` is whoever the stored author field names, which a body can
@@ -229,7 +229,7 @@ plant own-follows-the-author-field $ENT testEntrypaths \
     char ** at = NULL;
     size_t * al = NULL;
     size_t an = 0;
-    if (gdefcore_entity_values(catalog, NULL, GDEFCORE_VIEW_ACTIVE, id, id_len,
+    if (gdefcore_entity_values(catalog, NULL, GDEFCORE_VIEW_CURRENT, id, id_len,
             "en", 2, "author", 6, &at, &al, &an) == GDEFCORE_OK && an > 0) {
       *out_creator = dup_span(catalog->alloc, at[0], al[0]);
       if (out_len != NULL) {

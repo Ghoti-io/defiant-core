@@ -84,7 +84,7 @@ extern "C" {
  * the revision the entity currently is, and what a condition reads. (The
  * newest revision is always the current one: there is no older revision an
  * entity can be made to be, story S6b.) */
-#define GDEFCORE_VIEW_ACTIVE 3
+#define GDEFCORE_VIEW_CURRENT 3
 
 /** Caps for the changeset parser and for field values. */
 typedef struct GDEFCORE_Limits {
@@ -620,7 +620,7 @@ GDEFCORE_API GDEFCORE_Result gdefcore_entity_version(
  * @p out_has is 0 and @p out_seq is 0 when the entity has none (nothing saved
  * yet, or cleared). A missing id is ::GDEFCORE_ERR_INVALID.
  */
-GDEFCORE_API GDEFCORE_Result gdefcore_entity_active_revision(
+GDEFCORE_API GDEFCORE_Result gdefcore_entity_current_revision(
     GDEFCORE_Catalog * catalog, const char * id, size_t id_len, int * out_has,
     uint64_t * out_seq);
 
@@ -920,7 +920,7 @@ GDEFCORE_API void gdefcore_catalog_limits(const GDEFCORE_Catalog * catalog,
  *   query is over a cap of the query form), ::GDEFCORE_ERR_CORRUPT, or the
  *   store's error. An unknown type is an empty list.
  */
-GDEFCORE_API GDEFCORE_Result gdefcore_entity_query_active(
+GDEFCORE_API GDEFCORE_Result gdefcore_entity_query_current(
     GDEFCORE_Catalog * catalog, const char * type_name, size_t type_name_len,
     const GDEFSTOR_Query * query, char *** out_ids, size_t * out_count,
     uint64_t * out_total);
