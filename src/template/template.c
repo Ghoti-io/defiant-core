@@ -24,9 +24,11 @@
  * Template kinds, their layered contracts, and the validator.
  *
  * The validator reads the syntax tree through lang-tang's installed `ast/`
- * headers: it recurses over the public node structs itself, because the
- * library's own walk gives a callback no scope, no parent and no way to skip a
- * function body, and does not descend into a map literal's pairs. A node whose
+ * headers: it walks the public node structs itself, because the library's own
+ * walk gives a callback no scope, no parent and no way to skip a function
+ * body, and does not descend into a map literal's pairs. The walk keeps its
+ * own stack on the heap, since the parser accepts a tree deeper than a
+ * recursive walk can be sure of descending. A node whose
  * class it does not know is refused, never skipped, so a construct the
  * validator cannot see through cannot pass.
  */
@@ -957,15 +959,71 @@ static int line_marked(const Ctx * ctx, int line) {
   return has_word(s + start, end - start, kMarker);
 }
 
-typedef void (*Visit)(Ctx *, Scope *, GLTANG_Ast_Node *);
+/*
+ * The walk is iterative. A tree is as deep as the parser allows
+ * (GLTANG_MAX_TREE_DEPTH, 10000 levels), and a recursive walk over it needs a
+ * frame or two per level: 9000 levels of `+` overflowed the 4 MiB side stack
+ * under AddressSanitizer. So a node's handler does not call itself on a
+ * child; it pushes the child, and walk_run() pops. What a handler pushes is
+ * run in the order it was pushed, before anything pushed earlier, which is
+ * the order the recursive walk ran it in.
+ */
+enum {
+  WALK_COLLECT,  /* pass one over a node, into its scope */
+  WALK_CHECK,    /* pass two over a node, against its scope */
+  WALK_FREE      /* a function's scope, once both passes are done with it */
+};
 
-static void each_vec(Ctx * ctx, Scope * sc, GLTANG_VectorX * vec, Visit fn) {
+typedef struct Step {
+  int op;
+  Scope * sc;
+  GLTANG_Ast_Node * n;
+} Step;
+
+typedef struct Walk {
+  Ctx * ctx;
+  Step * v;
+  size_t n;
+  size_t cap;
+} Walk;
+
+/* Room for @p k more steps; 0, with the context failed, when there is none. */
+static int walk_reserve(Walk * w, size_t k) {
+  if (w->cap - w->n < k) {
+    size_t cap = w->cap == 0 ? 64 : w->cap;
+    Step * next;
+    while (cap - w->n < k) {
+      cap *= 2;
+    }
+    next = (Step *)realloc(w->v, cap * sizeof *next);
+    if (next == NULL) {
+      w->ctx->rc = GDEFCORE_ERR_OOM;
+      return 0;
+    }
+    w->v = next;
+    w->cap = cap;
+  }
+  return 1;
+}
+
+static void walk_push(Walk * w, int op, Scope * sc, GLTANG_Ast_Node * n) {
+  if (w->ctx->rc != GDEFCORE_OK || (n == NULL && op != WALK_FREE) ||
+      !walk_reserve(w, 1)) {
+    return;
+  }
+  w->v[w->n].op = op;
+  w->v[w->n].sc = sc;
+  w->v[w->n].n = n;
+  w->n += 1;
+}
+
+static void each_vec(Walk * w, int op, Scope * sc, GLTANG_VectorX * vec) {
   size_t i;
   if (vec == NULL) {
     return;
   }
   for (i = 0; i < GLTANG_VECTORX_COUNT(vec); i++) {
-    fn(ctx, sc, (GLTANG_Ast_Node *)GLTANG_TYPEX_P(vec->data[i]));
+    walk_push(w, op, sc, (GLTANG_Ast_Node *)GLTANG_TYPEX_P(vec->data[i]));
   }
 }
 
@@ -974,50 +1032,50 @@ static void each_vec(Ctx * ctx, Scope * sc, GLTANG_VectorX * vec, Visit fn) {
  * reported once and not entered, so the validator never passes what it cannot
  * see.
  */
-static void each_child(Ctx * ctx, Scope * sc, GLTANG_Ast_Node * n, Visit fn) {
+static void each_child(Walk * w, int op, Scope * sc, GLTANG_Ast_Node * n) {
   if (n == NULL) {
     return;
   }
   if (IS(n, ARRAY)) {
     GLTANG_Ast_Node_Array * node = AS(GLTANG_Ast_Node_Array, n);
-    each_vec(ctx, sc, node->elements, fn);
+    each_vec(w, op, sc, node->elements);
   } else if (IS(n, ASSIGN)) {
     GLTANG_Ast_Node_Assign * node = AS(GLTANG_Ast_Node_Assign, n);
-    fn(ctx, sc, node->lhs);
-    fn(ctx, sc, node->rhs);
+    walk_push(w, op, sc, node->lhs);
+    walk_push(w, op, sc, node->rhs);
   } else if (IS(n, BINARY)) {
     GLTANG_Ast_Node_Binary * node = AS(GLTANG_Ast_Node_Binary, n);
-    fn(ctx, sc, node->lhs);
-    fn(ctx, sc, node->rhs);
+    walk_push(w, op, sc, node->lhs);
+    walk_push(w, op, sc, node->rhs);
   } else if (IS(n, BLOCK)) {
     GLTANG_Ast_Node_Block * node = AS(GLTANG_Ast_Node_Block, n);
-    each_vec(ctx, sc, node->statements, fn);
+    each_vec(w, op, sc, node->statements);
   } else if (IS(n, CAST)) {
     GLTANG_Ast_Node_Cast * node = AS(GLTANG_Ast_Node_Cast, n);
-    fn(ctx, sc, node->expression);
+    walk_push(w, op, sc, node->expression);
   } else if (IS(n, DO_WHILE)) {
     GLTANG_Ast_Node_Do_While * node = AS(GLTANG_Ast_Node_Do_While, n);
-    fn(ctx, sc, node->block);
-    fn(ctx, sc, node->condition);
+    walk_push(w, op, sc, node->block);
+    walk_push(w, op, sc, node->condition);
   } else if (IS(n, FOR)) {
     GLTANG_Ast_Node_For * node = AS(GLTANG_Ast_Node_For, n);
-    fn(ctx, sc, node->init);
-    fn(ctx, sc, node->condition);
-    fn(ctx, sc, node->update);
-    fn(ctx, sc, node->block);
+    walk_push(w, op, sc, node->init);
+    walk_push(w, op, sc, node->condition);
+    walk_push(w, op, sc, node->update);
+    walk_push(w, op, sc, node->block);
   } else if (IS(n, FUNCTION_CALL)) {
     GLTANG_Ast_Node_Function_Call * node = AS(GLTANG_Ast_Node_Function_Call, n);
-    fn(ctx, sc, node->lhs);
-    each_vec(ctx, sc, node->arguments, fn);
+    walk_push(w, op, sc, node->lhs);
+    each_vec(w, op, sc, node->arguments);
   } else if (IS(n, IF_ELSE)) {
     GLTANG_Ast_Node_If_Else * node = AS(GLTANG_Ast_Node_If_Else, n);
-    fn(ctx, sc, node->condition);
-    fn(ctx, sc, node->ifBlock);
-    fn(ctx, sc, node->elseBlock);
+    walk_push(w, op, sc, node->condition);
+    walk_push(w, op, sc, node->ifBlock);
+    walk_push(w, op, sc, node->elseBlock);
   } else if (IS(n, INDEX)) {
     GLTANG_Ast_Node_Index * node = AS(GLTANG_Ast_Node_Index, n);
-    fn(ctx, sc, node->lhs);
-    fn(ctx, sc, node->rhs);
+    walk_push(w, op, sc, node->lhs);
+    walk_push(w, op, sc, node->rhs);
   } else if (IS(n, MAP)) {
     GLTANG_Ast_Node_Map * node = AS(GLTANG_Ast_Node_Map, n);
     GLTANG_VectorX * pairs = node->pairs;
@@ -1025,78 +1083,96 @@ static void each_child(Ctx * ctx, Scope * sc, GLTANG_Ast_Node * n, Visit fn) {
     for (i = 0; pairs != NULL && i < GLTANG_VECTORX_COUNT(pairs); i++) {
       GLTANG_Ast_Node_Map_Pair * pair =
           (GLTANG_Ast_Node_Map_Pair *)GLTANG_TYPEX_P(pairs->data[i]);
-      fn(ctx, sc, pair->key);
-      fn(ctx, sc, pair->value);
+      walk_push(w, op, sc, pair->key);
+      walk_push(w, op, sc, pair->value);
     }
   } else if (IS(n, PERIOD)) {
     GLTANG_Ast_Node_Period * node = AS(GLTANG_Ast_Node_Period, n);
-    fn(ctx, sc, node->lhs);
+    walk_push(w, op, sc, node->lhs);
   } else if (IS(n, PRINT)) {
     GLTANG_Ast_Node_Print * node = AS(GLTANG_Ast_Node_Print, n);
-    fn(ctx, sc, node->expression);
+    walk_push(w, op, sc, node->expression);
   } else if (IS(n, RETURN)) {
     GLTANG_Ast_Node_Return * node = AS(GLTANG_Ast_Node_Return, n);
-    fn(ctx, sc, node->expression);
+    walk_push(w, op, sc, node->expression);
   } else if (IS(n, SLICE)) {
     GLTANG_Ast_Node_Slice * node = AS(GLTANG_Ast_Node_Slice, n);
-    fn(ctx, sc, node->lhs);
-    fn(ctx, sc, node->start);
-    fn(ctx, sc, node->end);
-    fn(ctx, sc, node->skip);
+    walk_push(w, op, sc, node->lhs);
+    walk_push(w, op, sc, node->start);
+    walk_push(w, op, sc, node->end);
+    walk_push(w, op, sc, node->skip);
   } else if (IS(n, TERNARY)) {
     GLTANG_Ast_Node_Ternary * node = AS(GLTANG_Ast_Node_Ternary, n);
-    fn(ctx, sc, node->condition);
-    fn(ctx, sc, node->ifTrue);
-    fn(ctx, sc, node->ifFalse);
+    walk_push(w, op, sc, node->condition);
+    walk_push(w, op, sc, node->ifTrue);
+    walk_push(w, op, sc, node->ifFalse);
   } else if (IS(n, UNARY)) {
     GLTANG_Ast_Node_Unary * node = AS(GLTANG_Ast_Node_Unary, n);
-    fn(ctx, sc, node->expression);
+    walk_push(w, op, sc, node->expression);
   } else if (IS(n, WHILE)) {
     GLTANG_Ast_Node_While * node = AS(GLTANG_Ast_Node_While, n);
-    fn(ctx, sc, node->condition);
-    fn(ctx, sc, node->block);
+    walk_push(w, op, sc, node->condition);
+    walk_push(w, op, sc, node->block);
   } else if (IS(n, BOOLEAN) || IS(n, BREAK) || IS(n, CONTINUE) ||
              IS(n, FLOAT) || IS(n, IDENTIFIER) || IS(n, INTEGER) ||
              IS(n, LIBRARY) || IS(n, STRING) ||
              n->vtable == &gltang_ast_node_null_vtable) {
     /* a leaf */
   } else {
-    note(ctx, GDEFCORE_ISSUE_SYNTAX, n, "", 0,
+    note(w->ctx, GDEFCORE_ISSUE_SYNTAX, n, "", 0,
         "This construct (%s) cannot be checked, so it is not allowed.",
         n->vtable != NULL && n->vtable->name != NULL ? n->vtable->name : "?");
   }
 }
 
-/* The dotted path a `use` names: Library, or Periods over a Library. */
+/*
+ * The dotted path a `use` names: Library, or Periods over a Library. Read
+ * without recursion, since the chain can be as deep as the parser allows.
+ * Each Period adds at least two bytes, so a chain of cap / 2 or more cannot
+ * fit and is refused before it is read.
+ */
 static int use_path(GLTANG_Ast_Node * e, char * out, size_t cap, size_t * n) {
-  if (e == NULL) {
+  GLTANG_Ast_Node * at = e;
+  size_t depth = 0;
+  size_t len;
+  size_t k;
+  const char * id;
+  while (at != NULL && IS(at, PERIOD)) {
+    if (++depth >= cap / 2) {
+      return 0;
+    }
+    at = period_lhs(at);
+  }
+  if (at == NULL || !IS(at, LIBRARY)) {
     return 0;
   }
-  if (IS(e, LIBRARY)) {
-    const char * id = library_of(e);
-    size_t len = id == NULL ? 0 : strlen(id);
-    if (len == 0 || len >= cap) {
+  id = library_of(at);
+  len = id == NULL ? 0 : strlen(id);
+  if (len == 0 || len >= cap) {
+    return 0;
+  }
+  memcpy(out, id, len);
+  /* Outward from the Library: the Period k levels down from @p e, deepest first. */
+  for (k = depth; k > 0; k--) {
+    GLTANG_Ast_Node * p = e;
+    const char * rhs;
+    size_t rlen;
+    size_t j;
+    for (j = 1; j < k; j++) {
+      p = period_lhs(p);
+    }
+    rhs = period_rhs(p);
+    rlen = rhs == NULL ? 0 : strlen(rhs);
+    if (rlen == 0 || len + 1 + rlen >= cap) {
       return 0;
     }
-    memcpy(out, id, len);
-    out[len] = '\0';
-    *n = len;
-    return 1;
+    out[len++] = '.';
+    memcpy(out + len, rhs, rlen);
+    len += rlen;
   }
-  if (IS(e, PERIOD)) {
-    const char * rhs = period_rhs(e);
-    size_t rlen = rhs == NULL ? 0 : strlen(rhs);
-    if (!use_path(period_lhs(e), out, cap, n) || rlen == 0 ||
-        *n + 1 + rlen >= cap) {
-      return 0;
-    }
-    out[(*n)++] = '.';
-    memcpy(out + *n, rhs, rlen);
-    *n += rlen;
-    out[*n] = '\0';
-    return 1;
-  }
-  return 0;
+  out[len] = '\0';
+  *n = len;
+  return 1;
 }
 
 static size_t param_count(const GLTANG_Ast_Node_Function * f) {
@@ -1104,19 +1180,17 @@ static size_t param_count(const GLTANG_Ast_Node_Function * f) {
 }
 
 /* Pass one: what the scope declares. A function body is another scope. */
-static void collect(Ctx * ctx, Scope * sc, GLTANG_Ast_Node * n) {
-  if (n == NULL || ctx->rc != GDEFCORE_OK) {
-    return;
-  }
+static void collect(Walk * w, Scope * sc, GLTANG_Ast_Node * n) {
+  Ctx * ctx = w->ctx;
   if (IS(n, ASSIGN)) {
     GLTANG_Ast_Node * lhs = assign_lhs(n);
     if (lhs != NULL && IS(lhs, IDENTIFIER)) {
       const char * id = ident_of(lhs);
       scope_add(ctx, sc, id, strlen(id), NULL, 0, 0, 0);
     } else {
-      collect(ctx, sc, lhs);
+      walk_push(w, WALK_COLLECT, sc, lhs);
     }
-    collect(ctx, sc, assign_rhs(n));
+    walk_push(w, WALK_COLLECT, sc, assign_rhs(n));
   } else if (IS(n, USE)) {
     GLTANG_Ast_Node_Use * use = AS(GLTANG_Ast_Node_Use, n);
     char path[TEMPLATE_MAX_ID];
@@ -1132,15 +1206,15 @@ static void collect(Ctx * ctx, Scope * sc, GLTANG_Ast_Node * n) {
       const char * id = ident_of(rf->identifier);
       scope_add(ctx, sc, id, strlen(id), NULL, 0, 0, 0);
     }
-    collect(ctx, sc, rf->expression);
-    collect(ctx, sc, rf->block);
+    walk_push(w, WALK_COLLECT, sc, rf->expression);
+    walk_push(w, WALK_COLLECT, sc, rf->block);
   } else if (IS(n, GLOBAL)) {
     GLTANG_Ast_Node_Global * g = AS(GLTANG_Ast_Node_Global, n);
     if (g->identifier != NULL && IS(g->identifier, IDENTIFIER)) {
       const char * id = ident_of(g->identifier);
       scope_add(ctx, sc, id, strlen(id), NULL, 0, 0, 0);
     }
-    collect(ctx, sc, g->assignment);
+    walk_push(w, WALK_COLLECT, sc, g->assignment);
   } else if (IS(n, FUNCTION)) {
     GLTANG_Ast_Node_Function * f = AS(GLTANG_Ast_Node_Function, n);
     if (f->identifier != NULL) {
@@ -1148,7 +1222,7 @@ static void collect(Ctx * ctx, Scope * sc, GLTANG_Ast_Node * n) {
           param_count(f));
     }
   } else {
-    each_child(ctx, sc, n, collect);
+    each_child(w, WALK_COLLECT, sc, n);
   }
 }
 
@@ -1160,16 +1234,19 @@ static const GDEFCORE_CVar * contract_var(const Ctx * ctx, const char * p, size_
   return cvar_find(ctx->contract, p, n);
 }
 
-static void check(Ctx * ctx, Scope * sc, GLTANG_Ast_Node * n);
-
-static void check_function(Ctx * ctx, GLTANG_Ast_Node_Function * f) {
-  Scope fs;
+/* A function body is checked in a scope of its own, which the walk frees. */
+static void check_function(Walk * w, GLTANG_Ast_Node_Function * f) {
+  Ctx * ctx = w->ctx;
+  Scope * fs = (Scope *)calloc(1, sizeof *fs);
   size_t i;
-  memset(&fs, 0, sizeof fs);
+  if (fs == NULL) {
+    ctx->rc = GDEFCORE_ERR_OOM;
+    return;
+  }
   /* The program's own functions are visible by name in a function. */
   for (i = 0; ctx->top != NULL && i < ctx->top->n; i++) {
     if (ctx->top->v[i].is_fn) {
-      scope_add(ctx, &fs, ctx->top->v[i].name, ctx->top->v[i].name_len, NULL, 0,
+      scope_add(ctx, fs, ctx->top->v[i].name, ctx->top->v[i].name_len, NULL, 0,
           1, ctx->top->v[i].arity);
     }
   }
@@ -1178,12 +1255,19 @@ static void check_function(Ctx * ctx, GLTANG_Ast_Node_Function * f) {
     GLTANG_Ast_Node * p = (GLTANG_Ast_Node *)GLTANG_TYPEX_P(f->parameters->data[i]);
     if (p != NULL && IS(p, IDENTIFIER)) {
       const char * id = ident_of(p);
-      scope_add(ctx, &fs, id, strlen(id), NULL, 0, 0, 0);
+      scope_add(ctx, fs, id, strlen(id), NULL, 0, 0, 0);
     }
   }
-  collect(ctx, &fs, f->block);
-  check(ctx, &fs, f->block);
-  scope_free(&fs);
+  /* With the room reserved the free cannot fail to be pushed, so the walk
+   * owns the scope from here. */
+  if (ctx->rc != GDEFCORE_OK || !walk_reserve(w, 3)) {
+    scope_free(fs);
+    free(fs);
+    return;
+  }
+  walk_push(w, WALK_COLLECT, fs, f->block);
+  walk_push(w, WALK_CHECK, fs, f->block);
+  walk_push(w, WALK_FREE, fs, NULL);
 }
 
 static void check_use(Ctx * ctx, GLTANG_Ast_Node * n) {
@@ -1262,10 +1346,8 @@ static void check_period(Ctx * ctx, GLTANG_Ast_Node * n) {
 }
 
 /* Pass two: every read, call and `use` against the contract. */
-static void check(Ctx * ctx, Scope * sc, GLTANG_Ast_Node * n) {
-  if (n == NULL || ctx->rc != GDEFCORE_OK) {
-    return;
-  }
+static void check(Walk * w, Scope * sc, GLTANG_Ast_Node * n) {
+  Ctx * ctx = w->ctx;
   if (IS(n, IDENTIFIER)) {
     const char * id = ident_of(n);
     size_t idn = strlen(id);
@@ -1282,32 +1364,71 @@ static void check(Ctx * ctx, Scope * sc, GLTANG_Ast_Node * n) {
   } else if (IS(n, ASSIGN)) {
     GLTANG_Ast_Node * lhs = assign_lhs(n);
     if (lhs == NULL || !IS(lhs, IDENTIFIER)) {
-      check(ctx, sc, lhs);
+      walk_push(w, WALK_CHECK, sc, lhs);
     }
-    check(ctx, sc, assign_rhs(n));
+    walk_push(w, WALK_CHECK, sc, assign_rhs(n));
   } else if (IS(n, USE)) {
     check_use(ctx, n);
   } else if (IS(n, FUNCTION_CALL)) {
     check_call(ctx, sc, n);
     /* A bare callee was judged as a callee; anything else is read. */
     if (call_lhs(n) != NULL && !IS(call_lhs(n), IDENTIFIER)) {
-      check(ctx, sc, call_lhs(n));
+      walk_push(w, WALK_CHECK, sc, call_lhs(n));
     }
-    each_vec(ctx, sc, call_args(n), check);
+    each_vec(w, WALK_CHECK, sc, call_args(n));
   } else if (IS(n, PERIOD)) {
     check_period(ctx, n);
-    check(ctx, sc, period_lhs(n));
+    walk_push(w, WALK_CHECK, sc, period_lhs(n));
   } else if (IS(n, FUNCTION)) {
-    check_function(ctx, AS(GLTANG_Ast_Node_Function, n));
+    check_function(w, AS(GLTANG_Ast_Node_Function, n));
   } else if (IS(n, RANGED_FOR)) {
     GLTANG_Ast_Node_Ranged_For * rf = AS(GLTANG_Ast_Node_Ranged_For, n);
-    check(ctx, sc, rf->expression);
-    check(ctx, sc, rf->block);
+    walk_push(w, WALK_CHECK, sc, rf->expression);
+    walk_push(w, WALK_CHECK, sc, rf->block);
   } else if (IS(n, GLOBAL)) {
-    check(ctx, sc, global_assignment(n));
+    walk_push(w, WALK_CHECK, sc, global_assignment(n));
   } else {
-    each_child(ctx, sc, n, check);
+    each_child(w, WALK_CHECK, sc, n);
   }
+}
+
+/*
+ * Run both passes over @p root in @p top: pass one over the whole tree, then
+ * pass two. A handler's pushes are reversed on the stack so that they pop in
+ * the order they were pushed. Once the context has failed, only the frees run.
+ */
+static void walk_run(Ctx * ctx, Scope * top, GLTANG_Ast_Node * root) {
+  Walk w;
+  memset(&w, 0, sizeof w);
+  w.ctx = ctx;
+  /* Pushed by hand, so in the order they pop. */
+  walk_push(&w, WALK_CHECK, top, root);
+  walk_push(&w, WALK_COLLECT, top, root);
+  while (w.n > 0) {
+    Step s = w.v[--w.n];
+    size_t mark = w.n;
+    size_t lo;
+    size_t hi;
+    if (s.op == WALK_FREE) {
+      scope_free(s.sc);
+      free(s.sc);
+      continue;
+    }
+    if (ctx->rc != GDEFCORE_OK) {
+      continue;
+    }
+    if (s.op == WALK_COLLECT) {
+      collect(&w, s.sc, s.n);
+    } else {
+      check(&w, s.sc, s.n);
+    }
+    for (lo = mark, hi = w.n; hi > lo + 1; lo++, hi--) {
+      Step t = w.v[lo];
+      w.v[lo] = w.v[hi - 1];
+      w.v[hi - 1] = t;
+    }
+  }
+  free(w.v);
 }
 
 #pragma GCC diagnostic pop
@@ -1354,8 +1475,7 @@ static void validate_run(Job * job) {
     ctx.tname_len = job->tname_len;
     ctx.top = &top;
     ctx.rc = GDEFCORE_OK;
-    collect(&ctx, &top, gltang_tree_root(tree));
-    check(&ctx, &top, gltang_tree_root(tree));
+    walk_run(&ctx, &top, gltang_tree_root(tree));
     scope_free(&top);
     job->rc = ctx.rc;
   }
@@ -1367,7 +1487,7 @@ static void validate_entry(void * arg) {
   validate_run((Job *)arg);
 }
 
-/* Parse and walk on a stack of our own: lang-tang recurses once per level. */
+/* Parse on a stack of our own: lang-tang's parser recurses once per level. */
 static GDEFCORE_Result validate_on_side_stack(Job * job) {
 #if GCU_FIBER_SUPPORTED
   GCU_Fiber * fiber = NULL;

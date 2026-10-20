@@ -19,6 +19,8 @@
 #                                 activate-not-vetted, on the retired
 #                                 activate: access SPEC decision 13)
 #
+#   validated-on-callers-stack    Templates.DeepTreeOnTheSmallestFiber
+#
 # and six more that stand behind a matrix row each: the engine's own math is
 # no longer shadowed, the plumbing template is reachable from a template, the
 # error line is off by one, a map literal's values are not walked, the
@@ -115,7 +117,7 @@ plant line-off-by-one src/template/template.c testTemplates \
 # Plant 10: a map literal's values are not read.
 plant map-values-unread src/template/template.c testTemplates \
   'Templates.AstWalkSeesInsideLiterals' \
-  '      fn(ctx, sc, pair->value);' \
+  '      walk_push(w, op, sc, pair->value);' \
   '      (void)pair;'
 
 # Plant 11: a field called kind is read as the type's own kind file again.
@@ -142,5 +144,15 @@ plant revert-not-vetted src/template/template.c testTemplates \
           GDEFCORE_TOUCH_SAVE | GDEFCORE_TOUCH_DRAFT | GDEFCORE_TOUCH_PUBLISH) &&' \
   '  if (!touches_type(changeset, GDEFCORE_TEMPLATE_TYPE,
           GDEFCORE_TOUCH_DRAFT | GDEFCORE_TOUCH_PUBLISH) &&'
+
+# Plant 14: validation parses and walks on whatever stack the caller has, so a
+# deep template faults a request's small fiber.
+plant validated-on-callers-stack src/template/template.c testTemplates \
+  'Templates.DeepTreeOnTheSmallestFiber' \
+  '  job->rc = GDEFCORE_ERR_INTERNAL;
+  if (gcu_fiber_switch_to(fiber) != GCU_FIBER_OK) {
+    job->rc = GDEFCORE_ERR_INTERNAL;
+  }' \
+  '  validate_run(job);'
 
 plant_finish

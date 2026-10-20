@@ -28,6 +28,7 @@
  * the thing it looks for is not passing by accident.
  */
 
+#include <ghoti.io/cutil/fiber.h>
 #include <ghoti.io/defiant-core/defiant-core.h>
 #include <ghoti.io/defiant-storage/model.h>
 #include <ghoti.io/defiant-storage/revision.h>
@@ -39,6 +40,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifndef _WIN32
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
+
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -1196,29 +1203,73 @@ TEST_F(Templates, AstWalkSeesInsideLiterals) {
   }
 }
 
-TEST_F(Templates, DeepTreeDoesNotOverflowTheStack) {
+/* `<% x = 1+1+...+1<tail> %>`, @p levels deep on its left. */
+std::string DeepSum(int levels, const char * tail) {
   std::string deep = "<% x = 1";
-  for (int i = 0; i < 9000; i++) {
+  for (int i = 0; i < levels; i++) {
     deep += "+1";
   }
-  deep += "; %><%= x %>";
-  EXPECT_TRUE(Check("core.pane", deep).empty());
+  return deep + tail;
+}
+
+/* The validator's walk keeps its own stack: a tree as deep as the parser
+ * accepts is walked under AddressSanitizer, whose frames are about three times
+ * larger, on the 4 MiB side stack (a recursive walk overflowed it). */
+TEST_F(Templates, DeepTreeDoesNotOverflowTheStack) {
+  EXPECT_TRUE(Check("core.pane", DeepSum(9000, "; %><%= x %>")).empty());
   /* Control: a read buried that deep is found. */
-  std::string buried = "<% x = 1";
-  for (int i = 0; i < 9000; i++) {
-    buried += "+1";
-  }
-  buried += "+nope; %>";
-  EXPECT_TRUE(Has(Check("core.pane", buried), GDEFCORE_ISSUE_NAME, "nope"));
+  EXPECT_TRUE(Has(Check("core.pane", DeepSum(9000, "+nope; %>")), GDEFCORE_ISSUE_NAME,
+      "nope"));
   /* Past the parser's limit the template is refused, not crashed on. */
-  std::string over = "<% x = 1";
-  for (int i = 0; i < 10100; i++) {
-    over += "+1";
-  }
-  over += "; %>";
-  auto v = Check("core.pane", over);
+  auto v = Check("core.pane", DeepSum(10100, "; %>"));
   ASSERT_EQ(1u, v.size());
   EXPECT_EQ(GDEFCORE_ISSUE_PARSE, v[0].reason);
+}
+
+/* A request's fiber can be as small as cutil allows. Validation moves to a
+ * stack of its own before it parses, so the same deep cases pass when they are
+ * validated from such a fiber. It runs in a child, so that a fault on the
+ * small stack is this test failing rather than the suite ending. */
+TEST_F(Templates, DeepTreeOnTheSmallestFiber) {
+#if defined(_WIN32) || !GCU_FIBER_SUPPORTED
+  GTEST_SKIP() << "needs fork() and fibers";
+#else
+  std::function<bool()> body = [&]() {
+    bool ran = false;
+    bool ok = Check("core.pane", DeepSum(9000, "; %><%= x %>"), NULL, &ran).empty() &&
+        ran;
+    ok = ok && Has(Check("core.pane", DeepSum(9000, "+nope; %>")),
+        GDEFCORE_ISSUE_NAME, "nope");
+    auto v = Check("core.pane", DeepSum(10100, "; %>"));
+    return ok && v.size() == 1 && v[0].reason == GDEFCORE_ISSUE_PARSE;
+  };
+  struct Job {
+    std::function<bool()> * body;
+    bool ok;
+  } job = {&body, false};
+  int status = 0;
+  pid_t pid;
+  fflush(NULL);
+  pid = fork();
+  ASSERT_GE(pid, 0);
+  if (pid == 0) {
+    GCU_Fiber * fiber = NULL;
+    if (gcu_fiber_create(&fiber,
+            [](void * a) {
+              Job * j = (Job *)a;
+              j->ok = (*j->body)();
+            },
+            &job, GCU_FIBER_MIN_STACK_SIZE, NULL) != GCU_FIBER_OK) {
+      _exit(2);
+    }
+    gcu_fiber_switch_to(fiber);
+    gcu_fiber_destroy(fiber);
+    _exit(job.ok ? 0 : 1);
+  }
+  ASSERT_EQ(pid, waitpid(pid, &status, 0));
+  ASSERT_TRUE(WIFEXITED(status)) << "killed by signal " << WTERMSIG(status);
+  EXPECT_EQ(0, WEXITSTATUS(status));
+#endif
 }
 
 /* Reverting a template to an old revision puts that revision's text in front
