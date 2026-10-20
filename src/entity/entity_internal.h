@@ -22,6 +22,11 @@
  * @file entity_internal.h
  *
  * Private to src/entity. Another subsystem includes entity.h, not this.
+ *
+ * entity.c holds changesets: staging, the diff, the rating, the patch form,
+ * apply. store.c holds what core keeps on the storage port (model.h): the
+ * type records, the typed values, the field trees of each language, drafts,
+ * revisions and the reads.
  */
 
 #ifndef GHOTI_IO_GDEFCORE_SRC_ENTITY_ENTITY_INTERNAL_H
@@ -29,6 +34,7 @@
 
 #include <ghoti.io/defiant-core/macros.h>
 #include <ghoti.io/defiant-core/entity.h>
+#include <ghoti.io/defiant-storage/model.h>
 
 enum {
   GDEFCORE_OP_SAVE = 1,
@@ -39,7 +45,6 @@ enum {
   GDEFCORE_OP_DRAFT = 6,
   GDEFCORE_OP_PUBLISH = 7,
   GDEFCORE_OP_UNPUBLISH = 8,
-  GDEFCORE_OP_ACTIVATE = 9,
   GDEFCORE_OP_REVERT = 10
 };
 
@@ -60,6 +65,8 @@ typedef struct GDEFCORE_Lang {
   size_t nfields;
 } GDEFCORE_Lang;
 
+/* An entity's values in every language, each as the canonical text of its
+ * field's logical type. */
 typedef struct GDEFCORE_Doc {
   GDEFCORE_Lang * langs;
   size_t nlangs;
@@ -76,22 +83,27 @@ typedef struct GDEFCORE_Decl {
   int64_t range_min;
   int64_t range_max;
   GDEFCORE_Text pattern;
+  int type;    /* a GDEFSTOR_FieldType, never 0 */
+  int scale;   /* DECIMAL */
+  int indexed;
 } GDEFCORE_Decl;
 
 typedef struct GDEFCORE_Op {
   int kind;
   GDEFCORE_Text id;
-  uint64_t row;
-  int have_row;
+  int have_row;        /* the op names an entity (or a stored type) */
+  int reserved;        /* the entity has no port entity: its draft reserves it */
   GDEFCORE_Text type_name;
   int type_kind;
   GDEFCORE_Text machine;
   GDEFCORE_Doc staged;
   GDEFCORE_Doc base;
-  uint64_t base_seq;
+  uint64_t base_seq;   /* the revision when staged (a type: its version) */
   uint64_t base_ver;   /* the entity's version when the op was staged */
   int have_ver;
-  uint64_t target_seq; /* the revision an activate makes active */
+  uint64_t target_seq; /* REVERT: the revision copied */
+  uint64_t draft_base; /* DRAFT: the revision the draft is made from */
+  uint64_t written;    /* after apply: the revision the op wrote, 0 for none */
   GDEFCORE_Decl * decls;
   size_t ndecls;
 } GDEFCORE_Op;
@@ -109,6 +121,7 @@ struct GDEFCORE_Changeset {
   GDEFCORE_Catalog * catalog;
   uint64_t epoch;
   GDEFCORE_Text actor;
+  GDEFCORE_Text why;
   GDEFCORE_Op * ops;
   size_t nops;
   GDEFCORE_Text conflict;
@@ -119,5 +132,108 @@ struct GDEFCORE_Changeset {
   GDEFCORE_Request * request;
   int accept_sealed;
 };
+
+/* ---- store.c ------------------------------------------------------------- */
+
+/* The record namespace of type declarations, keyed by machine name, and the
+ * counter of the config epoch. */
+#define GDEFCORE_ENT_TYPE_NS "core.type"
+#define GDEFCORE_ENT_EPOCH "core.epoch"
+/* Who wrote an entity's draft, keyed by public id: the author of the revision
+ * a publish applies it as (defect 1.5.3: the publisher is not the author). */
+#define GDEFCORE_ENT_DRAFT_NS "core.draft"
+
+/* What a stored type says (a record, beside its port declaration). */
+typedef struct GDEFCORE_EntType {
+  int kind;
+  char id[GDEFCORE_PUBLIC_ID_LEN + 1];
+  uint64_t version;
+  GDEFCORE_Decl * decls;
+  size_t ndecls;
+} GDEFCORE_EntType;
+
+/* An entity as the port has it: a port entity, or an id its draft reserves. */
+typedef struct GDEFCORE_EntLook {
+  int exists;       /* a port entity */
+  int reserved;     /* no port entity; a draft holds the id */
+  char type[160];
+  size_t type_len;
+  char creator[130];
+  size_t creator_len;
+  uint64_t revision;
+  int published;
+  int deleted;
+  int has_draft;
+  uint64_t draft_base;
+} GDEFCORE_EntLook;
+
+const GDEFCORE_Allocator * gdefcore_ent_alloc(const GDEFCORE_Allocator * a);
+GDEFCORE_Result gdefcore_ent_map(GDEFSTOR_Result rc);
+void gdefcore_ent_text_clear(const GDEFCORE_Allocator * alloc, GDEFCORE_Text * t);
+GDEFCORE_Result gdefcore_ent_text_set(const GDEFCORE_Allocator * alloc,
+    GDEFCORE_Text * t, const char * p, size_t n);
+char * gdefcore_ent_dup(const GDEFCORE_Allocator * alloc, const char * p,
+    size_t n);
+int gdefcore_ent_span_eq(const char * a, size_t an, const char * b, size_t bn);
+
+void gdefcore_ent_doc_free(const GDEFCORE_Allocator * alloc, GDEFCORE_Doc * doc);
+GDEFCORE_Result gdefcore_ent_doc_clone(const GDEFCORE_Allocator * alloc,
+    const GDEFCORE_Doc * in, GDEFCORE_Doc * out);
+void gdefcore_ent_decls_free(const GDEFCORE_Allocator * alloc,
+    GDEFCORE_Decl * decls, size_t n);
+GDEFCORE_Result gdefcore_ent_decls_copy(const GDEFCORE_Allocator * alloc,
+    const GDEFCORE_Decl * in, size_t n, GDEFCORE_Decl ** out);
+void gdefcore_ent_type_free(const GDEFCORE_Allocator * alloc,
+    GDEFCORE_EntType * t);
+
+/* A type's record: ::GDEFCORE_ERR_INVALID when there is none. */
+GDEFCORE_Result gdefcore_ent_type_load(GDEFCORE_Catalog * cat,
+    const char * name, size_t name_len, GDEFCORE_EntType * out);
+/* Write a type's record and declare it on the port, in @p write. */
+GDEFCORE_Result gdefcore_ent_type_write(GDEFCORE_Catalog * cat,
+    GDEFSTOR_Write * write, const char * name, size_t name_len,
+    const GDEFCORE_EntType * t);
+
+/* Parse @p text as a value of @p decl's type, in place: the canonical text
+ * replaces it. ::GDEFCORE_ERR_INVALID when it is not one. */
+GDEFCORE_Result gdefcore_ent_value_check(const GDEFCORE_Allocator * alloc,
+    const GDEFCORE_Decl * decl, const char * text, size_t len,
+    GDEFCORE_Text * out_canonical);
+
+/* An entity, a reservation or nothing (::GDEFCORE_ERR_INVALID). @p canon is
+ * the canonical id. */
+GDEFCORE_Result gdefcore_ent_lookup(GDEFCORE_Catalog * cat, const char * canon,
+    GDEFCORE_EntLook * out);
+
+/* The values of an entity: the current trees (@p revision 0) or as of a
+ * revision, or (@p draft) its draft over the current trees. */
+GDEFCORE_Result gdefcore_ent_read_doc(GDEFCORE_Catalog * cat,
+    const char * canon, uint64_t revision, int draft, GDEFCORE_Doc * out);
+
+/* The trees of a doc for a save, items keyed to the current trees so an
+ * unchanged value stays unchanged. */
+GDEFCORE_Result gdefcore_ent_save_doc(GDEFCORE_Catalog * cat,
+    GDEFSTOR_Write * write, const char * canon, const char * type,
+    size_t type_len, uint64_t base, const GDEFSTOR_RevisionMeta * meta,
+    const GDEFCORE_Doc * doc, uint64_t * out_revision, int * out_conflict);
+/* The doc as the draft of the entity, made from revision @p base. */
+GDEFCORE_Result gdefcore_ent_put_draft(GDEFCORE_Catalog * cat,
+    GDEFSTOR_Write * write, const char * canon, const char * type,
+    size_t type_len, uint64_t base, const GDEFCORE_Doc * doc);
+
+/* Revision @p index (oldest first) and its author, or the count. */
+GDEFCORE_Result gdefcore_ent_history(GDEFCORE_Catalog * cat,
+    const char * canon, size_t * out_count, size_t index, uint64_t * out_seq,
+    char ** out_who, size_t * out_who_len);
+
+/* The entity's version: the counter every write that touches it bumps. */
+GDEFCORE_Result gdefcore_ent_version(GDEFCORE_Catalog * cat,
+    const char * canon, uint64_t * out);
+GDEFCORE_Result gdefcore_ent_bump(GDEFSTOR_Write * write, const char * canon,
+    uint64_t * out);
+
+/* The ids of a type's port entities, in creation order. */
+GDEFCORE_Result gdefcore_ent_ids(GDEFCORE_Catalog * cat, const char * type,
+    size_t type_len, char *** out_ids, size_t * out_count);
 
 #endif /* GHOTI_IO_GDEFCORE_SRC_ENTITY_ENTITY_INTERNAL_H */

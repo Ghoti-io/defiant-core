@@ -43,12 +43,12 @@ before anything is staged, and only then submits. `gdefcore_form_authorize()` as
 the same question for any action without writing, for a button or a preview.
 
 - The entity asked about is the token's target, which the token binds with the
-  session, the principal and the base revision. The optional `claimed` argument is
+  session, the principal and the base version. The optional `claimed` argument is
   the id the request itself names (a route capture, a hidden field). If it is not
   the token's target the answer is no: the request is not about one entity, and
   neither the URL's entity nor the token's is trusted for it.
-- The condition is evaluated on the entity as stored, its active revision, not on
-  the values in the token and not on a newer draft. A body that sets `group` to
+- The condition is evaluated on the entity as stored, its newest revision, not on
+  the values in the token and not on its draft. A body that sets `group` to
   `a` for a group b post, or an `author` field to the submitter's id, changes what
   would be written and not what is asked.
 - A refusal is `GDEFCORE_ERR_INVALID` with `out_allowed` 0, the same whichever
@@ -92,16 +92,21 @@ refused at submit rather than sealed a second time.
 
 ## Draft and publish
 
-`gdefcore_form_submit` appends a revision (it checks no permission; the path in
-front of it does, above). It becomes the head, and the
-active revision and the published flag are left as they were (an entity's first
-revision is the exception: it becomes active, unpublished). A second submit
-whose base revision is no longer current is a conflict and writes nothing.
+`gdefcore_form_submit` writes the entity's draft (it checks no permission; the
+path in front of it does, above). A draft is never a revision (access SPEC
+decision 13): the newest revision and the published flag are left as they
+were, and readers, lists and conditions see none of it. The first submit for
+an entity nobody has saved makes the entity, with the submitter as its creator.
+A token's base is the entity's version when it was signed, which every write
+moves, a draft included: a submit once the entity has moved, a second submit of
+one token among them, is a conflict and writes nothing.
 
-`gdefcore_form_publish` sets the published flag and makes the head revision
-active; the revision keeps the creator it was written with, so publishing does
-not make the publisher the author. `gdefcore_entity_save` appends a revision,
-makes it active and sets the flag.
+`gdefcore_form_publish` applies the draft as the entity's next revision and sets
+the published flag; the revision's author is whoever submitted the draft, so
+publishing does not make the publisher the author, and the entity's creator
+stays whoever made it. A draft made from a revision that is no longer
+the newest is not applied: that is a conflict. `gdefcore_entity_save` writes a
+revision and sets the flag.
 
 ## Aliases
 

@@ -24,8 +24,8 @@
 #   list-counts-before-filter  CondAccess.ListCountsWhatIsGranted
 #   lookup-failure-reseeds     CondAccess.FailureNeverGrants (two plants)
 #   list-skips-the-flag        CondAccess.ReadAndListHonorTheExpression
-#   condition-reads-head       Cond.TheActiveRevisionIsWhatIsRead
-#   condition-reads-published  Cond.TheActiveRevisionIsWhatIsRead
+#   condition-reads-head       Cond.TheNewestRevisionIsWhatIsRead
+#   condition-reads-published  Cond.TheNewestRevisionIsWhatIsRead
 #   actor-still-written        Cond.EditionOneActorIsUpcastAndNotWrittenAnyMore
 #   upcast-does-nothing        Cond.EditionOneActorIsUpcastAndNotWrittenAnyMore, CondAccess.AStoredEditionOneGrantStillMeansWhatItMeant
 #   upcast-rewrites-constants  Cond.EditionOneActorIsUpcastAndNotWrittenAnyMore
@@ -157,8 +157,8 @@ plant trailing-garbage-accepted $PARSE testCondition 'Cond.RefusesBadSyntax' \
 # Plant 9: a personal field may be named in a condition.
 plant personal-field-allowed $PARSE testCondition \
   'Cond.PersonalFieldRefused CondAccess.DeclareRefusals' \
-  '      return personal == 0;' \
-  '      return 1;'
+  '  return out->found && !out->personal;' \
+  '  return out->found;'
 
 # Plant 10a: an evaluation that failed holds.
 plant failure-grants-in-eval $EVAL testCondition 'Cond.FailureNeverGrants' \
@@ -238,13 +238,13 @@ plant list-skips-the-flag $ACCESS testCondition 'CondAccess.ReadAndListHonorTheE
 
 # Plant 15: a condition reads the head revision, so a draft beside the active
 # revision decides who may do what.
-plant condition-reads-head $EVAL testCondition 'Cond.TheActiveRevisionIsWhatIsRead' \
+plant condition-reads-head $EVAL testCondition 'Cond.TheNewestRevisionIsWhatIsRead' \
   '  rc = gdefcore_entity_values(ctx->catalog, NULL, GDEFCORE_VIEW_ACTIVE,' \
   '  rc = gdefcore_entity_values(ctx->catalog, NULL, GDEFCORE_VIEW_DRAFT,'
 
 # Plant 16: a condition reads what readers see, so an entity that is not
 # published has no fields for a grant to hold on and its author cannot edit it.
-plant condition-reads-published $EVAL testCondition 'Cond.TheActiveRevisionIsWhatIsRead' \
+plant condition-reads-published $EVAL testCondition 'Cond.TheNewestRevisionIsWhatIsRead' \
   '  rc = gdefcore_entity_values(ctx->catalog, NULL, GDEFCORE_VIEW_ACTIVE,' \
   '  rc = gdefcore_entity_values(ctx->catalog, NULL, GDEFCORE_VIEW_PUBLISHED,'
 

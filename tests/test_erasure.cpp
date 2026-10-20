@@ -47,7 +47,8 @@
 #include <ghoti.io/archive/stream.h>
 #include <ghoti.io/defiant-core/defiant-core.h>
 #include <ghoti.io/defiant-storage-memory/memory.h>
-#include <ghoti.io/defiant-storage/projection.h>
+#include <ghoti.io/defiant-storage/model.h>
+#include <ghoti.io/defiant-storage/query.h>
 #include <ghoti.io/defiant-storage/revision.h>
 #include <ghoti.io/defiant-storage/snapshot.h>
 #include <ghoti.io/defiant-storage/store.h>
@@ -594,28 +595,96 @@ class Erasure : public ::testing::Test {
     AddKeyset(out, "key set " + stage);
     AddZip(out, "registry snapshot " + stage,
         StorageExport(registry_, kRegistryTenant, sizeof kRegistryTenant), false);
-    /* Revision documents are keyed by decimal row id, not public id, so walk
-     * the rows. A type is a row too; the walk reads those documents as well. */
+    /* Every recorded revision of every entity, in each language, as the
+     * port hands it back, and every draft (story S6b: the port's revisions
+     * replace core's revision documents). Walked by type, from the type
+     * records core keeps, so no entity is reached only through a list. */
     {
-      size_t row;
-      size_t seq;
       size_t docs = 0;
-      for (row = 1; row <= 48; row++) {
-        for (seq = 1; seq <= 12; seq++) {
-          uint8_t * doc = NULL;
-          size_t doc_len = 0;
-          std::string key = std::to_string(row);
-          if (gdefstor_revision_get(site_,
-                  reinterpret_cast<const char *>(storage_), sizeof storage_,
-                  key.data(), key.size(), seq, &doc, &doc_len) == GDEFSTOR_OK) {
-            AddText(out, "revision document row " + key + " #" +
-                             std::to_string(seq) + " " + stage,
-                B(doc, doc_len));
-            docs += 1;
-          }
-          gdefstor_bytes_free(NULL, doc);
+      const char * tenant = reinterpret_cast<const char *>(storage_);
+      GDEFSTOR_RecordList * types = NULL;
+      ASSERT_EQ(GDEFSTOR_OK,
+          gdefstor_record_list(site_, tenant, sizeof storage_, "core.type", 9,
+              "", 0, 0, GDEFSTOR_RECORD_MAX_PAGE, &types));
+      for (size_t ti = 0; ti < gdefstor_record_list_count(types); ti++) {
+        const char * tk = NULL;
+        size_t tkn = 0;
+        const uint8_t * tb = NULL;
+        size_t tbn = 0;
+        ASSERT_EQ(GDEFSTOR_OK,
+            gdefstor_record_list_item(types, ti, &tk, &tkn, &tb, &tbn));
+        GDEFSTOR_Type * type = NULL;
+        if (gdefstor_type_get(site_, tenant, sizeof storage_, tk, tkn, &type) !=
+            GDEFSTOR_OK) {
+          continue;
         }
+        GDEFSTOR_Query q;
+        memset(&q, 0, sizeof q);
+        q.size = sizeof q;
+        q.language = "en";
+        q.language_len = 2;
+        GDEFSTOR_QueryResult * r = NULL;
+        ASSERT_EQ(GDEFSTOR_OK,
+            gdefstor_entity_query(site_, tenant, sizeof storage_, tk, tkn, &q, &r));
+        for (size_t ri = 0; ri < gdefstor_query_result_rows(r); ri++) {
+          const char * pid = NULL;
+          size_t pn = 0;
+          ASSERT_EQ(GDEFSTOR_OK, gdefstor_query_result_entity(r, ri, &pid, &pn));
+          const std::string id(pid, pn);
+          for (const char * lang : {"en", "fr"}) {
+            GDEFSTOR_History * h = NULL;
+            if (gdefstor_entity_history(site_, tenant, sizeof storage_, id.data(),
+                    id.size(), lang, 2, &h) != GDEFSTOR_OK) {
+              continue;
+            }
+            for (size_t hi = 0; hi < gdefstor_history_revision_count(h); hi++) {
+              GDEFSTOR_RevisionInfo info;
+              memset(&info, 0, sizeof info);
+              info.size = sizeof info;
+              GDEFSTOR_Tree * tree = NULL;
+              uint8_t * json = NULL;
+              size_t jn = 0;
+              if (gdefstor_history_revision(h, hi, &info) != GDEFSTOR_OK ||
+                  gdefstor_entity_tree(site_, tenant, sizeof storage_, id.data(),
+                      id.size(), lang, 2, info.revision, &tree) != GDEFSTOR_OK) {
+                continue;
+              }
+              if (gdefstor_tree_to_json(type, tree, &json, &jn) == GDEFSTOR_OK) {
+                AddText(out, "revision document " + id + " #" +
+                                 std::to_string(info.revision) + " " + lang + " " +
+                                 stage,
+                    B(json, jn));
+                docs += 1;
+              }
+              gdefstor_bytes_free(NULL, json);
+              gdefstor_tree_free(tree);
+            }
+            gdefstor_history_free(h);
+          }
+          GDEFSTOR_Draft * d = NULL;
+          if (gdefstor_draft_get(site_, tenant, sizeof storage_, id.data(),
+                  id.size(), &d) == GDEFSTOR_OK) {
+            GDEFSTOR_DraftInfo di;
+            memset(&di, 0, sizeof di);
+            di.size = sizeof di;
+            if (gdefstor_draft_info(d, &di) == GDEFSTOR_OK) {
+              for (size_t k = 0; k < di.language_count; k++) {
+                GDEFSTOR_DraftTree dt;
+                memset(&dt, 0, sizeof dt);
+                dt.size = sizeof dt;
+                if (gdefstor_draft_tree(d, k, &dt) == GDEFSTOR_OK) {
+                  AddText(out, "revision document draft " + id + " " + stage,
+                      B(dt.json, dt.json_len));
+                }
+              }
+            }
+            gdefstor_draft_free(d);
+          }
+        }
+        gdefstor_query_result_free(r);
+        gdefstor_type_free(type);
       }
+      gdefstor_record_list_free(types);
       EXPECT_GE(docs, 8u) << "the revision walk found too few documents";
     }
     for (i = 0; i < 2; i++) {
@@ -954,6 +1023,14 @@ class Erasure : public ::testing::Test {
     EXPECT_EQ(GDEFCORE_OK,
         gdefcore_entity_revision_count(catalog_, entity, strlen(entity), &n));
     return n;
+  }
+
+  /* Every write moves it, a draft included (a form submit writes one). */
+  uint64_t Version(const char * entity) {
+    uint64_t v = 0;
+    EXPECT_EQ(GDEFCORE_OK,
+        gdefcore_entity_version(catalog_, entity, strlen(entity), &v));
+    return v;
   }
 
   size_t BlindCount(const char * subject) {
@@ -1386,13 +1463,13 @@ TEST_F(Erasure, FormPersonalField) {
   size_t token_len = 0;
   std::string held;
   int conflict = 7;
-  size_t before;
+  uint64_t before;
   DefinePerson();
   Login();
   ASSERT_EQ(GDEFCORE_OK, gdefcore_subject_create(subjects_, a_));
   NewPerson(entity);
   ASSERT_FALSE(HasFatalFailure());
-  before = Revisions(entity);
+  before = Version(entity);
 
   /* The plain sign has no subject to seal for. */
   OneValue(&value, kField, kCanary, &slot, &slot_len);
@@ -1408,7 +1485,7 @@ TEST_F(Erasure, FormPersonalField) {
   ASSERT_EQ(GDEFCORE_OK, SignFor(a_, entity, kCanary, &held));
   EXPECT_EQ(GDEFCORE_ERR_INVALID, SubmitPlain(held, &conflict));
   EXPECT_EQ(0, conflict);
-  EXPECT_EQ(before, Revisions(entity));
+  EXPECT_EQ(before, Version(entity));
   EXPECT_EQ("", Stored(entity, GDEFCORE_VIEW_DRAFT));
   EXPECT_EQ("", Stored(entity, GDEFCORE_VIEW_PUBLISHED));
   EXPECT_EQ(0u, BlindCount(a_));
@@ -1416,7 +1493,7 @@ TEST_F(Erasure, FormPersonalField) {
   /* The same token still goes through the subject route: the refusal was
    * about the route, not the token. */
   ASSERT_EQ(GDEFCORE_OK, SubmitFor(held, &conflict));
-  EXPECT_EQ(before + 1, Revisions(entity));
+  EXPECT_EQ(before + 1, Version(entity));
 
   AddForms(&needles, "canary", kCanary, false);
   AddZip(&arts, "tenant store snapshot", TenantExport(), true);
@@ -1623,13 +1700,11 @@ TEST_F(Erasure, PlaintextHistoryIsNotRestored) {
   EXPECT_EQ(published, Stored(entity, GDEFCORE_VIEW_PUBLISHED));
 }
 
-/* Making an old revision the active one puts its content in front of the
- * entity's readers without a new revision, so it is held to the same rule as
- * a revert: a revision from before the field was personal, which holds
- * plaintext, cannot be made active, whether the changeset is staged by the
- * call, applied, or read from a patch. A revision whose personal value is
- * sealed can, and then reads as that ciphertext. */
-TEST_F(Erasure, PlaintextRevisionIsNotActivated) {
+/* A revert to a revision from before the field was personal, which holds
+ * plaintext, is refused: there is no other way to make an old revision the
+ * content (access SPEC decision 13 retired `activate`, which this gate used to
+ * hold to the same rule). */
+TEST_F(Erasure, PlaintextRevisionCannotBecomeTheContentAgain) {
   GDEFCORE_Field field;
   GDEFCORE_Changeset * cs = NULL;
   GDEFCORE_Value value;
@@ -1656,10 +1731,11 @@ TEST_F(Erasure, PlaintextRevisionIsNotActivated) {
     ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, NULL, 0));
     gdefcore_changeset_destroy(cs);
   }
-  /* control, before the field is personal: the activate is allowed */
-  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
+  /* control, before the field is personal: the revert is allowed */
+  cs = NULL;
   EXPECT_EQ(GDEFCORE_OK,
-      gdefcore_entity_activate(cs, entity, strlen(entity), 1));
+      gdefcore_changeset_revert_to(catalog_, entity, strlen(entity), 1, NULL, 0,
+          &cs));
   gdefcore_changeset_destroy(cs);
   /* The field becomes personal. */
   field.personal = 1;
@@ -1672,16 +1748,15 @@ TEST_F(Erasure, PlaintextRevisionIsNotActivated) {
   revisions = Revisions(entity);
   stored = Stored(entity, GDEFCORE_VIEW_PUBLISHED);
   ASSERT_EQ("plain-two", stored);
-  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
-  EXPECT_NE(GDEFCORE_OK, gdefcore_entity_activate(cs, entity, strlen(entity), 1));
-  EXPECT_NE(GDEFCORE_OK, gdefcore_entity_activate(cs, entity, strlen(entity), 2));
-  gdefcore_changeset_destroy(cs);
-  /* nor can it be restored under another name */
-  cs = NULL;
-  EXPECT_NE(GDEFCORE_OK,
-      gdefcore_changeset_revert_to(catalog_, entity, strlen(entity), 1, NULL, 0,
-          &cs));
-  gdefcore_changeset_destroy(cs);
+  /* neither plaintext revision can be restored */
+  for (uint64_t seq : {1u, 2u}) {
+    cs = NULL;
+    EXPECT_NE(GDEFCORE_OK,
+        gdefcore_changeset_revert_to(catalog_, entity, strlen(entity), seq, NULL,
+            0, &cs))
+        << seq;
+    gdefcore_changeset_destroy(cs);
+  }
   EXPECT_EQ(revisions, Revisions(entity));
   EXPECT_EQ(stored, Stored(entity, GDEFCORE_VIEW_PUBLISHED));
 }
@@ -1691,13 +1766,15 @@ TEST_F(Erasure, PlaintextRevisionIsNotActivated) {
  * a personal field is refused. */
 /* A revision view is an output like any other (story A5b task 8). Before the
  * person is erased it says a personal value is there and shows none of it; after
- * it says [erased]; the survivor's is not touched. Making an old revision of the
- * erased person active puts its ciphertext in front of readers and nothing
- * else: no output carries the value, the ciphertext, or a form of either. */
-TEST_F(Erasure, RevisionViewsAndAnActivatedOldRevisionOfAnErasedSubject) {
+ * it says [erased]; the survivor's is not touched. Reverting to an old revision
+ * of the erased person (a new revision that copies it: there is no activate
+ * since access SPEC decision 13) puts its ciphertext in front of readers and
+ * nothing else: no output carries the value, the ciphertext, or a form of
+ * either. */
+TEST_F(Erasure, RevisionViewsAndARestoredOldRevisionOfAnErasedSubject) {
   std::vector<Artifact> pre;
   std::vector<Artifact> post;
-  std::vector<Artifact> activated;
+  std::vector<Artifact> restored;
   std::vector<std::string> values;
   std::vector<std::string> leaks;
   Populate();
@@ -1745,25 +1822,26 @@ TEST_F(Erasure, RevisionViewsAndAnActivatedOldRevisionOfAnErasedSubject) {
   leaks = Sweep(post, needles_);
   EXPECT_TRUE(leaks.empty()) << Joined(leaks);
 
-  /* Make the first revision (the first canary's ciphertext) active again. */
+  /* Make the first revision (the first canary's ciphertext) the content
+   * again. */
   {
     GDEFCORE_Changeset * cs = NULL;
-    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
-    ASSERT_EQ(GDEFCORE_OK, gdefcore_entity_activate(cs, ea_, strlen(ea_), 1));
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_changeset_revert_to(catalog_, ea_, strlen(ea_), 1, NULL, 0, &cs));
     ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, NULL, 0));
     gdefcore_changeset_destroy(cs);
   }
   EXPECT_EQ(0u, Stored(ea_, GDEFCORE_VIEW_ACTIVE).compare(0, 3, "s1:"));
   EXPECT_EQ(GDEFCORE_SUBJECT_ERASED, ReadAs(a_, ea_));
   EXPECT_EQ("erased:[erased]", RevisionView(ea_, 1, "en", a_));
-  Collect(&activated, "activated");
+  Collect(&restored, "restored");
   ASSERT_FALSE(HasFatalFailure());
-  leaks = Sweep(activated, needles_);
-  EXPECT_TRUE(leaks.empty()) << "an activated old revision of an erased subject "
+  leaks = Sweep(restored, needles_);
+  EXPECT_TRUE(leaks.empty()) << "a restored old revision of an erased subject "
                                 "reached an output:" << Joined(leaks);
   /* The sweep still sees the survivor: it did not go blind. */
-  EXPECT_FALSE(FoundIn(activated, Bytes("s1:"), "output: revision view"));
-  EXPECT_TRUE(FoundIn(activated, kSurvivor, "output: export of b"));
+  EXPECT_FALSE(FoundIn(restored, Bytes("s1:"), "output: revision view"));
+  EXPECT_TRUE(FoundIn(restored, kSurvivor, "output: export of b"));
 }
 
 /*

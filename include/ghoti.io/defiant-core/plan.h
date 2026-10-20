@@ -41,12 +41,17 @@
  *   or a field the type no longer has) fails only when evaluation reaches it,
  *   and then the whole condition does not hold, `not` included. The compiled
  *   form carries the "reached" condition as a second predicate.
- * - `state` is the published flag of the entity record: "published" when it
- *   is set, else "draft".
- * - `creator` is the record's creator and `revision.creator` the active
- *   revision's, each none (not the empty text) when absent; a field absent
- *   from the revision, or without values, is the single empty text.
+ * - `state` is the published fact of the entity: "published" when it is
+ *   set, else "draft".
+ * - `creator` is the entity's creator and `revision.creator` the author of
+ *   its newest revision, each none (not the empty text) when absent; a field
+ *   with no value in the plan's language is the single empty text.
+ * - Fields are typed, and compared as condition.h says.
  * - `now` and `principal` are the plan's, as constants.
+ *
+ * The predicate is of the port's form over entities: it reads the current
+ * trees of the plan's language, and a relation as an EXISTS over its rows,
+ * which are kept in their own language (relation.h).
  *
  * Every builder returns NULL when it could not build (out of memory, or a
  * plan grown past ::GDEFCORE_PLAN_MAX_NODES, or something the query form
@@ -82,7 +87,10 @@ typedef struct GDEFCORE_Plan GDEFCORE_Plan;
  *   which are personal and which hold several values. Borrowed until the plan
  *   is freed.
  * @param type_name The entity type. Copied.
- * @param lang The language fields are read in. Copied.
+ * @param lang The language fields are read in. Copied. The port's query
+ *   binds one language (GDEFSTOR_Query::language) and the plan's nodes carry
+ *   none, so a query built from them must bind this one; a relation's EXISTS
+ *   names its rows' own.
  * @param principal The request's principal, or NULL for none. Copied.
  * @param now The request clock, in seconds.
  * @param out_plan Receives the plan.
@@ -140,7 +148,8 @@ GDEFCORE_API const GDEFSTOR_QueryNode * gdefcore_plan_or(GDEFCORE_Plan * plan,
 
 /**
  * @brief A field of the entity has the value @p text, other than "-" (the
- * mark the access list's filter has always ignored). A field with no value
+ * mark the access list's filter has always ignored), read in the field's
+ * type: a text that is no value of it matches nothing. A field with no value
  * has none, and so matches nothing. NULL for a personal field or one the
  * type lacks, with the plan marked unsupported: those are read as stored.
  */
@@ -162,8 +171,10 @@ GDEFCORE_API int gdefcore_plan_relation_at(const GDEFCORE_Plan * plan,
     size_t index, const char ** out_name, size_t * out_len);
 
 /**
- * @brief A sort key: the first value of a field, the empty text when it has
- * none. NULL under the same rules as gdefcore_plan_field_is().
+ * @brief A sort key: the first value of a field (by its order in the
+ * entity), in the field's type; a text or reference with none sorts as the
+ * empty text, any other field with none first. NULL under the same rules as
+ * gdefcore_plan_field_is().
  */
 GDEFCORE_API const GDEFSTOR_QuerySort * gdefcore_plan_sort_field(
     GDEFCORE_Plan * plan, const char * field, size_t field_len,

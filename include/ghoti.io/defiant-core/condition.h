@@ -32,9 +32,20 @@
  * Operands: `type`, `state`, `creator`, `revision.creator`, `principal`,
  * `now`, `field.<name>`, text constants and integer constants. `creator` is
  * who created the entity (immutable, and what `own` means);
- * `revision.creator` is who wrote the revision that is now active. Edition 1
- * called the second `actor`; see gdefcore_condition_upcast(). Operators: `=`, `!=`, `<`, `<=`,
- * `>`, `>=`, `in`, `and`, `or`, `not`, and the words `true` and `false`.
+ * `revision.creator` is who wrote its newest revision. Edition 1 called the
+ * second `actor`; see gdefcore_condition_upcast(). Operators: `=`, `!=`, `<`,
+ * `<=`, `>`, `>=`, `in`, `and`, `or`, `not`, and the words `true` and `false`.
+ *
+ * Fields are typed (entity.h). A text or reference field compares by bytes,
+ * as every operand did before fields had types. A field of any other type
+ * compares in its type: a constant is read as a value of it (`"07"` equals an
+ * integer 7, and a text that is no value of the type equals none of its),
+ * `now` is that instant in its type, and an identifier never equals it. `<`,
+ * `<=`, `>` and `>=` need a number, a date or a date-time field wherever a
+ * field is compared (access SPEC decision 12): ordering a text, reference or
+ * boolean field is refused by gdefcore_condition_validate(), as is comparing
+ * two fields of different types, and a stored condition that does either
+ * fails. Without a field, an ordering reads both sides as integers.
  * `(related "<relation>" (<operand> ...))` holds when a module's relation
  * (module.h) has a row whose columns equal the listed operands, in order; an
  * operand `_` leaves its column free. At most four relations in one condition.
@@ -157,7 +168,9 @@ GDEFCORE_API void gdefcore_condition_free(GDEFCORE_Condition * condition);
  * not be personal (AD-19: a personal field is refused with the same message
  * as a field the type does not have). A type constant compared with `type`
  * must name a defined type. A state constant compared with `state` must be
- * `published` or `draft`.
+ * `published` or `draft`. An ordering of a field that is not a number, a
+ * date or a date-time, and a comparison of two fields of different types,
+ * are refused, at the offset of the field.
  *
  * @return ::GDEFCORE_OK or ::GDEFCORE_ERR_INVALID with @p out_error set.
  */
@@ -174,8 +187,9 @@ GDEFCORE_API GDEFCORE_Result gdefcore_condition_validate(
  * when @p projection is not NULL, of the modules that changeset enables or
  * disables: the relation must be declared, the operands must be as many as its
  * columns, and each operand's kind must suit its column (an entity column takes
- * `principal`, `creator`, `revision.creator`, a field or a public id; an integer
- * column an integer, `now` or a field; a text column anything). The error says
+ * `principal`, `creator`, `revision.creator`, a text or reference field or a
+ * public id; an integer column an integer, `now` or an integer field; a text
+ * column anything but a field of a type other than text and reference). The error says
  * which, at the byte offset of the clause or the operand.
  */
 GDEFCORE_API GDEFCORE_Result gdefcore_condition_validate_in(
@@ -206,7 +220,7 @@ GDEFCORE_API void gdefcore_condition_text_free(char * text);
  *
  * Edition 1 named the operand for who wrote the entity's content `actor`.
  * Edition 2 splits it: `creator` (the entity's, immutable) and
- * `revision.creator` (the active revision's). A stored `actor` meant the
+ * `revision.creator` (the newest revision's). A stored `actor` meant the
  * second, so from edition 1 this renames that one operand to
  * `revision.creator`, leaving text constants alone. From edition 2 it copies.
  * Text already in edition 2 has no bare `actor`, so upcasting it is the

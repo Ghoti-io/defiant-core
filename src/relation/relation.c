@@ -22,10 +22,13 @@
  * @file
  *
  * The rows of the relations modules declare: the writes, and the version
- * counter. A row is an entity of `core.relation_row`; a relation that has had a
- * row has an entity of `core.relation`, whose version counter every change to
- * the relation's rows bumps in the same changeset. Nothing here reads a row
- * for a caller; the evaluator and the list compiler read them (condition.h).
+ * counter. A row is an entity of `core.relation_row`, its relation's name in
+ * `relation` and each column in the field of its kind: an entity or a text
+ * column in `c0`..`c3` (text), an integer column in `n0`..`n3` (integer). A
+ * relation that has had a row has an entity of `core.relation`, whose
+ * `changes` every change to the relation's rows counts in the same changeset,
+ * so its version moves with them. Nothing here reads a row for a caller; the
+ * evaluator and the list compiler read them (condition.h).
  */
 
 #include <ghoti.io/defiant-core/macros.h>
@@ -48,18 +51,32 @@ static const char kNameField[] = GDEFCORE_RELATION_FIELD_NAME;
 static const char kLang[] = GDEFCORE_RELATION_LANG;
 static const char * const kColumnField[GDEFCORE_RELATION_COLUMNS_MAX] = {
     "c0", "c1", "c2", "c3"};
+static const char * const kNumberField[GDEFCORE_RELATION_COLUMNS_MAX] = {
+    "n0", "n1", "n2", "n3"};
 
 const char * gdefcore_relation_column_field(size_t index) {
   return index < GDEFCORE_RELATION_COLUMNS_MAX ? kColumnField[index] : NULL;
 }
 
-static GDEFCORE_Field make_field(const char * name, int required) {
+const char * gdefcore_relation_number_field(size_t index) {
+  return index < GDEFCORE_RELATION_COLUMNS_MAX ? kNumberField[index] : NULL;
+}
+
+/* The field of a row that holds column @p index of a column of @p kind. */
+static const char * column_of(int kind, size_t index) {
+  return kind == GDEFCORE_RELATION_INTEGER ? kNumberField[index]
+                                           : kColumnField[index];
+}
+
+static GDEFCORE_Field make_field(const char * name, int required, int type) {
   GDEFCORE_Field f;
   memset(&f, 0, sizeof f);
   f.size = sizeof f;
   f.name = name;
   f.name_len = strlen(name);
   f.required = required;
+  f.type = type;
+  f.indexed = 1;
   return f;
 }
 
@@ -69,24 +86,28 @@ static GDEFCORE_Result ensure_types(GDEFCORE_Catalog * catalog) {
   GDEFCORE_Result rc;
   if (gdefcore_type_kind(catalog, kRowType, strlen(kRowType), &kind) !=
       GDEFCORE_OK) {
-    GDEFCORE_Field f[1 + GDEFCORE_RELATION_COLUMNS_MAX];
+    GDEFCORE_Field f[1 + 2 * GDEFCORE_RELATION_COLUMNS_MAX];
     size_t i;
-    f[0] = make_field(kNameField, 1);
+    f[0] = make_field(kNameField, 1, GDEFSTOR_FIELD_TEXT);
     for (i = 0; i < GDEFCORE_RELATION_COLUMNS_MAX; i++) {
-      f[1 + i] = make_field(kColumnField[i], 0);
+      f[1 + i] = make_field(kColumnField[i], 0, GDEFSTOR_FIELD_TEXT);
+      f[1 + GDEFCORE_RELATION_COLUMNS_MAX + i] =
+          make_field(kNumberField[i], 0, GDEFSTOR_FIELD_INTEGER);
     }
     rc = gdefcore_type_define(catalog, kRowType, strlen(kRowType),
-        GDEFCORE_TYPE_CONTENT, f, 1 + GDEFCORE_RELATION_COLUMNS_MAX);
+        GDEFCORE_TYPE_CONTENT, f, 1 + 2 * GDEFCORE_RELATION_COLUMNS_MAX);
     if (rc != GDEFCORE_OK) {
       return rc;
     }
   }
   if (gdefcore_type_kind(catalog, kStateType, strlen(kStateType), &kind) !=
       GDEFCORE_OK) {
-    GDEFCORE_Field f[1];
-    f[0] = make_field("name", 1);
+    GDEFCORE_Field f[2];
+    f[0] = make_field("name", 1, GDEFSTOR_FIELD_TEXT);
+    f[1] = make_field("changes", 0, GDEFSTOR_FIELD_INTEGER);
+    f[1].indexed = 0;
     rc = gdefcore_type_define(catalog, kStateType, strlen(kStateType),
-        GDEFCORE_TYPE_CONTENT, f, 1);
+        GDEFCORE_TYPE_CONTENT, f, 2);
     if (rc != GDEFCORE_OK) {
       return rc;
     }
@@ -198,49 +219,55 @@ static int store_value(int kind, const char * v, size_t n, Stored * out) {
 /* ---- finding rows -------------------------------------------------------- */
 
 typedef struct Keep {
-  GDEFSTOR_QueryText texts[1 + GDEFCORE_RELATION_COLUMNS_MAX];
+  GDEFSTOR_Value values[1 + GDEFCORE_RELATION_COLUMNS_MAX];
   GDEFSTOR_QueryNode leaves[1 + GDEFCORE_RELATION_COLUMNS_MAX];
   const GDEFSTOR_QueryNode * kids[1 + GDEFCORE_RELATION_COLUMNS_MAX];
   GDEFSTOR_QueryNode root;
 } Keep;
 
-static void row_field(GDEFSTOR_QueryOperand * o, const char * field) {
-  memset(o, 0, sizeof *o);
-  o->kind = GDEFSTOR_QUERY_COLUMN;
-  o->column = GDEFCORE_QUERY_COL_DOC;
-  o->column_len = strlen(GDEFCORE_QUERY_COL_DOC);
-  o->path_depth = 2;
-  o->path1 = kLang;
-  o->path1_len = strlen(kLang);
-  o->path2 = field;
-  o->path2_len = strlen(field);
+/* field = value, for one leaf. */
+static void leaf_eq(GDEFSTOR_QueryNode * n, const char * field,
+    GDEFSTOR_Value * value) {
+  memset(n, 0, sizeof *n);
+  n->op = GDEFSTOR_QUERY_EQ;
+  n->left.kind = GDEFSTOR_QUERY_FIELD;
+  n->left.field = field;
+  n->left.field_len = strlen(field);
+  n->right.kind = GDEFSTOR_QUERY_VALUES;
+  n->right.values = value;
+  n->right.value_count = 1;
+}
+
+/* A stored value as the port's typed constant of its column's field. */
+static int column_value(int kind, const Stored * v, GDEFSTOR_Value * out) {
+  memset(out, 0, sizeof *out);
+  if (kind == GDEFCORE_RELATION_INTEGER) {
+    return gdefcore_value_parse(GDEFSTOR_FIELD_INTEGER, 0, v->text, v->len,
+               out) == GDEFCORE_OK;
+  }
+  out->type = GDEFSTOR_FIELD_TEXT;
+  out->bytes = (const uint8_t *)v->text;
+  out->len = v->len;
+  return 1;
 }
 
 /* name = relation, and each column given equal to its value. */
 static void build_where(Keep * k, const char * relation, size_t relation_len,
-    const Stored * stored, const int * given, size_t ncolumns) {
+    const Stored * stored, const int * given, const Declared * decl) {
   size_t n = 0;
   size_t i;
   memset(k, 0, sizeof *k);
-  k->texts[0].bytes = (const uint8_t *)relation;
-  k->texts[0].len = relation_len;
-  k->leaves[0].op = GDEFSTOR_QUERY_EQ;
-  row_field(&k->leaves[0].left, kNameField);
-  k->leaves[0].right.kind = GDEFSTOR_QUERY_CONST;
-  k->leaves[0].right.texts = &k->texts[0];
-  k->leaves[0].right.text_count = 1;
+  k->values[0].type = GDEFSTOR_FIELD_TEXT;
+  k->values[0].bytes = (const uint8_t *)relation;
+  k->values[0].len = relation_len;
+  leaf_eq(&k->leaves[0], kNameField, &k->values[0]);
   k->kids[n++] = &k->leaves[0];
-  for (i = 0; i < ncolumns; i++) {
+  for (i = 0; i < decl->ncolumns; i++) {
     if (!given[i]) {
       continue;
     }
-    k->texts[1 + i].bytes = (const uint8_t *)stored[i].text;
-    k->texts[1 + i].len = stored[i].len;
-    k->leaves[1 + i].op = GDEFSTOR_QUERY_EQ;
-    row_field(&k->leaves[1 + i].left, kColumnField[i]);
-    k->leaves[1 + i].right.kind = GDEFSTOR_QUERY_CONST;
-    k->leaves[1 + i].right.texts = &k->texts[1 + i];
-    k->leaves[1 + i].right.text_count = 1;
+    (void)column_value(decl->kinds[i], &stored[i], &k->values[1 + i]);
+    leaf_eq(&k->leaves[1 + i], column_of(decl->kinds[i], i), &k->values[1 + i]);
     k->kids[n++] = &k->leaves[1 + i];
   }
   k->root.op = GDEFSTOR_QUERY_AND;
@@ -250,15 +277,16 @@ static void build_where(Keep * k, const char * relation, size_t relation_len,
 
 static GDEFCORE_Result find_rows(GDEFCORE_Catalog * catalog,
     const char * relation, size_t relation_len, const Stored * stored,
-    const int * given, size_t ncolumns, uint64_t limit, char *** ids,
+    const int * given, const Declared * decl, uint64_t limit, char *** ids,
     size_t * n) {
   Keep keep;
   GDEFSTOR_Query q;
-  build_where(&keep, relation, relation_len, stored, given, ncolumns);
+  build_where(&keep, relation, relation_len, stored, given, decl);
   memset(&q, 0, sizeof q);
   q.size = sizeof q;
   q.where = &keep.root;
-  q.entity_numeric = 1;
+  q.language = kLang;
+  q.language_len = strlen(kLang);
   q.limit = limit;
   return gdefcore_entity_query_active(catalog, kRowType, strlen(kRowType), &q,
       ids, n, NULL);
@@ -268,32 +296,23 @@ static GDEFCORE_Result find_rows(GDEFCORE_Catalog * catalog,
 static GDEFCORE_Result find_state(GDEFCORE_Catalog * catalog,
     const char * relation, size_t relation_len, char out[GDEFCORE_PUBLIC_ID_LEN + 1],
     int * out_found) {
-  GDEFSTOR_QueryText text;
+  GDEFSTOR_Value value;
   GDEFSTOR_QueryNode leaf;
   GDEFSTOR_Query q;
   char ** ids = NULL;
   size_t n = 0;
   GDEFCORE_Result rc;
   *out_found = 0;
-  memset(&leaf, 0, sizeof leaf);
-  text.bytes = (const uint8_t *)relation;
-  text.len = relation_len;
-  leaf.op = GDEFSTOR_QUERY_EQ;
-  memset(&leaf.left, 0, sizeof leaf.left);
-  leaf.left.kind = GDEFSTOR_QUERY_COLUMN;
-  leaf.left.column = GDEFCORE_QUERY_COL_DOC;
-  leaf.left.column_len = strlen(GDEFCORE_QUERY_COL_DOC);
-  leaf.left.path_depth = 2;
-  leaf.left.path1 = kLang;
-  leaf.left.path1_len = strlen(kLang);
-  leaf.left.path2 = "name";
-  leaf.left.path2_len = 4;
-  leaf.right.kind = GDEFSTOR_QUERY_CONST;
-  leaf.right.texts = &text;
-  leaf.right.text_count = 1;
+  memset(&value, 0, sizeof value);
+  value.type = GDEFSTOR_FIELD_TEXT;
+  value.bytes = (const uint8_t *)relation;
+  value.len = relation_len;
+  leaf_eq(&leaf, "name", &value);
   memset(&q, 0, sizeof q);
   q.size = sizeof q;
   q.where = &leaf;
+  q.language = kLang;
+  q.language_len = strlen(kLang);
   q.limit = 1;
   rc = gdefcore_entity_query_active(catalog, kStateType, strlen(kStateType), &q,
       &ids, &n, NULL);
@@ -419,6 +438,45 @@ static GDEFCORE_Result state_entity(GDEFCORE_Catalog * catalog,
       NULL);
 }
 
+/* Stage the relation's state: its name and one more change, so that its
+ * version moves in the changeset that changes its rows (a save that changed
+ * nothing would write nothing, story S6b). */
+static GDEFCORE_Result stage_state(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Changeset * cs, const char * state_id, const char * relation,
+    size_t relation_len) {
+  char ** texts = NULL;
+  size_t * lens = NULL;
+  size_t n = 0;
+  uint64_t changes = 0;
+  char text[32];
+  int wn;
+  GDEFCORE_Value vals[2];
+  const char * slot[2];
+  size_t slot_len[2];
+  GDEFCORE_Result rc = gdefcore_entity_values(catalog, NULL,
+      GDEFCORE_VIEW_ACTIVE, state_id, GDEFCORE_PUBLIC_ID_LEN, kLang,
+      strlen(kLang), "changes", 7, &texts, &lens, &n);
+  if (rc == GDEFCORE_OK && n == 1) {
+    size_t i;
+    for (i = 0; i < lens[0]; i++) {
+      changes = changes * 10u + (uint64_t)(texts[0][i] - '0');
+    }
+  }
+  if (rc == GDEFCORE_OK) {
+    gdefcore_values_free(catalog, texts, lens, n);
+  } else if (rc != GDEFCORE_ERR_INVALID) {
+    return rc;
+  }
+  wn = snprintf(text, sizeof text, "%llu", (unsigned long long)(changes + 1));
+  if (wn <= 0 || (size_t)wn >= sizeof text) {
+    return GDEFCORE_ERR_LIMIT;
+  }
+  one_value(&vals[0], "name", relation, relation_len, &slot[0], &slot_len[0]);
+  one_value(&vals[1], "changes", text, (size_t)wn, &slot[1], &slot_len[1]);
+  return gdefcore_entity_save(cs, state_id, GDEFCORE_PUBLIC_ID_LEN, kLang,
+      strlen(kLang), vals, 2);
+}
+
 GDEFCORE_Result gdefcore_relation_add(GDEFCORE_Catalog * catalog,
     const char * module, size_t module_len, const char * relation,
     size_t relation_len, const char * const * values, const size_t * value_lens,
@@ -435,9 +493,6 @@ GDEFCORE_Result gdefcore_relation_add(GDEFCORE_Catalog * catalog,
   GDEFCORE_Value vals[1 + GDEFCORE_RELATION_COLUMNS_MAX];
   const char * slot[1 + GDEFCORE_RELATION_COLUMNS_MAX];
   size_t slot_len[1 + GDEFCORE_RELATION_COLUMNS_MAX];
-  GDEFCORE_Value state_value;
-  const char * state_slot;
-  size_t state_slot_len;
   GDEFCORE_Result rc;
   if (out_added != NULL) {
     *out_added = 0;
@@ -453,8 +508,8 @@ GDEFCORE_Result gdefcore_relation_add(GDEFCORE_Catalog * catalog,
   if (rc != GDEFCORE_OK) {
     return rc;
   }
-  rc = find_rows(catalog, relation, relation_len, stored, given, count, 1, &ids,
-      &n);
+  rc = find_rows(catalog, relation, relation_len, stored, given, &decl, 1,
+      &ids, &n);
   if (rc != GDEFCORE_OK) {
     return rc;
   }
@@ -475,7 +530,8 @@ GDEFCORE_Result gdefcore_relation_add(GDEFCORE_Catalog * catalog,
   }
   one_value(&vals[0], kNameField, relation, relation_len, &slot[0], &slot_len[0]);
   for (i = 0; i < count; i++) {
-    one_value(&vals[1 + i], kColumnField[i], stored[i].text, stored[i].len,
+    one_value(&vals[1 + i], column_of(decl.kinds[i], i), stored[i].text,
+        stored[i].len,
         &slot[1 + i], &slot_len[1 + i]);
   }
   rc = gdefcore_entity_save(cs, row_id, GDEFCORE_PUBLIC_ID_LEN, kLang,
@@ -483,10 +539,7 @@ GDEFCORE_Result gdefcore_relation_add(GDEFCORE_Catalog * catalog,
   if (rc == GDEFCORE_OK) {
     /* The same changeset touches the relation, so its version moves with the
      * row or not at all. */
-    one_value(&state_value, "name", relation, relation_len, &state_slot,
-        &state_slot_len);
-    rc = gdefcore_entity_save(cs, state_id, GDEFCORE_PUBLIC_ID_LEN, kLang,
-        strlen(kLang), &state_value, 1);
+    rc = stage_state(catalog, cs, state_id, relation, relation_len);
   }
   if (rc == GDEFCORE_OK) {
     rc = gdefcore_changeset_apply(cs, NULL, 0);
@@ -529,10 +582,7 @@ GDEFCORE_Result gdefcore_relation_remove(GDEFCORE_Catalog * catalog,
     size_t i;
     GDEFCORE_Changeset * cs = NULL;
     char state_id[GDEFCORE_PUBLIC_ID_LEN + 1];
-    GDEFCORE_Value state_value;
-    const char * state_slot;
-    size_t state_slot_len;
-    rc = find_rows(catalog, relation, relation_len, stored, given, count,
+    rc = find_rows(catalog, relation, relation_len, stored, given, &decl,
         kRemoveBatch, &ids, &n);
     if (rc != GDEFCORE_OK) {
       return rc;
@@ -549,10 +599,7 @@ GDEFCORE_Result gdefcore_relation_remove(GDEFCORE_Catalog * catalog,
       rc = gdefcore_entity_clear(cs, ids[i], GDEFCORE_PUBLIC_ID_LEN);
     }
     if (rc == GDEFCORE_OK) {
-      one_value(&state_value, "name", relation, relation_len, &state_slot,
-          &state_slot_len);
-      rc = gdefcore_entity_save(cs, state_id, GDEFCORE_PUBLIC_ID_LEN, kLang,
-          strlen(kLang), &state_value, 1);
+      rc = stage_state(catalog, cs, state_id, relation, relation_len);
     }
     if (rc == GDEFCORE_OK) {
       rc = gdefcore_changeset_apply(cs, NULL, 0);

@@ -29,6 +29,7 @@
 
 #include <ghoti.io/defiant-core/macros.h>
 #include <ghoti.io/defiant-core/condition.h>
+#include <ghoti.io/defiant-core/entity.h>
 
 #include <stddef.h>
 #include <stdint.h>
@@ -90,5 +91,45 @@ struct GDEFCORE_Condition {
 
 /* True when text is an integer: -?[0-9]{1,18}. */
 int cond_parse_int(const char * p, size_t n, int64_t * out);
+
+/*
+ * Fields have logical types (entity.h). The evaluator and the list compiler
+ * read a comparison the same way (condition_types.c):
+ *
+ * - A field's values are typed; one with no value reads as the single empty
+ *   text, as it always has. Constants, `type`, `state` and `now` are texts;
+ *   `principal`, `creator` and `revision.creator` are identifiers.
+ * - `=`, `!=` and `in`: a text or reference field compares by bytes with
+ *   texts and identifiers; any other field reads a text in its own type (a
+ *   text that is not one of its type equals no value of it) and never equals
+ *   an identifier; `now` is that number in the field's type. Two fields
+ *   compare when both are text or reference, or both of one type.
+ * - `<`, `<=`, `>`, `>=` need a numeric or temporal field on a field side
+ *   (access SPEC decision 12); two fields need one type. A text that is not
+ *   a value of the type makes its pair false. Without a field both sides are
+ *   read as integers, as before.
+ * - A comparison these rules do not allow (an ordering of a text field, two
+ *   fields of different types) fails: it holds for nothing, `not` included,
+ *   and gdefcore_condition_validate() refuses it.
+ */
+typedef struct CondField {
+  int found;
+  int personal;
+  int many;
+  int type;
+  int scale;
+} CondField;
+
+/* What a field of the type is. 0, or 1 when the type cannot be read. */
+int cond_field_info(GDEFCORE_Catalog * catalog, const char * type,
+    size_t type_len, const char * name, size_t name_len, CondField * out);
+/* An integer, decimal, float, date or date-time. */
+int cond_numeric_type(int type);
+/* A text or a reference: compared by bytes. */
+int cond_texty_type(int type);
+/* Two fields' types can be compared with `=` (and, numeric, ordered). */
+int cond_types_meet(int ta, int sa, int tb, int sb);
+/* `now` (seconds) as a value of a field of @p type: 0 when it is none. */
+int cond_now_as(int type, int scale, int64_t now, GDEFSTOR_Value * out);
 
 #endif /* GHOTI_IO_GDEFCORE_SRC_CONDITION_CONDITION_INTERNAL_H */

@@ -176,7 +176,17 @@ class Form : public ::testing::Test {
     return value;
   }
 
-  uint64_t Revision(const char * id) {
+  /* The entity's version: every write moves it, a draft included (a form
+   * submit writes a draft, which is never a revision). */
+  uint64_t Version(const char * id) {
+    uint64_t v = 99;
+    EXPECT_EQ(GDEFCORE_OK,
+        gdefcore_entity_version(catalog_, id, strlen(id), &v));
+    return v;
+  }
+
+  /* The newest revision. */
+  uint64_t Head(const char * id) {
     uint64_t seq = 99;
     EXPECT_EQ(GDEFCORE_OK,
         gdefcore_entity_revision(catalog_, id, strlen(id), &seq));
@@ -320,7 +330,7 @@ TEST_F(Form, Tree) {
  * clear removed the head, the active revision, whether or not it is published
  * (it used to look for a published one, so a restored but unpublished entity
  * opened as an empty form). */
-TEST_F(Form, TreeFallsBackToTheActiveRevision) {
+TEST_F(Form, TreeFallsBackToTheCurrentRevision) {
   GDEFCORE_Field field = Field("title", 1, 2, 12, 0, 0, 0, NULL);
   GDEFCORE_Value value;
   const char * slot = NULL;
@@ -356,22 +366,26 @@ TEST_F(Form, TreeFallsBackToTheActiveRevision) {
         gdefcore_entity_save(cs, id, strlen(id), "en", 2, &value, 1));
     Apply(cs);
   }
-  EXPECT_EQ("Second", Shown());   /* control: the head */
+  EXPECT_EQ("Second", Shown());   /* control: the newest revision */
   GDEFCORE_Changeset * cs = NULL;
   ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
-  ASSERT_EQ(GDEFCORE_OK, gdefcore_entity_activate(cs, id, strlen(id), 1));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_entity_clear(cs, id, strlen(id)));
   Apply(cs);
-  ASSERT_EQ(GDEFCORE_OK,
-      gdefcore_changeset_revert(catalog_, id, strlen(id), NULL, 0, &cs));
-  Apply(cs);                       /* the active revision is the first: a clear */
   EXPECT_EQ("<none>", Shown());   /* cleared: nothing to edit */
-  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
-  ASSERT_EQ(GDEFCORE_OK, gdefcore_entity_activate(cs, id, strlen(id), 1));
-  Apply(cs);                       /* restored, not the head, not published */
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_changeset_revert_to(catalog_, id, strlen(id), 1, NULL, 0, &cs));
+  Apply(cs);                       /* restored as a new revision, not published */
   int state = 0;
   ASSERT_EQ(GDEFCORE_OK, gdefcore_entity_state(catalog_, id, strlen(id), &state));
   ASSERT_EQ(GDEFCORE_STATE_DRAFT, state);
   EXPECT_EQ("First", Shown());
+  /* A draft over it is what the form opens. */
+  OneValue(&value, "title", "Third", &slot, &len_slot);
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_entity_save_draft(cs, id, strlen(id), "en", 2, &value, 1));
+  Apply(cs);
+  EXPECT_EQ("Third", Shown());
 }
 
 TEST_F(Form, Constraint) {
@@ -390,7 +404,7 @@ TEST_F(Form, Constraint) {
       gdefcore_form_sign(catalog_, request_, keyring_, root_, sizeof root_,
           session_.data(), session_.size(), "edit", 4, id, strlen(id), "en", 2,
           &value, 1, NULL, 0, &token, &n));
-  EXPECT_EQ(0u, Revision(id));
+  EXPECT_EQ(0u, Version(id));
   OneValue(&value, "title", "abcdef", &slot, &len_slot);
   EXPECT_NE(GDEFCORE_OK,
       gdefcore_form_sign(catalog_, request_, keyring_, root_, sizeof root_,
@@ -398,7 +412,7 @@ TEST_F(Form, Constraint) {
           &value, 1, NULL, 0, &token, &n));
   OneValue(&value, "title", "abcd", &slot, &len_slot);
   EXPECT_FALSE(Sign(id, &value, 1, NULL, 0).empty());
-  EXPECT_EQ(0u, Revision(id));
+  EXPECT_EQ(0u, Version(id));
 }
 
 TEST_F(Form, Range) {
@@ -427,7 +441,7 @@ TEST_F(Form, Range) {
   EXPECT_FALSE(Sign(id, &value, 1, NULL, 0).empty());
   OneValue(&value, "title", "20", &slot, &len_slot);
   EXPECT_FALSE(Sign(id, &value, 1, NULL, 0).empty());
-  EXPECT_EQ(0u, Revision(id));
+  EXPECT_EQ(0u, Version(id));
 }
 
 TEST_F(Form, Pattern) {
@@ -459,7 +473,7 @@ TEST_F(Form, Pattern) {
           &value, 1, NULL, 0, &token, &n));
   OneValue(&value, "title", "ab", &slot, &len_slot);
   EXPECT_FALSE(Sign(id, &value, 1, NULL, 0).empty());
-  EXPECT_EQ(0u, Revision(id));
+  EXPECT_EQ(0u, Version(id));
 }
 
 TEST_F(Form, Sign) {
@@ -480,7 +494,7 @@ TEST_F(Form, Sign) {
   now = (uint64_t)time(NULL);
   token = Sign(id, &value, 1, NULL, 0);
   ASSERT_FALSE(token.empty());
-  EXPECT_EQ(0u, Revision(id));
+  EXPECT_EQ(0u, Version(id));
   EXPECT_EQ(GDEFCORE_OK,
       gdefcore_form_check(catalog_, request_, keyring_, root_, sizeof root_,
           session_.data(), session_.size(), token.data(), token.size(), &expiry));
@@ -512,7 +526,7 @@ TEST_F(Form, Tamper) {
   token[token.size() / 2] = (char)(token[token.size() / 2] ^ 0x01);
   EXPECT_NE(GDEFCORE_OK, Submit(token, &conflict));
   EXPECT_EQ(0, conflict);
-  EXPECT_EQ(0u, Revision(id));
+  EXPECT_EQ(0u, Version(id));
   Read(id, "title", GDEFCORE_VIEW_DRAFT, &draft);
   EXPECT_EQ(0, draft);
 }
@@ -539,11 +553,11 @@ TEST_F(Form, OtherSession) {
       gdefcore_form_submit(catalog_, request_, keyring_, root_, sizeof root_, other,
           other_len, token.data(), token.size(), &conflict));
   EXPECT_EQ(0, conflict);
-  EXPECT_EQ(0u, Revision(id));
+  EXPECT_EQ(0u, Version(id));
   gdefcore_text_free(catalog_, other);
   /* The control: the session the token was signed under still submits it. */
   ASSERT_EQ(GDEFCORE_OK, Submit(token, &conflict));
-  EXPECT_EQ(1u, Revision(id));
+  EXPECT_EQ(1u, Version(id));
 }
 
 TEST_F(Form, OtherTenant) {
@@ -573,7 +587,7 @@ TEST_F(Form, OtherTenant) {
           session_.data(), session_.size(), token.data(), token.size(),
           &conflict));
   EXPECT_EQ(0, conflict);
-  EXPECT_EQ(0u, Revision(id));
+  EXPECT_EQ(0u, Version(id));
   gdefcore_request_destroy(other_request);
   gdefcore_catalog_destroy(other);
   gdefstor_store_destroy(other_store);
@@ -626,7 +640,7 @@ TEST_F(Form, Unsigned) {
       gdefcore_form_submit(catalog_, request_, keyring_, root_, sizeof root_,
           session_.data(), session_.size(), NULL, 0, &conflict));
   EXPECT_EQ(0, conflict);
-  EXPECT_EQ(0u, Revision(id));
+  EXPECT_EQ(0u, Version(id));
 }
 
 TEST_F(Form, Replay) {
@@ -644,11 +658,11 @@ TEST_F(Form, Replay) {
   token = Sign(id, &value, 1, NULL, 0);
   ASSERT_EQ(GDEFCORE_OK, Submit(token, &conflict));
   EXPECT_EQ(0, conflict);
-  EXPECT_EQ(1u, Revision(id));
+  EXPECT_EQ(1u, Version(id));
   EXPECT_EQ(std::string("Hello"), Read(id, "title", GDEFCORE_VIEW_DRAFT, NULL));
   EXPECT_NE(GDEFCORE_OK, Submit(token, &conflict));
   EXPECT_EQ(1, conflict);
-  EXPECT_EQ(1u, Revision(id));
+  EXPECT_EQ(1u, Version(id));
   EXPECT_EQ(std::string("Hello"), Read(id, "title", GDEFCORE_VIEW_DRAFT, NULL));
 }
 
@@ -676,18 +690,18 @@ TEST_F(Form, StaleBase) {
   ASSERT_FALSE(fresh.empty());
   ASSERT_EQ(GDEFCORE_OK, Submit(fresh, &conflict));
   EXPECT_EQ(0, conflict);
-  EXPECT_EQ(1u, Revision(id));
+  EXPECT_EQ(1u, Version(id));
   conflict = 0;
   EXPECT_NE(GDEFCORE_OK, Submit(stale, &conflict));
   EXPECT_EQ(1, conflict);
-  EXPECT_EQ(1u, Revision(id));
+  EXPECT_EQ(1u, Version(id));
   EXPECT_EQ(std::string("two"), Read(id, "title", GDEFCORE_VIEW_DRAFT, NULL));
   OneValue(&value, "title", "three", &slot, &len_slot);
   fresh = Sign(id, &value, 1, NULL, 0);
   conflict = 1;
   ASSERT_EQ(GDEFCORE_OK, Submit(fresh, &conflict));
   EXPECT_EQ(0, conflict);
-  EXPECT_EQ(2u, Revision(id));
+  EXPECT_EQ(2u, Version(id));
 }
 
 /*
@@ -713,7 +727,7 @@ TEST_F(Form, Expired) {
   sleep(2);
   EXPECT_NE(GDEFCORE_OK, Submit(token, &conflict));
   EXPECT_EQ(0, conflict);
-  EXPECT_EQ(0u, Revision(id));
+  EXPECT_EQ(0u, Version(id));
 }
 
 TEST_F(Form, Resign) {
@@ -736,7 +750,7 @@ TEST_F(Form, Resign) {
       gdefcore_form_resign(catalog_, request_, keyring_, root_, sizeof root_,
           session_.data(), session_.size(), token.data(), token.size(), &value, 1,
           &again, &again_len));
-  EXPECT_EQ(0u, Revision(id));
+  EXPECT_EQ(0u, Version(id));
   Read(id, "title", GDEFCORE_VIEW_DRAFT, &draft);
   EXPECT_EQ(0, draft);
   gdefcore_text_free(catalog_, again);
@@ -747,7 +761,7 @@ TEST_F(Form, Resign) {
       gdefcore_form_resign(catalog_, request_, keyring_, root_, sizeof root_,
           session_.data(), session_.size(), token.data(), token.size(), &value, 1,
           &again, &again_len));
-  EXPECT_EQ(0u, Revision(id));
+  EXPECT_EQ(0u, Version(id));
 }
 
 TEST_F(Form, Draft) {
@@ -881,15 +895,16 @@ TEST_F(Form, Publish) {
   OneValue(&value, "title", "Hello World", &slot, &len_slot);
   token = Sign(first, &value, 1, NULL, 0);
   ASSERT_EQ(GDEFCORE_OK, Submit(token, &conflict));
-  revision = Revision(first);
+  revision = Head(first);
+  EXPECT_EQ(0u, revision);   /* the submit wrote a draft */
   token = Sign(second, &value, 1, NULL, 0);
   ASSERT_EQ(GDEFCORE_OK, Submit(token, &conflict));
   EXPECT_NE(GDEFCORE_OK, gdefcore_form_publish(catalog_, bare, strlen(bare)));
-  EXPECT_EQ(0u, Revision(bare));
+  EXPECT_EQ(0u, Version(bare));
   Read(bare, "title", GDEFCORE_VIEW_PUBLISHED, &published);
   EXPECT_EQ(0, published);
   ASSERT_EQ(GDEFCORE_OK, gdefcore_form_publish(catalog_, first, strlen(first)));
-  EXPECT_EQ(revision, Revision(first));
+  EXPECT_EQ(revision + 1, Head(first));   /* the publish applied the draft */
   EXPECT_EQ(std::string("Hello World"),
       Read(first, "title", GDEFCORE_VIEW_PUBLISHED, NULL));
   ASSERT_EQ(GDEFCORE_OK,

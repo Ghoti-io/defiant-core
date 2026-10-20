@@ -223,8 +223,8 @@ plant path-checks-head-not-active src/condition/condition_eval.c testEntrypaths 
 # set, and not the entity's creator.
 plant own-follows-the-author-field $ENT testEntrypaths \
   'EntryPath.TheStoredAuthorFieldDoesNotMakeAnOwner' \
-  '  if (st.creator_len > 0) {
-    *out_creator = dup_span(catalog->alloc, st.creator, st.creator_len);' \
+  '  if (look.creator_len > 0) {
+    *out_creator = dup_span(catalog->alloc, look.creator, look.creator_len);' \
   '  {
     char ** at = NULL;
     size_t * al = NULL;
@@ -239,7 +239,7 @@ plant own-follows-the-author-field $ENT testEntrypaths \
       return *out_creator == NULL ? GDEFCORE_ERR_OOM : GDEFCORE_OK;
     }
   }
-  if (st.creator_len > 0) {
-    *out_creator = dup_span(catalog->alloc, st.creator, st.creator_len);'
+  if (look.creator_len > 0) {
+    *out_creator = dup_span(catalog->alloc, look.creator, look.creator_len);'
 
 plant_finish

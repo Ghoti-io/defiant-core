@@ -96,8 +96,8 @@ for t in Erasure.Scanner Erasure.Channels Erasure.Sweep Erasure.SnapshotCarriesN
     Erasure.EntitySavePersonal Erasure.RevertKeepsCiphertext \
     Erasure.ParsePersonalPatch Erasure.PlaintextHistoryIsNotRestored \
     Erasure.FormSubjectRoute Erasure.FormUnknownSubject \
-    Erasure.FormSubjectBinding Erasure.PlaintextRevisionIsNotActivated \
-    Erasure.RevisionViewsAndAnActivatedOldRevisionOfAnErasedSubject; do
+    Erasure.FormSubjectBinding Erasure.PlaintextRevisionCannotBecomeTheContentAgain \
+    Erasure.RevisionViewsAndARestoredOldRevisionOfAnErasedSubject; do
   if ! run_test "$SCRATCH/control" "$t"; then
     printf 'check-erasure: %s failed on the real tree\n' "$t" >&2
     tail -30 "$SCRATCH/control.run" >&2
@@ -336,20 +336,18 @@ plant restore-skips-sealed-check src/entity/entity.c Erasure.PlaintextHistoryIsN
         continue;
       }'
 
-# 10a. An activate makes an old revision the entity's content without asking
-#      whether its personal values are sealed (the check is at the call and
-#      again at apply, where the revision is read from the store).
-plant activate-skips-sealed-check src/entity/entity.c Erasure.PlaintextRevisionIsNotActivated \
-  '      rc = rev_doc(cat, row, target, &staged);
-      if (rc == GDEFCORE_OK && !doc_personal_sealed(&staged, decls, ndecls)) {
-        rc = GDEFCORE_ERR_INVALID;
+# 10a. The same check, seen from the other gate: a revert to a revision from
+#      before the field was personal (the only way an old revision becomes
+#      the content again since access SPEC decision 13 retired `activate`,
+#      whose own plant, activate-skips-sealed-check, went with it).
+plant restore-skips-sealed-check-again src/entity/entity.c \
+  Erasure.PlaintextRevisionCannotBecomeTheContentAgain \
+  '      if (decl == NULL || !decl->personal) {
+        continue;
       }' \
-  '      rc = rev_doc(cat, row, target, &staged);' \
-  '      if (rc == GDEFCORE_OK &&
-          !doc_personal_sealed(&doc, op->decls, op->ndecls)) {
-        rc = GDEFCORE_ERR_INVALID;
-      }' \
-  '      (void)op->decls;'
+  '      if (decl == NULL || 1) {
+        continue;
+      }'
 
 # 10b. The seal takes a text that is already sealed (what the form tree shows
 #      for a personal field) and seals it a second time.
@@ -368,14 +366,14 @@ plant parse-takes-personal src/entity/entity.c Erasure.ParsePersonalPatch \
 
 # 12. A revision view shows a personal field as it is stored, the ciphertext.
 plant revision-view-shows-ciphertext src/access/access.c \
-  Erasure.RevisionViewsAndAnActivatedOldRevisionOfAnErasedSubject \
+  Erasure.RevisionViewsAndARestoredOldRevisionOfAnErasedSubject \
   '  if (field_is_personal(catalog, type_name, type_len, field, field_len)) {' \
   '  if (0 && field_is_personal(catalog, type_name, type_len, field, field_len)) {'
 
 # 13. The erased marker is never shown: a view of an erased person's history
 #     says "a personal value is here" as it does for everyone.
 plant erased-marker-never-shown src/subject/subject.c \
-  Erasure.RevisionViewsAndAnActivatedOldRevisionOfAnErasedSubject \
+  Erasure.RevisionViewsAndARestoredOldRevisionOfAnErasedSubject \
   '  if (!erased) {
     return GDEFCORE_OK;
   }

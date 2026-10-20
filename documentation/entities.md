@@ -5,17 +5,29 @@
 A type is `core.<name>`, `site.<name>`, or `<module>.<name>`. The name part
 may hold letters, digits and underscore, and a hyphen that is neither first
 nor last (`core.template-kind`); the part before the dot has no hyphen. It is
-content or configuration, and its fields are text, one value or many. Values sit
-under a language in the revision's `lang` object. The built-in types are
+content or configuration, and its fields hold one value or many, each of a
+logical type (`GDEFCORE_Field::type`): text (the default), integer, decimal
+(with a scale), float, boolean, date, date-time or reference. A field may ask
+the store to index it (`GDEFCORE_Field::indexed`, a hint that changes no
+answer). Values are kept per language. The built-in types are
 `core.entity_type` and `core.changeset`.
 
-The integer row id is the storage key. The head and active revisions are
-copied into projections whose type is `d:` or `a:` plus the machine name, and
-the entity argument is the decimal row id. `d:site.note` cannot collide with a
-machine name, because a machine name has no colon. The public-id index is a
-projection whose type is `i` and whose entity argument is the public id.
-Reading by the public id uses that index. The document's `entity` field is the
-public id, not the key.
+Since story S6b an entity is the storage port's (defiant-storage `model.h`):
+the port keeps the entity record, the append-only revisions, the trees of
+each language, the current tables a query reads and the draft. Core keeps
+beside it, as system records (non-revisioned, written in the changeset's own
+port write): each type's declaration (namespace `core.type`, format
+`defiant-core-type/1`: the kind, the type's public id and version, and each
+field's shape, type, scale, index hint and constraints), and as counters the
+config epoch (`core.epoch`) and each entity's version (`core.v:<public id>`).
+The port's own declaration of the type is the fields' shape; a personal
+field is declared as text, since its value is the sealed text it is kept as
+until subjects reach the port (story S7). A value is stored as its type's
+value and read back as its canonical text: an integer `7` however it was
+written, a decimal of scale 2 `1.50`, a boolean `true` or `false`, a date
+`2026-10-19`, a date-time `2026-10-19T08:30:00Z` (`.mmm` with milliseconds),
+a reference a canonical public id. A value that is not one of its type, and a
+text holding a NUL byte, are refused at staging.
 
 No function in this document checks a permission (SPEC decision 7): each runs
 at the trust of its caller, and the path in front of it asks `gdefcore_access_can()`
@@ -26,100 +38,70 @@ reads through `gdefcore_access_read()` and `gdefcore_access_revision_values()`.
 
 ## The entity record
 
-An entity is a small record plus append-only revisions (SPEC decisions 9-11).
-The record is a core-owned projection of type `s`, keyed by the decimal row id:
+An entity is a record plus append-only revisions (SPEC decisions 9-11, as
+access SPEC decision 13 leaves them):
 
-| Column | Meaning |
-| --- | --- |
-| `pub` | `1` when the entity is published, else `0`. Whether the public may see it. |
-| `act` | the sequence of the active revision, absent when there is none. The content the entity currently is, which exists even while it is unpublished. |
-| `ver` | a counter that every write touching the entity bumps, including a publish, an unpublish, an activate and a clear, none of which moves the latest revision sequence. `can()`'s memo and the render read set are keyed on it. |
-| `creator` | the principal of the entity's first revision, recorded at that revision and never again. Absent when the first revision had no actor. |
+| Fact | Where | Meaning |
+| --- | --- | --- |
+| published | the port's state | whether the public may see the entity |
+| deleted | the port's state | a soft delete: a cleared entity reads as one with no content |
+| revision | the port's record | the newest revision, which is always the content: there is no active-revision pointer, so no older revision is the content without a new revision that copies it |
+| creator | the port's record | whoever made the entity, set once and never again; none for the system |
+| version | core's counter `core.v:<id>` | moved by every write that touches the entity, a draft, a publish, an unpublish and a clear included, none of which need move the revision. `can()`'s memo, the render read set and a form's base are keyed on it. |
+| draft | the port's draft | at most one working copy, never a revision, recording the revision it was made from |
 
-Three things are separate. The **published flag** says whether readers may see
-the entity. The **active revision** is the content it currently is; readers,
-conditions and `own` see it, and so does the author of an unpublished entity.
-The **other revisions** are history, and a newer draft not yet made active.
 `gdefcore_entity_values` takes the view: `GDEFCORE_VIEW_PUBLISHED` is the
-active revision while the flag is set (a miss otherwise), `GDEFCORE_VIEW_ACTIVE`
-is the active revision whether or not it is, and `GDEFCORE_VIEW_DRAFT` is the
-head, the latest revision.
+newest revision while the entity is published (a miss otherwise),
+`GDEFCORE_VIEW_ACTIVE` is the newest revision whether or not it is, and
+`GDEFCORE_VIEW_DRAFT` is the draft over it, where there is one. A draft is in
+no list, no query and no reader's view, and no condition reads it.
 
-| Projection | Holds |
-| --- | --- |
-| `a:<type>` | the active revision's content, with its `seq`, its `id` and the `actor` it was written with. |
-| `d:<type>` | the head revision's content, the latest. |
-| `ra` | one line `<seq> <actor>` per revision: every revision's own creator. |
+An entity's creator and a revision's author are different things. A revision's
+author is whoever wrote that revision, so an editor who saves someone else's
+post is the author of their revision and of nothing else. The entity's
+creator is who made it, and `own` means it. `gdefcore_entity_actor` returns
+the newest revision's author and `gdefcore_entity_creator` the entity's
+creator. A draft records who wrote it last (the record `core.draft`, keyed by
+public id), and a publish applies it as that author's revision, so publishing
+does not make the publisher the author (defect 1.5.3).
 
-An entity's creator and a revision's creator are different things. A revision's
-creator is whoever wrote that revision, so an editor who saves someone else's
-post is the creator of their revision and of nothing else. The entity's creator
-is the first revision's, and `own` means it. `gdefcore_entity_actor` returns the
-active revision's creator and `gdefcore_entity_creator` the entity's. A publish
-does not write a revision, so the publisher is recorded nowhere and the revision
-keeps its own creator.
+| Operation | Revision | Draft | Published | Version |
+| --- | --- | --- | --- | --- |
+| `gdefcore_entity_create` | none: the id is reserved by an empty draft, and there is no port entity | the reservation | no | 0 |
+| `gdefcore_entity_save_draft` | none | written; it builds on the draft there is, made from the newest revision. The first draft of a reserved id makes the port entity, with the actor as its creator | unchanged | +1 |
+| `gdefcore_entity_save` ("save and publish") | the next, from the draft when it was made from the newest revision, else from the newest; nothing when the values are those the entity has, which `gdefcore_changeset_revision` says | consumed | yes | +1 when anything was written |
+| `gdefcore_entity_publish` | the draft applied as the next, only on the revision it was made from (a moved head is a conflict and writes nothing), with the draft's author as its author; with no draft, none | applied | yes | +1 when anything was written |
+| `gdefcore_entity_unpublish` | none | unchanged | no | +1 when it was published |
+| `gdefcore_changeset_revert_to(seq)` | a copy of `seq` as the next (none when the content is already that); a cleared entity is no longer deleted | unchanged | unchanged | +1 |
+| `gdefcore_changeset_revert` (legacy) | as `revert_to(newest - 1)`; a clear when the newest is the first | | | |
+| `gdefcore_entity_clear` (a revert of the first revision) | none: every revision stays | dropped | no, and deleted | +1 |
 
-| Operation | New revision | Head | Active revision | `pub` | `ver` |
-| --- | --- | --- | --- | --- | --- |
-| `gdefcore_entity_create` | none | none | none | 0 | 0 |
-| `gdefcore_entity_save` ("save and publish") | yes | moves | the new one | 1 | +1 |
-| `gdefcore_entity_save_draft` | yes | moves | unchanged; the entity's first revision becomes active | unchanged | +1 |
-| `gdefcore_entity_publish` | none | unchanged | the head | 1 | +1 |
-| `gdefcore_entity_unpublish` | none | unchanged | unchanged | 0 | +1 |
-| `gdefcore_entity_activate(seq)` | none | unchanged (the head is restored if a clear removed it and `seq` is the head) | `seq` | unchanged | +1 |
-| `gdefcore_changeset_revert_to(seq)` | yes, a copy of `seq` | moves | the copy | unchanged | +1 |
-| `gdefcore_changeset_revert` (legacy) | as `revert_to(active - 1)`; a clear when the active revision is the first | | | | |
-| clear (a revert of the first revision) | none | `d:` removed | none, `a:` removed | 0 | +1 |
-| type definition | yes | moves | the new one | 1 | +1 |
-
-`gdefcore_entity_save` builds on the **active** revision, not on the head: a
-save made while a newer draft sits beside the active revision starts from the
-active content and does not carry the draft's edits (the draft stays in the
-history). That is "save overwrites"; a path that wants to keep editing a draft
-uses `gdefcore_entity_save_draft`, which starts from the head, as the form path
-does.
-
-A draft never moves the active revision; only a save, a publish, an activate
-and a revert do. Publishing and activating are different acts: a publish makes
-the head active *and* sets the flag; an activate moves the pointer to any
-recorded revision and leaves the flag alone, and an unpublish clears the flag
-and leaves the pointer. A revert is a save of an earlier revision's content
-that leaves the flag alone, so reverting an unpublished entity does not
-publish it. An activate, like a revert, refuses a revision that holds a
+A draft is applied only on the revision it was made from (CAP-S4): a publish
+of a draft whose entity has a newer revision (a revert, or another writer
+between the draft and its publish) is a conflict and writes nothing. A save
+consumes the draft: it saves the working copy when the draft was made from
+the newest revision, and otherwise saves on the newest revision and drops
+the stale draft. A revert, like a save, refuses a revision that holds a
 personal value that is not sealed (a revision written before the field was
-personal): it would put plaintext in front of readers without a new revision. The one exception is an entity's first
-revision, which becomes active while staying unpublished, so that the entity
-has content and a creator for a condition to read. A clear keeps every revision,
-the `ra` lines, the public id and the creator; it empties the projections and
-clears the flag. There is no hard delete: erasure is by key (AD-19), not by
-deleting records. A cleared entity has no active revision, so a field-conditioned
-`update` grant cannot hold on it, and only an unconditioned permission to
-activate can bring it back (an activate of the head also restores the head
-projection, so it can be published; an activate of an older revision does not,
-and a revert to it, which writes a revision, does).
-
-A row in the index with no `s` row is a store written before the record
-existed. Nothing is released and nothing migrates it: every call that needs the
-record answers `GDEFCORE_ERR_CORRUPT` rather than reading the entity as
-unpublished, which would hide it without a word.
-
-A core-owned projection of type `w`, keyed by the decimal row id, holds the
-high-water sequence. Clearing does not remove it, so the next save after
-reverting sequence 1 is sequence 2.
+personal). There is no hard delete: erasure is by key (AD-19), not by
+deleting records, and a cleared entity is brought back by a revert to one of
+its revisions or by a save.
 
 `gdefcore_type_define` writes a type without moving the config epoch, so a
 content save can still be the epoch's first step. A changeset that defines
 or changes a type is high risk. Apply of a high-risk changeset requires the
-touched machine names, sorted, one per line. Apply commits the revisions and
-both projections in one port write and increments the epoch in that write.
-A port error aborts the write.
+touched machine names, sorted, one per line. Apply is one port write: the
+revisions, the drafts, the states, the type records, the version counters and
+the epoch, which moves in that write. A port error aborts the write, and
+nothing of the changeset is kept.
 
 Serializing a changeset yields `defiant-changeset/1`: an ordered list of
-relative paths and UTF-8 bytes. The `revert`, `unpublish` and `activate` words
-and the `ver` and `target` files are additions to `/1`: a reader from before them
-refuses the unknown word or file as corrupt. An `unpublish` and an `activate`
-carry no values; `publish` carries them for the diff but apply publishes the head
-as the store has it, not what the patch says it is. A patch made against a
+relative paths and UTF-8 bytes. The `revert` and `unpublish` words, the `ver`
+and `target` files and a field's type words are additions to `/1`: a reader
+from before them refuses the unknown word or file as corrupt. (The `activate`
+word went with `activate`, story S6b.) An `unpublish` carries no values;
+`publish` carries them for the diff but apply publishes the draft as the store
+has it, not what the patch says it is. A patch made against a
 version the entity has since left is a conflict, whatever the epoch says.
 
 | Path | Bytes |
@@ -130,11 +112,11 @@ version the entity has since left is a conflict, whatever the epoch says.
 | `entity/<id>/type` | the entity's machine name |
 | `entity/<id>/base` | the decimal sequence the save was prepared against |
 | `entity/<id>/ver` | the decimal version of the entity the change was staged against (optional; absent means the version at parse time) |
-| `entity/<id>/op` | `save`, `draft`, `publish`, `revert`, `unpublish`, `activate` or `clear` |
-| `entity/<id>/target` | the decimal sequence an `activate` makes active |
+| `entity/<id>/op` | `save`, `draft`, `publish`, `revert`, `unpublish` or `clear` |
+| `entity/<id>/target` | the decimal sequence a `revert` copies |
 | `entity/<id>/lang/<lang>/<field>/<index>` | one field value |
 | `type/<machine>/kind` | `content` or `config` |
-| `type/<machine>/field/<name>` | `required one`, `required many`, `optional one`, or `optional many` |
+| `type/<machine>/field/<name>` | `required one`, `required many`, `optional one`, or `optional many`, then ` personal` for a personal field, then the type word when it is not text (`integer`, `decimal <scale>`, `float`, `boolean`, `date`, `datetime`, `reference`), then ` indexed` for the index hint, then the constraints after a `|` |
 
 A field may be called `kind`: `type/core.template/field/kind` is that field,
 and not the kind of a type called `core.template/field`. The parser takes
@@ -146,17 +128,16 @@ not looked up, and nothing is written.
 
 ## Querying a type's entities
 
-`gdefcore_entity_query_active()` is the unfiltered index with a predicate: it
-runs a storage query (defiant-storage `query.h`) over the type's `a:<type>`
-projection and returns the public ids in the query's order, with the total. The
-row is the entity's number; its `id` column is the public id. The names a
-predicate may read are fixed in `entity.h` (`GDEFCORE_QUERY_COL_DOC`,
-`_COL_ID`, `_COL_REVISION_CREATOR`, `GDEFCORE_QUERY_RECORD_TYPE`, `_COL_PUBLISHED`,
-`_COL_CREATOR`) and one test reads the stored projections directly to hold the
-layout to them. The `lang` column is the active revision's document, read by
-language and field name (`{"en":{"title":["Hello"]}}`), which is why a field
-needs no column of its own. Nothing is indexed: a projection is one value per
-key, so a query reads every row of the type.
+`gdefcore_entity_query_active()` is the unfiltered list with a predicate: it
+runs the port's query over entities (defiant-storage `query.h`, "Over
+entities") on the type's current tables, with the entities that are something
+now (saved, and not cleared) and the predicate the caller hands it, and
+returns the public ids in the query's order, with the total. The predicate is
+of the port's form: typed field operands, the entity's facts (published,
+deleted, creator, the newest revision and its author) and EXISTS over
+another type. The query binds one language (the caller's, `en` by default).
+The fields a declaration indexes are indexed by the store, so an equality, an
+`in`, a range or a sort on one reads its answer and not the table.
 
 This function filters nothing for a principal; it is not a way to read for
 one. `gdefcore_access_list()` builds a principal's access filter into the

@@ -21,8 +21,9 @@
 /**
  * @file
  *
- * The installation registry lives on the caller's registry store. Site
- * tenant catalogs live on the other store, each under its own 16-byte
+ * The installation registry lives on the caller's registry store, as system
+ * records (below, at write_record()). Site tenant catalogs live on the other
+ * store, each under its own 16-byte
  * storage key. The keyring is wrapped by the root and is not a field.
  * When a key store is passed, that wrap is written there the first time, as
  * the tenant's secret, and adopted on a later open; no data store holds it.
@@ -37,6 +38,7 @@
 #include "inst_internal.h"
 
 #include <ghoti.io/cutil/allocator.h>
+#include <ghoti.io/defiant-storage/model.h>
 #include <ghoti.io/security/random.h>
 #include <ghoti.io/security/secret.h>
 #include <ghoti.io/text/toml/toml_dom.h>
@@ -65,8 +67,7 @@ enum {
 };
 
 static const uint8_t kRegistryTenant[] = {0x02};
-static const char kType[] = "core.tenant";
-static const char kLang[] = "en";
+static const char kRegistryNs[] = "core.tenant";
 static const char kActive[] = "active";
 static const char * kEnvNames[kSettingCount] = {
     "DEFIANT_ROLES", "DEFIANT_STORE", "DEFIANT_LISTEN",
@@ -110,7 +111,6 @@ static const struct LimitField kLimits[] = {
 
 struct TenantSlot {
   char id[GDEFCORE_PUBLIC_ID_LEN + 1];
-  char entity[GDEFCORE_PUBLIC_ID_LEN + 1];
   uint8_t storage[kKeyBytes];
   char * placement;
   size_t placement_len;
@@ -140,7 +140,6 @@ struct GDEFCORE_Inst {
   GDEFSTOR_Store * registry;
   GDEFSTOR_Store * site;
   GDEFSTOR_KeyStore * keys;
-  GDEFCORE_Catalog * catalog;
   GDEFCORE_Keyring * keyring;
   uint8_t root[GDEFCORE_ACCOUNT_ROOT_LEN];
   struct TenantSlot * slots;
@@ -667,70 +666,158 @@ GDEFCORE_Result gdefcore_inst_config_setting(const GDEFCORE_Inst_Config * config
   return GDEFCORE_ERR_INVALID;
 }
 
-static void field_set(GDEFCORE_Field * field, const char * name, int required) {
-  memset(field, 0, sizeof *field);
-  field->size = sizeof *field;
-  field->name = name;
-  field->name_len = strlen(name);
-  field->required = required;
-}
+/*
+ * The registry: one record per tenant in namespace `core.tenant` of the
+ * registry tenant, keyed by the tenant's public id. Its value is one line per
+ * field, `name hex\n`, the hex of the field's bytes: storage (the hex of the
+ * storage key, so the value holds the key twice over), placement, edition,
+ * status, resolution, is_default (`1` or `0`) and, when set, limits. It is a
+ * system record: it has no history, so a change is one put in one write.
+ */
 
-static void value_set(GDEFCORE_Value * value, const char * field,
-    const char * const * texts, const size_t * lens) {
-  memset(value, 0, sizeof *value);
-  value->size = sizeof *value;
-  value->field = field;
-  value->field_len = strlen(field);
-  value->texts = texts;
-  value->text_lens = lens;
-  value->count = 1;
-}
+typedef struct Rec {
+  char * p;
+  size_t n;
+  size_t cap;
+  int oom;
+} Rec;
 
-static GDEFCORE_Result ensure_type(GDEFCORE_Catalog * catalog) {
-  GDEFCORE_Field fields[7];
-  int kind = 0;
-  GDEFCORE_Result rc = gdefcore_type_kind(catalog, kType, strlen(kType), &kind);
-  if (rc == GDEFCORE_OK) {
-    return GDEFCORE_OK;
+static void rec_put(const GDEFCORE_Allocator * alloc, Rec * b,
+    const char * name, const char * value, size_t len) {
+  static const char hex[] = "0123456789abcdef";
+  size_t nl = strlen(name);
+  size_t need = nl + 2 + 2 * len;
+  size_t i;
+  if (b->oom) {
+    return;
   }
-  field_set(&fields[0], "storage", 1);
-  field_set(&fields[1], "placement", 1);
-  field_set(&fields[2], "edition", 1);
-  field_set(&fields[3], "status", 1);
-  field_set(&fields[4], "resolution", 1);
-  field_set(&fields[5], "is_default", 1);
-  field_set(&fields[6], "limits", 0);
-  return gdefcore_type_define(catalog, kType, strlen(kType),
-      GDEFCORE_TYPE_CONFIG, fields, 7);
+  if (b->n + need > b->cap) {
+    size_t cap = (b->n + need) * 2;
+    char * next = (char *)gcu_allocator_realloc(alloc, b->p, cap);
+    if (next == NULL) {
+      b->oom = 1;
+      return;
+    }
+    b->p = next;
+    b->cap = cap;
+  }
+  memcpy(b->p + b->n, name, nl);
+  b->n += nl;
+  b->p[b->n++] = ' ';
+  for (i = 0; i < len; i++) {
+    unsigned char c = (unsigned char)value[i];
+    b->p[b->n++] = hex[c >> 4];
+    b->p[b->n++] = hex[c & 15u];
+  }
+  b->p[b->n++] = '\n';
 }
 
-static GDEFCORE_Result read_field(GDEFCORE_Catalog * catalog,
-    const GDEFCORE_Allocator * alloc, const char * id, const char * field,
-    int required, char ** out, size_t * out_n) {
-  char ** texts = NULL;
-  size_t * lens = NULL;
-  size_t count = 0;
-  GDEFCORE_Result rc;
+/* Field @p name of a record value, allocated. ::GDEFCORE_ERR_CORRUPT when the
+ * value is not of the form, or a required field is missing (an optional one
+ * is NULL). */
+static GDEFCORE_Result rec_field(const GDEFCORE_Allocator * alloc,
+    const uint8_t * bytes, size_t len, const char * name, int required,
+    char ** out, size_t * out_n) {
+  const char * p = (const char *)bytes;
+  const char * end = p + len;
+  size_t name_len = strlen(name);
   *out = NULL;
   *out_n = 0;
-  rc = gdefcore_entity_values(catalog, NULL, GDEFCORE_VIEW_PUBLISHED, id,
-      GDEFCORE_PUBLIC_ID_LEN, kLang, strlen(kLang), field, strlen(field),
-      &texts, &lens, &count);
+  while (p < end) {
+    const char * eol = memchr(p, '\n', (size_t)(end - p));
+    const char * sp;
+    if (eol == NULL) {
+      return GDEFCORE_ERR_CORRUPT;
+    }
+    sp = memchr(p, ' ', (size_t)(eol - p));
+    if (sp == NULL) {
+      return GDEFCORE_ERR_CORRUPT;
+    }
+    if ((size_t)(sp - p) == name_len && memcmp(p, name, name_len) == 0) {
+      size_t hn = (size_t)(eol - sp - 1);
+      uint8_t * raw;
+      if (hn % 2 != 0) {
+        return GDEFCORE_ERR_CORRUPT;
+      }
+      raw = (uint8_t *)mem(alloc, hn / 2 + 1);
+      if (raw == NULL) {
+        return GDEFCORE_ERR_OOM;
+      }
+      if (hn > 0 && hex_decode(sp + 1, hn, raw, hn / 2) != GDEFCORE_OK) {
+        gcu_allocator_free(alloc, raw);
+        return GDEFCORE_ERR_CORRUPT;
+      }
+      raw[hn / 2] = '\0';
+      *out = (char *)raw;
+      *out_n = hn / 2;
+      return GDEFCORE_OK;
+    }
+    p = eol + 1;
+  }
+  return required ? GDEFCORE_ERR_CORRUPT : GDEFCORE_OK;
+}
+
+static GDEFCORE_Result map_stor(GDEFSTOR_Result rc) {
+  switch (rc) {
+    case GDEFSTOR_OK:
+      return GDEFCORE_OK;
+    case GDEFSTOR_ERR_INVALID:
+      return GDEFCORE_ERR_INVALID;
+    case GDEFSTOR_ERR_OOM:
+      return GDEFCORE_ERR_OOM;
+    case GDEFSTOR_ERR_LIMIT:
+      return GDEFCORE_ERR_LIMIT;
+    case GDEFSTOR_ERR_CORRUPT:
+      return GDEFCORE_ERR_CORRUPT;
+    default:
+      return GDEFCORE_ERR_IO;
+  }
+}
+
+/* Write a tenant's record, whole, in one write of its own. */
+static GDEFCORE_Result write_record(GDEFCORE_Inst * inst, const char * id,
+    const uint8_t storage[kKeyBytes], const char * placement,
+    size_t placement_len, const char * edition, size_t edition_len,
+    const char * status, size_t status_len, const char * resolution,
+    size_t resolution_len, int is_default, const char * limits,
+    size_t limits_len) {
+  char hex[kHexKey + 1];
+  Rec b;
+  GDEFSTOR_Write * write = NULL;
+  GDEFCORE_Result rc = hex_encode(storage, kKeyBytes, hex, sizeof hex);
   if (rc != GDEFCORE_OK) {
-    return required ? rc : GDEFCORE_OK;
+    return rc;
   }
-  if (count != 1 || texts == NULL || lens == NULL || texts[0] == NULL) {
-    gdefcore_values_free(catalog, texts, lens, count);
-    return GDEFCORE_ERR_CORRUPT;
+  memset(&b, 0, sizeof b);
+  rec_put(inst->alloc, &b, "storage", hex, kHexKey);
+  rec_put(inst->alloc, &b, "placement", placement, placement_len);
+  rec_put(inst->alloc, &b, "edition", edition, edition_len);
+  rec_put(inst->alloc, &b, "status", status, status_len);
+  rec_put(inst->alloc, &b, "resolution", resolution == NULL ? "" : resolution,
+      resolution_len);
+  rec_put(inst->alloc, &b, "is_default", is_default ? "1" : "0", 1);
+  if (limits != NULL && limits_len > 0) {
+    rec_put(inst->alloc, &b, "limits", limits, limits_len);
   }
-  *out = dup_n(alloc, texts[0], lens[0]);
-  if (*out == NULL) {
-    gdefcore_values_free(catalog, texts, lens, count);
+  wipe(hex, sizeof hex);
+  if (b.oom) {
+    gcu_allocator_free(inst->alloc, b.p);
     return GDEFCORE_ERR_OOM;
   }
-  *out_n = lens[0];
-  gdefcore_values_free(catalog, texts, lens, count);
-  return GDEFCORE_OK;
+  rc = map_stor(gdefstor_write_begin(inst->registry,
+      (const char *)kRegistryTenant, sizeof kRegistryTenant, NULL, &write));
+  if (rc == GDEFCORE_OK) {
+    rc = map_stor(gdefstor_record_put(write, kRegistryNs, strlen(kRegistryNs),
+        id, GDEFCORE_PUBLIC_ID_LEN, (const uint8_t *)b.p, b.n));
+    if (rc == GDEFCORE_OK) {
+      rc = map_stor(gdefstor_write_commit(write));
+    } else {
+      gdefstor_write_abort(write);
+    }
+  }
+  wipe(b.p, b.n);
+  gcu_allocator_free(inst->alloc, b.p);
+  return rc;
 }
 
 static void slot_clear(const GDEFCORE_Allocator * alloc, struct TenantSlot * slot) {
@@ -799,49 +886,7 @@ static GDEFCORE_Result grow_slot(GDEFCORE_Inst * inst, struct TenantSlot ** out)
   return GDEFCORE_OK;
 }
 
-static GDEFCORE_Result save_new(GDEFCORE_Catalog * catalog, const char * entity,
-    const char * storage_hex, const char * placement, size_t placement_len,
-    const char * edition, size_t edition_len, const char * status,
-    size_t status_len, const char * resolution, size_t resolution_len,
-    int is_default) {
-  const char * texts[6];
-  size_t lens[6];
-  GDEFCORE_Value values[6];
-  GDEFCORE_Changeset * changeset = NULL;
-  const char * flag = is_default ? "1" : "0";
-  size_t flag_len = 1;
-  GDEFCORE_Result rc = gdefcore_changeset_prepare(catalog, NULL, 0, &changeset);
-  if (rc != GDEFCORE_OK) {
-    return rc;
-  }
-  texts[0] = storage_hex;
-  lens[0] = kHexKey;
-  texts[1] = placement;
-  lens[1] = placement_len;
-  texts[2] = edition;
-  lens[2] = edition_len;
-  texts[3] = status;
-  lens[3] = status_len;
-  texts[4] = resolution == NULL ? "" : resolution;
-  lens[4] = resolution_len;
-  texts[5] = flag;
-  lens[5] = flag_len;
-  value_set(&values[0], "storage", &texts[0], &lens[0]);
-  value_set(&values[1], "placement", &texts[1], &lens[1]);
-  value_set(&values[2], "edition", &texts[2], &lens[2]);
-  value_set(&values[3], "status", &texts[3], &lens[3]);
-  value_set(&values[4], "resolution", &texts[4], &lens[4]);
-  value_set(&values[5], "is_default", &texts[5], &lens[5]);
-  rc = gdefcore_entity_save(changeset, entity, GDEFCORE_PUBLIC_ID_LEN, kLang,
-      strlen(kLang), values, 6);
-  if (rc == GDEFCORE_OK) {
-    rc = gdefcore_changeset_apply(changeset, kType, strlen(kType));
-  }
-  gdefcore_changeset_destroy(changeset);
-  return rc;
-}
-
-static GDEFCORE_Result adopt(GDEFCORE_Inst * inst, const char * entity,
+static GDEFCORE_Result adopt(GDEFCORE_Inst * inst,
     const uint8_t storage[kKeyBytes], const char * id, const char * placement,
     size_t placement_len, const char * edition, size_t edition_len,
     const char * status, size_t status_len, const char * resolution,
@@ -853,7 +898,6 @@ static GDEFCORE_Result adopt(GDEFCORE_Inst * inst, const char * entity,
     return rc;
   }
   memcpy(slot->id, id, GDEFCORE_PUBLIC_ID_LEN + 1);
-  memcpy(slot->entity, entity, GDEFCORE_PUBLIC_ID_LEN + 1);
   memcpy(slot->storage, storage, kKeyBytes);
   slot->placement = dup_n(inst->alloc, placement, placement_len);
   slot->edition = dup_n(inst->alloc, edition, edition_len);
@@ -906,8 +950,6 @@ static GDEFCORE_Result add_tenant(GDEFCORE_Inst * inst, const char * key,
     const uint8_t * root, char out_id[GDEFCORE_PUBLIC_ID_LEN + 1]) {
   uint8_t raw[kKeyBytes];
   char id[GDEFCORE_PUBLIC_ID_LEN + 1];
-  char entity[GDEFCORE_PUBLIC_ID_LEN + 1];
-  char hex[kHexKey + 1];
   int tries;
   GDEFCORE_Result rc;
   if (placement == NULL) {
@@ -946,23 +988,13 @@ static GDEFCORE_Result add_tenant(GDEFCORE_Inst * inst, const char * key,
     wipe(raw, sizeof raw);
     return rc;
   }
-  rc = hex_encode(raw, sizeof raw, hex, sizeof hex);
+  rc = write_record(inst, id, raw, placement, placement_len, "", 0, kActive,
+      strlen(kActive), key, key_len, is_default, NULL, 0);
   if (rc != GDEFCORE_OK) {
     wipe(raw, sizeof raw);
     return rc;
   }
-  rc = gdefcore_entity_create(inst->catalog, kType, strlen(kType), entity, NULL);
-  if (rc != GDEFCORE_OK) {
-    wipe(raw, sizeof raw);
-    return rc;
-  }
-  rc = save_new(inst->catalog, entity, hex, placement, placement_len, "", 0,
-      kActive, strlen(kActive), key, key_len, is_default);
-  if (rc != GDEFCORE_OK) {
-    wipe(raw, sizeof raw);
-    return rc;
-  }
-  rc = adopt(inst, entity, raw, id, placement, placement_len, "", 0, kActive,
+  rc = adopt(inst, raw, id, placement, placement_len, "", 0, kActive,
       strlen(kActive), key, key_len, is_default, NULL, 0, root);
   wipe(raw, sizeof raw);
   if (rc != GDEFCORE_OK) {
@@ -974,102 +1006,91 @@ static GDEFCORE_Result add_tenant(GDEFCORE_Inst * inst, const char * key,
   return GDEFCORE_OK;
 }
 
-static GDEFCORE_Result load_slots(GDEFCORE_Inst * inst, const uint8_t * root) {
-  char ** ids = NULL;
-  size_t count = 0;
+/* One tenant's record into a slot. */
+static GDEFCORE_Result load_one(GDEFCORE_Inst * inst, const char * key,
+    size_t key_len, const uint8_t * bytes, size_t len, const uint8_t * root,
+    int * out_default) {
+  char * f[7] = {NULL, NULL, NULL, NULL, NULL, NULL, NULL};
+  size_t n[7] = {0, 0, 0, 0, 0, 0, 0};
+  static const char * const names[7] = {"storage", "placement", "edition",
+      "status", "resolution", "is_default", "limits"};
+  uint8_t raw[kKeyBytes];
+  char id[GDEFCORE_PUBLIC_ID_LEN + 1];
+  GDEFCORE_Result rc = GDEFCORE_OK;
   size_t i;
-  int defaults = 0;
-  GDEFCORE_Result rc = gdefcore_entity_ids(inst->catalog, kType, strlen(kType),
-      &ids, &count);
-  if (rc != GDEFCORE_OK) {
-    return rc;
+  memset(raw, 0, sizeof raw);
+  for (i = 0; i < 7 && rc == GDEFCORE_OK; i++) {
+    rc = rec_field(inst->alloc, bytes, len, names[i], i < 6, &f[i], &n[i]);
   }
-  for (i = 0; i < count; i++) {
-    char * storage = NULL;
-    char * placement = NULL;
-    char * edition = NULL;
-    char * status = NULL;
-    char * resolution = NULL;
-    char * flag = NULL;
-    char * limits = NULL;
-    size_t storage_n = 0;
-    size_t placement_n = 0;
-    size_t edition_n = 0;
-    size_t status_n = 0;
-    size_t resolution_n = 0;
-    size_t flag_n = 0;
-    size_t limits_n = 0;
-    uint8_t raw[kKeyBytes];
-    char id[GDEFCORE_PUBLIC_ID_LEN + 1];
-    memset(raw, 0, sizeof raw);
-    int is_default;
-    rc = read_field(inst->catalog, inst->alloc, ids[i], "storage", 1, &storage,
-        &storage_n);
-    if (rc == GDEFCORE_OK) {
-      rc = read_field(inst->catalog, inst->alloc, ids[i], "placement", 1,
-          &placement, &placement_n);
-    }
-    if (rc == GDEFCORE_OK) {
-      rc = read_field(inst->catalog, inst->alloc, ids[i], "edition", 1, &edition,
-          &edition_n);
-    }
-    if (rc == GDEFCORE_OK) {
-      rc = read_field(inst->catalog, inst->alloc, ids[i], "status", 1, &status,
-          &status_n);
-    }
-    if (rc == GDEFCORE_OK) {
-      rc = read_field(inst->catalog, inst->alloc, ids[i], "resolution", 1,
-          &resolution, &resolution_n);
-    }
-    if (rc == GDEFCORE_OK) {
-      rc = read_field(inst->catalog, inst->alloc, ids[i], "is_default", 1, &flag,
-          &flag_n);
-    }
-    if (rc == GDEFCORE_OK) {
-      rc = read_field(inst->catalog, inst->alloc, ids[i], "limits", 0, &limits,
-          &limits_n);
-    }
-    if (rc == GDEFCORE_OK) {
-      rc = hex_decode(storage, storage_n, raw, sizeof raw);
-    }
-    if (rc == GDEFCORE_OK) {
-      rc = gdefcore_id_encode(raw, id);
-    }
-    if (rc != GDEFCORE_OK || flag == NULL ||
-        (!same(flag, flag_n, "1", 1) && !same(flag, flag_n, "0", 1))) {
-      gcu_allocator_free(inst->alloc, storage);
-      gcu_allocator_free(inst->alloc, placement);
-      gcu_allocator_free(inst->alloc, edition);
-      gcu_allocator_free(inst->alloc, status);
-      gcu_allocator_free(inst->alloc, resolution);
-      gcu_allocator_free(inst->alloc, flag);
-      gcu_allocator_free(inst->alloc, limits);
-      wipe(raw, sizeof raw);
-      gdefcore_ids_free(inst->catalog, ids, count);
-      return rc == GDEFCORE_OK ? GDEFCORE_ERR_CORRUPT : rc;
-    }
-    is_default = same(flag, flag_n, "1", 1);
-    gcu_allocator_free(inst->alloc, storage);
-    gcu_allocator_free(inst->alloc, flag);
-    if (is_default) {
-      defaults += 1;
-    }
-    rc = adopt(inst, ids[i], raw, id, placement, placement_n, edition, edition_n,
-        status, status_n, resolution, resolution_n, is_default, limits, limits_n,
-        root);
-    wipe(raw, sizeof raw);
-    gcu_allocator_free(inst->alloc, placement);
-    gcu_allocator_free(inst->alloc, edition);
-    gcu_allocator_free(inst->alloc, status);
-    gcu_allocator_free(inst->alloc, resolution);
-    gcu_allocator_free(inst->alloc, limits);
+  if (rc == GDEFCORE_OK) {
+    rc = hex_decode(f[0], n[0], raw, sizeof raw);
+  }
+  if (rc == GDEFCORE_OK) {
+    rc = gdefcore_id_encode(raw, id);
+  }
+  /* The key is the id the storage key encodes: a record under another key
+   * is not one this registry wrote. */
+  if (rc == GDEFCORE_OK &&
+      (!same(key, key_len, id, GDEFCORE_PUBLIC_ID_LEN) ||
+          (!same(f[5], n[5], "1", 1) && !same(f[5], n[5], "0", 1)))) {
+    rc = GDEFCORE_ERR_CORRUPT;
+  }
+  if (rc == GDEFCORE_OK) {
+    *out_default = same(f[5], n[5], "1", 1);
+    rc = adopt(inst, raw, id, f[1], n[1], f[2], n[2], f[3], n[3], f[4], n[4],
+        *out_default, f[6], n[6], root);
+  }
+  wipe(raw, sizeof raw);
+  if (f[0] != NULL) {
+    wipe(f[0], n[0]);
+  }
+  for (i = 0; i < 7; i++) {
+    gcu_allocator_free(inst->alloc, f[i]);
+  }
+  return rc == GDEFCORE_ERR_INVALID ? GDEFCORE_ERR_CORRUPT : rc;
+}
+
+static GDEFCORE_Result load_slots(GDEFCORE_Inst * inst, const uint8_t * root) {
+  uint64_t offset = 0;
+  int defaults = 0;
+  size_t total = 0;
+  for (;;) {
+    GDEFSTOR_RecordList * list = NULL;
+    size_t count;
+    size_t i;
+    GDEFCORE_Result rc = map_stor(gdefstor_record_list(inst->registry,
+        (const char *)kRegistryTenant, sizeof kRegistryTenant, kRegistryNs,
+        strlen(kRegistryNs), "", 0, offset, GDEFSTOR_RECORD_MAX_PAGE, &list));
     if (rc != GDEFCORE_OK) {
-      gdefcore_ids_free(inst->catalog, ids, count);
       return rc;
     }
+    count = gdefstor_record_list_count(list);
+    for (i = 0; i < count; i++) {
+      const char * key = NULL;
+      size_t key_len = 0;
+      const uint8_t * bytes = NULL;
+      size_t blen = 0;
+      int is_default = 0;
+      if (gdefstor_record_list_item(list, i, &key, &key_len, &bytes, &blen) !=
+          GDEFSTOR_OK) {
+        gdefstor_record_list_free(list);
+        return GDEFCORE_ERR_CORRUPT;
+      }
+      rc = load_one(inst, key, key_len, bytes, blen, root, &is_default);
+      if (rc != GDEFCORE_OK) {
+        gdefstor_record_list_free(list);
+        return rc;
+      }
+      defaults += is_default;
+    }
+    gdefstor_record_list_free(list);
+    total += count;
+    if (count < GDEFSTOR_RECORD_MAX_PAGE) {
+      break;
+    }
+    offset += count;
   }
-  gdefcore_ids_free(inst->catalog, ids, count);
-  if (count == 0) {
+  if (total == 0) {
     return GDEFCORE_OK;
   }
   if (defaults != 1) {
@@ -1112,18 +1133,7 @@ static GDEFCORE_Result open_inst(GDEFSTOR_Store * registry,
   inst->site = site;
   inst->keys = keys;
   memcpy(inst->root, root, sizeof inst->root);
-  rc = gdefcore_catalog_open(registry, kRegistryTenant, sizeof kRegistryTenant,
-      NULL, allocator, &inst->catalog);
-  if (rc != GDEFCORE_OK) {
-    gdefcore_inst_destroy(inst);
-    return rc;
-  }
   rc = gdefcore_keyring_create(root, root_len, allocator, &inst->keyring);
-  if (rc != GDEFCORE_OK) {
-    gdefcore_inst_destroy(inst);
-    return rc;
-  }
-  rc = ensure_type(inst->catalog);
   if (rc != GDEFCORE_OK) {
     gdefcore_inst_destroy(inst);
     return rc;
@@ -1173,7 +1183,6 @@ void gdefcore_inst_destroy(GDEFCORE_Inst * inst) {
   }
   gcu_allocator_free(inst->alloc, inst->slots);
   gdefcore_keyring_destroy(inst->keyring);
-  gdefcore_catalog_destroy(inst->catalog);
   wipe(inst->root, sizeof inst->root);
   gcu_allocator_free(inst->alloc, inst);
 }
@@ -1317,23 +1326,10 @@ GDEFCORE_Keyring * gdefcore_inst_tenant_keyring(GDEFCORE_Inst * inst,
 
 static GDEFCORE_Result rewrite_limits(GDEFCORE_Inst * inst, struct TenantSlot * slot,
     const char * text, size_t n) {
-  const char * held = text;
-  size_t held_n = n;
-  GDEFCORE_Value value;
-  GDEFCORE_Changeset * changeset = NULL;
-  GDEFCORE_Result rc = gdefcore_changeset_prepare(inst->catalog, NULL, 0,
-      &changeset);
-  if (rc != GDEFCORE_OK) {
-    return rc;
-  }
-  value_set(&value, "limits", &held, &held_n);
-  rc = gdefcore_entity_save(changeset, slot->entity, GDEFCORE_PUBLIC_ID_LEN,
-      kLang, strlen(kLang), &value, 1);
-  if (rc == GDEFCORE_OK) {
-    rc = gdefcore_changeset_apply(changeset, kType, strlen(kType));
-  }
-  gdefcore_changeset_destroy(changeset);
-  return rc;
+  return write_record(inst, slot->id, slot->storage, slot->placement,
+      slot->placement_len, slot->edition, slot->edition_len, slot->status,
+      slot->status_len, slot->resolution, slot->resolution_len,
+      slot->is_default, text, n);
 }
 
 GDEFCORE_Result gdefcore_inst_limit_set(GDEFCORE_Inst * inst, const char * id,

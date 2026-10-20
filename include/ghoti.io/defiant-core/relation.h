@@ -26,7 +26,9 @@
  * A module declares a relation in its manifest (module.h): a name in its own
  * namespace and one to four typed columns. The rows are entities of a kernel
  * type, `core.relation_row`, one per row: a `relation` field with the
- * relation's name and a field `c0` to `c3` per column. They are business data
+ * relation's name and, per column, a text field `c0` to `c3` (an entity or a
+ * text column) or an integer field `n0` to `n3` (an integer column), so that a
+ * column is compared in its own type. They are business data
  * (SPEC decision 6): an entity column holds the public id of what it refers
  * to, and keeps holding it when the person it names is erased; no personal
  * value is ever stored in one.
@@ -67,7 +69,8 @@ extern "C" {
 /** The kernel type of a relation row. */
 #define GDEFCORE_RELATION_ROW_TYPE "core.relation_row"
 /** The kernel type of a relation's state: one entity per relation that has had
- * a row, whose version counter is the relation's version. */
+ * a row, whose version counter is the relation's version (its `changes`
+ * field counts the changes, so each one writes a revision). */
 #define GDEFCORE_RELATION_STATE_TYPE "core.relation"
 /** The field of a row that holds the relation's name. */
 #define GDEFCORE_RELATION_FIELD_NAME "relation"
@@ -75,11 +78,19 @@ extern "C" {
 #define GDEFCORE_RELATION_LANG "en"
 
 /**
- * @brief The field that holds column @p index of a row: "c0" to "c3".
+ * @brief The text field that holds entity or text column @p index of a row:
+ * "c0" to "c3".
  *
  * @return A static string, or NULL for an index of 4 or more.
  */
 GDEFCORE_API const char * gdefcore_relation_column_field(size_t index);
+
+/**
+ * @brief The field that holds integer column @p index of a row: "n0" to "n3".
+ *
+ * @return A static string, or NULL for an index of 4 or more.
+ */
+GDEFCORE_API const char * gdefcore_relation_number_field(size_t index);
 
 /**
  * @brief Add a row to a relation.

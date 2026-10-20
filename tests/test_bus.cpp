@@ -42,7 +42,7 @@
 
 #include <ghoti.io/defiant-core/defiant-core.h>
 #include <ghoti.io/defiant-storage-memory/memory.h>
-#include <ghoti.io/defiant-storage/projection.h>
+#include <ghoti.io/defiant-storage/model.h>
 
 #include <gtest/gtest.h>
 
@@ -124,22 +124,14 @@ class LossyBus {
 };
 
 /* The committed epoch, read from the store and not through the library. */
+/* The config epoch as the store has it: the counter `core.epoch`, read
+ * straight off the port (a system counter since story S6b). */
 uint64_t CommittedEpoch(GDEFSTOR_Store * store) {
-  GDEFSTOR_Projection * row = NULL;
   uint64_t epoch = 0;
-  if (gdefstor_projection_get(store, (const char *)kTenant, 1, "e", 1, "epoch", 5,
-          &row) != GDEFSTOR_OK) {
+  if (gdefstor_counter_peek(store, (const char *)kTenant, 1, "core.epoch", 10,
+          &epoch) != GDEFSTOR_OK) {
     return 0;
   }
-  for (size_t i = 0; i < gdefstor_projection_column_count(row); i++) {
-    GDEFSTOR_Column column;
-    if (gdefstor_projection_column(row, i, &column) == GDEFSTOR_OK &&
-        column.name_len == 1 && column.name[0] == 'n') {
-      epoch = strtoull(std::string((const char *)column.value, column.value_len).c_str(),
-          NULL, 10);
-    }
-  }
-  gdefstor_projection_free(row);
   return epoch;
 }
 

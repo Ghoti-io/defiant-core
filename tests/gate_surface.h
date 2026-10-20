@@ -149,6 +149,9 @@ static const Surface kSurface[] = {
     {"gdefcore_type_field_count", "RA"},
     {"gdefcore_type_field", "RA"},
     {"gdefcore_type_field_personal", "RA"},
+    {"gdefcore_type_field_type", "RA"},
+    {"gdefcore_value_parse", "P"},
+    {"gdefcore_value_compare", "P"},
     {"gdefcore_type_field_constraints", "RA"},
     {"gdefcore_entity_create", "W"},
     {"gdefcore_epoch", "RA"},
@@ -160,7 +163,6 @@ static const Surface kSurface[] = {
     {"gdefcore_entity_save_draft", "W"},
     {"gdefcore_entity_publish", "W"},
     {"gdefcore_entity_unpublish", "W"},
-    {"gdefcore_entity_activate", "W"},
     {"gdefcore_entity_revision", "RA"},
     {"gdefcore_entity_revision_count", "RA"},
     {"gdefcore_entity_revision_at", "RA"},
@@ -190,6 +192,8 @@ static const Surface kSurface[] = {
     {"gdefcore_changeset_touched_at", "P"},
     {"gdefcore_changeset_refusal", "P"},
     {"gdefcore_changeset_set_refusal", "W"},
+    {"gdefcore_changeset_set_why", "W"},
+    {"gdefcore_changeset_revision", "P"},
     {"gdefcore_changeset_module_at", "P"},
     {"gdefcore_entity_ids", "RA"},
     /* The unfiltered index with a predicate. The access list builds the
@@ -220,6 +224,7 @@ static const Surface kSurface[] = {
      * the note takes a request only to record that a decision read the
      * relation, and answers nothing about a row. */
     {"gdefcore_relation_column_field", "P"},
+    {"gdefcore_relation_number_field", "P"},
     {"gdefcore_relation_add", "W"},
     {"gdefcore_relation_remove", "W"},
     {"gdefcore_relation_version", "RA"},

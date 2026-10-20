@@ -131,9 +131,10 @@ of an erased person says so in the same word a read does. It does not decrypt, a
 it asks no principal; the permission and the field filter were the access
 layer's.
 
-Making an old revision of an erased person active (`gdefcore_entity_activate()`)
-puts its ciphertext in front of readers and nothing else: the key is gone, so it
-decrypts to nothing, and a revision that holds a personal value that is not
-sealed is refused (entities.md).
-`Erasure.RevisionViewsAndAnActivatedOldRevisionOfAnErasedSubject` sweeps every
+Reverting to an old revision of an erased person
+(`gdefcore_changeset_revert_to()`, a new revision that copies it; there is no
+activate since access SPEC decision 13) puts its ciphertext in front of readers
+and nothing else: the key is gone, so it decrypts to nothing, and a revision
+that holds a personal value that is not sealed is refused (entities.md).
+`Erasure.RevisionViewsAndARestoredOldRevisionOfAnErasedSubject` sweeps every
 output for the value, its hashes and the key after both.

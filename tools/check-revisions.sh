@@ -1,35 +1,39 @@
 #!/bin/sh
 #
-# The entity record gate (access-conditions story A5b): the published flag, the
-# active revision, the version and the creator, beside the append-only
-# revisions (SPEC decisions 9-11). Runs the Revisions tests on the real tree,
-# then plants each defect in a COPY of the source by an exact text edit and
-# requires the named test to fail:
+# The entity record gate (access-conditions story A5b, as decision 13 and
+# story S6b leave it): the published flag, the version and the creator,
+# beside the append-only revisions, and the draft, which is never a revision
+# and which a publish applies only on the revision it was made from. The
+# newest revision is always the content: there is no active-revision pointer.
+# Runs the Revisions tests on the real tree, then plants each defect in a COPY
+# of the source by an exact text edit and requires the named test to fail:
 #
-#   publish-forgets-flag        Revisions.PublishSetsTheFlagAndMakesTheHeadActive
-#   publish-stores-publisher    Revisions.PublishKeepsTheRevisionsOwnCreator
-#   draft-moves-pointer         Revisions.ALaterDraftDoesNotMoveThePointer
-#   first-draft-not-active      Revisions.FirstDraftIsActiveButNotPublished
-#   clear-leaves-flag           Revisions.ClearUnpublishesAndEmptiesTheActiveRevision
-#   published-view-ignores-flag Revisions.FirstDraftIsActiveButNotPublished
-#   active-view-reads-head      Revisions.ALaterDraftDoesNotMoveThePointer
-#   save-omits-state            Revisions.StoredShape
-#   row-without-state           Revisions.CreateWritesTheRecord
+#   publish-forgets-flag        Revisions.PublishAppliesTheDraftAsOneRevision
+#   publish-stores-publisher    Revisions.TheFirstDraftMakesTheEntityWithNoRevision
+#   draft-creator-dropped       Revisions.TheFirstDraftMakesTheEntityWithNoRevision
+#   draft-writes-revision       Revisions.ADraftIsNeverARevision
+#   first-draft-makes-no-entity Revisions.TheFirstDraftMakesTheEntityWithNoRevision
+#   clear-leaves-flag           Revisions.ClearUnpublishesDeletesAndDropsTheDraft
+#   clear-keeps-draft           Revisions.ClearUnpublishesDeletesAndDropsTheDraft
+#   published-view-ignores-flag Revisions.UnpublishClearsTheFlagAndNothingElse
+#   current-view-reads-draft    Revisions.ADraftIsNeverARevision
+#   save-leaves-unpublished     Revisions.SaveIsSaveAndPublish
+#   save-keeps-draft            Revisions.SaveIsSaveAndPublish
+#   create-reserves-nothing     Revisions.CreateReservesTheIdWithADraft
 #   publish-skips-version       Revisions.TheVersionMovesWhereTheRevisionDoesNot
-#   creator-mutable             Revisions.TheCreatorIsSetOnceAtTheFirstRevision
-#   old-shape-read-unpublished  Revisions.AnOldShapedStoreIsCorruptNotUnpublished
+#   creator-follows-the-author  Revisions.TheCreatorIsSetOnce
+#   draft-on-moved-head         Revisions.ADraftOnAMovedHeadIsRefused
+#   noop-save-writes-revision   Revisions.ANoOpSaveWritesNoRevisionAndSaysSo
+#   record-outside-its-write    EntityRollback.ATypeRecordIsWrittenInItsChangesetsWrite
 #
-#   unpublish-clears-pointer     Revisions.UnpublishClearsTheFlagAndNothingElse
-#   activate-moves-flag          Revisions.ActivateMovesThePointerAndNothingElse
-#   activate-publisher-creator   Revisions.ActivateMovesThePointerAndNothingElse
-#   activate-unrecorded          Revisions.ActivateNeedsARecordedRevision
-#   activate-cleared-no-head     Revisions.ActivateBringsBackAClearedEntity
-#   revert-publishes             Revisions.RevertToCopiesATargetAndKeepsTheFlag
-#   revert-writes-no-revision    Revisions.RevertToCopiesATargetAndKeepsTheFlag
-#   legacy-revert-from-head      Revisions.TheLegacyRevertStepsBackFromTheActiveRevision
-#   stale-version-accepted       Revisions.AStalePatchOfTheNewOperationsIsAConflict
-#   patch-drops-version          Revisions.TheNewOperationsRoundTripThroughAPatch
-#   form-tree-skips-active       Form.TreeFallsBackToTheActiveRevision
+#   unpublish-deletes           Revisions.UnpublishClearsTheFlagAndNothingElse
+#   revert-leaves-deleted       Revisions.ClearUnpublishesDeletesAndDropsTheDraft
+#   revert-publishes            Revisions.RevertToCopiesATargetAndKeepsTheFlag
+#   revert-writes-no-revision   Revisions.RevertToCopiesATargetAndKeepsTheFlag
+#   legacy-revert-wrong-step    Revisions.TheLegacyRevertStepsBackFromTheNewest
+#   stale-version-accepted      Revisions.AStalePatchOfTheNewOperationsIsAConflict
+#   patch-drops-version         Revisions.TheNewOperationsRoundTripThroughAPatch
+#   form-tree-reads-published   Form.TreeFallsBackToTheCurrentRevision
 #   revisions-not-edit-class    ActionRating.RevisionsActionsAreAtLeastAnEdit
 #   activate-not-strong         ActionRating.RevisionsActionsAreAtLeastAnEdit
 #   self-reference-not-raised   ActionRating.AGrantThatCanChangeItsOwnFieldIsRatedOneStepHigher,
@@ -48,13 +52,20 @@
 #                               Actions.RevisionViewIsFilteredFieldByField
 #   revision-view-shows-personal
 #                               Actions.RevisionViewNeverShowsAPersonalFieldAsStored
-#   condition-reads-head        Actions.RevisionViewAsksTheActiveStateNotTheViewedRevision
-#   (activate-skips-sealed-check is in check-erasure.sh, which owns the
-#    personal-value fixtures: Erasure.PlaintextRevisionIsNotActivated)
+#   condition-reads-draft       Actions.RevisionViewAsksTheCurrentStateNotTheViewedRevision
+#   (the gate that a plaintext revision cannot become the content again is in
+#    check-erasure.sh, which owns the personal-value fixtures:
+#    Erasure.PlaintextRevisionCannotBecomeTheContentAgain)
+#
+# The activate plants (activate-moves-flag, activate-publisher-creator,
+# activate-unrecorded, activate-cleared-no-head) went with activate, which
+# access SPEC decision 13 retired; old-shape-read-unpublished went with core's
+# own index, there being no row without a record when the port's entity
+# record is the only one.
 #
 # Every test has a control (the same call on the other side of the rule
 # answers differently), so a plant turning one red is a test seeing the
-# defect, not a build failure. Later tasks of the story add their plants here.
+# defect, not a build failure.
 #
 # Usage: check-revisions.sh <make> <build-dir> [make args]
 
@@ -64,201 +75,253 @@ set -u
 plant_setup "$@"
 
 plant_control testRevisions 'Revisions.*'
-plant_control testForm 'Form.TreeFallsBackToTheActiveRevision'
+plant_control testForm 'Form.TreeFallsBackToTheCurrentRevision'
 plant_control testActions 'ActionVocabulary.*:ActionRating.*:Actions.*'
+plant_control testEntity 'EntityRollback.*'
 
 ENT=src/entity/entity.c
+STO=src/entity/store.c
 
-# Plant 1: a publish does not set the flag.
-plant publish-forgets-flag $ENT testRevisions \
-  'Revisions.PublishSetsTheFlagAndMakesTheHeadActive' \
-  '    case GDEFCORE_OP_PUBLISH:
-      st->pub = 1;' \
-  '    case GDEFCORE_OP_PUBLISH:
-      st->pub = st->pub;'
-
-# Plant 2: a publish writes the publisher as the revision's creator (defect
-# 1.5.3: the author was lost, and `own` stopped matching).
+# A publish writes the publisher as the revision's author (defect 1.5.3: the
+# author was lost, and a form publish, which has no actor, dropped it).
 plant publish-stores-publisher $ENT testRevisions \
-  'Revisions.PublishKeepsTheRevisionsOwnCreator' \
-  '            head_actor, head_actor_len);' \
-  '            actor, actor_len);'
+  'Revisions.TheFirstDraftMakesTheEntityWithNoRevision' \
+  '        authored.who = who;
+        authored.who_len = who_len;' \
+  '        (void)who;
+        (void)who_len;'
 
-# Plant 3: a later draft moves the active pointer.
-plant draft-moves-pointer $ENT testRevisions \
-  'Revisions.ALaterDraftDoesNotMoveThePointer' \
-  '      moves = step->first;' \
-  '      moves = 1;'
-
-# Plant 4: the first draft of an entity is not made active.
-plant first-draft-not-active $ENT testRevisions \
-  'Revisions.FirstDraftIsActiveButNotPublished' \
-  '      moves = step->first;' \
-  '      moves = 0;'
-
-# Plant 5: a clear leaves the published flag set.
-plant clear-leaves-flag $ENT testRevisions \
-  'Revisions.ClearUnpublishesAndEmptiesTheActiveRevision' \
-  '      st->pub = 0;
-      st->has_act = 0;' \
-  '      st->has_act = 0;'
-
-# Plant 6: the reader's view ignores the flag.
-plant published-view-ignores-flag $ENT testRevisions \
-  'Revisions.FirstDraftIsActiveButNotPublished' \
-  '    if (view == GDEFCORE_VIEW_PUBLISHED && !st.pub) {' \
-  '    if (0 && view == GDEFCORE_VIEW_PUBLISHED && !st.pub) {'
-
-# Plant 7: the active view reads the head.
-plant active-view-reads-head $ENT testRevisions \
-  'Revisions.ALaterDraftDoesNotMoveThePointer' \
-  '  rc = read_proj_doc(catalog, view == GDEFCORE_VIEW_DRAFT ? "d:" : "a:",' \
-  '  rc = read_proj_doc(catalog, "d:",'
-
-# Plant 8: a save does not write the entity record.
-plant save-omits-state $ENT testRevisions \
-  'Revisions.StoredShape' \
+# A publish applies the draft and does not set the flag.
+plant publish-forgets-flag $ENT testRevisions \
+  'Revisions.PublishAppliesTheDraftAsOneRevision' \
   '    if (rc == GDEFCORE_OK) {
-      rc = put_state(write, op->row, &st);
+      rc = set_state(write, op, cs, 1, 0, when, &changed);
     }
-    gcu_allocator_free(cat->alloc, lang);' \
-  '    gcu_allocator_free(cat->alloc, lang);'
+    break;
+  case GDEFCORE_OP_UNPUBLISH:' \
+  '    if (rc == GDEFCORE_OK) {
+      rc = set_state(write, op, cs, look.published, 0, when, &changed);
+    }
+    break;
+  case GDEFCORE_OP_UNPUBLISH:'
 
-# Plant 9: create does not write the entity record (a row with no record).
-plant row-without-state $ENT testRevisions \
-  'Revisions.CreateWritesTheRecord' \
-  '    EntState st;
-    memset(&st, 0, sizeof st);
-    rc = put_state(write, row, &st);' \
-  '    EntState st;
-    memset(&st, 0, sizeof st);
-    (void)st;'
+# The first draft makes the entity with no creator, so `own` has no answer
+# for a draft (and the publisher would not become it either).
+plant draft-creator-dropped $ENT testRevisions \
+  'Revisions.TheFirstDraftMakesTheEntityWithNoRevision' \
+  '            op->type_name.n, op->id.p, op->id.n,
+            cs->actor.p == NULL ? "" : cs->actor.p, cs->actor.n, when, NULL));' \
+  '            op->type_name.n, op->id.p, op->id.n,
+            "", 0, when, NULL));'
 
-# Plant 10: a publish or a clear does not move the version (defect 1.5.2: the
-# memo and the read set were keyed on a number that did not move).
+# A draft is written as a revision.
+plant draft-writes-revision $ENT testRevisions \
+  'Revisions.ADraftIsNeverARevision' \
+  '      rc = gdefcore_ent_put_draft(cat, write, op->id.p, op->type_name.p,
+          op->type_name.n, look.exists ? op->draft_base : 0, &op->staged);
+    }' \
+  '      int moved_ = 0;
+      rc = look.exists
+               ? gdefcore_ent_save_doc(cat, write, op->id.p, op->type_name.p,
+                     op->type_name.n, op->draft_base, &meta, &op->staged, &rev,
+                     &moved_)
+               : gdefcore_ent_put_draft(cat, write, op->id.p, op->type_name.p,
+                     op->type_name.n, 0, &op->staged);
+    }'
+
+# The first draft leaves the id reserved and makes no entity.
+plant first-draft-makes-no-entity $ENT testRevisions \
+  'Revisions.TheFirstDraftMakesTheEntityWithNoRevision' \
+  '    if (!look.exists) {
+      /* The first draft of an id its empty draft reserves is when the' \
+  '    if (0 && !look.exists) {
+      /* The first draft of an id its empty draft reserves is when the'
+
+# A clear leaves the published flag set.
+plant clear-leaves-flag $ENT testRevisions \
+  'Revisions.ClearUnpublishesDeletesAndDropsTheDraft' \
+  '      rc = set_state(write, op, cs, 0, 1, when, &changed);' \
+  '      rc = set_state(write, op, cs, look.published, 1, when, &changed);'
+
+# A clear leaves the draft, which a publish would then bring back.
+plant clear-keeps-draft $ENT testRevisions \
+  'Revisions.ClearUnpublishesDeletesAndDropsTheDraft' \
+  '      if (rc == GDEFCORE_OK && look.has_draft) {
+        rc = map_stor(gdefstor_draft_delete(write, op->id.p, op->id.n));
+        if (rc == GDEFCORE_OK) {
+          rc = drop_draft_author(write, op);
+        }
+        changed = 1;
+      }
+    } else if (look.reserved) {' \
+  '    } else if (look.reserved) {'
+
+# The reader's view ignores the flag.
+plant published-view-ignores-flag $ENT testRevisions \
+  'Revisions.UnpublishClearsTheFlagAndNothingElse' \
+  '        (view == GDEFCORE_VIEW_PUBLISHED && !look.published)) {' \
+  '        (0 && view == GDEFCORE_VIEW_PUBLISHED && !look.published)) {'
+
+# Every view reads the draft, so what the entity is includes its draft.
+plant current-view-reads-draft $ENT testRevisions \
+  'Revisions.ADraftIsNeverARevision' \
+  '  if (view == GDEFCORE_VIEW_DRAFT && look.has_draft) {' \
+  '  if (look.has_draft) {'
+
+# A save does not set the flag.
+plant save-leaves-unpublished $ENT testRevisions \
+  'Revisions.SaveIsSaveAndPublish' \
+  '    if (rc == GDEFCORE_OK) {
+      rc = set_state(write, op, cs, 1, 0, when, &changed);
+    }
+    break;
+  case GDEFCORE_OP_DRAFT:' \
+  '    if (rc == GDEFCORE_OK) {
+      rc = set_state(write, op, cs, look.published, 0, when, &changed);
+    }
+    break;
+  case GDEFCORE_OP_DRAFT:'
+
+# A save leaves the draft it consumed.
+plant save-keeps-draft $ENT testRevisions \
+  'Revisions.SaveIsSaveAndPublish' \
+  '      if (rc == GDEFCORE_OK && look.has_draft) {
+        /* The save consumed the draft (stage_values()). */' \
+  '      if (0 && rc == GDEFCORE_OK && look.has_draft) {
+        /* The save consumed the draft (stage_values()). */'
+
+# A create reserves nothing: the id has no draft, so nothing holds it.
+plant create-reserves-nothing $ENT testRevisions \
+  'Revisions.CreateReservesTheIdWithADraft' \
+  '  rc = map_stor(gdefstor_draft_put(write, type_name, type_len, id,
+      GDEFCORE_PUBLIC_ID_LEN, 0, NULL, 0));' \
+  '  rc = GDEFCORE_OK;'
+
+# A publish or a draft does not move the version (defect 1.5.2: the memo and
+# the read set were keyed on a number that did not move).
 plant publish-skips-version $ENT testRevisions \
   'Revisions.TheVersionMovesWhereTheRevisionDoesNot' \
-  '  st->ver += 1;
-  if (step->first' \
-  '  if (step->kind != GDEFCORE_OP_PUBLISH && step->kind != GDEFCORE_OP_CLEAR) {
-    st->ver += 1;
+  '  if (changed) {
+    rc = gdefcore_ent_bump(write, op->id.p, NULL);
+  }' \
+  '  if (changed && op->kind != GDEFCORE_OP_PUBLISH &&
+      op->kind != GDEFCORE_OP_DRAFT) {
+    rc = gdefcore_ent_bump(write, op->id.p, NULL);
+  }'
+
+# The creator follows the newest revision's author.
+plant creator-follows-the-author $ENT testRevisions \
+  'Revisions.TheCreatorIsSetOnce' \
+  '  if (look.creator_len > 0) {
+    *out_creator = dup_span(catalog->alloc, look.creator, look.creator_len);' \
+  '  if (look.revision > 0) {
+    return gdefcore_entity_actor(catalog, id, id_len, out_creator, out_len);
   }
-  if (step->first'
+  if (look.creator_len > 0) {
+    *out_creator = dup_span(catalog->alloc, look.creator, look.creator_len);'
 
-# Plant 11: the creator follows the latest actor, not the first.
-plant creator-mutable $ENT testRevisions \
-  'Revisions.TheCreatorIsSetOnceAtTheFirstRevision' \
-  '  if (step->first && st->creator_len == 0 && step->actor != NULL &&' \
-  '  if (step->kind == GDEFCORE_OP_SAVE && step->actor != NULL &&'
-
-# Plant 12: a row with no entity record reads as an unpublished entity.
-plant old-shape-read-unpublished $ENT testRevisions \
-  'Revisions.AnOldShapedStoreIsCorruptNotUnpublished' \
-  '  if (rc == GDEFCORE_ERR_INVALID) {
-    return GDEFCORE_ERR_CORRUPT;
-  }
-  if (rc != GDEFCORE_OK) {
-    return rc;
-  }
-  if (!col_find(proj, "pub", 3, &val, &vlen) || vlen != 1 ||' \
-  '  if (rc == GDEFCORE_ERR_INVALID) {
-    return GDEFCORE_OK;
-  }
-  if (rc != GDEFCORE_OK) {
-    return rc;
-  }
-  if (!col_find(proj, "pub", 3, &val, &vlen) || vlen != 1 ||'
-
-# Plant 13: an unpublish also forgets which revision the entity is.
-plant unpublish-clears-pointer $ENT testRevisions \
-  'Revisions.UnpublishClearsTheFlagAndNothingElse' \
-  '      /* The active revision stays where it is. */
-      st->pub = 0;
-      return 0;' \
-  '      /* The active revision stays where it is. */
-      st->pub = 0;
-      st->has_act = 0;
-      return 0;'
-
-# Plant 14: an activate also publishes.
-plant activate-moves-flag $ENT testRevisions \
-  'Revisions.ActivateMovesThePointerAndNothingElse' \
-  '    case GDEFCORE_OP_ACTIVATE:
-      moves = 1;' \
-  '    case GDEFCORE_OP_ACTIVATE:
-      st->pub = 1;
-      moves = 1;'
-
-# Plant 15: an activated revision is credited to whoever activated it.
-plant activate-publisher-creator $ENT testRevisions \
-  'Revisions.ActivateMovesThePointerAndNothingElse' \
-  '            op->row, op->target_seq, op->id.p, op->id.n, doc_text,
-            doc_text_len, who, who_len);
-      }
-      if (rc == GDEFCORE_OK && op->target_seq == high) {' \
-  '            op->row, op->target_seq, op->id.p, op->id.n, doc_text,
-            doc_text_len, actor, actor_len);
-      }
-      if (rc == GDEFCORE_OK && op->target_seq == high) {'
-
-# Plant 16: a sequence that was never recorded is accepted (the call does not
-# look the revision up, and apply reads whatever is not there as empty).
-plant activate-unrecorded $ENT testRevisions \
-  'Revisions.ActivateNeedsARecordedRevision' \
-  '    if (target == 0 || target > high) {
-      rc = GDEFCORE_ERR_INVALID;
-    } else {
-      rc = rev_doc(cat, row, target, &staged);' \
-  '    if (0) {
-      rc = GDEFCORE_ERR_INVALID;
-    } else {
-      rc = GDEFCORE_OK;
-      (void)rev_doc(cat, row, target, &staged);' \
-  '      if (rc == GDEFCORE_OK && (op->target_seq == 0 || op->target_seq > high)) {
-        rc = GDEFCORE_ERR_INVALID;
-      }
-      if (rc == GDEFCORE_OK) {
-        rc = rev_doc(cat, op->row, op->target_seq, &doc);
+# A draft made from an older revision is rebased onto the head and applied,
+# overwriting what the head holds (CAP-S4: it is refused).
+plant draft-on-moved-head $ENT testRevisions \
+  'Revisions.ADraftOnAMovedHeadIsRefused' \
+  '      if (look.exists && look.draft_base != look.revision) {
+        *conflict = 1;
+        return GDEFCORE_OK;
       }' \
-  '      if (rc == GDEFCORE_OK) {
-        (void)rev_doc(cat, op->row, op->target_seq, &doc);
+  '      if (look.exists && look.draft_base != look.revision) {
+        GDEFCORE_Doc moved_;
+        memset(&moved_, 0, sizeof moved_);
+        rc = gdefcore_ent_read_doc(cat, op->id.p, 0, 1, &moved_);
+        if (rc == GDEFCORE_OK) {
+          rc = gdefcore_ent_put_draft(cat, write, op->id.p, op->type_name.p,
+              op->type_name.n, look.revision, &moved_);
+        }
+        gdefcore_ent_doc_free(cat->alloc, &moved_);
+        if (rc != GDEFCORE_OK) {
+          return rc;
+        }
       }'
 
-# Plant 17: making the head active again does not put its projection back.
-plant activate-cleared-no-head $ENT testRevisions \
-  'Revisions.ActivateBringsBackAClearedEntity' \
-  '      if (rc == GDEFCORE_OK && op->target_seq == high) {' \
-  '      if (0 && rc == GDEFCORE_OK && op->target_seq == high) {'
+# A save of the values the entity has writes a revision: the items of a
+# multiple field get new ids every save, so the port sees them all change.
+plant noop-save-writes-revision $STO testRevisions \
+  'Revisions.ANoOpSaveWritesNoRevisionAndSaysSo' \
+  '              f->name.n, k < nids ? ids[k] : 0, &item));' \
+  '              f->name.n, 0, &item));'
 
-# Plant 18: a revert sets the published flag (not the revert is to set).
+# A system record written outside its changeset's write: each type a changeset
+# defines is written, and committed, in a write of its own ahead of the
+# changeset's, so a changeset the port refuses still leaves the type.
+plant record-outside-its-write $ENT testEntity \
+  'EntityRollback.ATypeRecordIsWrittenInItsChangesetsWrite' \
+  '  rc = map_stor(gdefstor_write_begin(changeset->catalog->store,
+      (const char *)changeset->catalog->tenant,
+      changeset->catalog->tenant_len, NULL, &write));' \
+  '  for (i = 0; i < changeset->nops; i++) {
+    GDEFCORE_Op * dop = &changeset->ops[i];
+    GDEFSTOR_Write * own = NULL;
+    if (dop->kind == GDEFCORE_OP_DEFINE && !dop->have_row &&
+        gdefstor_write_begin(changeset->catalog->store,
+            (const char *)changeset->catalog->tenant,
+            changeset->catalog->tenant_len, NULL, &own) == GDEFSTOR_OK) {
+      if (write_type(changeset->catalog, own, dop->machine.p, dop->machine.n,
+              dop->type_kind, dop->decls, dop->ndecls, NULL, 0) == GDEFCORE_OK) {
+        (void)gdefstor_write_commit(own);
+      } else {
+        gdefstor_write_abort(own);
+      }
+    }
+  }
+  rc = map_stor(gdefstor_write_begin(changeset->catalog->store,
+      (const char *)changeset->catalog->tenant,
+      changeset->catalog->tenant_len, NULL, &write));'
+
+# An unpublish also deletes the entity.
+plant unpublish-deletes $ENT testRevisions \
+  'Revisions.UnpublishClearsTheFlagAndNothingElse' \
+  '      rc = set_state(write, op, cs, 0, look.deleted, when, &changed);' \
+  '      rc = set_state(write, op, cs, 0, 1, when, &changed);'
+
+# A revert of a cleared entity leaves it deleted.
+plant revert-leaves-deleted $ENT testRevisions \
+  'Revisions.ClearUnpublishesDeletesAndDropsTheDraft' \
+  '    if (rc == GDEFCORE_OK && look.deleted) {
+      rc = set_state(write, op, cs, look.published, 0, when, &changed);
+    }' \
+  '    if (0 && rc == GDEFCORE_OK && look.deleted) {
+      rc = set_state(write, op, cs, look.published, 0, when, &changed);
+    }'
+
+# A revert sets the published flag (the flag is not the revert's to set).
 plant revert-publishes $ENT testRevisions \
   'Revisions.RevertToCopiesATargetAndKeepsTheFlag' \
-  '    case GDEFCORE_OP_REVERT:' \
-  '    case GDEFCORE_OP_REVERT:
-      st->pub = 1;'
+  '    if (rc == GDEFCORE_OK && look.deleted) {
+      rc = set_state(write, op, cs, look.published, 0, when, &changed);
+    }' \
+  '    if (rc == GDEFCORE_OK) {
+      rc = set_state(write, op, cs, 1, 0, when, &changed);
+    }'
 
-# Plant 19: a revert with a target moves the pointer and writes no revision.
+# A revert writes no revision.
 plant revert-writes-no-revision $ENT testRevisions \
   'Revisions.RevertToCopiesATargetAndKeepsTheFlag' \
-  '    op->kind = GDEFCORE_OP_REVERT;
-    op->target_seq = explicit_target ? target : seq - 1;' \
-  '    op->kind = explicit_target ? GDEFCORE_OP_ACTIVATE : GDEFCORE_OP_REVERT;
-    op->target_seq = explicit_target ? target : seq - 1;'
+  '    src = gdefstor_entity_revert(write, op->id.p, op->id.n, op->base_seq,
+        op->target_seq, &meta, &rev);' \
+  '    src = GDEFSTOR_OK;'
 
-# Plant 20: the legacy revert steps back from the head, not from the active
-# revision.
-plant legacy-revert-from-head $ENT testRevisions \
-  'Revisions.TheLegacyRevertStepsBackFromTheActiveRevision' \
-  '    op->target_seq = explicit_target ? target : seq - 1;' \
-  '    op->target_seq = explicit_target ? target : high - 1;'
+# The legacy revert copies the first revision, not the one before the newest.
+plant legacy-revert-wrong-step $ENT testRevisions \
+  'Revisions.TheLegacyRevertStepsBackFromTheNewest' \
+  '      op->target_seq = explicit_target ? target : st.look.revision - 1;' \
+  '      op->target_seq = explicit_target ? target : 1;'
 
-# Plant 21: a changeset staged against a version the entity has left applies.
+# A changeset staged against a version the entity has left applies.
 plant stale-version-accepted $ENT testRevisions \
   'Revisions.AStalePatchOfTheNewOperationsIsAConflict' \
-  '      if (st.ver != op->base_ver) {' \
-  '      if (0) {'
+  '  if (look.revision != op->base_seq || (op->have_ver && version != op->base_ver) ||' \
+  '  if (look.revision != op->base_seq ||'
 
-# Plant 22: a serialized changeset does not carry the version it was staged at.
+# A serialized changeset does not carry the version it was staged at.
 plant patch-drops-version $ENT testRevisions \
   'Revisions.TheNewOperationsRoundTripThroughAPatch' \
   '    if (op->have_ver) {
@@ -266,12 +329,17 @@ plant patch-drops-version $ENT testRevisions \
   '    if (0 && op->have_ver) {
       /* The version the op was staged against: a patch made against a'
 
-# Plant 23: the form tree falls back to the published revision, so an entity
-# restored but not published opens as an empty form.
-plant form-tree-skips-active src/form/form.c testForm \
-  'Form.TreeFallsBackToTheActiveRevision' \
-  '    rc = gdefcore_entity_values(catalog, NULL, GDEFCORE_VIEW_ACTIVE, id,' \
-  '    rc = gdefcore_entity_values(catalog, NULL, GDEFCORE_VIEW_PUBLISHED, id,'
+# The form tree reads the published view, so an entity restored but not
+# published opens as an empty form (it was form-tree-skips-current, on the
+# fallback to the active revision that the draft view makes needless now).
+plant form-tree-reads-published src/form/form.c testForm \
+  'Form.TreeFallsBackToTheCurrentRevision' \
+  '  GDEFCORE_Result rc = gdefcore_entity_values(catalog, NULL, GDEFCORE_VIEW_DRAFT,
+      id, id_len, lang, lang_len, field->name, field->name_len, &texts, &lens,
+      &count);' \
+  '  GDEFCORE_Result rc = gdefcore_entity_values(catalog, NULL, GDEFCORE_VIEW_PUBLISHED,
+      id, id_len, lang, lang_len, field->name, field->name_len, &texts, &lens,
+      &count);'
 
 # ---- the action vocabulary, the rating and the revision views (task 4) ----
 
@@ -348,10 +416,10 @@ plant revision-view-shows-personal $ACC testActions \
   '  if (field_is_personal(catalog, type_name, type_len, field, field_len)) {' \
   '  if (0 && field_is_personal(catalog, type_name, type_len, field, field_len)) {'
 
-# Plant 34: a condition reads the head revision, the newest draft, where the
-# permission to view history is asked of the entity as it is stored.
-plant condition-reads-head src/condition/condition_eval.c testActions \
-  'Actions.RevisionViewAsksTheActiveStateNotTheViewedRevision' \
+# Plant 34: a condition reads the draft, where the permission to view history
+# is asked of the entity as it is stored: its newest revision.
+plant condition-reads-draft src/condition/condition_eval.c testActions \
+  'Actions.RevisionViewAsksTheCurrentStateNotTheViewedRevision' \
   '  rc = gdefcore_entity_values(ctx->catalog, NULL, GDEFCORE_VIEW_ACTIVE,' \
   '  rc = gdefcore_entity_values(ctx->catalog, NULL, GDEFCORE_VIEW_DRAFT,'
 

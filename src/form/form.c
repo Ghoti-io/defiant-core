@@ -22,7 +22,7 @@
  * @file
  *
  * Forms, signed under the tenant keyring purpose `form`. A draft save
- * leaves the published projection alone. A path alias stays hidden until
+ * leaves what readers see alone. A path alias stays hidden until
  * that draft is published. Routes are a segment trie.
  */
 
@@ -1346,16 +1346,14 @@ static GDEFCORE_Result fill_current(GDEFCORE_Catalog * catalog, FormField * fiel
   char ** texts = NULL;
   size_t * lens = NULL;
   size_t count = 0;
+  /* The draft where there is one, else what the entity currently is,
+   * published or not: a form is for the people who edit, not for readers.
+   * (The draft view falls back to the newest revision itself since story
+   * S6b; it used to stop at a cleared head and this read the active
+   * revision.) */
   GDEFCORE_Result rc = gdefcore_entity_values(catalog, NULL, GDEFCORE_VIEW_DRAFT,
       id, id_len, lang, lang_len, field->name, field->name_len, &texts, &lens,
       &count);
-  if (rc == GDEFCORE_ERR_INVALID) {
-    /* No head (a clear removed it): what the entity currently is, published
-     * or not. A form is for the people who edit, not for readers. */
-    rc = gdefcore_entity_values(catalog, NULL, GDEFCORE_VIEW_ACTIVE, id,
-        id_len, lang, lang_len, field->name, field->name_len, &texts, &lens,
-        &count);
-  }
   if (rc == GDEFCORE_ERR_INVALID) {
     return GDEFCORE_OK;
   }
@@ -1499,7 +1497,10 @@ static GDEFCORE_Result sign_opened(GDEFCORE_Catalog * catalog,
       opened_free(catalog, &opened);
       return rc;
     }
-    rc = gdefcore_entity_revision(catalog, canon, GDEFCORE_PUBLIC_ID_LEN,
+    /* The entity's version, which every write that touches it moves, a draft
+     * included: a draft is not a revision (story S6b), and a form signed
+     * before another draft must not overwrite it. */
+    rc = gdefcore_entity_version(catalog, canon, GDEFCORE_PUBLIC_ID_LEN,
         &opened.base);
     if (rc != GDEFCORE_OK) {
       gdefcore_text_free(catalog, type_name);
@@ -1892,7 +1893,7 @@ static GDEFCORE_Result seal_personal(GDEFCORE_Subjects * subjects,
 /*
  * What a signed-form path asks before it writes (SPEC decisions 7 and 8). The
  * entity the question is about is the token's target, which the AEAD bound at
- * sign time with the session, the principal and the base revision: it is not
+ * sign time with the session, the principal and the base version: it is not
  * a value a body can steer. The id the request itself names (a route capture,
  * a hidden field) is only checked against it; if they differ, the request is
  * not about one entity and is refused. The question is asked of the entity as
@@ -1996,7 +1997,7 @@ static GDEFCORE_Result submit_impl(GDEFCORE_Catalog * catalog,
     }
   }
   memset(&sealed, 0, sizeof sealed);
-  rc = gdefcore_entity_revision(catalog, opened.target, GDEFCORE_PUBLIC_ID_LEN,
+  rc = gdefcore_entity_version(catalog, opened.target, GDEFCORE_PUBLIC_ID_LEN,
       &current);
   if (rc != GDEFCORE_OK) {
     opened_free(catalog, &opened);

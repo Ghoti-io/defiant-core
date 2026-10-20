@@ -29,7 +29,7 @@
  */
 
 #include <ghoti.io/defiant-core/defiant-core.h>
-#include <ghoti.io/defiant-storage/projection.h>
+#include <ghoti.io/defiant-storage/model.h>
 #include <ghoti.io/defiant-storage/revision.h>
 #include <ghoti.io/defiant-storage-memory/memory.h>
 
@@ -1221,71 +1221,66 @@ TEST_F(Templates, DeepTreeDoesNotOverflowTheStack) {
   EXPECT_EQ(GDEFCORE_ISSUE_PARSE, v[0].reason);
 }
 
-/* Making an old revision of a template the active one puts its text in front
- * of the renderer without a new revision, so the changeset that does it is
- * vetted as a save is: a revision that no longer builds against the
- * contracts in force cannot become the template. (Such a revision is
- * reached here by writing it behind the library's back, as a contract that
- * has since narrowed would leave one.) */
-TEST_F(Templates, ActivateIsVetted) {
-  const uint8_t tenant[] = {'t'};
+/* Reverting a template to an old revision puts that revision's text in front
+ * of the renderer again, so the changeset that does it is vetted as a save
+ * is: a revision that no longer builds against the contracts in force cannot
+ * become the template. (Such a revision is reached here by writing it behind
+ * the library's back, as a contract that has since narrowed would leave one.)
+ * It replaces the gate on `activate`, which access SPEC decision 13 retired. */
+TEST_F(Templates, RevertIsVetted) {
+  const char tenant[] = {'t'};
   char id[GDEFCORE_PUBLIC_ID_LEN + 1];
-  ASSERT_EQ(GDEFCORE_OK,
-      SaveTemplate("recent", "<% use title; %><p><%= title %></p>", "core.pane"));
+  const std::string good = "<% use title; %><p><%= title %></p>";
+  ASSERT_EQ(GDEFCORE_OK, SaveTemplate("recent", good, "core.pane"));
   ASSERT_TRUE(Find("core.template", "recent", id));
   uint64_t head = 0;
   ASSERT_EQ(GDEFCORE_OK,
       gdefcore_entity_revision(catalog_, id, GDEFCORE_PUBLIC_ID_LEN, &head));
   ASSERT_GE(head, 1u);
-  /* The bad revision, appended raw, after the head. */
-  GDEFSTOR_Projection * index = NULL;
-  ASSERT_EQ(GDEFSTOR_OK,
-      gdefstor_projection_get(store_, (const char *)tenant, 1, "i", 1, id,
-          GDEFCORE_PUBLIC_ID_LEN, &index));
-  std::string row;
-  for (size_t i = 0; i < gdefstor_projection_column_count(index); i++) {
-    GDEFSTOR_Column column;
-    ASSERT_EQ(GDEFSTOR_OK, gdefstor_projection_column(index, i, &column));
-    if (std::string(column.name, column.name_len) == "row") {
-      row.assign((const char *)column.value, column.value_len);
-    }
-  }
-  gdefstor_projection_free(index);
-  ASSERT_FALSE(row.empty());
+  /* The bad revision, then the good text again, written raw on the port. */
+  auto Raw = [&](const std::string & body, uint64_t base) {
+    GDEFSTOR_Tree * tree = NULL;
+    ASSERT_EQ(GDEFSTOR_OK,
+        gdefstor_entity_tree(store_, tenant, 1, id, GDEFCORE_PUBLIC_ID_LEN, "en",
+            2, 0, &tree));
+    GDEFSTOR_Value v;
+    memset(&v, 0, sizeof v);
+    v.type = GDEFSTOR_FIELD_TEXT;
+    v.bytes = (const uint8_t *)body.data();
+    v.len = body.size();
+    ASSERT_EQ(GDEFSTOR_OK, gdefstor_tree_set(tree, 0, "body", 4, &v));
+    GDEFSTOR_RevisionMeta meta;
+    memset(&meta, 0, sizeof meta);
+    meta.size = sizeof meta;
+    meta.who = "";
+    meta.why = "";
+    GDEFSTOR_Write * write = NULL;
+    ASSERT_EQ(GDEFSTOR_OK, gdefstor_write_begin(store_, tenant, 1, NULL, &write));
+    uint64_t rev = 0;
+    ASSERT_EQ(GDEFSTOR_OK,
+        gdefstor_entity_save(write, id, GDEFCORE_PUBLIC_ID_LEN, base, &meta, "en",
+            2, tree, &rev));
+    ASSERT_EQ(base + 1, rev);
+    ASSERT_EQ(GDEFSTOR_OK, gdefstor_write_commit(write));
+    gdefstor_tree_free(tree);
+  };
+  Raw("<% use title; %><%= nope %>", head);
+  Raw(good, head + 1);
   uint64_t bad = head + 1;
-  std::string doc = "{\"format\":\"defiant-revision/1\",\"seq\":" + std::to_string(bad) +
-      ",\"row\":" + row + ",\"entity\":\"" + id +
-      "\",\"type\":\"core.template\",\"lang\":{\"en\":{\"name\":[\"recent\"],"
-      "\"kind\":[\"core.pane\"],\"body\":[\"<% use title; %><%= nope %>\"]}},"
-      "\"body\":\"\"}";
-  GDEFSTOR_Write * write = NULL;
-  ASSERT_EQ(GDEFSTOR_OK,
-      gdefstor_write_begin(store_, (const char *)tenant, 1, NULL, &write));
-  ASSERT_EQ(GDEFSTOR_OK,
-      gdefstor_revision_append(write, (const uint8_t *)doc.data(), doc.size()));
-  std::string seq = std::to_string(bad);
-  GDEFSTOR_Column wcol;
-  memset(&wcol, 0, sizeof wcol);
-  wcol.name = "seq";
-  wcol.name_len = 3;
-  wcol.value = (const uint8_t *)seq.data();
-  wcol.value_len = seq.size();
-  ASSERT_EQ(GDEFSTOR_OK,
-      gdefstor_projection_put(write, "w", 1, row.data(), row.size(), &wcol, 1));
-  ASSERT_EQ(GDEFSTOR_OK, gdefstor_write_commit(write));
 
   GDEFCORE_Changeset * cs = NULL;
-  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
-  ASSERT_EQ(GDEFCORE_OK, gdefcore_entity_activate(cs, id, GDEFCORE_PUBLIC_ID_LEN, bad));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_changeset_revert_to(catalog_, id, GDEFCORE_PUBLIC_ID_LEN, bad,
+          NULL, 0, &cs));
   EXPECT_EQ(GDEFCORE_ERR_FORMAT, gdefcore_changeset_apply(cs, "core.template", 13));
   SaveRefusal(cs);
   EXPECT_NE(std::string::npos, refusal_.find("nope")) << refusal_;
   gdefcore_changeset_destroy(cs);
-  EXPECT_EQ("<% use title; %><p><%= title %></p>",
-      Field("core.template", "recent", "body"));
-  /* Control: the revision before it, which builds, can be made active. */
-  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
-  ASSERT_EQ(GDEFCORE_OK, gdefcore_entity_activate(cs, id, GDEFCORE_PUBLIC_ID_LEN, head));
+  EXPECT_EQ(good, Field("core.template", "recent", "body"));
+  /* Control: the revision before it, which builds, can be reverted to. */
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_changeset_revert_to(catalog_, id, GDEFCORE_PUBLIC_ID_LEN, head,
+          NULL, 0, &cs));
   EXPECT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, "core.template", 13));
   gdefcore_changeset_destroy(cs);
 }

@@ -84,6 +84,10 @@ static const char kMsgFieldName[] = "a field name was expected after field.";
 static const char kMsgNoField[] = "no such field";
 static const char kMsgNoType[] = "no such type";
 static const char kMsgNoState[] = "no such state";
+static const char kMsgOrderType[] =
+    "only a number, a date or a date-time field can be compared by order";
+static const char kMsgFieldTypes[] =
+    "these two fields have different types and cannot be compared";
 static const char kMsgInternal[] = "the condition could not be written";
 static const char kMsgWritten[] =
     "the condition is longer than 4096 bytes once written out";
@@ -945,37 +949,13 @@ int gdefcore_condition_relation_at(const GDEFCORE_Condition * condition,
 
 /* ---- validation ------------------------------------------------------- */
 
-/* 1 when the type has a non-personal field called name. */
+/* 1 when the type has a non-personal field called name; its type in @p out. */
 static int field_usable(GDEFCORE_Catalog * catalog, const char * type,
-    size_t type_len, const char * name, size_t name_len) {
-  size_t count = 0;
-  size_t i;
-  if (gdefcore_type_field_count(catalog, type, type_len, &count) !=
-      GDEFCORE_OK) {
+    size_t type_len, const char * name, size_t name_len, CondField * out) {
+  if (cond_field_info(catalog, type, type_len, name, name_len, out) != 0) {
     return 0;
   }
-  for (i = 0; i < count; i++) {
-    char * got = NULL;
-    size_t got_len = 0;
-    int required = 0;
-    int many = 0;
-    int match;
-    if (gdefcore_type_field(catalog, type, type_len, i, &got, &got_len,
-            &required, &many) != GDEFCORE_OK) {
-      return 0;
-    }
-    match = got_len == name_len && memcmp(got, name, name_len) == 0;
-    gdefcore_text_free(catalog, got);
-    if (match) {
-      int personal = 0;
-      if (gdefcore_type_field_personal(catalog, type, type_len, i,
-              &personal) != GDEFCORE_OK) {
-        return 0;
-      }
-      return personal == 0;
-    }
-  }
-  return 0;
+  return out->found && !out->personal;
 }
 
 static int state_name_ok(const char * s, size_t n) {
@@ -983,14 +963,28 @@ static int state_name_ok(const char * s, size_t n) {
 }
 
 /* Whether an operand can be what a relation column holds. */
-static int operand_suits(const GDEFCORE_Condition * c, const CNode * node,
+static int operand_suits(GDEFCORE_Catalog * catalog, const char * type,
+    size_t type_len, const GDEFCORE_Condition * c, const CNode * node,
     int kind) {
   char canon[GDEFCORE_PUBLIC_ID_LEN + 1];
+  CondField f;
   int64_t v;
   switch (node->kind) {
     case kAny:
-    case kField:
       return 1;
+    case kField:
+      /* A relation row keeps its columns as texts and integers: a field
+       * meets a column of its own kind. An unusable field is refused as
+       * that, below. */
+      if (type == NULL ||
+          !field_usable(catalog, type, type_len, c->pool + node->str,
+              node->str_len, &f)) {
+        return 1;
+      }
+      if (kind == GDEFCORE_RELATION_INTEGER) {
+        return f.type == GDEFSTOR_FIELD_INTEGER;
+      }
+      return cond_texty_type(f.type);
     case kPrincipal:
     case kCreator:
     case kRevCreator:
@@ -1020,6 +1014,7 @@ static int operand_suits(const GDEFCORE_Condition * c, const CNode * node,
 
 static GDEFCORE_Result check_related(GDEFCORE_Catalog * catalog,
     const GDEFCORE_Condition * condition, const CNode * node,
+    const char * type, size_t type_len,
     const GDEFCORE_Changeset * projection, GDEFCORE_Condition_Error * out_error) {
   const CNode * name = &condition->nodes[condition->kids[node->first]];
   GDEFCORE_Host * host = gdefcore_catalog_host(catalog);
@@ -1058,7 +1053,8 @@ static GDEFCORE_Result check_related(GDEFCORE_Catalog * catalog,
   } else {
     for (k = 1; k < node->count; k++) {
       const CNode * operand = &condition->nodes[condition->kids[node->first + k]];
-      if (!operand_suits(condition, operand, found->columns[k - 1].kind)) {
+      if (!operand_suits(catalog, type, type_len, condition, operand,
+              found->columns[k - 1].kind)) {
         set_error(out_error, operand->pos, kMsgRelOperand);
         out = GDEFCORE_ERR_INVALID;
         break;
@@ -1088,19 +1084,48 @@ GDEFCORE_Result gdefcore_condition_validate_in(GDEFCORE_Catalog * catalog,
   for (i = 0; i < condition->nnodes; i++) {
     const CNode * node = &condition->nodes[i];
     if (node->kind == kRelated) {
-      GDEFCORE_Result rc = check_related(catalog, condition, node, projection,
-          out_error);
+      GDEFCORE_Result rc = check_related(catalog, condition, node, type_name,
+          type_name_len, projection, out_error);
       if (rc != GDEFCORE_OK) {
         return rc;
       }
       continue;
     }
     if (node->kind == kField) {
+      CondField f;
       if (type_name == NULL ||
           !field_usable(catalog, type_name, type_name_len,
-              condition->pool + node->str, node->str_len)) {
+              condition->pool + node->str, node->str_len, &f)) {
         /* Absent and personal read alike (AD-19). */
         set_error(out_error, node->pos, kMsgNoField);
+        return GDEFCORE_ERR_INVALID;
+      }
+    }
+    if (node->kind == kCmp && type_name != NULL) {
+      /* Typed comparisons (access SPEC decision 12): an ordering needs a
+       * number or a time on every field side, two fields one type. A field
+       * that is not usable is refused by its own node. */
+      const CNode * a = &condition->nodes[condition->kids[node->first]];
+      const CNode * b = &condition->nodes[condition->kids[node->first + 1]];
+      CondField fa;
+      CondField fb;
+      int ha = a->kind == kField &&
+               field_usable(catalog, type_name, type_name_len,
+                   condition->pool + a->str, a->str_len, &fa);
+      int hb = b->kind == kField &&
+               field_usable(catalog, type_name, type_name_len,
+                   condition->pool + b->str, b->str_len, &fb);
+      int ordered = node->op != kEq && node->op != kNe;
+      if (ordered && ha && !cond_numeric_type(fa.type)) {
+        set_error(out_error, a->pos, kMsgOrderType);
+        return GDEFCORE_ERR_INVALID;
+      }
+      if (ordered && hb && !cond_numeric_type(fb.type)) {
+        set_error(out_error, b->pos, kMsgOrderType);
+        return GDEFCORE_ERR_INVALID;
+      }
+      if (ha && hb && !cond_types_meet(fa.type, fa.scale, fb.type, fb.scale)) {
+        set_error(out_error, b->pos, kMsgFieldTypes);
         return GDEFCORE_ERR_INVALID;
       }
     }

@@ -15,7 +15,9 @@
 #   principal-not-recorded        Templates.PrincipalKey
 #   key-ignores-observed-principal Templates.PrincipalKey
 #   unsafe-marker-check-removed   Templates.Unsafe
-#   activate-not-vetted           Templates.ActivateIsVetted
+#   revert-not-vetted             Templates.RevertIsVetted (it was
+#                                 activate-not-vetted, on the retired
+#                                 activate: access SPEC decision 13)
 #
 # and six more that stand behind a matrix row each: the engine's own math is
 # no longer shadowed, the plumbing template is reachable from a template, the
@@ -132,14 +134,13 @@ plant hyphen-refused-in-type-name src/entity/entity.c testEntity \
     }" \
   '    (void)dot;'
 
-# Plant 13: a changeset that only activates an old template revision is not
-# vetted, so a revision that no longer builds becomes the template.
-plant activate-not-vetted src/template/template.c testTemplates \
-  'Templates.ActivateIsVetted' \
+# Plant 13: a changeset that writes a template revision (a revert is one) is
+# not vetted, so a revision that no longer builds becomes the template.
+plant revert-not-vetted src/template/template.c testTemplates \
+  'Templates.RevertIsVetted' \
   '  if (!touches_type(changeset, GDEFCORE_TEMPLATE_TYPE,
-          GDEFCORE_TOUCH_SAVE | GDEFCORE_TOUCH_DRAFT | GDEFCORE_TOUCH_PUBLISH |
-              GDEFCORE_TOUCH_ACTIVATE) &&' \
+          GDEFCORE_TOUCH_SAVE | GDEFCORE_TOUCH_DRAFT | GDEFCORE_TOUCH_PUBLISH) &&' \
   '  if (!touches_type(changeset, GDEFCORE_TEMPLATE_TYPE,
-          GDEFCORE_TOUCH_SAVE | GDEFCORE_TOUCH_DRAFT | GDEFCORE_TOUCH_PUBLISH) &&'
+          GDEFCORE_TOUCH_DRAFT | GDEFCORE_TOUCH_PUBLISH) &&'
 
 plant_finish

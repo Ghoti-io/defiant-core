@@ -105,7 +105,8 @@ Vals V(std::initializer_list<std::pair<std::string, std::string> > one) {
   return out;
 }
 
-GDEFCORE_Field Field(const char * name, int many = 0, int personal = 0) {
+GDEFCORE_Field Field(const char * name, int many = 0, int personal = 0,
+    int type = 0) {
   GDEFCORE_Field f;
   memset(&f, 0, sizeof f);
   f.size = sizeof f;
@@ -113,6 +114,7 @@ GDEFCORE_Field Field(const char * name, int many = 0, int personal = 0) {
   f.name_len = strlen(name);
   f.many = many;
   f.personal = personal;
+  f.type = type;
   return f;
 }
 
@@ -137,8 +139,11 @@ struct Env {
     EXPECT_EQ(GDEFCORE_OK,
         gdefcore_request_create((const uint8_t *)"t", 1, 0, 0, NULL, &req));
     {
-      GDEFCORE_Field f[5] = {Field("title"), Field("group"), Field("rank"),
-          Field("embargo"), Field("tags", 1)};
+      /* rank and embargo are integers: an ordering needs a number (access
+       * SPEC decision 12). */
+      GDEFCORE_Field f[5] = {Field("title"), Field("group"),
+          Field("rank", 0, 0, GDEFSTOR_FIELD_INTEGER),
+          Field("embargo", 0, 0, GDEFSTOR_FIELD_INTEGER), Field("tags", 1)};
       EXPECT_EQ(GDEFCORE_OK,
           gdefcore_type_define(catalog, kBlog, strlen(kBlog),
               GDEFCORE_TYPE_CONTENT, f, 5));
@@ -798,14 +803,12 @@ TEST(Cond, ManyValuedFields) {
 TEST(Cond, Numeric) {
   Env env;
   std::string seven = env.Make(kBlog, "", V({{"title", "T"}, {"rank", "7"}}));
-  std::string word = env.Make(kBlog, "", V({{"title", "T"}, {"rank", "abc"}}));
   std::string none = env.Make(kBlog, "", V({{"title", "T"}}));
   std::string ten = env.Make(kBlog, "", V({{"title", "T"}, {"rank", "10"}}));
   std::string neg = env.Make(kBlog, "", V({{"title", "T"}, {"rank", "-3"}}));
   std::string lead = env.Make(kBlog, "", V({{"title", "T"}, {"rank", "07"}}));
   const std::string lt = "(< field.rank 10)";
   EXPECT_EQ((Answer{1, 0}), Eval(env, lt, seven));
-  EXPECT_EQ((Answer{0, 0}), Eval(env, lt, word));
   EXPECT_EQ((Answer{0, 0}), Eval(env, lt, none));
   EXPECT_EQ((Answer{0, 0}), Eval(env, lt, ten));
   EXPECT_EQ((Answer{1, 0}), Eval(env, "(<= field.rank 10)", ten));
@@ -814,19 +817,52 @@ TEST(Cond, Numeric) {
   EXPECT_EQ((Answer{1, 0}), Eval(env, "(>= field.rank 7)", seven));
   EXPECT_EQ((Answer{1, 0}), Eval(env, "(< field.rank 0)", neg));
   EXPECT_EQ((Answer{1, 0}), Eval(env, "(>= field.rank -3)", neg));
-  /* Either side not an integer: the comparison is false, never an error. */
+  /* A constant that is no integer is no value of the field: false, never an
+   * error. Without a field, both sides are read as integers. */
   EXPECT_EQ((Answer{0, 0}), Eval(env, "(< field.rank \"abc\")", seven));
-  EXPECT_EQ((Answer{0, 0}), Eval(env, "(>= field.rank \"abc\")", word));
+  EXPECT_EQ((Answer{0, 0}), Eval(env, "(= field.rank \"abc\")", seven));
   EXPECT_EQ((Answer{0, 0}), Eval(env, "(<= \"x\" 2)", seven));
   EXPECT_EQ((Answer{1, 0}), Eval(env, "(< 1 2)", seven));
   EXPECT_EQ((Answer{1, 0}), Eval(env, "(< \"1\" \"2\")", seven));
-  /* Numeric comparison reads "07" as 7; = compares bytes and does not. */
+  /* The field is an integer, so "07" is stored as 7, and = compares it as
+   * one: with 7 and with "07". */
   EXPECT_EQ((Answer{1, 0}), Eval(env, "(<= field.rank 7)", lead));
   EXPECT_EQ((Answer{1, 0}), Eval(env, "(>= field.rank 7)", lead));
-  EXPECT_EQ((Answer{0, 0}), Eval(env, "(= field.rank 7)", lead));
-  EXPECT_EQ((Answer{1, 0}), Eval(env, "(= field.rank 7)", seven));
+  EXPECT_EQ((Answer{1, 0}), Eval(env, "(= field.rank 7)", lead));
+  EXPECT_EQ((Answer{1, 0}), Eval(env, "(= field.rank \"07\")", seven));
+  EXPECT_EQ((Answer{1, 0}), Eval(env, "(in field.rank (\"07\" \"9\"))", seven));
+  /* A field with no value is the empty text, which equals "" and no number. */
+  EXPECT_EQ((Answer{1, 0}), Eval(env, "(= field.rank \"\")", none));
+  EXPECT_EQ((Answer{0, 0}), Eval(env, "(= field.rank \"\")", seven));
   /* The false comparison inverts under not, as any false does. */
-  EXPECT_EQ((Answer{1, 0}), Eval(env, "(not (< field.rank 10))", word));
+  EXPECT_EQ((Answer{1, 0}), Eval(env, "(not (< field.rank 10))", none));
+  /* An ordering of a text field, and two fields of different types, are
+   * refused when checked against the type; met in a stored condition, they
+   * fail, under not too (decision 12). */
+  EXPECT_EQ((Answer{0, 1}), Eval(env, "(< field.title 10)", seven));
+  EXPECT_EQ((Answer{0, 1}), Eval(env, "(not (< field.title 10))", seven));
+  EXPECT_EQ((Answer{0, 1}), Eval(env, "(= field.rank field.title)", seven));
+  /* control: two fields of one type compare */
+  EXPECT_EQ((Answer{1, 0}), Eval(env, "(= field.title field.title)", seven));
+  /* An integer field holds integers: other text is refused at the save. */
+  {
+    char id[GDEFCORE_PUBLIC_ID_LEN + 1];
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_entity_create(env.catalog, kBlog, strlen(kBlog), id, NULL));
+    GDEFCORE_Changeset * cs = NULL;
+    const char * t = "abc";
+    size_t tl = 3;
+    GDEFCORE_Value v;
+    memset(&v, 0, sizeof v);
+    v.size = sizeof v;
+    v.field = "rank";
+    v.field_len = 4;
+    v.texts = &t;
+    v.text_lens = &tl;
+    v.count = 1;
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(env.catalog, NULL, 0, &cs));
+    EXPECT_EQ(GDEFCORE_ERR_INVALID, gdefcore_entity_save(cs, id, strlen(id), "en", 2, &v, 1));
+    gdefcore_changeset_destroy(cs);
+  }
 }
 
 TEST(Cond, TimeIsTheRequestClock) {
@@ -934,17 +970,24 @@ void Resave(Env & env, const std::string & id, const std::string & actor,
 /* An unpublished entity is evaluated on its active revision, so a grant can
  * hold for it, and `state` still says it is a draft. A newer draft beside the
  * active revision is not what a condition reads. */
-TEST(Cond, TheActiveRevisionIsWhatIsRead) {
+/* A condition reads the newest revision: never a draft, and nothing of an
+ * entity that has no revision (decision 13: the newest revision is the
+ * content). */
+TEST(Cond, TheNewestRevisionIsWhatIsRead) {
   Env env;
   const std::string group_a = "(= field.group \"a\")";
   const std::string published = "(= state \"published\")";
-  std::string unpublished =
-      env.Make(kBlog, "", V({{"title", "T"}, {"group", "a"}}), 1);
-  /* control: the same entity on the old rule, where nothing of it was read */
-  EXPECT_EQ((Answer{1, 0}), Eval(env, group_a, unpublished));
-  EXPECT_EQ((Answer{0, 0}), Eval(env, published, unpublished));
-  EXPECT_EQ((Answer{0, 0}), Eval(env, "(= field.group \"b\")", unpublished));
-  /* A published entity with a newer draft: the conditions read the active. */
+  /* Never saved: its content is a draft, which no condition reads. */
+  std::string drafted = env.Make(kBlog, "", V({{"title", "T"}, {"group", "a"}}), 1);
+  EXPECT_EQ((Answer{0, 0}), Eval(env, group_a, drafted));
+  EXPECT_EQ((Answer{1, 0}), Eval(env, "(= field.group \"\")", drafted));
+  EXPECT_EQ((Answer{0, 0}), Eval(env, published, drafted));
+  EXPECT_EQ((Answer{1, 0}), Eval(env, "(= state \"draft\")", drafted));
+  /* control: once published, the same values are read */
+  env.Publish(drafted);
+  EXPECT_EQ((Answer{1, 0}), Eval(env, group_a, drafted));
+  /* A published entity with a draft over it: the conditions read the newest
+   * revision. */
   std::string pub = env.Make(kBlog, "", V({{"title", "T"}, {"group", "a"}}));
   Resave(env, pub, "", "group", "b", true);
   EXPECT_EQ((Answer{1, 0}), Eval(env, group_a, pub));
@@ -965,7 +1008,8 @@ TEST(Cond, TheActiveRevisionIsWhatIsRead) {
   EXPECT_EQ((Answer{1, 0}), Eval(env, "(= field.group \"b\")", pub));
   EXPECT_EQ((Answer{0, 0}), Eval(env, published, pub));
   EXPECT_EQ((Answer{1, 0}), Eval(env, "(= state \"draft\")", pub));
-  /* A cleared entity has no active revision: a field condition cannot hold. */
+  /* A cleared entity reads as one with no content: a field condition cannot
+   * hold. */
   std::string gone = env.Make(kBlog, "", V({{"title", "T"}, {"group", "a"}}));
   {
     GDEFCORE_Changeset * cs = NULL;
@@ -1580,6 +1624,17 @@ TEST(CondAccess, ReadAndListHonorTheExpression) {
   std::string b1 = env.Make(kBlog, "", V({{"title", "b1"}, {"group", "b"}}));
   std::string none = env.Make(kBlog, "", V({{"title", "none"}}));
   std::string drafted = env.Make(kBlog, "", V({{"title", "dr"}, {"group", "a"}}), 1);
+  /* Saved, then unpublished: it has a revision in group a, which a draft-only
+   * entity (story S6b) does not, so it is the one a list that skipped the
+   * published flag would show. */
+  std::string held = env.Make(kBlog, "", V({{"title", "held"}, {"group", "a"}}));
+  {
+    GDEFCORE_Changeset * cs = NULL;
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(env.catalog, NULL, 0, &cs));
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_entity_unpublish(cs, held.data(), held.size()));
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, NULL, 0));
+    gdefcore_changeset_destroy(cs);
+  }
   (void)a1;
   (void)a2;
   (void)b1;
@@ -1603,6 +1658,7 @@ TEST(CondAccess, ReadAndListHonorTheExpression) {
    * though its active revision is in group a (the condition holds on it: the
    * control below publishes it and the same principal reads it). */
   EXPECT_EQ("Invalid argument|untouched", env.Read(env.Req(pa), drafted, "title"));
+  EXPECT_EQ("Invalid argument|untouched", env.Read(env.Req(pa), held, "title"));
   /* Controls: the int grant sees them all; a principal with no role none. */
   EXPECT_EQ("No error|1|b1", env.Read(env.Req(pall), b1, "title"));
   EXPECT_EQ("Invalid argument|untouched", env.Read(env.Req(pnone), a1, "title"));
@@ -1610,9 +1666,10 @@ TEST(CondAccess, ReadAndListHonorTheExpression) {
   size_t count = 0;
   EXPECT_EQ("a1,a2", env.List(env.Req(pa), kBlog, &count));
   EXPECT_EQ(2u, count);
-  /* The draft-only entity is not listed. It used to be (the list never asked
-   * whether an entity was published, so an `any` reader was told the id of
-   * one that a direct read refused). The list now asks, as a read does. */
+  /* Neither the draft-only nor the unpublished entity is listed. The
+   * unpublished one used to be (the list never asked whether an entity was
+   * published, so an `any` reader was told the id of one that a direct read
+   * refused). The list now asks, as a read does. */
   EXPECT_EQ("a1,a2,b1,none", env.List(env.Req(pall), kBlog, &count));
   EXPECT_EQ(4u, count);
   EXPECT_EQ("", env.List(env.Req(pnone), kBlog, &count));
@@ -2234,33 +2291,126 @@ std::vector<std::string> Operand(const T & t, const Facts & f) {
   return out;
 }
 
-bool Ref(const T & t, const Facts & f) {
+/* The fields' logical types, as the fixture declares them: rank and embargo
+ * are integers, the rest text (access SPEC decision 12). */
+bool IntegerField(const std::string & name) {
+  return name == "rank" || name == "embargo";
+}
+
+/* A text of one side read as an integer of the field's type: 1 with *out, 2
+ * for the empty text, 0 when it is none (an identifier never is one). */
+int AsInteger(const T & side, const std::string & text, int64_t * out) {
+  if (side.k == T::Actor || side.k == T::Principal) {
+    return 0;
+  }
+  if (text.empty()) {
+    return 2;
+  }
+  return ToInt(text, out) ? 1 : 0;
+}
+
+/* Whether the tree holds a comparison the type rules refuse anywhere,
+ * reached or not: an ordering with a text field, or two fields of different
+ * types. Such a condition is refused when it is checked. */
+bool TypeRefuses(const T & t) {
+  if (t.k == T::Cmp) {
+    const T & l = t.kids[0];
+    const T & r = t.kids[1];
+    bool ordered = t.op != "=" && t.op != "!=";
+    bool lf = l.k == T::Field;
+    bool rf = r.k == T::Field;
+    bool li = lf && IntegerField(l.s);
+    bool ri = rf && IntegerField(r.s);
+    return (lf && rf && li != ri) || (ordered && ((lf && !li) || (rf && !ri)));
+  }
+  for (const T & k : t.kids) {
+    if (TypeRefuses(k)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/*
+ * The reference reading of a condition (condition.h): bytes where no side is
+ * a field of a type other than text, the field's type where one is. A
+ * comparison the rules refuse (an ordering of a text field, two fields of
+ * different types) fails, and a failure ends the evaluation as a no.
+ */
+bool Ref(const T & t, const Facts & f, bool * failed) {
   size_t i;
   size_t j;
+  if (*failed) {
+    return false;
+  }
   switch (t.k) {
     case T::True:
       return true;
     case T::False:
       return false;
-    case T::Not:
-      return !Ref(t.kids[0], f);
+    case T::Not: {
+      bool v = Ref(t.kids[0], f, failed);
+      return *failed ? false : !v;
+    }
     case T::And:
       for (i = 0; i < t.kids.size(); i++) {
-        if (!Ref(t.kids[i], f)) {
+        if (!Ref(t.kids[i], f, failed)) {
           return false;
         }
       }
       return true;
     case T::Or:
       for (i = 0; i < t.kids.size(); i++) {
-        if (Ref(t.kids[i], f)) {
+        if (Ref(t.kids[i], f, failed)) {
           return true;
+        }
+        if (*failed) {
+          return false;
         }
       }
       return false;
     case T::Cmp: {
-      std::vector<std::string> a = Operand(t.kids[0], f);
-      std::vector<std::string> b = Operand(t.kids[1], f);
+      const T & l = t.kids[0];
+      const T & r = t.kids[1];
+      bool ordered = t.op != "=" && t.op != "!=";
+      bool lf = l.k == T::Field;
+      bool rf = r.k == T::Field;
+      bool li = lf && IntegerField(l.s);
+      bool ri = rf && IntegerField(r.s);
+      if ((lf && rf && li != ri) || (ordered && ((lf && !li) || (rf && !ri)))) {
+        *failed = true;
+        return false;
+      }
+      std::vector<std::string> a = Operand(l, f);
+      std::vector<std::string> b = Operand(r, f);
+      if (li || ri) {
+        /* In the integer's type. */
+        bool any = false;
+        for (i = 0; i < a.size() && !any; i++) {
+          int64_t x = 0;
+          int ra = AsInteger(l, a[i], &x);
+          if (ra == 0) {
+            continue;
+          }
+          for (j = 0; j < b.size() && !any; j++) {
+            int64_t y = 0;
+            int rb = AsInteger(r, b[j], &y);
+            if (rb == 0) {
+              continue;
+            }
+            if (ra == 2 || rb == 2) {
+              any = !ordered && ra == 2 && rb == 2;
+              continue;
+            }
+            any = (t.op == "=" || t.op == "!=") ? x == y
+                  : t.op == "<"                 ? x < y
+                  : t.op == "<="                ? x <= y
+                  : t.op == ">"                 ? x > y
+                                                : x >= y;
+          }
+        }
+        return t.op == "!=" ? !any : any;
+      }
       bool eq = false;
       for (i = 0; i < a.size(); i++) {
         for (j = 0; j < b.size(); j++) {
@@ -2293,10 +2443,21 @@ bool Ref(const T & t, const Facts & f) {
     }
     case T::In: {
       std::vector<std::string> a = Operand(t.kids[0], f);
+      bool typed = t.kids[0].k == T::Field && IntegerField(t.kids[0].s);
       for (i = 1; i < t.kids.size(); i++) {
         std::vector<std::string> m = Operand(t.kids[i], f);
-        for (j = 0; j < a.size(); j++) {
-          if (!m.empty() && a[j] == m[0]) {
+        for (j = 0; j < a.size() && !m.empty(); j++) {
+          if (!typed) {
+            if (a[j] == m[0]) {
+              return true;
+            }
+            continue;
+          }
+          int64_t x = 0;
+          int64_t y = 0;
+          int ra = AsInteger(t.kids[0], a[j], &x);
+          int rb = AsInteger(t.kids[i], m[0], &y);
+          if ((ra == 2 && rb == 2) || (ra == 1 && rb == 1 && x == y)) {
             return true;
           }
         }
@@ -2540,6 +2701,8 @@ TEST(CondSweep, RandomTreesAgreeWithAnIndependentEvaluator) {
   Rng r(0x5eed1234abcdULL);
   int trues = 0;
   int falses = 0;
+  int fails = 0;
+  int refused = 0;
   int too_big = 0;
   int round;
   f.actor = alice;
@@ -2555,7 +2718,8 @@ TEST(CondSweep, RandomTreesAgreeWithAnIndependentEvaluator) {
     T t = GenBool(r, 5, &budget);
     std::string text;
     bool last = false;
-    bool want = Ref(t, f);
+    bool failed = false;
+    bool want = Ref(t, f, &failed);
     Print(t, r, &text, &last);
     std::string canon = Canon(text);
     if (canon.find("more than 256 nodes") != std::string::npos) {
@@ -2569,12 +2733,33 @@ TEST(CondSweep, RandomTreesAgreeWithAnIndependentEvaluator) {
     ASSERT_LE(canon.size(), (size_t)GDEFCORE_CONDITION_MAX_BYTES) << text;
     {
       Answer a = Eval(env, text, e, req);
-      Answer b = Eval(env, canon, e, req);
       ASSERT_EQ(want ? 1 : 0, a.allow) << text;
-      ASSERT_EQ(0, a.failed) << text;
-      ASSERT_EQ(a, b) << text << " / " << canon;
+      ASSERT_EQ(failed ? 1 : 0, a.failed) << text;
+      /* A condition the types accept (every stored one is checked) cannot
+       * fail, so the order of its and and or does not matter and the
+       * canonical form means what it does. One they refuse (an ordering of a
+       * text field, decision 12) can fail, and a failure ends a lazy
+       * evaluation wherever it is met, so only the written order is held to
+       * the model. */
+      bool checked = !TypeRefuses(t);
+      if (checked) {
+        Answer b = Eval(env, canon, e, req);
+        ASSERT_FALSE(failed) << "a checked condition failed: " << text;
+        ASSERT_EQ(a, b) << text << " / " << canon;
+      } else {
+        /* and the check refuses it */
+        GDEFCORE_Condition * cond = NULL;
+        ASSERT_EQ(GDEFCORE_OK,
+            gdefcore_condition_parse(text.data(), text.size(), &cond, NULL));
+        EXPECT_EQ(GDEFCORE_ERR_INVALID,
+            gdefcore_condition_validate(env.catalog, cond, kBlog, strlen(kBlog),
+                NULL))
+            << text;
+        gdefcore_condition_free(cond);
+        refused += 1;
+      }
     }
-    want ? trues++ : falses++;
+    failed ? fails++ : (want ? trues++ : falses++);
     /* Reordering and/or operands is not a different expression. */
     if (t.k == T::And || t.k == T::Or) {
       T u = t;
@@ -2593,6 +2778,9 @@ TEST(CondSweep, RandomTreesAgreeWithAnIndependentEvaluator) {
   /* The control: the sweep saw both answers, plenty of each. */
   EXPECT_GT(trues, 400);
   EXPECT_GT(falses, 400);
+  /* ...and reached the comparisons the types refuse (decision 12). */
+  EXPECT_GT(fails, 50);
+  EXPECT_GE(refused, fails);
   EXPECT_LT(too_big, 200) << "most generated trees must fit the node limit";
   EXPECT_LT(ms, 60000) << "4000 trees took " << ms << " ms";
 }

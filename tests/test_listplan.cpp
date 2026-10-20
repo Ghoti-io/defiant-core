@@ -21,11 +21,14 @@
 /**
  * @file
  *
- * Story A2: a condition compiled into a filtered, counted and paged list.
+ * Story A2: a condition compiled into a filtered, counted and paged list, on
+ * the storage port's entity query since story S6b.
  *
  * The evaluator (gdefcore_condition_eval(), and the entity-by-entity list it
  * decides) is the reference. Two generated sweeps hold the compiled form to
- * it on both storage backends (memory, and SQLite in a scratch directory):
+ * it on both storage backends (memory, and SQLite in a scratch directory),
+ * and on Postgres when GDEFCORE_TEST_LISTPLAN=postgres (make
+ * test-listplan-postgres, through defiant-storage-postgres's tools/pg-test.sh):
  * every random condition, over every entity, selects exactly the entities the
  * evaluator holds on, including where it cannot decide; and every random list
  * (grants, filter, sorts, condition, page) is the evaluated list, in the same
@@ -36,13 +39,18 @@
 #include <ghoti.io/defiant-core/macros.h>
 #include <ghoti.io/defiant-core/defiant-core.h>
 #include <ghoti.io/defiant-storage-memory/memory.h>
-#include <ghoti.io/defiant-storage-sqlite/sqlite.h>
+#include <ghoti.io/defiant-storage-sqlite/model.h>
+#ifdef GDEFCORE_TEST_HAVE_PG
+#include <ghoti.io/defiant-storage-postgres/model.h>
+#endif
 
 #include <gtest/gtest.h>
 
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <filesystem>
@@ -81,7 +89,8 @@ Vals V(std::initializer_list<std::pair<std::string, std::string> > one) {
   return out;
 }
 
-GDEFCORE_Field Field(const char * name, int many = 0, int personal = 0) {
+GDEFCORE_Field Field(const char * name, int many = 0, int personal = 0,
+    int type = 0) {
   GDEFCORE_Field f;
   memset(&f, 0, sizeof f);
   f.size = sizeof f;
@@ -89,7 +98,21 @@ GDEFCORE_Field Field(const char * name, int many = 0, int personal = 0) {
   f.name_len = strlen(name);
   f.many = many;
   f.personal = personal;
+  f.type = type;
   return f;
+}
+
+enum { kMemory = 0, kSqlite = 1, kPostgres = 2 };
+
+/* The backends a test runs on: memory and SQLite, or Postgres alone when
+ * GDEFCORE_TEST_LISTPLAN=postgres (it needs a server, so it is a target of its
+ * own). */
+std::vector<int> Backends() {
+  const char * v = getenv("GDEFCORE_TEST_LISTPLAN");
+  if (v != NULL && strcmp(v, "postgres") == 0) {
+    return {kPostgres};
+  }
+  return {kMemory, kSqlite};
 }
 
 /** One tenant on a chosen backend, with two types and the helpers. */
@@ -97,12 +120,29 @@ struct Site {
   GDEFSTOR_Store * store = NULL;
   GDEFCORE_Catalog * catalog = NULL;
   std::string dir;
+  std::string prefix;
   std::vector<GDEFCORE_Request *> reqs;
-  bool sqlite;
+  int backend;
 
-  explicit Site(bool use_sqlite, const GDEFCORE_Limits * limits = NULL)
-      : sqlite(use_sqlite) {
-    if (sqlite) {
+  explicit Site(int which, const GDEFCORE_Limits * limits = NULL)
+      : backend(which) {
+    if (backend == kPostgres) {
+#ifdef GDEFCORE_TEST_HAVE_PG
+      static unsigned n = 0;
+      char buf[32];
+      const char * ci = getenv("GDEFSPG_TEST_CONNINFO");
+      EXPECT_TRUE(ci != NULL && ci[0] != '\0');
+      snprintf(buf, sizeof buf, "lp%x_%u_", (unsigned)getpid() & 0xfffffu, ++n);
+      prefix = buf;
+      GDEFSPG_Options o;
+      gdefspg_options_default(&o);
+      o.conninfo = ci;
+      o.schema_prefix = prefix.c_str();
+      EXPECT_EQ(GDEFSPG_OK, gdefspg_model_store_create(&o, NULL, NULL, &store));
+#else
+      ADD_FAILURE() << "the Postgres arm needs defiant-storage-postgres";
+#endif
+    } else if (backend == kSqlite) {
       std::error_code ec;
       std::filesystem::path base = std::filesystem::temp_directory_path(ec);
       std::random_device entropy;
@@ -113,8 +153,11 @@ struct Site {
         }
       }
       EXPECT_FALSE(dir.empty());
+      GDEFSSQLITE_ModelOptions o;
+      gdefssqlite_model_options_default(&o);
+      o.synchronous = GDEFSSQLITE_SYNC_OFF; /* many stores; not about the disk */
       EXPECT_EQ(GDEFSSQLITE_OK,
-          gdefssqlite_store_create(dir.c_str(), NULL, NULL, &store));
+          gdefssqlite_model_store_create(dir.c_str(), &o, NULL, NULL, &store));
     } else {
       EXPECT_EQ(GDEFSMEMORY_OK, gdefsmemory_store_create(NULL, NULL, &store));
     }
@@ -122,8 +165,11 @@ struct Site {
         gdefcore_catalog_open(store, (const uint8_t *)"t", 1, limits, NULL,
             &catalog));
     {
-      GDEFCORE_Field f[5] = {Field("title"), Field("group"), Field("rank"),
-          Field("embargo"), Field("tags", 1)};
+      /* rank and embargo are integers (access SPEC decision 12): an
+       * ordering needs a number. */
+      GDEFCORE_Field f[5] = {Field("title"), Field("group"),
+          Field("rank", 0, 0, GDEFSTOR_FIELD_INTEGER),
+          Field("embargo", 0, 0, GDEFSTOR_FIELD_INTEGER), Field("tags", 1)};
       EXPECT_EQ(GDEFCORE_OK,
           gdefcore_type_define(catalog, kBlog, strlen(kBlog),
               GDEFCORE_TYPE_CONTENT, f, 5));
@@ -165,14 +211,29 @@ struct Site {
     return r;
   }
 
-  /** Create an entity (actor is its first revision's creator) and save it. */
+  /** Create an entity (actor is its creator) and save it. Mode 0 saves it;
+   * mode 1 saves it as a draft, so it has no revision and is in no list;
+   * mode 2 saves it, unpublishes it and leaves a draft over it, which is
+   * what a draft save used to leave (an unpublished first revision). */
   std::string Make(const char * type, const std::string & actor, const Vals & vals,
       int mode = 0, const char * lang = "en") {
     char id[GDEFCORE_PUBLIC_ID_LEN + 1];
     id[0] = '\0';
     EXPECT_EQ(GDEFCORE_OK,
         gdefcore_entity_create(catalog, type, strlen(type), id, NULL));
-    Save(id, actor, vals, mode, lang);
+    Save(id, actor, vals, mode == 1 ? 1 : 0, lang);
+    if (mode == 2) {
+      Unpublish(id);
+      Vals other = vals;
+      for (auto & kv : other) {
+        for (auto & v : kv.second) {
+          v = "drafted-" + v;
+        }
+      }
+      if (!other.empty() && other[0].first == "title") {
+        Save(id, actor, {other[0]}, 1, lang);
+      }
+    }
     return std::string(id);
   }
 
@@ -383,8 +444,22 @@ static const size_t kNTexts = sizeof kTexts / sizeof kTexts[0];
 struct World {
   std::vector<std::string> people;
   std::vector<std::string> blogs;
+  std::vector<std::string> drafts;   /* never saved: no revision */
   std::vector<std::string> vaults;
 };
+
+bool Integer(const std::string & t, int64_t * out) {
+  char * end = NULL;
+  if (t.empty() || t.size() > 18) {
+    return false;
+  }
+  long long v = strtoll(t.c_str(), &end, 10);
+  if (end == NULL || *end != '\0') {
+    return false;
+  }
+  *out = (int64_t)v;
+  return true;
+}
 
 World MakeWorld(Site & site, Rng & rng, size_t nblogs) {
   World w;
@@ -394,6 +469,15 @@ World MakeWorld(Site & site, Rng & rng, size_t nblogs) {
   for (size_t i = 0; i < nblogs; i++) {
     Vals v;
     auto pick = [&]() { return std::string(kTexts[rng.below(kNTexts)]); };
+    /* An integer field holds the texts that are integers ("07" is 7). */
+    auto pick_number = [&]() {
+      std::string t;
+      int64_t x;
+      do {
+        t = kTexts[rng.below(kNTexts)];
+      } while (t.empty() || !Integer(t, &x));
+      return t;
+    };
     if (rng.chance(90)) {
       v.push_back({"title", {"e" + std::to_string(i)}});
     }
@@ -401,10 +485,10 @@ World MakeWorld(Site & site, Rng & rng, size_t nblogs) {
       v.push_back({"group", {pick()}});
     }
     if (rng.chance(75)) {
-      v.push_back({"rank", {pick()}});
+      v.push_back({"rank", {pick_number()}});
     }
     if (rng.chance(60)) {
-      v.push_back({"embargo", {pick()}});
+      v.push_back({"embargo", {pick_number()}});
     }
     if (rng.chance(70)) {
       std::vector<std::string> tags;
@@ -415,8 +499,14 @@ World MakeWorld(Site & site, Rng & rng, size_t nblogs) {
       v.push_back({"tags", tags});
     }
     std::string creator = rng.chance(85) ? w.people[rng.below(w.people.size())] : "";
-    int mode = rng.chance(75) ? 0 : 1;
+    /* Saved and published, saved with a draft over it and unpublished, or a
+     * draft that was never saved (in no list, never a revision). */
+    int mode = rng.chance(75) ? 0 : (rng.chance(80) ? 2 : 1);
     std::string id = site.Make(kBlog, creator, v, mode);
+    if (mode == 1) {
+      w.drafts.push_back(id);
+      continue;
+    }
     if (rng.chance(30)) {
       /* A second revision by someone else, in another language too. */
       Vals f = {{"title", {"fr" + std::to_string(i)}}, {"group", {pick()}}};
@@ -542,6 +632,10 @@ std::set<std::string> Compiled(Site & site, GDEFCORE_Condition * cond,
     memset(&q, 0, sizeof q);
     q.size = sizeof q;
     q.where = node;
+    /* The plan reads fields in its language only when the query binds it
+     * (the port's query binds one language, story S6a2). */
+    q.language = lang;
+    q.language_len = strlen(lang);
     EXPECT_EQ(GDEFCORE_OK,
         gdefcore_entity_query_active(site.catalog, type, strlen(type), &q, &ids,
             &n, NULL));
@@ -584,8 +678,8 @@ TEST(ListPlan, ConditionsAgreeWithTheEvaluator) {
   size_t nonempty = 0;
   size_t partial = 0;
   size_t with_failure = 0;
-  for (int backend = 0; backend < 2; backend++) {
-    Site site(backend == 1);
+  for (int backend : Backends()) {
+    Site site(backend);
     Rng rng(backend + 11);
     World w = MakeWorld(site, rng, 45);
     std::vector<std::string> all = w.blogs;
@@ -628,17 +722,21 @@ TEST(ListPlan, ConditionsAgreeWithTheEvaluator) {
       }
     }
   }
-  EXPECT_GE(compared, 700u);
+  /* The bounds are for two backends; one (Postgres alone) has half. */
+  const size_t nb = Backends().size();
+  EXPECT_GE(compared, 350u * nb);
   /* The sweep is not trivial: many conditions select some and not all, and
    * some reach a failure. */
-  EXPECT_GE(nonempty, 250u);
-  EXPECT_GE(partial, 60u);
-  EXPECT_GE(with_failure, 15u);
+  /* (125 per backend before fields were typed; an integer field now holds
+   * only integers, so fewer random constants match anything.) */
+  EXPECT_GE(nonempty, 100u * nb);
+  EXPECT_GE(partial, 30u * nb);
+  EXPECT_GE(with_failure, 8u * nb);
 }
 
 TEST(ListPlan, FailureNeverGrantsWhenCompiled) {
-  for (int backend = 0; backend < 2; backend++) {
-    Site site(backend == 1);
+  for (int backend : Backends()) {
+    Site site(backend);
     std::string e = site.Make(kBlog, "", V({{"title", "T"}, {"group", "a"}}));
     std::vector<std::string> ids = {e};
     GDEFCORE_Request * req = site.Req("");
@@ -679,8 +777,8 @@ TEST(ListPlan, FailureNeverGrantsWhenCompiled) {
 }
 
 TEST(ListPlan, APersonalFieldIsNeverComparedAndNeverGrants) {
-  for (int backend = 0; backend < 2; backend++) {
-    Site site(backend == 1);
+  for (int backend : Backends()) {
+    Site site(backend);
     std::string v = site.Make(kVault, "", V({{"name", "N"}}));
     GDEFCORE_Request * req = site.Req("");
     /* The personal field holds nothing here, so comparing it with the empty
@@ -763,8 +861,8 @@ TEST(ListPlan, ListsAgreeWithTheEvaluatedList) {
   size_t planned = 0;
   size_t nonempty = 0;
   size_t paged = 0;
-  for (int backend = 0; backend < 2; backend++) {
-    Site site(backend == 1);
+  for (int backend : Backends()) {
+    Site site(backend);
     Rng rng(backend + 101);
     World w = MakeWorld(site, rng, 50);
     /* Principals with random read grants; some are agents of the people. */
@@ -839,17 +937,17 @@ TEST(ListPlan, ListsAgreeWithTheEvaluatedList) {
       }
     }
   }
-  EXPECT_EQ(720u, compared);
+  EXPECT_EQ(360u * Backends().size(), compared);
   /* Almost every list is answered by the store: the sweep is of the compiled
    * list and not of the fallback agreeing with itself. */
   EXPECT_GE(planned, compared * 9 / 10);
-  EXPECT_GE(nonempty, 200u);
-  EXPECT_GE(paged, 100u);
+  EXPECT_GE(nonempty, 100u * Backends().size());
+  EXPECT_GE(paged, 50u * Backends().size());
 }
 
 TEST(ListPlan, CountCountsOnlyWhatIsVisible) {
-  for (int backend = 0; backend < 2; backend++) {
-    Site site(backend == 1);
+  for (int backend : Backends()) {
+    Site site(backend);
     site.Role("seer");
     ASSERT_EQ(GDEFCORE_OK, site.Declare("Read three", "read", 0, "(= field.group \"yes\")"));
     site.Grant("seer", "Read three");
@@ -890,8 +988,8 @@ TEST(ListPlan, CountCountsOnlyWhatIsVisible) {
 }
 
 TEST(ListPlan, PagesAreSlicesOfTheEvaluatedList) {
-  for (int backend = 0; backend < 2; backend++) {
-    Site site(backend == 1);
+  for (int backend : Backends()) {
+    Site site(backend);
     site.Role("seer");
     ASSERT_EQ(GDEFCORE_OK, site.Declare("Read open", "read", 0, "(= field.group \"open\")"));
     site.Grant("seer", "Read open");
@@ -938,8 +1036,8 @@ TEST(ListPlan, PagesAreSlicesOfTheEvaluatedList) {
 }
 
 TEST(ListPlan, TheLimitIsClamped) {
-  for (int backend = 0; backend < 2; backend++) {
-    Site site(backend == 1);
+  for (int backend : Backends()) {
+    Site site(backend);
     site.Role("seer");
     ASSERT_EQ(GDEFCORE_OK, site.Declare("Read all", "read", GDEFCORE_ACCESS_ANY, ""));
     site.Grant("seer", "Read all");
@@ -964,8 +1062,8 @@ TEST(ListPlan, TheLimitIsClamped) {
 }
 
 TEST(ListPlan, TheLastTiebreakIsCreationOrder) {
-  for (int backend = 0; backend < 2; backend++) {
-    Site site(backend == 1);
+  for (int backend : Backends()) {
+    Site site(backend);
     site.Role("seer");
     ASSERT_EQ(GDEFCORE_OK, site.Declare("Read all", "read", GDEFCORE_ACCESS_ANY, ""));
     site.Grant("seer", "Read all");
@@ -1012,19 +1110,17 @@ TEST(ListPlan, TheLastTiebreakIsCreationOrder) {
 }
 
 TEST(ListPlan, NumericComparisonIsOnIntegersOnly) {
-  for (int backend = 0; backend < 2; backend++) {
-    Site site(backend == 1);
+  for (int backend : Backends()) {
+    Site site(backend);
     site.Role("seer");
     ASSERT_EQ(GDEFCORE_OK, site.Declare("Read low", "read", 0, "(< field.rank 10)"));
     site.Grant("seer", "Read low");
     std::string p = site.Principal("seer");
     site.Make(kBlog, "", V({{"title", "seven"}, {"rank", "7"}}));
-    site.Make(kBlog, "", V({{"title", "letters"}, {"rank", "abc"}}));
     site.Make(kBlog, "", V({{"title", "absent"}}));
     site.Make(kBlog, "", V({{"title", "padded"}, {"rank", "007"}}));
     site.Make(kBlog, "", V({{"title", "big"}, {"rank", "12"}}));
     site.Make(kBlog, "", V({{"title", "negative"}, {"rank", "-4"}}));
-    site.Make(kBlog, "", V({{"title", "decimal"}, {"rank", "7.5"}}));
     GDEFCORE_Request * r = site.Req(p);
     for (int flags : {0, (int)GDEFCORE_ACCESS_LIST_EVALUATE}) {
       Q q;
@@ -1032,13 +1128,63 @@ TEST(ListPlan, NumericComparisonIsOnIntegersOnly) {
       Listed l = List(site, r, q);
       EXPECT_EQ("seven,padded,negative", Titles(site, l.ids))
           << "backend " << backend << " flags " << flags;
+      /* "007" is the integer 7, so equality with "7" holds too. */
+      q.condition = "(= field.rank \"7\")";
+      l = List(site, r, q);
+      EXPECT_EQ("seven,padded", Titles(site, l.ids)) << "flags " << flags;
     }
+    /* An integer field holds integers: text that is not one is refused at
+     * the save, and so is a fraction. */
+    for (const char * bad : {"abc", "7.5", ""}) {
+      char id[GDEFCORE_PUBLIC_ID_LEN + 1];
+      ASSERT_EQ(GDEFCORE_OK,
+          gdefcore_entity_create(site.catalog, kBlog, strlen(kBlog), id, NULL));
+      GDEFCORE_Changeset * cs = NULL;
+      const char * texts[1] = {bad};
+      size_t lens[1] = {strlen(bad)};
+      GDEFCORE_Value v;
+      memset(&v, 0, sizeof v);
+      v.size = sizeof v;
+      v.field = "rank";
+      v.field_len = 4;
+      v.texts = texts;
+      v.text_lens = lens;
+      v.count = 1;
+      ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(site.catalog, NULL, 0, &cs));
+      EXPECT_EQ(GDEFCORE_ERR_INVALID,
+          gdefcore_entity_save(cs, id, strlen(id), "en", 2, &v, 1))
+          << bad;
+      gdefcore_changeset_destroy(cs);
+    }
+    /* An ordering of a text field is refused when it is checked against the
+     * type (access SPEC decision 12): as a grant, and as a list's condition.
+     * Control: the same ordering of the integer field is taken. */
+    EXPECT_EQ(GDEFCORE_ERR_INVALID,
+        site.Declare("Read early titles", "read", 0, "(< field.title 10)"));
+    EXPECT_EQ(GDEFCORE_ERR_INVALID,
+        site.Declare("Read rank by title", "read", 0, "(= field.rank field.title)"));
+    EXPECT_EQ(GDEFCORE_OK,
+        site.Declare("Read rank below twelve", "read", 0, "(< field.rank 12)"));
+    Q text_order;
+    text_order.condition = "(< field.title 10)";
+    EXPECT_EQ(GDEFCORE_ERR_INVALID, List(site, r, text_order).rc);
+    GDEFCORE_Condition * cond = NULL;
+    GDEFCORE_Condition_Error err;
+    memset(&err, 0, sizeof err);
+    err.size = sizeof err;
+    const char * text = "(and true (>= field.group 3))";
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_condition_parse(text, strlen(text), &cond, &err));
+    EXPECT_EQ(GDEFCORE_ERR_INVALID,
+        gdefcore_condition_validate(site.catalog, cond, kBlog, strlen(kBlog), &err));
+    EXPECT_EQ(strstr(text, "field.group") - text, (ptrdiff_t)err.offset)
+        << "the refusal points at the field";
+    gdefcore_condition_free(cond);
   }
 }
 
 TEST(ListPlan, ConstantsAreMatchedLiterally) {
-  for (int backend = 0; backend < 2; backend++) {
-    Site site(backend == 1);
+  for (int backend : Backends()) {
+    Site site(backend);
     site.Role("seer");
     ASSERT_EQ(GDEFCORE_OK, site.Declare("Read all", "read", GDEFCORE_ACCESS_ANY, ""));
     site.Grant("seer", "Read all");
@@ -1046,7 +1192,7 @@ TEST(ListPlan, ConstantsAreMatchedLiterally) {
     std::string big(4000, 'q');
     big[1999] = '\'';
     std::vector<std::string> evil = {"it's", "'; DROP TABLE defiant_record; --", "100%",
-        "a_c", "back\\slash", "\"quoted\"", big, std::string("nul\0byte", 8), "?"};
+        "a_c", "back\\slash", "\"quoted\"", big, "\x01ctl", "?"};
     std::vector<std::string> ids;
     for (size_t i = 0; i < evil.size(); i++) {
       ids.push_back(site.Make(kBlog, "", V({{"title", "e" + std::to_string(i)},
@@ -1091,18 +1237,42 @@ TEST(ListPlan, ConstantsAreMatchedLiterally) {
     /* Every row is still there afterwards. */
     Q all;
     EXPECT_EQ(evil.size() + 2, List(site, r, all).ids.size());
+    /* A NUL in a text value is refused at the save (every backend's text
+     * column refuses it: Postgres cannot hold one). */
+    {
+      char id[GDEFCORE_PUBLIC_ID_LEN + 1];
+      ASSERT_EQ(GDEFCORE_OK,
+          gdefcore_entity_create(site.catalog, kBlog, strlen(kBlog), id, NULL));
+      GDEFCORE_Changeset * cs = NULL;
+      std::string nul("nul\0byte", 8);
+      const char * texts[1] = {nul.data()};
+      size_t lens[1] = {nul.size()};
+      GDEFCORE_Value v;
+      memset(&v, 0, sizeof v);
+      v.size = sizeof v;
+      v.field = "group";
+      v.field_len = 5;
+      v.texts = texts;
+      v.text_lens = lens;
+      v.count = 1;
+      ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(site.catalog, NULL, 0, &cs));
+      EXPECT_EQ(GDEFCORE_ERR_INVALID,
+          gdefcore_entity_save(cs, id, strlen(id), "en", 2, &v, 1));
+      gdefcore_changeset_destroy(cs);
+    }
   }
 }
 
 TEST(ListPlan, AnUnpublishedEntityIsNeverListed) {
-  for (int backend = 0; backend < 2; backend++) {
-    Site site(backend == 1);
+  for (int backend : Backends()) {
+    Site site(backend);
     site.Role("seer");
     ASSERT_EQ(GDEFCORE_OK, site.Declare("Read all", "read", GDEFCORE_ACCESS_ANY, ""));
     site.Grant("seer", "Read all");
     std::string p = site.Principal("seer");
     site.Make(kBlog, "", V({{"title", "live"}}));
     site.Make(kBlog, "", V({{"title", "draft"}}), 1);
+    site.Make(kBlog, "", V({{"title", "held"}}), 2);
     std::string gone = site.Make(kBlog, "", V({{"title", "gone"}}));
     site.Unpublish(gone);
     GDEFCORE_Request * r = site.Req(p);
@@ -1121,8 +1291,8 @@ TEST(ListPlan, AnUnpublishedEntityIsNeverListed) {
 }
 
 TEST(ListPlan, TheOldListIsUnchanged) {
-  for (int backend = 0; backend < 2; backend++) {
-    Site site(backend == 1);
+  for (int backend : Backends()) {
+    Site site(backend);
     site.Role("seer");
     ASSERT_EQ(GDEFCORE_OK, site.Declare("Read all", "read", GDEFCORE_ACCESS_ANY, ""));
     site.Grant("seer", "Read all");
@@ -1172,8 +1342,8 @@ TEST(ListPlan, TheOldListIsUnchanged) {
 }
 
 TEST(ListPlan, AFieldWithAFieldGrantIsDecidedEntityByEntity) {
-  for (int backend = 0; backend < 2; backend++) {
-    Site site(backend == 1);
+  for (int backend : Backends()) {
+    Site site(backend);
     site.Role("seer");
     ASSERT_EQ(GDEFCORE_OK, site.Declare("Read all", "read", GDEFCORE_ACCESS_ANY, ""));
     ASSERT_EQ(GDEFCORE_OK, site.Declare("Read rank", "read", GDEFCORE_ACCESS_ANY, "", kBlog, "rank"));
@@ -1230,8 +1400,8 @@ TEST(ListPlan, APlanThatCannotBePromisedIsEvaluatedInstead) {
   GDEFCORE_Limits limits;
   gdefcore_limits_default(&limits);
   limits.max_values = 100;
-  for (int backend = 0; backend < 2; backend++) {
-    Site site(backend == 1, &limits);
+  for (int backend : Backends()) {
+    Site site(backend, &limits);
     site.Role("seer");
     ASSERT_EQ(GDEFCORE_OK, site.Declare("Read tagged", "read", 0, "(= field.tags \"x\")"));
     site.Grant("seer", "Read tagged");
@@ -1255,8 +1425,8 @@ TEST(ListPlan, APlanThatCannotBePromisedIsEvaluatedInstead) {
 }
 
 TEST(ListPlan, AnAgentIsHeldToTheCeilingInTheCompiledList) {
-  for (int backend = 0; backend < 2; backend++) {
-    Site site(backend == 1);
+  for (int backend : Backends()) {
+    Site site(backend);
     site.Role("wide");
     site.Role("narrow");
     ASSERT_EQ(GDEFCORE_OK, site.Declare("Read all", "read", GDEFCORE_ACCESS_ANY, ""));
@@ -1282,63 +1452,131 @@ TEST(ListPlan, AnAgentIsHeldToTheCeilingInTheCompiledList) {
   }
 }
 
-TEST(ListPlan, TheLayoutTheQueryFormReadsIsWhatIsStored) {
-  /* The names the compiled list depends on, read straight from the store. */
-  Site site(false);
-  const std::string alice = site.Principal();
-  std::string id = site.Make(kBlog, alice, V({{"title", "T"}}));
-  GDEFSTOR_Projection * row = NULL;
-  /* The row is the entity's number, which the active projection's id column
-   * maps back to the public id. */
-  GDEFSTOR_Query q;
-  GDEFSTOR_QueryResult * r = NULL;
-  memset(&q, 0, sizeof q);
-  q.size = sizeof q;
-  GDEFSTOR_QueryOperand sel[4];
-  memset(sel, 0, sizeof sel);
-  const char * names[3] = {GDEFCORE_QUERY_COL_ID, GDEFCORE_QUERY_COL_DOC,
-      GDEFCORE_QUERY_COL_REVISION_CREATOR};
-  for (int i = 0; i < 3; i++) {
-    sel[i].kind = GDEFSTOR_QUERY_COLUMN;
-    sel[i].column = names[i];
-    sel[i].column_len = strlen(names[i]);
+/* The compiled list is a query of the port's entities (story S6b): the
+ * current tables, in the plan's language, with the published fact and the
+ * creator the entity record holds. Asked here straight of the port, beside
+ * the list, so a list that read anything else would disagree. */
+TEST(ListPlan, TheQueryIsOfThePortsCurrentTables) {
+  for (int backend : Backends()) {
+    Site site(backend);
+    const std::string alice = site.Principal();
+    std::string id = site.Make(kBlog, alice, V({{"title", "T"}, {"rank", "3"}}));
+    site.Make(kBlog, "", V({{"title", "U"}, {"rank", "4"}}));
+    GDEFCORE_Plan * plan = NULL;
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_plan_create(site.catalog, kBlog, strlen(kBlog),
+                               "en", 2, alice.data(), alice.size(), 0, &plan));
+    const GDEFSTOR_QueryNode * kids[2] = {gdefcore_plan_published(plan),
+        gdefcore_plan_creator_is_principal(plan)};
+    const GDEFSTOR_QueryNode * where = gdefcore_plan_and(plan, kids, 2);
+    ASSERT_TRUE(where != NULL);
+    GDEFSTOR_Query q;
+    memset(&q, 0, sizeof q);
+    q.size = sizeof q;
+    q.where = where;
+    q.language = "en";
+    q.language_len = 2;
+    GDEFSTOR_QueryResult * r = NULL;
+    ASSERT_EQ(GDEFSTOR_OK, gdefstor_entity_query(site.store, "t", 1, kBlog,
+                               strlen(kBlog), &q, &r));
+    ASSERT_EQ(1u, gdefstor_query_result_rows(r));
+    const char * entity = NULL;
+    size_t en = 0;
+    ASSERT_EQ(GDEFSTOR_OK, gdefstor_query_result_entity(r, 0, &entity, &en));
+    EXPECT_EQ(id, std::string(entity, en));
+    gdefstor_query_result_free(r);
+    /* The sort key is the field's typed value: rank 4 after rank 3. */
+    const GDEFSTOR_QuerySort * sort = gdefcore_plan_sort_field(plan, "rank", 4, 1);
+    ASSERT_TRUE(sort != NULL);
+    memset(&q, 0, sizeof q);
+    q.size = sizeof q;
+    q.sorts = sort;
+    q.sort_count = 1;
+    q.language = "en";
+    q.language_len = 2;
+    char ** ids = NULL;
+    size_t n = 0;
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_entity_query_active(site.catalog, kBlog, strlen(kBlog), &q, &ids,
+            &n, NULL));
+    EXPECT_EQ("U,T", Titles(site, std::vector<std::string>(ids, ids + n)));
+    gdefcore_ids_free(site.catalog, ids, n);
+    gdefcore_plan_free(plan);
   }
-  sel[3].kind = GDEFSTOR_QUERY_COLUMN;
-  sel[3].column = GDEFCORE_QUERY_COL_CREATOR;
-  sel[3].column_len = strlen(GDEFCORE_QUERY_COL_CREATOR);
-  sel[3].join_type = NULL;
-  q.select = sel;
-  q.select_count = 3;
-  std::string ptype = std::string(GDEFCORE_QUERY_ACTIVE_PREFIX) + kBlog;
-  ASSERT_EQ(GDEFSTOR_OK, gdefstor_projection_query(site.store, "t", 1, ptype.data(),
-                             ptype.size(), &q, &r));
-  ASSERT_EQ(1u, gdefstor_query_result_rows(r));
-  int present = 0;
-  const uint8_t * b = NULL;
-  size_t n = 0;
-  ASSERT_EQ(GDEFSTOR_OK, gdefstor_query_result_value(r, 0, 0, &present, &b, &n));
-  EXPECT_EQ(id, std::string((const char *)b, n));
-  ASSERT_EQ(GDEFSTOR_OK, gdefstor_query_result_value(r, 0, 1, &present, &b, &n));
-  EXPECT_NE(std::string::npos, std::string((const char *)b, n).find("\"title\""));
-  ASSERT_EQ(GDEFSTOR_OK, gdefstor_query_result_value(r, 0, 2, &present, &b, &n));
-  EXPECT_EQ(alice, std::string((const char *)b, n));
-  const char * entity = NULL;
-  size_t en = 0;
-  ASSERT_EQ(GDEFSTOR_OK, gdefstor_query_result_entity(r, 0, &entity, &en));
-  /* The record, by the same row. */
-  ASSERT_EQ(GDEFSTOR_OK, gdefstor_projection_get(site.store, "t", 1,
-                             GDEFCORE_QUERY_RECORD_TYPE, strlen(GDEFCORE_QUERY_RECORD_TYPE),
-                             entity, en, &row));
-  std::map<std::string, std::string> cols;
-  for (size_t i = 0; i < gdefstor_projection_column_count(row); i++) {
-    GDEFSTOR_Column c;
-    ASSERT_EQ(GDEFSTOR_OK, gdefstor_projection_column(row, i, &c));
-    cols[std::string(c.name, c.name_len)] = std::string((const char *)c.value, c.value_len);
+}
+
+/* A list reads the newest revision and nothing older: an entity whose group
+ * was "old" and is "new" is listed by "new" alone, by the store and by the
+ * entity-by-entity reference, in its filter, its condition and its sort. */
+TEST(ListPlan, AListReadsOnlyTheCurrentRevision) {
+  for (int backend : Backends()) {
+    Site site(backend);
+    site.Role("seer");
+    ASSERT_EQ(GDEFCORE_OK, site.Declare("Read all", "read", GDEFCORE_ACCESS_ANY, ""));
+    site.Grant("seer", "Read all");
+    std::string p = site.Principal("seer");
+    std::string moved = site.Make(kBlog, "", V({{"title", "moved"}, {"group", "old"}}));
+    site.Save(moved, "", V({{"group", "new"}}));
+    site.Make(kBlog, "", V({{"title", "stays"}, {"group", "old"}}));
+    GDEFCORE_Request * r = site.Req(p);
+    for (int flags : {0, (int)GDEFCORE_ACCESS_LIST_EVALUATE}) {
+      Q q;
+      q.flags = flags;
+      q.filter_field = "group";
+      q.filter_text = "old";
+      EXPECT_EQ("stays", Titles(site, List(site, r, q).ids))
+          << "backend " << backend << " flags " << flags;
+      q.filter_text = "new";
+      EXPECT_EQ("moved", Titles(site, List(site, r, q).ids)) << "flags " << flags;
+      Q c;
+      c.flags = flags;
+      c.condition = "(= field.group \"old\")";
+      EXPECT_EQ("stays", Titles(site, List(site, r, c).ids)) << "flags " << flags;
+      Q s;
+      s.flags = flags;
+      s.sort1 = "group";
+      EXPECT_EQ("moved,stays", Titles(site, List(site, r, s).ids)) << "flags " << flags;
+    }
   }
-  EXPECT_EQ("1", cols[GDEFCORE_QUERY_COL_PUBLISHED]);
-  EXPECT_EQ(alice, cols[GDEFCORE_QUERY_COL_CREATOR]);
-  gdefstor_projection_free(row);
-  gdefstor_query_result_free(r);
+}
+
+/* A draft is never in a list: not as an entity (one never saved is in none),
+ * and not as content (the draft over a published entity is not what its
+ * filter, condition or sort read). */
+TEST(ListPlan, ADraftIsNeverInAList) {
+  for (int backend : Backends()) {
+    Site site(backend);
+    site.Role("seer");
+    ASSERT_EQ(GDEFCORE_OK, site.Declare("Read all", "read", GDEFCORE_ACCESS_ANY, ""));
+    site.Grant("seer", "Read all");
+    std::string p = site.Principal("seer");
+    std::string pub = site.Make(kBlog, "", V({{"title", "pub"}, {"group", "b"}}));
+    site.Save(pub, "", V({{"group", "a"}}), 1);   /* a draft over it */
+    site.Make(kBlog, "", V({{"title", "only"}, {"group", "a"}}), 1);
+    site.Make(kBlog, "", V({{"title", "other"}, {"group", "c"}}));
+    GDEFCORE_Request * r = site.Req(p);
+    for (int flags : {0, (int)GDEFCORE_ACCESS_LIST_EVALUATE}) {
+      Q all;
+      all.flags = flags;
+      Listed l = List(site, r, all);
+      EXPECT_EQ("pub,other", Titles(site, l.ids)) << "backend " << backend
+                                                  << " flags " << flags;
+      EXPECT_EQ(2u, l.total);
+      Q f;
+      f.flags = flags;
+      f.filter_field = "group";
+      f.filter_text = "a";
+      EXPECT_TRUE(List(site, r, f).ids.empty()) << "flags " << flags;
+      Q c;
+      c.flags = flags;
+      c.condition = "(= field.group \"a\")";
+      EXPECT_TRUE(List(site, r, c).ids.empty()) << "flags " << flags;
+      Q s;
+      s.flags = flags;
+      s.sort1 = "group";
+      s.desc1 = true;
+      EXPECT_EQ("other,pub", Titles(site, List(site, r, s).ids)) << "flags " << flags;
+    }
+  }
 }
 
 int main(int argc, char ** argv) {

@@ -34,7 +34,7 @@
 
 #include <ghoti.io/cutil/allocator.h>
 #include <ghoti.io/cutil/library.h>
-#include <ghoti.io/defiant-storage/projection.h>
+#include <ghoti.io/defiant-storage/model.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -68,7 +68,6 @@ static const char kEntrySymbol[] = "gdefcore_module_manifest";
 static const char kInstallTenant[] = "\x01";
 static const char kInstallType[] = "core.module.install";
 static const char kEnabledType[] = "core.module.enabled";
-static const char kIndexKey[] = ".index";
 
 typedef struct Name {
   char text[kNameMax + 1];
@@ -401,28 +400,84 @@ static void name_remove(Name * names, size_t * n, const char * text,
   }
 }
 
-static GDEFCORE_Result col_copy(const GDEFSTOR_Projection * row,
+/*
+ * A module record (story S6b: installed and enabled modules are records of
+ * the storage port, AD-31): one `name hex` line per column, the value in
+ * lowercase hex so that no byte of it can end a line.
+ */
+typedef struct RecBuf {
+  char text[4 * (kPathMax + 64)];
+  size_t n;
+  int full;
+} RecBuf;
+
+static void rec_put(RecBuf * b, const char * name, const char * value,
+    size_t len) {
+  static const char hex[] = "0123456789abcdef";
+  size_t nl = strlen(name);
+  size_t i;
+  if (b->full || b->n + nl + 2 + 2 * len >= sizeof b->text) {
+    b->full = 1;
+    return;
+  }
+  memcpy(b->text + b->n, name, nl);
+  b->n += nl;
+  b->text[b->n++] = ' ';
+  for (i = 0; i < len; i++) {
+    unsigned char c = (unsigned char)value[i];
+    b->text[b->n++] = hex[c >> 4];
+    b->text[b->n++] = hex[c & 15u];
+  }
+  b->text[b->n++] = '\n';
+}
+
+static int rec_nibble(char c) {
+  if (c >= '0' && c <= '9') {
+    return c - '0';
+  }
+  if (c >= 'a' && c <= 'f') {
+    return c - 'a' + 10;
+  }
+  return -1;
+}
+
+static GDEFCORE_Result rec_copy(const uint8_t * bytes, size_t len,
     const char * name, size_t name_len, char * dst, size_t cap, size_t * out_n,
     int required) {
-  size_t i;
-  size_t count = gdefstor_projection_column_count(row);
-  for (i = 0; i < count; i++) {
-    GDEFSTOR_Column column;
-    if (gdefstor_projection_column(row, i, &column) != GDEFSTOR_OK) {
+  const char * p = (const char *)bytes;
+  const char * end = p + len;
+  while (p < end) {
+    const char * eol = memchr(p, '\n', (size_t)(end - p));
+    const char * sp;
+    if (eol == NULL) {
       return GDEFCORE_ERR_CORRUPT;
     }
-    if (column.name_len == name_len &&
-        memcmp(column.name, name, name_len) == 0) {
-      if (column.value_len >= cap) {
+    sp = memchr(p, ' ', (size_t)(eol - p));
+    if (sp == NULL) {
+      return GDEFCORE_ERR_CORRUPT;
+    }
+    if ((size_t)(sp - p) == name_len && memcmp(p, name, name_len) == 0) {
+      size_t hn = (size_t)(eol - sp - 1);
+      size_t i;
+      if (hn % 2 != 0) {
+        return GDEFCORE_ERR_CORRUPT;
+      }
+      if (hn / 2 >= cap) {
         return GDEFCORE_ERR_LIMIT;
       }
-      if (column.value_len > 0 && column.value != NULL) {
-        memcpy(dst, column.value, column.value_len);
+      for (i = 0; i < hn; i += 2) {
+        int hi = rec_nibble(sp[1 + i]);
+        int lo = rec_nibble(sp[2 + i]);
+        if (hi < 0 || lo < 0) {
+          return GDEFCORE_ERR_CORRUPT;
+        }
+        dst[i / 2] = (char)((hi << 4) | lo);
       }
-      dst[column.value_len] = '\0';
-      *out_n = column.value_len;
+      dst[hn / 2] = '\0';
+      *out_n = hn / 2;
       return GDEFCORE_OK;
     }
+    p = eol + 1;
   }
   if (required) {
     return GDEFCORE_ERR_CORRUPT;
@@ -432,82 +487,50 @@ static GDEFCORE_Result col_copy(const GDEFSTOR_Projection * row,
   return GDEFCORE_OK;
 }
 
+/* The names of a namespace's records, in key order. */
 static GDEFCORE_Result load_names(GDEFCORE_Host * host, const char * tenant,
-    size_t tenant_len, const char * type, Name * names, size_t cap,
+    size_t tenant_len, const char * ns, Name * names, size_t cap,
     size_t * out_n) {
-  GDEFSTOR_Projection * row = NULL;
-  char list[kModMax * (kNameMax + 1)];
-  size_t list_len = 0;
-  GDEFSTOR_Result src;
-  size_t i = 0;
+  uint64_t offset = 0;
   *out_n = 0;
-  src = gdefstor_projection_get(host->store, tenant, tenant_len, type,
-      strlen(type), kIndexKey, strlen(kIndexKey), &row);
-  if (src == GDEFSTOR_ERR_INVALID) {
-    return GDEFCORE_OK;
-  }
-  if (src != GDEFSTOR_OK) {
-    return map_stor(src);
-  }
-  {
-    GDEFCORE_Result rc =
-        col_copy(row, "list", 4, list, sizeof list, &list_len, 0);
-    gdefstor_projection_free(row);
-    if (rc != GDEFCORE_OK) {
-      return rc;
+  for (;;) {
+    GDEFSTOR_RecordList * list = NULL;
+    size_t i;
+    size_t count;
+    GDEFSTOR_Result src = gdefstor_record_list(host->store, tenant, tenant_len,
+        ns, strlen(ns), "", 0, offset, GDEFSTOR_RECORD_MAX_PAGE, &list);
+    if (src != GDEFSTOR_OK) {
+      return map_stor(src);
     }
-  }
-  while (i < list_len) {
-    size_t start = i;
-    while (i < list_len && list[i] != '\n') {
-      i += 1;
+    count = gdefstor_record_list_count(list);
+    for (i = 0; i < count; i++) {
+      const char * key = NULL;
+      size_t key_len = 0;
+      const uint8_t * bytes = NULL;
+      size_t blen = 0;
+      if (gdefstor_record_list_item(list, i, &key, &key_len, &bytes, &blen) !=
+          GDEFSTOR_OK) {
+        gdefstor_record_list_free(list);
+        return GDEFCORE_ERR_CORRUPT;
+      }
+      if (*out_n >= cap) {
+        gdefstor_record_list_free(list);
+        return GDEFCORE_ERR_LIMIT;
+      }
+      if (!name_ok(key, key_len) ||
+          !copy_span(names[*out_n].text, sizeof names[*out_n].text,
+              &names[*out_n].len, key, key_len)) {
+        gdefstor_record_list_free(list);
+        return GDEFCORE_ERR_CORRUPT;
+      }
+      *out_n += 1;
     }
-    if (i == start || *out_n >= cap) {
-      return i == start ? GDEFCORE_ERR_CORRUPT : GDEFCORE_ERR_LIMIT;
+    gdefstor_record_list_free(list);
+    if (count < GDEFSTOR_RECORD_MAX_PAGE) {
+      return GDEFCORE_OK;
     }
-    if (!name_ok(list + start, i - start) ||
-        !copy_span(names[*out_n].text, sizeof names[*out_n].text,
-            &names[*out_n].len, list + start, i - start)) {
-      return GDEFCORE_ERR_CORRUPT;
-    }
-    *out_n += 1;
-    if (i < list_len && list[i] == '\n') {
-      i += 1;
-    }
+    offset += count;
   }
-  return GDEFCORE_OK;
-}
-
-static GDEFCORE_Result join_names(const GDEFCORE_Allocator * alloc,
-    Name * names, size_t n, char ** out, size_t * out_n) {
-  size_t bytes = 0;
-  size_t i;
-  size_t at = 0;
-  char * text;
-  if (n > 1) {
-    qsort(names, n, sizeof *names, cmp_name);
-  }
-  for (i = 0; i < n; i++) {
-    bytes += names[i].len;
-    if (i + 1 < n) {
-      bytes += 1;
-    }
-  }
-  text = (char *)gcu_allocator_malloc(alloc, bytes + 1);
-  if (text == NULL) {
-    return GDEFCORE_ERR_OOM;
-  }
-  for (i = 0; i < n; i++) {
-    if (i > 0) {
-      text[at++] = '\n';
-    }
-    memcpy(text + at, names[i].text, names[i].len);
-    at += names[i].len;
-  }
-  text[at] = '\0';
-  *out = text;
-  *out_n = at;
-  return GDEFCORE_OK;
 }
 
 static void close_mod(Mod * mod) {
@@ -519,75 +542,34 @@ static void close_mod(Mod * mod) {
   mod->entry = NULL;
 }
 
-static GDEFCORE_Result put_install_row(GDEFSTOR_Write * write, const Mod * mod) {
-  GDEFSTOR_Column columns[4];
-  size_t n = 0;
+static GDEFCORE_Result put_install_row(GDEFSTOR_Write * write, const Mod * mod,
+    int entered) {
+  RecBuf b;
   const char * kind = mod->native ? "native" : "guest";
-  const char * entered = "0";
-  memset(columns, 0, sizeof columns);
-  columns[n].name = "kind";
-  columns[n].name_len = 4;
-  columns[n].value = (const uint8_t *)kind;
-  columns[n].value_len = strlen(kind);
-  n += 1;
-  columns[n].name = "token";
-  columns[n].name_len = 5;
-  columns[n].value = (const uint8_t *)mod->token;
-  columns[n].value_len = mod->token_len;
-  n += 1;
-  columns[n].name = "entered";
-  columns[n].name_len = 7;
-  columns[n].value = (const uint8_t *)entered;
-  columns[n].value_len = 1;
-  n += 1;
+  memset(&b, 0, sizeof b);
+  rec_put(&b, "kind", kind, strlen(kind));
+  rec_put(&b, "token", mod->token, mod->token_len);
+  rec_put(&b, "entered", entered ? "1" : "0", 1);
   if (mod->native) {
-    columns[n].name = "path";
-    columns[n].name_len = 4;
-    columns[n].value = (const uint8_t *)mod->path;
-    columns[n].value_len = mod->path_len;
-    n += 1;
+    rec_put(&b, "path", mod->path, mod->path_len);
   }
-  return map_stor(gdefstor_projection_put(write, kInstallType,
-      strlen(kInstallType), mod->name, mod->name_len, columns, n));
+  if (b.full) {
+    return GDEFCORE_ERR_LIMIT;
+  }
+  return map_stor(gdefstor_record_put(write, kInstallType, strlen(kInstallType),
+      mod->name, mod->name_len, (const uint8_t *)b.text, b.n));
 }
 
+/* The installation's record of a module, in a write of its own on the
+ * installation tenant. */
 static GDEFCORE_Result store_install(GDEFCORE_Host * host, const Mod * mod) {
-  Name names[kModMax];
-  size_t nnames = 0;
-  char * list = NULL;
-  size_t list_len = 0;
   GDEFSTOR_Write * write = NULL;
-  GDEFSTOR_Column index_col;
-  GDEFCORE_Result rc = load_names(host, kInstallTenant, 1, kInstallType, names,
-      kModMax, &nnames);
+  GDEFCORE_Result rc = map_stor(gdefstor_write_begin(host->store,
+      kInstallTenant, 1, NULL, &write));
   if (rc != GDEFCORE_OK) {
     return rc;
   }
-  rc = name_add(names, &nnames, kModMax, mod->name, mod->name_len);
-  if (rc != GDEFCORE_OK) {
-    return rc;
-  }
-  rc = join_names(host->alloc, names, nnames, &list, &list_len);
-  if (rc != GDEFCORE_OK) {
-    return rc;
-  }
-  rc = map_stor(gdefstor_write_begin(host->store, kInstallTenant, 1, NULL,
-      &write));
-  if (rc != GDEFCORE_OK) {
-    gcu_allocator_free(host->alloc, list);
-    return rc;
-  }
-  rc = put_install_row(write, mod);
-  if (rc == GDEFCORE_OK) {
-    memset(&index_col, 0, sizeof index_col);
-    index_col.name = "list";
-    index_col.name_len = 4;
-    index_col.value = (const uint8_t *)list;
-    index_col.value_len = list_len;
-    rc = map_stor(gdefstor_projection_put(write, kInstallType,
-        strlen(kInstallType), kIndexKey, strlen(kIndexKey), &index_col, 1));
-  }
-  gcu_allocator_free(host->alloc, list);
+  rc = put_install_row(write, mod, 0);
   if (rc != GDEFCORE_OK) {
     gdefstor_write_abort(write);
     return rc;
@@ -598,42 +580,16 @@ static GDEFCORE_Result store_install(GDEFCORE_Host * host, const Mod * mod) {
 static GDEFCORE_Result persist_entered(GDEFCORE_Host * host, Mod * mod,
     int entered) {
   GDEFSTOR_Write * write = NULL;
-  GDEFSTOR_Column columns[4];
-  size_t n = 0;
-  const char * kind = mod->native ? "native" : "guest";
-  const char * flag = entered ? "1" : "0";
   GDEFCORE_Result rc;
   if (!mod->native) {
     return GDEFCORE_OK;
   }
-  memset(columns, 0, sizeof columns);
-  columns[n].name = "kind";
-  columns[n].name_len = 4;
-  columns[n].value = (const uint8_t *)kind;
-  columns[n].value_len = strlen(kind);
-  n += 1;
-  columns[n].name = "token";
-  columns[n].name_len = 5;
-  columns[n].value = (const uint8_t *)mod->token;
-  columns[n].value_len = mod->token_len;
-  n += 1;
-  columns[n].name = "entered";
-  columns[n].name_len = 7;
-  columns[n].value = (const uint8_t *)flag;
-  columns[n].value_len = 1;
-  n += 1;
-  columns[n].name = "path";
-  columns[n].name_len = 4;
-  columns[n].value = (const uint8_t *)mod->path;
-  columns[n].value_len = mod->path_len;
-  n += 1;
   rc = map_stor(gdefstor_write_begin(host->store, kInstallTenant, 1, NULL,
       &write));
   if (rc != GDEFCORE_OK) {
     return rc;
   }
-  rc = map_stor(gdefstor_projection_put(write, kInstallType, strlen(kInstallType),
-      mod->name, mod->name_len, columns, n));
+  rc = put_install_row(write, mod, entered);
   if (rc != GDEFCORE_OK) {
     gdefstor_write_abort(write);
     return rc;
@@ -974,12 +930,14 @@ static GDEFCORE_Result adopt(GDEFCORE_Host * host, Mod * filled) {
 }
 
 static GDEFCORE_Result reload_one(GDEFCORE_Host * host, const Name * name) {
-  GDEFSTOR_Projection * row = NULL;
   Mod mod;
   char kind[16];
   char entered[8];
   size_t kind_len = 0;
   size_t entered_len = 0;
+  int found = 0;
+  uint8_t * bytes = NULL;
+  size_t blen = 0;
   GDEFSTOR_Result src;
   GDEFCORE_Result rc;
   memset(&mod, 0, sizeof mod);
@@ -987,24 +945,29 @@ static GDEFCORE_Result reload_one(GDEFCORE_Host * host, const Name * name) {
           name->len)) {
     return GDEFCORE_ERR_LIMIT;
   }
-  src = gdefstor_projection_get(host->store, kInstallTenant, 1, kInstallType,
-      strlen(kInstallType), name->text, name->len, &row);
+  src = gdefstor_record_get(host->store, kInstallTenant, 1, kInstallType,
+      strlen(kInstallType), name->text, name->len, &found, &bytes, &blen);
   if (src != GDEFSTOR_OK) {
     return map_stor(src);
   }
-  rc = col_copy(row, "kind", 4, kind, sizeof kind, &kind_len, 1);
+  if (!found) {
+    return GDEFCORE_ERR_CORRUPT;
+  }
+  rc = rec_copy(bytes, blen, "kind", 4, kind, sizeof kind, &kind_len, 1);
   if (rc == GDEFCORE_OK) {
-    rc = col_copy(row, "token", 5, mod.token, sizeof mod.token, &mod.token_len,
-        1);
+    rc = rec_copy(bytes, blen, "token", 5, mod.token, sizeof mod.token,
+        &mod.token_len, 1);
   }
   if (rc == GDEFCORE_OK) {
-    rc = col_copy(row, "entered", 7, entered, sizeof entered, &entered_len, 0);
+    rc = rec_copy(bytes, blen, "entered", 7, entered, sizeof entered,
+        &entered_len, 0);
   }
   if (rc == GDEFCORE_OK && kind_len == 6 && memcmp(kind, "native", 6) == 0) {
     mod.native = 1;
-    rc = col_copy(row, "path", 4, mod.path, sizeof mod.path, &mod.path_len, 1);
+    rc = rec_copy(bytes, blen, "path", 4, mod.path, sizeof mod.path,
+        &mod.path_len, 1);
   }
-  gdefstor_projection_free(row);
+  gdefstor_bytes_free(NULL, bytes);
   if (rc != GDEFCORE_OK) {
     return rc;
   }
@@ -2656,13 +2619,8 @@ GDEFCORE_Result gdefcore_module_write_enables(GDEFCORE_Host * host,
     GDEFCORE_Changeset * changeset) {
   Name names[kModMax];
   size_t nnames = 0;
-  char * list = NULL;
-  size_t list_len = 0;
   size_t count;
   size_t i;
-  GDEFSTOR_Column on_col;
-  GDEFSTOR_Column index_col;
-  const char * on = "1";
   GDEFCORE_Result rc;
   if (host == NULL || write == NULL || changeset == NULL) {
     return GDEFCORE_ERR_INVALID;
@@ -2671,6 +2629,8 @@ GDEFCORE_Result gdefcore_module_write_enables(GDEFCORE_Host * host,
   if (rc != GDEFCORE_OK) {
     return rc;
   }
+  /* In the changeset's write, as records of the tenant: a module disabled
+   * loses its record, and every module the set holds has one. */
   count = gdefcore_changeset_module_count(changeset);
   for (i = 0; i < count; i++) {
     const char * name = NULL;
@@ -2681,38 +2641,21 @@ GDEFCORE_Result gdefcore_module_write_enables(GDEFCORE_Host * host,
       return rc;
     }
     if (!enable) {
-      rc = map_stor(gdefstor_projection_delete(write, kEnabledType,
-          strlen(kEnabledType), name, name_len));
+      rc = map_stor(gdefstor_record_delete(write, kEnabledType,
+          strlen(kEnabledType), name, name_len, NULL));
       if (rc != GDEFCORE_OK) {
         return rc;
       }
     }
   }
   for (i = 0; i < nnames; i++) {
-    memset(&on_col, 0, sizeof on_col);
-    on_col.name = "on";
-    on_col.name_len = 2;
-    on_col.value = (const uint8_t *)on;
-    on_col.value_len = 1;
-    rc = map_stor(gdefstor_projection_put(write, kEnabledType,
-        strlen(kEnabledType), names[i].text, names[i].len, &on_col, 1));
+    rc = map_stor(gdefstor_record_put(write, kEnabledType, strlen(kEnabledType),
+        names[i].text, names[i].len, (const uint8_t *)"1", 1));
     if (rc != GDEFCORE_OK) {
       return rc;
     }
   }
-  rc = join_names(host->alloc, names, nnames, &list, &list_len);
-  if (rc != GDEFCORE_OK) {
-    return rc;
-  }
-  memset(&index_col, 0, sizeof index_col);
-  index_col.name = "list";
-  index_col.name_len = 4;
-  index_col.value = (const uint8_t *)list;
-  index_col.value_len = list_len;
-  rc = map_stor(gdefstor_projection_put(write, kEnabledType, strlen(kEnabledType),
-      kIndexKey, strlen(kIndexKey), &index_col, 1));
-  gcu_allocator_free(host->alloc, list);
-  return rc;
+  return GDEFCORE_OK;
 }
 
 static GDEFCORE_Result activate(GDEFCORE_Host * host, Mod * mod) {

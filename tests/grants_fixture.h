@@ -31,7 +31,7 @@
 #include <ghoti.io/defiant-core/macros.h>
 #include <ghoti.io/defiant-core/defiant-core.h>
 #include <ghoti.io/defiant-storage-memory/memory.h>
-#include <ghoti.io/defiant-storage-sqlite/sqlite.h>
+#include <ghoti.io/defiant-storage-sqlite/model.h>
 
 #include <gtest/gtest.h>
 
@@ -261,8 +261,14 @@ class GrantsFixture : public ::testing::Test {
         }
       }
       ASSERT_FALSE(sqlite_dir_.empty());
+      /* The entity port's store (story S6b), with no fsync: these tests open
+       * many stores and are not about the disk. */
+      GDEFSSQLITE_ModelOptions o;
+      gdefssqlite_model_options_default(&o);
+      o.synchronous = GDEFSSQLITE_SYNC_OFF;
       ASSERT_EQ(GDEFSSQLITE_OK,
-          gdefssqlite_store_create(sqlite_dir_.c_str(), NULL, NULL, &store_));
+          gdefssqlite_model_store_create(sqlite_dir_.c_str(), &o, NULL, NULL,
+              &store_));
     } else {
       ASSERT_EQ(GDEFSMEMORY_OK, gdefsmemory_store_create(NULL, NULL, &store_));
     }

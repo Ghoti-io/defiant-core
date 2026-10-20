@@ -74,12 +74,12 @@ Every operand is a set of texts.
 | Operand | The texts |
 |---|---|
 | `type` | the entity's type name |
-| `state` | `published` when the entity's published flag is set (a newer draft beside the active revision does not change that), else `draft`. An entity that was never published, was unpublished or was cleared is `draft`. There is no third state. |
-| `creator` | the entity's creator: the principal of its first revision, recorded then and never changed, or none |
-| `revision.creator` | the creator of the active revision (whoever wrote that revision), or none |
+| `state` | `published` when the entity's published flag is set (a draft beside its newest revision does not change that), else `draft`. An entity that was never published, was unpublished or was cleared is `draft`. There is no third state. |
+| `creator` | the entity's creator: whoever made it (its first draft or its first save), recorded then and never changed, or none |
+| `revision.creator` | the author of the newest revision (whoever wrote that revision), or none |
 | `principal` | the request principal's public id, or none (an anonymous request) |
 | `now` | the request clock in seconds since the epoch, as decimal text |
-| `field.f` | the field's values in the language of the call, or the single empty text when the field has none |
+| `field.f` | the field's values in the language of the call, each the canonical text of the field's logical type (entities.md), or the single empty text when the field has none |
 | a constant | itself |
 
 `creator`, `revision.creator` and `principal` are *none*, not the empty text,
@@ -88,16 +88,16 @@ request is nobody: two absences never equal each other. An absent field is the e
 rule), so `(= field.group "x")` is false on it and `(= field.group "")` is true.
 
 Field values, `creator`, `revision.creator` and `state` are read from the
-entity as it is stored: the **active revision**, whether or not the entity is
-published, and never from a newer draft beside it and never from data being
-written (the evaluator has no parameter for values, so a submitted value cannot
+entity as it is stored: the **newest revision**, whether or not the entity is
+published, which is always its content (access SPEC decision 13), never from
+its draft and never from data being written (the evaluator has no parameter for values, so a submitted value cannot
 steer a check). A condition says what the entity is; whether readers may see it
 at all is a separate question that `read`, `list` and the route check ask for
 themselves (`reader_sees` in access.c), so a stored `(= state "published")` is
 not implied by `read` and not needed in it. A grant on `update` over group a
 therefore holds for an unpublished group a entity, and its author can edit it
-before anyone can see it. An entity with no active revision (nothing saved,
-or cleared) has no fields: a field condition cannot hold on it. Values are read
+before anyone can see it. An entity with no revision (nothing saved but a
+draft) or a cleared one has no fields: a field condition cannot hold on it. Values are read
 in the language of the call, with no fallback to another language, as the
 filter reads them. A many-valued field is all its values (at most 64).
 
@@ -119,12 +119,14 @@ that is an operand with no text at all (`creator` of an entity with no creator,
 - **Validation** (`gdefcore_condition_validate_in()`): the relation must be
   declared by an enabled module, or by the module the same changeset enables;
   the operands must be as many as the columns; and each must suit its column.
-  An entity column takes `principal`, `creator`, `revision.creator`, a field,
-  or a text that is a canonical public id; an integer column an integer, `now`
-  or a field; a text column anything. Errors are at the byte offset of the clause
+  An entity column takes `principal`, `creator`, `revision.creator`, a text or
+  reference field, or a text that is a canonical public id; an integer column
+  an integer, `now` or an integer field; a text column anything but a field of
+  another type than text and reference. Errors are at the byte offset of the clause
   (no such relation, wrong number) or of the operand.
 - **Reading** is as the system. The evaluator and the list compiler read
-  `core.relation_row` through the unfiltered index, only for a relation an
+  `core.relation_row` through the port's query of its current rows (its rows
+  are kept in their own language, `en`, whatever the list's is), only for a relation an
   enabled module declares with this many columns and only its declared columns;
   there is no call that returns rows (relation.h). A relation that is not
   declared now (its module is disabled), or declared with another number of
@@ -136,9 +138,9 @@ that is an operand with no text at all (`creator` of an entity with no creator,
   notes it on the request at that version (`gdefcore_relation_note_dependency()`), so
   the render key's `reads:` digest moves with the rows and a fragment that used
   the relation is invalid after a change.
-- **Compiled.** In a list, `related` is a semi-join: some row of
-  `core.relation_row`'s active copies, with the entity being decided as the
-  outer row. The compiled list equals the evaluated one (access.md).
+- **Compiled.** In a list, `related` is an EXISTS over
+  `core.relation_row`'s current rows, read in the rows' language, with the
+  entity being decided as the outer row. The compiled list equals the evaluated one (access.md).
 - **Explain and rating.** "there is a row of blog.group-editor listing the
   person and the group field". The matrix and the module's confirmation add
   that the grant's breadth depends on who may add rows to the relation, and a
@@ -146,15 +148,34 @@ that is an operand with no text at all (`creator` of an entity with no creator,
 
 ## Operators
 
-`=` holds when some text on the left equals some text on the right, byte for
-byte (so `"7"` and `"07"` differ, and so do `"x"` and `"X"`). `!=` is exactly
-`(not (= ...))`. `in` holds when some text of the operand is one of the
-constants.
+Fields are typed (entities.md), and a comparison reads them in their type
+(access SPEC decision 12):
 
-`<`, `<=`, `>`, `>=` compare integers. A text is an integer when it is
-`-?[0-9]{1,18}`; `"07"` is 7. They hold when some pair of texts are both
-integers and stand in the relation. A side that is not an integer makes that
-pair false, never an error. `not` of that false is true, as for any false.
+- Where no side is a field of a type other than text and reference, `=` holds
+  when some text on the left equals some text on the right, byte for byte (so
+  `"7"` and `"07"` differ, and so do `"x"` and `"X"`), as every operand did
+  before fields had types.
+- Where one side is a field of another type (an integer, a decimal, a float,
+  a boolean, a date, a date-time), the other side is read in that type: a
+  constant as a value of it (`"07"` equals an integer field holding 7; a text
+  that is no value of the type equals none of its values), `now` as that
+  instant in the type, and `principal`, `creator` and `revision.creator` never
+  equal it. The empty text (a field with no value, or the constant `""`)
+  equals only the empty text. Two fields compare when both are text or
+  reference, or both of one type.
+- `!=` is exactly `(not (= ...))`. `in` holds when some text of the operand
+  is one of the constants, read the same way.
+- `<`, `<=`, `>`, `>=` need a number, a date or a date-time field wherever a
+  field is compared, and two fields of one type; they compare values, so they
+  hold when some pair stands in the relation. A constant that is no value of
+  the field's type makes its pair false, never an error. Without a field,
+  both sides are read as integers (`-?[0-9]{1,18}`, `"07"` is 7) and a side
+  that is not one makes its pair false. `not` of that false is true, as for
+  any false.
+- An ordering of a text, reference or boolean field, and a comparison of two
+  fields of different types, are refused by validation (below). Met where
+  nothing validated it (a condition parsed and evaluated directly), such a
+  comparison fails: the condition does not hold, `not` included.
 
 `and`, `or` and `not` are the usual truth tables. `not` is an operator inside
 an expression; it is not a negative grant.
@@ -184,6 +205,12 @@ offset and one of these fixed messages:
   type.
 - `no such state`: a text constant compared with `state` that is neither
   `published` nor `draft`.
+- `only a number, a date or a date-time field can be compared by order`: a
+  `<`, `<=`, `>` or `>=` with a text, reference or boolean field on a side, at
+  the offset of the field (access SPEC decision 12). The message is one of the
+  fixed set, so the offset is what names the field.
+- `these two fields have different types and cannot be compared`: two fields
+  of different types, at the offset of the second.
 
 Fields are checked against the permission's own type.
 
@@ -296,16 +323,20 @@ the same way. Everything the evaluator decides, it decides:
 - Constants, `type`, `now` and `principal` are constants of the plan. `now` is
   the request clock at the time the plan is built; the render key still does
   not capture it (A6).
-- `creator` is the entity record's creator, `revision.creator` the active
-  revision's; each is *none*, not the empty text, when absent. A field is read
-  from the active revision's document in the call's language; one with no value
-  is the single empty text.
+- `creator` is the entity record's creator, `revision.creator` the newest
+  revision's author; each is *none*, not the empty text, when absent. A field
+  is read from the entity's current tables in the call's language, as a typed
+  operand; a text or reference field with no value is the single empty text
+  (the port's EMPTY_IF_NONE), and a reference is compared as text with texts
+  and identifiers (AS_TEXT).
 - `state` is compared through the record's published flag: "published" when
   set, "draft" otherwise. `state` against an operand that is not a constant is
   compiled too (some text of the operand is the state); an ordered comparison
   with `state` is false, as a state is never an integer.
-- A comparison of integers holds when some pair of texts are integers
-  (`-?[0-9]{1,18}`); a text that is not one makes its pair false.
+- A comparison is compiled as the evaluator reads it (Operators, above): a
+  constant compared with a field of another type than text is parsed into
+  that type when the plan is built, and one that is no value of it is false;
+  a comparison the types refuse is a failure.
 - A condition that names a personal field or a field the type lacks fails when
   evaluation reaches it, and then does not hold at all, `not` included. `and`
   and `or` stop at the first operand that decides them, so a failure after that

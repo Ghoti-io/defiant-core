@@ -38,6 +38,7 @@
 #include <ghoti.io/defiant-core/core.h>
 #include <ghoti.io/defiant-storage/store.h>
 #include <ghoti.io/defiant-storage/query.h>
+#include <ghoti.io/defiant-storage/value.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -54,33 +55,34 @@ extern "C" {
 #define GDEFCORE_TYPE_CONFIG 2
 
 /* The touch codes are bit flags, so a caller can test a set of them. */
-/** A touched entity gets a new revision that is made active and published.
- * A revert reports this too: it is a save of an earlier revision's content. */
+/** A touched entity gets a new revision, its newest, and is published. A
+ * revert reports this too: it is a save of an earlier revision's content. */
 #define GDEFCORE_TOUCH_SAVE 1
-/** A touched entity gets a new revision that is not made active (the first
- * revision of an entity is, but stays unpublished). */
+/** A touched entity's draft is written: no revision, nothing a reader sees. */
 #define GDEFCORE_TOUCH_DRAFT 2
-/** A touched entity's head revision is made active and published. */
+/** A touched entity's draft, if it has one, is applied as its newest
+ * revision, and the entity is published. */
 #define GDEFCORE_TOUCH_PUBLISH 4
 /** A touched entity is cleared by the changeset. */
 #define GDEFCORE_TOUCH_CLEAR 8
-/** A touched entity is unpublished. Its active revision does not change. */
+/** A touched entity is unpublished. Its revisions do not change. */
 #define GDEFCORE_TOUCH_UNPUBLISH 16
-/** A touched entity has another existing revision made active. */
-#define GDEFCORE_TOUCH_ACTIVATE 32
 
 /** A changeset that only changes content field values. */
 #define GDEFCORE_RISK_LOW 1
 /** A changeset that defines a type or touches configuration. */
 #define GDEFCORE_RISK_HIGH 2
 
-/** Read the active revision, but only while the entity is published. This is
+/** Read the newest revision, but only while the entity is published. This is
  * what a reader sees; an unpublished entity has no such view. */
 #define GDEFCORE_VIEW_PUBLISHED 1
-/** Read the head revision: the latest, which may be a draft not yet active. */
+/** Read the entity's draft, where it has one, over its newest revision: what
+ * an editor opens. A draft is never a revision and never in a list. */
 #define GDEFCORE_VIEW_DRAFT 2
-/** Read the active revision whether or not the entity is published. This is
- * the revision the entity currently is, and what a condition reads. */
+/** Read the newest revision whether or not the entity is published. This is
+ * the revision the entity currently is, and what a condition reads. (The
+ * newest revision is always the current one: there is no older revision an
+ * entity can be made to be, story S6b.) */
 #define GDEFCORE_VIEW_ACTIVE 3
 
 /** Caps for the changeset parser and for field values. */
@@ -114,7 +116,21 @@ typedef struct GDEFCORE_Changeset GDEFCORE_Changeset;
  * @ref size is `sizeof(GDEFCORE_Field)`. A value that stops before
  * @ref many is ::GDEFCORE_ERR_INVALID. @ref personal is 0 when @ref size
  * stops before it. Members after @ref personal are absent when @ref size
- * stops before them: no minimum, no maximum, no range and no pattern.
+ * stops before them: no minimum, no maximum, no range and no pattern, a text
+ * field, not indexed.
+ *
+ * Every field has a logical type (AD-13), which is what the storage port
+ * keeps and compares: ::GDEFSTOR_FIELD_TEXT (also @ref type 0), INTEGER,
+ * DECIMAL (with @ref scale), FLOAT, BOOLEAN, DATE, DATETIME or REFERENCE.
+ * Values are still texts at this interface, written and read in each type's
+ * canonical text (gdefcore_value_parse()): an integer reads `7` however it
+ * was written, a decimal of scale 2 `1.50`, a boolean `true` or `false`, a
+ * date `2026-10-19`, a date-time `2026-10-19T08:30:00Z` (with `.mmm` when it
+ * has milliseconds), a reference a canonical public id. A value that is not
+ * one of its type is ::GDEFCORE_ERR_INVALID at staging. A personal field holds
+ * the sealed text of its value whatever its type, until subjects reach the
+ * port (story S7). `<`, `<=`, `>` and `>=` in a condition need a numeric or
+ * temporal field (access SPEC decision 12).
  */
 typedef struct GDEFCORE_Field {
   size_t size;              ///< Must be `sizeof(GDEFCORE_Field)`.
@@ -130,6 +146,9 @@ typedef struct GDEFCORE_Field {
   int64_t range_max;        ///< Inclusive upper bound of a base-10 integer.
   const char * pattern;     ///< ECMAScript regex, or NULL. Must match the whole value.
   size_t pattern_len;       ///< Length of @ref pattern. 0 means no pattern.
+  int type;                 ///< A ::GDEFSTOR_FieldType other than GROUP; 0 is text.
+  int scale;                ///< DECIMAL: digits after the point, 0 to 18.
+  int indexed;              ///< Non-zero asks the store to index it (a hint).
 } GDEFCORE_Field;
 
 /**
@@ -279,10 +298,15 @@ GDEFCORE_API GDEFCORE_Result gdefcore_type_field_constraints(
     char ** out_pattern, size_t * out_pattern_len);
 
 /**
- * @brief Mint a public id and a row id for an entity of @p type_name.
+ * @brief Mint a public id for an entity of @p type_name and reserve it.
  *
- * The row id is returned for inspection. Later calls take the public id.
- * A never-published entity has no published row.
+ * The id is reserved by the entity's draft, which holds no content yet (a
+ * draft of a never-saved entity has no entity row, AD-14): the entity itself,
+ * with its creator, is made when its first draft or its first save is
+ * applied, with that changeset's actor as its creator. Until then it has no
+ * creator and its type is its draft's. Until its first revision it is in no
+ * list. @p out_row receives 0: an entity has no internal row before
+ * it exists, and the row is the port's afterwards.
  *
  * @param catalog The catalog.
  * @param type_name A type that is already readable.
@@ -295,7 +319,8 @@ GDEFCORE_API GDEFCORE_Result gdefcore_entity_create(GDEFCORE_Catalog * catalog,
     const char * type_name, size_t type_len,
     char out_id[GDEFCORE_PUBLIC_ID_LEN + 1], uint64_t * out_row);
 
-/** @brief The tenant config epoch. An unseen epoch is 0. */
+/** @brief The tenant config epoch (the store's counter `core.epoch`, AD-31).
+ * An unseen epoch is 0. */
 GDEFCORE_API GDEFCORE_Result gdefcore_epoch(GDEFCORE_Catalog * catalog,
     uint64_t * out_epoch);
 
@@ -326,11 +351,17 @@ GDEFCORE_API GDEFCORE_Result gdefcore_changeset_define(
 /**
  * @brief Stage field values. A rejected save leaves the changeset unchanged.
  *
- * Apply appends a revision, makes it the active revision and sets the
- * published flag: this is the system's "save and publish", used for
- * configuration and by every caller that has no draft step. A path that
- * separates the acts uses gdefcore_entity_save_draft() and
- * gdefcore_entity_publish().
+ * Apply writes the entity's next revision from the values it has now and
+ * these, in every language they touch, and sets the published flag: the
+ * system's "save and publish", used for configuration and by every caller
+ * that has no draft step. Only what changed is written; values equal to the
+ * current ones write no revision, which gdefcore_changeset_revision() says.
+ * A path that separates the acts uses gdefcore_entity_save_draft() and
+ * gdefcore_entity_publish(). An entity whose id its draft reserves is made
+ * here, with the changeset's actor as its creator. A draft the entity has is
+ * consumed: when it was made from the newest revision the save builds on it
+ * (it saves the working copy), otherwise on the newest revision, and after
+ * the apply the entity has no draft.
  *
  * @p lang is required: non-empty, at most 35 bytes, ASCII letters, digits
  * and hyphens. An undeclared field or a missing required field stages
@@ -358,12 +389,16 @@ GDEFCORE_API GDEFCORE_Result gdefcore_changeset_accept_sealed(
     GDEFCORE_Changeset * changeset);
 
 /**
- * @brief Stage field values as a new revision that is not made active.
+ * @brief Stage field values as the entity's draft (access SPEC decision 13).
  *
- * Apply appends a revision, which becomes the head. The active revision and
- * the published flag are left as they were, except that an entity's first
- * revision becomes its active revision (unpublished), so that the entity has
- * a creator and content for a condition to read. The arguments are the same as gdefcore_entity_save().
+ * Apply writes the draft: the entity's values as they would be, kept apart
+ * from its revisions, recording the revision it was made from. It writes no
+ * revision, moves no published flag, and nothing it holds is in a list, a
+ * query or a reader's view; gdefcore_entity_publish() applies it. Staged on
+ * an entity that has a draft, it builds on the draft. The first draft of an
+ * entity whose id its draft reserves makes the entity, with the changeset's
+ * actor as its creator and no revision. The arguments are the same as
+ * gdefcore_entity_save().
  */
 GDEFCORE_API GDEFCORE_Result gdefcore_entity_save_draft(
     GDEFCORE_Changeset * changeset, const char * id, size_t id_len,
@@ -371,11 +406,16 @@ GDEFCORE_API GDEFCORE_Result gdefcore_entity_save_draft(
     size_t value_count);
 
 /**
- * @brief Stage publishing the head revision: set the published flag and make
- * the head revision active.
+ * @brief Stage publishing: apply the entity's draft, if it has one, as its
+ * next revision, and set the published flag.
  *
- * Apply does not append a revision, and the revision keeps the creator it was
- * written with. An entity with no head revision writes nothing.
+ * The draft is applied only on the revision it was made from: when the
+ * entity has a newer one, apply is a conflict and writes nothing. A draft
+ * equal to the current values writes no revision. Without a draft only the
+ * flag is set. An entity with no revision and no draft is
+ * ::GDEFCORE_ERR_INVALID. The revision's author is whoever wrote the draft
+ * last (recorded with it), not the publisher (defect 1.5.3); the entity's
+ * creator is whoever made it.
  */
 GDEFCORE_API GDEFCORE_Result gdefcore_entity_publish(
     GDEFCORE_Changeset * changeset, const char * id, size_t id_len);
@@ -383,23 +423,22 @@ GDEFCORE_API GDEFCORE_Result gdefcore_entity_publish(
 /**
  * @brief Stage clearing the published flag.
  *
- * Apply does not append a revision and does not move the active revision, so
- * the entity keeps its content and its creator and readers stop seeing it.
- * Unpublishing an entity that is not published is allowed and writes only a
- * new version (see gdefcore_entity_version()).
+ * Apply writes no revision, so the entity keeps its content and its creator
+ * and readers stop seeing it. Unpublishing an entity that is not published
+ * is allowed and writes nothing.
  */
 GDEFCORE_API GDEFCORE_Result gdefcore_entity_unpublish(
     GDEFCORE_Changeset * changeset, const char * id, size_t id_len);
 
 /**
- * @brief Stage clearing an entity: it is unpublished, has no active revision
- * and no projection of its content, as if it had no content.
+ * @brief Stage clearing an entity: a soft delete. It is unpublished, marked
+ * deleted, and reads as if it had no content; its draft is dropped.
  *
- * Every recorded revision stays, and the entity can be restored by making a
- * revision active. This is the delete that a revert of a first revision makes
- * (gdefcore_changeset_revert()), staged in a changeset of its own choosing so
- * that it can be applied with other changes atomically. It checks no
- * permission (SPEC decision 7).
+ * Every recorded revision stays, and the entity is restored by a revert to
+ * one of them (gdefcore_changeset_revert_to()) or by a save. This is the
+ * delete that a revert of a first revision makes (gdefcore_changeset_revert()),
+ * staged in a changeset of its own choosing so that it can be applied with
+ * other changes atomically. It checks no permission (SPEC decision 7).
  *
  * @return ::GDEFCORE_ERR_INVALID for an unknown id, an id already in the
  *   changeset, or an applied changeset.
@@ -408,36 +447,25 @@ GDEFCORE_API GDEFCORE_Result gdefcore_entity_clear(GDEFCORE_Changeset * changese
     const char * id, size_t id_len);
 
 /**
- * @brief Stage making revision @p seq the active revision.
- *
- * Apply does not append a revision and leaves the published flag alone. The
- * revision must exist, and any personal value in it must be sealed (an
- * old revision written before values were sealed cannot be made active).
- * This is also how a cleared entity is brought back. ::GDEFCORE_ERR_INVALID
- * for a sequence that is not a recorded revision.
- */
-GDEFCORE_API GDEFCORE_Result gdefcore_entity_activate(
-    GDEFCORE_Changeset * changeset, const char * id, size_t id_len,
-    uint64_t seq);
-
-/**
  * @brief The entity's version: a counter that every write touching the
- * entity bumps, including a publish, an unpublish, an activate and a clear,
- * none of which moves the latest revision sequence.
+ * entity bumps, including a publish, an unpublish, a draft and a clear, none
+ * of which need move the latest revision sequence.
  *
  * Starts at 0 at gdefcore_entity_create(). A caller that remembers a fact
- * about an entity keys it on this, not on gdefcore_entity_revision(). A row
- * with no entity record is ::GDEFCORE_ERR_CORRUPT.
+ * about an entity keys it on this, not on gdefcore_entity_revision(). An op
+ * that writes nothing (a save of the values the entity has, an unpublish of
+ * an unpublished entity) does not move it. It only increases, though not
+ * always by one (a write that aborted can leave a gap).
  */
 GDEFCORE_API GDEFCORE_Result gdefcore_entity_version(
     GDEFCORE_Catalog * catalog, const char * id, size_t id_len,
     uint64_t * out_version);
 
 /**
- * @brief The active revision's sequence.
+ * @brief The revision the entity currently is: its newest.
  *
- * @p out_has is 0 and @p out_seq is 0 when the entity has no active revision
- * (nothing saved yet, or cleared). A missing id is ::GDEFCORE_ERR_INVALID.
+ * @p out_has is 0 and @p out_seq is 0 when the entity has none (nothing saved
+ * yet, or cleared). A missing id is ::GDEFCORE_ERR_INVALID.
  */
 GDEFCORE_API GDEFCORE_Result gdefcore_entity_active_revision(
     GDEFCORE_Catalog * catalog, const char * id, size_t id_len, int * out_has,
@@ -479,8 +507,9 @@ GDEFCORE_API GDEFCORE_Result gdefcore_entity_revision_at(
  * @brief Read field values.
  *
  * When @p changeset touches the entity, the staged fields are returned and
- * @p view is ignored. Otherwise @p view selects the published or draft
- * projection. A miss is ::GDEFCORE_ERR_INVALID.
+ * @p view is ignored. Otherwise @p view selects what is read: the newest
+ * revision while published, the newest revision, or the draft over it. Values
+ * are in their field type's canonical text. A miss is ::GDEFCORE_ERR_INVALID.
  *
  * Free the texts with gdefcore_values_free().
  */
@@ -570,27 +599,30 @@ GDEFCORE_API GDEFCORE_Result gdefcore_changeset_base_seq(
     uint64_t * out_seq);
 
 /**
- * @brief A new changeset that restores the revision before the active one.
+ * @brief A new changeset that restores the revision before the newest.
  *
- * That is a new revision, a copy of the revision numbered one less than the
- * active revision, which becomes active; the published flag is unchanged.
- * When the active revision is the first, the changeset clears the entity
- * instead (the published flag, the active revision and the head revision's
- * projection; every recorded revision stays). An entity with no active
- * revision is ::GDEFCORE_ERR_INVALID. The caller applies the result.
+ * That is a new revision (the port's revert, AD-14: old rows are never
+ * touched), a copy of the revision numbered one less than the newest; the
+ * published flag is unchanged. When the newest revision is the first, the
+ * changeset clears the entity instead (gdefcore_entity_clear(); every
+ * recorded revision stays). An entity with no revision is
+ * ::GDEFCORE_ERR_INVALID. The caller applies the result.
  */
 GDEFCORE_API GDEFCORE_Result gdefcore_changeset_revert(
     GDEFCORE_Catalog * catalog, const char * id, size_t id_len,
     const char * actor, size_t actor_len, GDEFCORE_Changeset ** out_changeset);
 
 /**
- * @brief A new changeset that appends a copy of revision @p seq and makes the
- * copy active, leaving the published flag as it is.
+ * @brief A new changeset that writes a copy of revision @p seq as the newest,
+ * leaving the published flag as it is.
  *
- * Unlike gdefcore_changeset_revert() this names its target and never clears.
- * The new revision's creator is @p actor. Any personal value in revision
- * @p seq must be sealed. ::GDEFCORE_ERR_INVALID for a sequence that is not a
- * recorded revision. The caller applies the result.
+ * Unlike gdefcore_changeset_revert() this names its target and never clears;
+ * a cleared entity reverted to a revision is no longer deleted. This is what
+ * "make an older revision the content" is now (access SPEC decision 13: there
+ * is no active-revision pointer). The new revision's creator is @p actor. Any
+ * personal value in revision @p seq must be sealed. ::GDEFCORE_ERR_INVALID
+ * for a sequence that is not a recorded revision. Reverting to the values the
+ * entity has writes no revision. The caller applies the result.
  */
 GDEFCORE_API GDEFCORE_Result gdefcore_changeset_revert_to(
     GDEFCORE_Catalog * catalog, const char * id, size_t id_len, uint64_t seq,
@@ -703,29 +735,6 @@ GDEFCORE_API GDEFCORE_Result gdefcore_entity_ids(GDEFCORE_Catalog * catalog,
     const char * type_name, size_t type_name_len, char *** out_ids,
     size_t * out_count);
 
-/*
- * The shape the query form reads. An entity's active revision is the
- * projection `a:<type>` keyed by its row, with the columns below; its record
- * (published flag, creator) is the projection `s` keyed by the same row. A
- * query over a type's entities joins the two by that shared row. Each name is
- * pinned by a test that reads the stored projections directly, so a rename
- * breaks that test and not a list.
- */
-/** The projection type prefix of the active revision's copy. */
-#define GDEFCORE_QUERY_ACTIVE_PREFIX "a:"
-/** The active revision's document: language, then field, then the values. */
-#define GDEFCORE_QUERY_COL_DOC "lang"
-/** The public id of the entity. */
-#define GDEFCORE_QUERY_COL_ID "id"
-/** Who wrote the active revision (absent when nobody was recorded). */
-#define GDEFCORE_QUERY_COL_REVISION_CREATOR "actor"
-/** The entity record's projection type. */
-#define GDEFCORE_QUERY_RECORD_TYPE "s"
-/** The record's published flag: "1" or "0". */
-#define GDEFCORE_QUERY_COL_PUBLISHED "pub"
-/** The record's creator (absent when nobody was recorded). */
-#define GDEFCORE_QUERY_COL_CREATOR "creator"
-
 /**
  * @brief The caps this catalog was opened with.
  *
@@ -735,19 +744,23 @@ GDEFCORE_API void gdefcore_catalog_limits(const GDEFCORE_Catalog * catalog,
     GDEFCORE_Limits * out);
 
 /**
- * @brief Public ids of the entities of a type that have an active revision and
- * match a storage query, in the query's order, with the total.
+ * @brief Public ids of the entities of a type that have a revision and are not
+ * cleared, matching a storage query, in the query's order, with the total.
  *
- * This is the unfiltered index with a predicate: it reads the type's `a:`
- * projection as the system and knows nothing of a principal. A caller that
- * serves a principal puts that principal's access filter into the query's
- * tree (gdefcore_access_list() does). Rows are the entities whose active
- * revision exists, whether or not they are published; a tree that reads
- * GDEFCORE_QUERY_RECORD_TYPE decides that. The query's own select list must be
- * empty. The order ends in creation order, which is the order of
- * gdefcore_entity_ids(). Free @p out_ids with gdefcore_ids_free().
+ * This is the unfiltered index with a predicate: the port's entity query
+ * (query.h, "Over entities") over the type's current tables, read as the
+ * system, knowing nothing of a principal. A caller that serves a principal
+ * puts that principal's access filter into the query's tree
+ * (gdefcore_access_list() does, through plan.h). Rows are the entities whose
+ * newest revision exists and that are not deleted, whether or not they are
+ * published; a tree that reads META PUBLISHED decides that. The query binds
+ * one language (GDEFSTOR_Query::language; NULL reads `en`). Its select list
+ * must be empty and it takes no `entity_numeric`. The order ends in creation
+ * order, which is the order of gdefcore_entity_ids(). Free @p out_ids with
+ * gdefcore_ids_free(). This replaces the projection form of story A2, whose
+ * `a:` and `s` rows are no longer written.
  *
- * @param query A query (storage query.h) over the columns named above.
+ * @param query A query over the type's fields and facts.
  * @param out_total Receives the matches before the offset and the limit. May
  *   be NULL.
  * @return ::GDEFCORE_OK, ::GDEFCORE_ERR_INVALID, ::GDEFCORE_ERR_LIMIT (the
@@ -772,7 +785,7 @@ GDEFCORE_API GDEFCORE_Result gdefcore_entity_type(GDEFCORE_Catalog * catalog,
     const char * id, size_t id_len, char ** out_type, size_t * out_len);
 
 /**
- * @brief The creator of the active revision (the revision's own creator), or
+ * @brief The creator of the newest revision (the revision's own creator), or
  * NULL when there is none.
  *
  * This is the principal that wrote the revision the entity currently is, set
@@ -791,7 +804,7 @@ GDEFCORE_API GDEFCORE_Result gdefcore_entity_actor(GDEFCORE_Catalog * catalog,
  *
  * The principal of the entity's first revision, recorded on the entity
  * record at that revision and never changed: not by a later revision, a
- * revert, an activate, a publish or a clear. An entity whose first revision
+ * revert, a publish or a clear. An entity whose first revision
  * had no actor has no creator, ever. `own` means this. A missing id is
  * ::GDEFCORE_ERR_INVALID. A row with no entity record is
  * ::GDEFCORE_ERR_CORRUPT. Free @p out_creator with gdefcore_text_free().
@@ -801,14 +814,14 @@ GDEFCORE_API GDEFCORE_Result gdefcore_entity_creator(GDEFCORE_Catalog * catalog,
 
 /** The entity is not published: readers do not see it. */
 #define GDEFCORE_STATE_DRAFT 1
-/** The entity is published: readers see its active revision. */
+/** The entity is published: readers see its newest revision. */
 #define GDEFCORE_STATE_PUBLISHED 2
 
 /**
  * @brief Whether the entity is published.
  *
  * ::GDEFCORE_STATE_PUBLISHED when the entity's published flag is set, whether
- * or not a newer draft sits beside its active revision; otherwise
+ * or not a draft sits beside its newest revision; otherwise
  * ::GDEFCORE_STATE_DRAFT, which includes an entity that was unpublished or
  * cleared. A missing id is ::GDEFCORE_ERR_INVALID and @p out_state is not
  * written. A row with no entity record is ::GDEFCORE_ERR_CORRUPT. Unfiltered,
@@ -847,7 +860,7 @@ GDEFCORE_API GDEFCORE_Host * gdefcore_catalog_host(
 
 /**
  * @brief How many entities the changeset writes: saves, drafts, publishes,
- * unpublishes, activates, reverts and clears. Type definitions and module operations are not counted.
+ * unpublishes, reverts and clears. Type definitions and module operations are not counted.
  */
 GDEFCORE_API size_t gdefcore_changeset_touched_count(
     const GDEFCORE_Changeset * changeset);
@@ -858,8 +871,8 @@ GDEFCORE_API size_t gdefcore_changeset_touched_count(
  * @p out_id and @p out_type are borrowed from the changeset and are not
  * NUL-terminated. @p out_op receives ::GDEFCORE_TOUCH_SAVE,
  * ::GDEFCORE_TOUCH_DRAFT, ::GDEFCORE_TOUCH_PUBLISH,
- * ::GDEFCORE_TOUCH_CLEAR, ::GDEFCORE_TOUCH_UNPUBLISH or
- * ::GDEFCORE_TOUCH_ACTIVATE. Any out pointer may be NULL.
+ * ::GDEFCORE_TOUCH_CLEAR or ::GDEFCORE_TOUCH_UNPUBLISH. Any out pointer may be
+ * NULL.
  *
  * @return ::GDEFCORE_OK or ::GDEFCORE_ERR_INVALID for an index past the end.
  */
@@ -888,6 +901,51 @@ GDEFCORE_API const char * gdefcore_changeset_refusal(
  */
 GDEFCORE_API GDEFCORE_Result gdefcore_changeset_set_refusal(
     GDEFCORE_Changeset * changeset, const char * text, size_t len);
+
+/**
+ * @brief The logical type of the field at @p index, and its scale.
+ *
+ * A field declared before @ref GDEFCORE_Field::type existed is text.
+ * Nothing is written on failure.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_type_field_type(
+    GDEFCORE_Catalog * catalog, const char * name, size_t name_len,
+    size_t index, int * out_type, int * out_scale);
+
+/**
+ * @brief Read @p text as a value of logical @p type (and @p scale).
+ *
+ * The canonical texts gdefcore_entity_values() gives are read, and so are the
+ * other spellings a save takes: leading zeros and a missing fraction of a
+ * number, fewer milliseconds than three. A text or reference value points
+ * into @p text. Type 0 is text. ::GDEFCORE_ERR_INVALID when it is not one.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_value_parse(int type, int scale,
+    const char * text, size_t len, GDEFSTOR_Value * out);
+
+/**
+ * @brief Order two values of one type: negative, 0 or positive. Text and
+ * references by bytes, numbers and dates by value.
+ */
+GDEFCORE_API int gdefcore_value_compare(const GDEFSTOR_Value * a,
+    const GDEFSTOR_Value * b);
+
+/**
+ * @brief Say why: the reason every revision the changeset writes records
+ * (AD-14: who, when and why). UTF-8, at most 4096 bytes; copied. NULL clears.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_changeset_set_why(
+    GDEFCORE_Changeset * changeset, const char * why, size_t why_len);
+
+/**
+ * @brief After apply: the revision the changeset wrote for @p id, or 0 when
+ * it wrote none (a save of values the entity already had, a publish with no
+ * draft, a state change). ::GDEFCORE_ERR_INVALID when the changeset does not
+ * touch @p id or was not applied.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_changeset_revision(
+    const GDEFCORE_Changeset * changeset, const char * id, size_t id_len,
+    uint64_t * out_revision);
 
 #ifdef __cplusplus
 }

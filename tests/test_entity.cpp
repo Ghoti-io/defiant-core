@@ -26,8 +26,7 @@
 
 #include <ghoti.io/defiant-core/macros.h>
 #include <ghoti.io/defiant-core/defiant-core.h>
-#include <ghoti.io/defiant-storage/projection.h>
-#include <ghoti.io/defiant-storage/revision.h>
+#include <ghoti.io/defiant-storage/model.h>
 #include <ghoti.io/defiant-storage-memory/memory.h>
 
 #include <gtest/gtest.h>
@@ -167,63 +166,27 @@ TEST(EntityId, Vector) {
   EXPECT_STREQ("00041061050R3GG28A1C60T3GFGB", out);
 }
 
-TEST_F(Entity, OldFieldLine) {
+/* A type is a record (`core.type`, story S6b) in one format: one that is not
+ * that format is corrupt, never read as a type with fewer facts. (The old
+ * projection's field lines, read with defaults for the members they lacked,
+ * went with the projection.) */
+TEST_F(Entity, ATypeRecordInAnotherFormatIsCorrupt) {
   GDEFSTOR_Write * write = NULL;
-  GDEFSTOR_Column columns[4];
-  char * name = NULL;
-  size_t name_len = 0;
-  int required = 0;
-  int many = 0;
-  int personal = 1;
-  const char * fields = "title 1 0\n";
+  const char * bad = "defiant-core-type/0\nkind content\n";
+  int kind = 0;
+  size_t count = 0;
   ASSERT_EQ(GDEFSTOR_OK, gdefstor_write_begin(store_, kTenant, 1, NULL, &write));
-  memset(columns, 0, sizeof columns);
-  columns[0].name = "kind";
-  columns[0].name_len = 4;
-  columns[0].value = (const uint8_t *)"content";
-  columns[0].value_len = 7;
-  columns[1].name = "fields";
-  columns[1].name_len = 6;
-  columns[1].value = (const uint8_t *)fields;
-  columns[1].value_len = strlen(fields);
-  columns[2].name = "id";
-  columns[2].name_len = 2;
-  columns[2].value = (const uint8_t *)"x";
-  columns[2].value_len = 1;
-  columns[3].name = "row";
-  columns[3].name_len = 3;
-  columns[3].value = (const uint8_t *)"1";
-  columns[3].value_len = 1;
   ASSERT_EQ(GDEFSTOR_OK,
-      gdefstor_projection_put(write, "m", 1, "site.old", 8, columns, 4));
+      gdefstor_record_put(write, "core.type", 9, "site.old", 8,
+          (const uint8_t *)bad, strlen(bad)));
   ASSERT_EQ(GDEFSTOR_OK, gdefstor_write_commit(write));
-  ASSERT_EQ(GDEFCORE_OK,
-      gdefcore_type_field(catalog_, "site.old", 8, 0, &name, &name_len, &required,
-          &many));
-  EXPECT_EQ(std::string("title"), std::string(name, name_len));
-  EXPECT_EQ(1, required);
-  EXPECT_EQ(0, many);
-  gdefcore_text_free(catalog_, name);
-  ASSERT_EQ(GDEFCORE_OK,
-      gdefcore_type_field_personal(catalog_, "site.old", 8, 0, &personal));
-  EXPECT_EQ(0, personal);
-  {
-    size_t min_len = 9;
-    size_t max_len = 9;
-    int has_range = 1;
-    int64_t range_min = 3;
-    int64_t range_max = 4;
-    char * pattern = (char *)0x1;
-    size_t pattern_len = 4;
-    ASSERT_EQ(GDEFCORE_OK,
-        gdefcore_type_field_constraints(catalog_, "site.old", 8, 0, &min_len,
-            &max_len, &has_range, &range_min, &range_max, &pattern, &pattern_len));
-    EXPECT_EQ(0u, min_len);
-    EXPECT_EQ(0u, max_len);
-    EXPECT_EQ(0, has_range);
-    EXPECT_EQ(nullptr, pattern);
-    EXPECT_EQ(0u, pattern_len);
-  }
+  EXPECT_EQ(GDEFCORE_ERR_CORRUPT, gdefcore_type_kind(catalog_, "site.old", 8, &kind));
+  EXPECT_EQ(GDEFCORE_ERR_CORRUPT,
+      gdefcore_type_field_count(catalog_, "site.old", 8, &count));
+  /* control: a defined type reads */
+  DefineType(catalog_, "site.note", GDEFCORE_TYPE_CONTENT);
+  EXPECT_EQ(GDEFCORE_OK, gdefcore_type_kind(catalog_, "site.note", 9, &kind));
+  EXPECT_EQ(GDEFCORE_TYPE_CONTENT, kind);
 }
 
 TEST_F(Entity, FieldConstraints) {
@@ -448,8 +411,9 @@ TEST_F(Entity, Create) {
   uint64_t row = 0;
   GDEFCORE_Result rc = GDEFCORE_OK;
   DefineType(catalog_, "site.note", GDEFCORE_TYPE_CONTENT);
+  row = 99;
   CreateEntity(catalog_, "site.note", id, &row);
-  EXPECT_GT(row, 0u);
+  EXPECT_EQ(0u, row);   /* the row is the port's, made at the first save */
   EXPECT_EQ(GDEFCORE_PUBLIC_ID_LEN, strlen(id));
   ReadTitle(catalog_, NULL, GDEFCORE_VIEW_PUBLISHED, id, "en", &rc);
   EXPECT_EQ(GDEFCORE_ERR_INVALID, rc);
@@ -719,20 +683,22 @@ TEST_F(Entity, Rebase) {
   gdefcore_changeset_destroy(second);
 }
 
-TEST(EntityRollback, PortRefusesAppend) {
-  GDEFSTOR_Limits limits;
+/* The port refuses a write the core limits allowed (more languages than the
+ * port keeps): the changeset rolls back whole, and the epoch does not move. */
+TEST(EntityRollback, PortRefusesTheWrite) {
   GDEFSTOR_Store * store = NULL;
   GDEFCORE_Catalog * catalog = NULL;
   GDEFCORE_Changeset * changeset = NULL;
+  GDEFCORE_Limits limits;
   char id[GDEFCORE_PUBLIC_ID_LEN + 1];
   uint64_t row = 0;
   uint64_t epoch = 99;
   GDEFCORE_Result rc = GDEFCORE_OK;
-  gdefstor_limits_default(&limits);
-  limits.max_revisions = 2;
-  ASSERT_EQ(GDEFSMEMORY_OK, gdefsmemory_store_create(NULL, &limits, &store));
+  gdefcore_limits_default(&limits);
+  limits.max_languages = 2 * GDEFSTOR_MODEL_MAX_LANGUAGES;
+  ASSERT_EQ(GDEFSMEMORY_OK, gdefsmemory_store_create(NULL, NULL, &store));
   ASSERT_EQ(GDEFCORE_OK,
-      gdefcore_catalog_open(store, (const uint8_t *)kTenant, 1, NULL, NULL,
+      gdefcore_catalog_open(store, (const uint8_t *)kTenant, 1, &limits, NULL,
           &catalog));
   DefineType(catalog, "site.note", GDEFCORE_TYPE_CONTENT);
   CreateEntity(catalog, "site.note", id, &row);
@@ -740,8 +706,13 @@ TEST(EntityRollback, PortRefusesAppend) {
   SaveTitle(changeset, id, "en", "Hello");
   ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(changeset, NULL, 0));
   gdefcore_changeset_destroy(changeset);
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_epoch(catalog, &epoch));
+  EXPECT_EQ(1u, epoch);
   ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog, NULL, 0, &changeset));
-  SaveTitle(changeset, id, "en", "Bonjour");
+  for (int i = 0; i <= GDEFSTOR_MODEL_MAX_LANGUAGES; i++) {
+    char lang[3] = {(char)('a' + i / 26), (char)('a' + i % 26), '\0'};
+    SaveTitle(changeset, id, lang, "Many");
+  }
   EXPECT_EQ(GDEFCORE_ERR_LIMIT, gdefcore_changeset_apply(changeset, NULL, 0));
   ASSERT_EQ(GDEFCORE_OK, gdefcore_epoch(catalog, &epoch));
   EXPECT_EQ(1u, epoch);
@@ -750,6 +721,115 @@ TEST(EntityRollback, PortRefusesAppend) {
   gdefcore_changeset_destroy(changeset);
   gdefcore_catalog_destroy(catalog);
   gdefstor_store_destroy(store);
+}
+
+/* A type's record is written in the write of the changeset that defines it
+ * (AD-31: a system record has no write of its own), so a changeset the port
+ * refuses leaves no type behind. */
+TEST(EntityRollback, ATypeRecordIsWrittenInItsChangesetsWrite) {
+  GDEFSTOR_Store * store = NULL;
+  GDEFCORE_Catalog * catalog = NULL;
+  GDEFCORE_Changeset * changeset = NULL;
+  GDEFCORE_Limits limits;
+  char id[GDEFCORE_PUBLIC_ID_LEN + 1];
+  uint64_t row = 0;
+  uint64_t epoch = 99;
+  int kind = 0;
+  GDEFCORE_Field field = TitleField();
+  gdefcore_limits_default(&limits);
+  limits.max_languages = 2 * GDEFSTOR_MODEL_MAX_LANGUAGES;
+  ASSERT_EQ(GDEFSMEMORY_OK, gdefsmemory_store_create(NULL, NULL, &store));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_catalog_open(store, (const uint8_t *)kTenant, 1, &limits, NULL,
+          &catalog));
+  DefineType(catalog, "site.note", GDEFCORE_TYPE_CONTENT);
+  CreateEntity(catalog, "site.note", id, &row);
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_epoch(catalog, &epoch));
+  const uint64_t before = epoch;
+  for (int refused = 1; refused >= 0; refused--) {
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog, NULL, 0, &changeset));
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_changeset_define(changeset, "site.extra", 10,
+            GDEFCORE_TYPE_CONTENT, &field, 1));
+    for (int i = 0; i <= (refused ? GDEFSTOR_MODEL_MAX_LANGUAGES : 0); i++) {
+      char lang[3] = {(char)('a' + i / 26), (char)('a' + i % 26), '\0'};
+      SaveTitle(changeset, id, lang, "Many");
+    }
+    GDEFCORE_Result rc = gdefcore_changeset_apply(changeset, "site.extra", 10);
+    gdefcore_changeset_destroy(changeset);
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_epoch(catalog, &epoch));
+    if (refused) {
+      EXPECT_EQ(GDEFCORE_ERR_LIMIT, rc);
+      EXPECT_EQ(GDEFCORE_ERR_INVALID,
+          gdefcore_type_kind(catalog, "site.extra", 10, &kind));
+      EXPECT_EQ(before, epoch);
+    } else {
+      /* control: the same changeset, which the port takes, defines it */
+      EXPECT_EQ(GDEFCORE_OK, rc);
+      EXPECT_EQ(GDEFCORE_OK, gdefcore_type_kind(catalog, "site.extra", 10, &kind));
+      EXPECT_EQ(before + 1, epoch);
+    }
+  }
+  gdefcore_catalog_destroy(catalog);
+  gdefstor_store_destroy(store);
+}
+
+/* A field's logical type, its scale and the index hint travel in a patch
+ * (story S6b): a definition parsed from its own serialization declares the
+ * same field types. Control: a text field stays text. */
+TEST_F(Entity, ATypesFieldTypesRoundTripThroughAPatch) {
+  GDEFCORE_Field f[4];
+  memset(f, 0, sizeof f);
+  const char * names[4] = {"title", "rank", "price", "when"};
+  const int types[4] = {0, GDEFSTOR_FIELD_INTEGER, GDEFSTOR_FIELD_DECIMAL,
+      GDEFSTOR_FIELD_DATETIME};
+  for (int i = 0; i < 4; i++) {
+    f[i].size = sizeof f[i];
+    f[i].name = names[i];
+    f[i].name_len = strlen(names[i]);
+    f[i].type = types[i];
+    f[i].indexed = i % 2;
+  }
+  f[2].scale = 2;
+  f[3].many = 1;
+  GDEFCORE_Changeset * cs = NULL;
+  GDEFCORE_Changeset * parsed = NULL;
+  GDEFCORE_Patch * files = NULL;
+  size_t count = 0;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_changeset_define(cs, "site.typed", 10, GDEFCORE_TYPE_CONTENT, f, 4));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_serialize(cs, &files, &count));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_parse(catalog_, files, count, NULL, &parsed));
+  gdefcore_patch_free(catalog_, files, count);
+  gdefcore_changeset_destroy(cs);
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(parsed, "site.typed", 10));
+  gdefcore_changeset_destroy(parsed);
+  size_t n = 0;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_type_field_count(catalog_, "site.typed", 10, &n));
+  ASSERT_EQ(4u, n);
+  for (size_t k = 0; k < n; k++) {
+    char * name = NULL;
+    size_t name_len = 0;
+    int required = 0;
+    int many = 0;
+    int type = -1;
+    int scale = -1;
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_type_field(catalog_, "site.typed", 10, k, &name,
+                               &name_len, &required, &many));
+    std::string got(name, name_len);
+    gdefcore_text_free(catalog_, name);
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_type_field_type(catalog_, "site.typed", 10, k, &type, &scale));
+    size_t i = 0;
+    while (i < 4 && got != names[i]) {
+      i++;
+    }
+    ASSERT_LT(i, 4u) << got;
+    EXPECT_EQ(types[i] == 0 ? GDEFSTOR_FIELD_TEXT : types[i], type) << got;
+    EXPECT_EQ(i == 2 ? 2 : 0, scale) << got;
+    EXPECT_EQ(i == 3 ? 1 : 0, many) << got;
+  }
 }
 
 TEST_F(Entity, Revert) {
@@ -777,13 +857,10 @@ TEST_F(Entity, Revert) {
 
 TEST_F(Entity, RevertFirst) {
   char id[GDEFCORE_PUBLIC_ID_LEN + 1];
-  char row_text[32];
   uint64_t row = 0;
   GDEFCORE_Changeset * changeset = NULL;
   GDEFCORE_Result rc = GDEFCORE_OK;
-  uint8_t * bytes = NULL;
-  size_t len = 0;
-  GDEFSTOR_Revision * revision = NULL;
+  size_t count = 0;
   DefineType(catalog_, "site.note", GDEFCORE_TYPE_CONTENT);
   CreateEntity(catalog_, "site.note", id, &row);
   ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &changeset));
@@ -798,27 +875,30 @@ TEST_F(Entity, RevertFirst) {
   EXPECT_EQ(GDEFCORE_ERR_INVALID, rc);
   ReadTitle(catalog_, NULL, GDEFCORE_VIEW_DRAFT, id, "en", &rc);
   EXPECT_EQ(GDEFCORE_ERR_INVALID, rc);
-  snprintf(row_text, sizeof row_text, "%llu", (unsigned long long)row);
-  ASSERT_EQ(GDEFSTOR_OK,
-      gdefstor_revision_get(store_, kTenant, 1, row_text, strlen(row_text), 1,
-          &bytes, &len));
-  ASSERT_EQ(GDEFSTOR_OK, gdefstor_revision_parse(bytes, len, NULL, NULL, &revision));
-  EXPECT_EQ(1u, gdefstor_revision_seq(revision));
-  gdefstor_revision_free(revision);
-  gdefstor_bytes_free(NULL, bytes);
+  /* The revision is still recorded: a clear is a soft delete. */
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_entity_revision_count(catalog_, id, strlen(id), &count));
+  EXPECT_EQ(1u, count);
+  {
+    char ** texts = NULL;
+    size_t * lens = NULL;
+    size_t n = 0;
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_entity_revision_values(catalog_, id, strlen(id), 1, "en", 2,
+            "title", 5, &texts, &lens, &n));
+    ASSERT_EQ(1u, n);
+    EXPECT_EQ("Hello", std::string(texts[0], lens[0]));
+    gdefcore_values_free(catalog_, texts, lens, n);
+  }
   ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &changeset));
   SaveTitle(changeset, id, "en", "Again");
   ASSERT_EQ(GDEFCORE_OK,
       gdefcore_changeset_base_seq(changeset, id, strlen(id), &row));
   EXPECT_EQ(1u, row);
   ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(changeset, NULL, 0));
-  ASSERT_EQ(GDEFSTOR_OK,
-      gdefstor_revision_get(store_, kTenant, 1, row_text, strlen(row_text), 2,
-          &bytes, &len));
-  gdefstor_bytes_free(NULL, bytes);
-  EXPECT_EQ(GDEFSTOR_ERR_INVALID,
-      gdefstor_revision_get(store_, kTenant, 1, row_text, strlen(row_text), 3,
-          &bytes, &len));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_entity_revision_count(catalog_, id, strlen(id), &count));
+  EXPECT_EQ(2u, count);
+  EXPECT_EQ("Again",
+      ReadTitle(catalog_, NULL, GDEFCORE_VIEW_PUBLISHED, id, "en", &rc));
   gdefcore_changeset_destroy(changeset);
 }
 
@@ -876,61 +956,39 @@ TEST_F(Entity, Patch) {
   EXPECT_EQ(GDEFCORE_ERR_INVALID, rc);
 }
 
-TEST_F(Entity, Key) {
+/* An entity is the port's record, found by its public id; its revisions are
+ * the port's history of it. A public id nobody created is no record. */
+TEST_F(Entity, TheEntityIsThePortsRecord) {
   char id[GDEFCORE_PUBLIC_ID_LEN + 1];
-  char row_text[32];
+  char other[GDEFCORE_PUBLIC_ID_LEN + 1];
   uint64_t row = 0;
   GDEFCORE_Changeset * changeset = NULL;
-  uint8_t * bytes = NULL;
-  size_t len = 0;
-  GDEFSTOR_Revision * revision = NULL;
-  const char * entity = NULL;
-  size_t entity_len = 0;
-  GDEFSTOR_Projection * index = NULL;
-  GDEFSTOR_Write * write = NULL;
-  const char missing[] =
-      "{\"format\":\"defiant-revision/1\",\"seq\":1,\"entity\":\"post1\","
-      "\"type\":\"site.note\",\"lang\":{},\"body\":\"\"}";
-  size_t i;
-  int saw_row = 0;
+  GDEFSTOR_Entity * e = NULL;
+  GDEFSTOR_History * h = NULL;
   DefineType(catalog_, "site.note", GDEFCORE_TYPE_CONTENT);
   CreateEntity(catalog_, "site.note", id, &row);
   ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &changeset));
   SaveTitle(changeset, id, "en", "Hello");
   ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(changeset, NULL, 0));
   gdefcore_changeset_destroy(changeset);
-  snprintf(row_text, sizeof row_text, "%llu", (unsigned long long)row);
+  ASSERT_EQ(GDEFSTOR_OK, gdefstor_entity_get(store_, kTenant, 1, id, strlen(id), &e));
+  GDEFSTOR_EntityInfo info;
+  memset(&info, 0, sizeof info);
+  info.size = sizeof info;
+  ASSERT_EQ(GDEFSTOR_OK, gdefstor_entity_info(e, &info));
+  EXPECT_EQ("site.note", std::string(info.type, info.type_len));
+  EXPECT_EQ(std::string(id), std::string(info.public_id, info.public_id_len));
+  EXPECT_EQ(1u, info.revision);
+  EXPECT_EQ(1, info.published);
+  gdefstor_entity_free(e);
+  ASSERT_EQ(GDEFSTOR_OK,
+      gdefstor_entity_history(store_, kTenant, 1, id, strlen(id), "en", 2, &h));
+  EXPECT_EQ(1u, gdefstor_history_revision_count(h));
+  gdefstor_history_free(h);
+  /* control: an id never created */
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_id_generate(other));
   EXPECT_EQ(GDEFSTOR_ERR_INVALID,
-      gdefstor_revision_get(store_, kTenant, 1, id, strlen(id), 1, &bytes, &len));
-  ASSERT_EQ(GDEFSTOR_OK,
-      gdefstor_revision_get(store_, kTenant, 1, row_text, strlen(row_text), 1,
-          &bytes, &len));
-  ASSERT_EQ(GDEFSTOR_OK, gdefstor_revision_parse(bytes, len, NULL, NULL, &revision));
-  EXPECT_EQ(row, gdefstor_revision_row(revision));
-  entity = gdefstor_revision_entity(revision, &entity_len);
-  EXPECT_EQ(std::string(id), std::string(entity, entity_len));
-  gdefstor_revision_free(revision);
-  gdefstor_bytes_free(NULL, bytes);
-  ASSERT_EQ(GDEFSTOR_OK,
-      gdefstor_projection_get(store_, kTenant, 1, "i", 1, id, strlen(id), &index));
-  for (i = 0; i < gdefstor_projection_column_count(index); i++) {
-    GDEFSTOR_Column column;
-    ASSERT_EQ(GDEFSTOR_OK, gdefstor_projection_column(index, i, &column));
-    if (column.name_len == 3 && memcmp(column.name, "row", 3) == 0) {
-      EXPECT_EQ(std::string(row_text),
-          std::string((const char *)column.value, column.value_len));
-      saw_row = 1;
-    }
-  }
-  EXPECT_EQ(1, saw_row);
-  gdefstor_projection_free(index);
-  ASSERT_EQ(GDEFSTOR_OK,
-      gdefstor_write_begin(store_, kTenant, 1, NULL, &write));
-  EXPECT_EQ(GDEFSTOR_ERR_CORRUPT,
-      gdefstor_revision_append(write, (const uint8_t *)missing, strlen(missing)));
-  gdefstor_write_abort(write);
-  EXPECT_EQ(GDEFSTOR_ERR_INVALID,
-      gdefstor_revision_get(store_, kTenant, 1, "99", 2, 1, &bytes, &len));
+      gdefstor_entity_get(store_, kTenant, 1, other, strlen(other), &e));
 }
 
 TEST_F(Entity, ConfigSaveNeedsTypeName) {
@@ -1198,15 +1256,12 @@ TEST_F(Entity, DefineExistingPublishesFields) {
   gdefcore_changeset_destroy(changeset);
 }
 
-TEST_F(Entity, ActorOnProjection) {
+TEST_F(Entity, TheActorIsTheRevisionsAuthor) {
   char id[GDEFCORE_PUBLIC_ID_LEN + 1];
-  char row_text[32];
   uint64_t row = 0;
   GDEFCORE_Changeset * changeset = NULL;
-  GDEFSTOR_Projection * projection = NULL;
   const char * actor = "00041061050R3GG28A1C60T3GFGB";
-  int saw = 0;
-  size_t i;
+  GDEFSTOR_History * h = NULL;
   DefineType(catalog_, "site.note", GDEFCORE_TYPE_CONTENT);
   CreateEntity(catalog_, "site.note", id, &row);
   EXPECT_EQ(GDEFCORE_ERR_INVALID,
@@ -1216,21 +1271,15 @@ TEST_F(Entity, ActorOnProjection) {
   SaveTitle(changeset, id, "en", "Hello");
   ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(changeset, NULL, 0));
   gdefcore_changeset_destroy(changeset);
-  snprintf(row_text, sizeof row_text, "%llu", (unsigned long long)row);
   ASSERT_EQ(GDEFSTOR_OK,
-      gdefstor_projection_get(store_, kTenant, 1, "a:site.note", 11, row_text,
-          strlen(row_text), &projection));
-  for (i = 0; i < gdefstor_projection_column_count(projection); i++) {
-    GDEFSTOR_Column column;
-    ASSERT_EQ(GDEFSTOR_OK, gdefstor_projection_column(projection, i, &column));
-    if (column.name_len == 5 && memcmp(column.name, "actor", 5) == 0) {
-      EXPECT_EQ(std::string(actor),
-          std::string((const char *)column.value, column.value_len));
-      saw = 1;
-    }
-  }
-  EXPECT_EQ(1, saw);
-  gdefstor_projection_free(projection);
+      gdefstor_entity_history(store_, kTenant, 1, id, strlen(id), "en", 2, &h));
+  ASSERT_EQ(1u, gdefstor_history_revision_count(h));
+  GDEFSTOR_RevisionInfo r;
+  memset(&r, 0, sizeof r);
+  r.size = sizeof r;
+  ASSERT_EQ(GDEFSTOR_OK, gdefstor_history_revision(h, 0, &r));
+  EXPECT_EQ(std::string(actor), std::string(r.who, r.who_len));
+  gdefstor_history_free(h);
 }
 
 TEST_F(Entity, RevisionActors) {

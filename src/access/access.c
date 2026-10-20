@@ -2406,14 +2406,86 @@ GDEFCORE_Result gdefcore_access_revision_values(GDEFCORE_Catalog * catalog,
   return rc;
 }
 
+/* A field's logical type and scale (entity.h). Text when it cannot be read:
+ * the caller has checked the field exists. */
+static void field_type_of(GDEFCORE_Catalog * catalog, const char * type,
+    size_t type_len, const char * field, size_t field_len, int * out_type,
+    int * out_scale) {
+  size_t count = 0;
+  size_t i;
+  *out_type = GDEFSTOR_FIELD_TEXT;
+  *out_scale = 0;
+  if (gdefcore_type_field_count(catalog, type, type_len, &count) !=
+      GDEFCORE_OK) {
+    return;
+  }
+  for (i = 0; i < count; i++) {
+    char * name = NULL;
+    size_t name_len = 0;
+    int required = 0;
+    int many = 0;
+    int match;
+    if (gdefcore_type_field(catalog, type, type_len, i, &name, &name_len,
+            &required, &many) != GDEFCORE_OK) {
+      return;
+    }
+    match = same(name, name_len, field, field_len);
+    gdefcore_text_free(catalog, name);
+    if (match) {
+      if (gdefcore_type_field_type(catalog, type, type_len, i, out_type,
+              out_scale) != GDEFCORE_OK) {
+        *out_type = GDEFSTOR_FIELD_TEXT;
+        *out_scale = 0;
+      }
+      return;
+    }
+  }
+}
+
+static int texty(int type) {
+  return type == GDEFSTOR_FIELD_TEXT || type == GDEFSTOR_FIELD_REFERENCE;
+}
+
+/* The list filter: some value of the field is @p want, read in the field's
+ * type (a text that is no value of it matches nothing), never the empty-slot
+ * mark. As gdefcore_plan_field_is() compiles it. */
+static int filter_has(char ** texts, size_t * lens, size_t count, int type,
+    int scale, const char * want, size_t want_len) {
+  GDEFSTOR_Value w;
+  size_t i;
+  if (texty(type)) {
+    return values_have(texts, lens, count, want, want_len);
+  }
+  if (same(want, want_len, kEmptyMark, strlen(kEmptyMark)) || want_len == 0 ||
+      gdefcore_value_parse(type, scale, want, want_len, &w) != GDEFCORE_OK) {
+    return 0;
+  }
+  for (i = 0; i < count; i++) {
+    GDEFSTOR_Value v;
+    if (gdefcore_value_parse(type, scale, texts[i], lens[i], &v) ==
+            GDEFCORE_OK &&
+        gdefcore_value_compare(&v, &w) == 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
 struct Listed {
   char * id;
-  char * key;
+  char * key;      /* NULL: the field has no value */
   size_t key_len;
   char * key2;
   size_t key2_len;
   size_t index;
 };
+
+/* How a list sorts: each key's field type, and its direction. */
+typedef struct ListOrder {
+  int type[2];
+  int scale[2];
+  int desc[2];
+} ListOrder;
 
 static void drop_rows(GDEFCORE_Catalog * catalog, struct Listed * rows,
     size_t nrows, char ** ids, size_t count) {
@@ -2436,27 +2508,47 @@ static int cmp_bytes(const char * a, size_t an, const char * b, size_t bn) {
   return an < bn ? -1 : (an > bn ? 1 : 0);
 }
 
-/* The order a list has: the first key, then the second, each ascending unless
- * asked otherwise, an absent key before any present one, and last the order
- * the entities were created in. Bytes, not a locale. */
-static int listed_before(const struct Listed * a, const struct Listed * b,
-    int desc1, int desc2) {
-  int c = cmp_bytes(a->key == NULL ? "" : a->key, a->key_len,
-      b->key == NULL ? "" : b->key, b->key_len);
-  if (c != 0) {
-    return desc1 ? c > 0 : c < 0;
+/* One key of two rows, in the field's type: a text or reference by bytes,
+ * with no value as the empty text; any other type by value, with no value
+ * before every value. As the port sorts a key (query.h "Over entities"). */
+static int key_compare(const char * a, size_t an, const char * b, size_t bn,
+    int type, int scale) {
+  GDEFSTOR_Value x;
+  GDEFSTOR_Value y;
+  if (texty(type)) {
+    return cmp_bytes(a == NULL ? "" : a, an, b == NULL ? "" : b, bn);
   }
-  c = cmp_bytes(a->key2 == NULL ? "" : a->key2, a->key2_len,
-      b->key2 == NULL ? "" : b->key2, b->key2_len);
+  if (a == NULL || b == NULL) {
+    return a == NULL ? (b == NULL ? 0 : -1) : 1;
+  }
+  if (gdefcore_value_parse(type, scale, a, an, &x) != GDEFCORE_OK ||
+      gdefcore_value_parse(type, scale, b, bn, &y) != GDEFCORE_OK) {
+    return cmp_bytes(a, an, b, bn);
+  }
+  return gdefcore_value_compare(&x, &y);
+}
+
+/* The order a list has: the first key, then the second, each ascending unless
+ * asked otherwise, and last the order the entities were created in. Bytes,
+ * not a locale. */
+static int listed_before(const struct Listed * a, const struct Listed * b,
+    const ListOrder * o) {
+  int c = key_compare(a->key, a->key_len, b->key, b->key_len, o->type[0],
+      o->scale[0]);
   if (c != 0) {
-    return desc2 ? c > 0 : c < 0;
+    return o->desc[0] ? c > 0 : c < 0;
+  }
+  c = key_compare(a->key2, a->key2_len, b->key2, b->key2_len, o->type[1],
+      o->scale[1]);
+  if (c != 0) {
+    return o->desc[1] ? c > 0 : c < 0;
   }
   return a->index < b->index;
 }
 
 /* A merge sort: no comparator context to smuggle through qsort. */
-static GDEFCORE_Result listed_sort(struct Listed * rows, size_t n, int desc1,
-    int desc2) {
+static GDEFCORE_Result listed_sort(struct Listed * rows, size_t n,
+    const ListOrder * order) {
   struct Listed * tmp;
   size_t width;
   if (n < 2) {
@@ -2475,7 +2567,7 @@ static GDEFCORE_Result listed_sort(struct Listed * rows, size_t n, int desc1,
       size_t b = mid;
       size_t k = lo;
       while (a < mid && b < hi) {
-        if (listed_before(&rows[b], &rows[a], desc1, desc2)) {
+        if (listed_before(&rows[b], &rows[a], order)) {
           tmp[k++] = rows[b++];
         } else {
           tmp[k++] = rows[a++];
@@ -2724,7 +2816,9 @@ static GDEFCORE_Result list_planned(Eval * ev, GDEFCORE_Catalog * catalog,
   sq.where = where;
   sq.sorts = nsorts > 0 ? sort_copy : NULL;
   sq.sort_count = nsorts;
-  sq.entity_numeric = 1; /* ends in creation order, as the index lists */
+  /* The port ends in creation order, as gdefcore_entity_ids() lists. */
+  sq.language = ev->lang;
+  sq.language_len = ev->lang_len;
   sq.offset = spec->count_only ? 0 : q->offset;
   sq.limit = spec->count_only ? 1 : spec->limit;
   rc = gdefcore_entity_query_active(catalog, q->type_name, q->type_name_len,
@@ -2770,10 +2864,17 @@ static GDEFCORE_Result list_memory(Eval * ev, GDEFCORE_Catalog * catalog,
   size_t first;
   size_t take;
   GDEFCORE_Result rc;
+  int filter_type = GDEFSTOR_FIELD_TEXT;
+  int filter_scale = 0;
   rc = gdefcore_entity_ids(catalog, local->type_name, local->type_name_len,
       &ids, &count);
   if (rc != GDEFCORE_OK) {
     return rc;
+  }
+  if (local->filter_field != NULL && local->filter_field_len > 0) {
+    field_type_of(catalog, local->type_name, local->type_name_len,
+        local->filter_field, local->filter_field_len, &filter_type,
+        &filter_scale);
   }
   rows = (struct Listed *)gcu_allocator_calloc(alloc_default(),
       count > 0 ? count : 1, sizeof *rows);
@@ -2849,8 +2950,8 @@ static GDEFCORE_Result list_memory(Eval * ev, GDEFCORE_Catalog * catalog,
         drop_rows(catalog, rows, nrows, ids, count);
         return rc;
       }
-      if (!values_have(texts, lens, n, local->filter_text,
-              local->filter_text_len)) {
+      if (!filter_has(texts, lens, n, filter_type, filter_scale,
+              local->filter_text, local->filter_text_len)) {
         gdefcore_values_free(catalog, texts, lens, n);
         continue;
       }
@@ -2937,8 +3038,22 @@ static GDEFCORE_Result list_memory(Eval * ev, GDEFCORE_Catalog * catalog,
   if (nrows > 1 && ((local->sort_field != NULL && local->sort_field_len > 0) ||
                        (local->sort2_field != NULL &&
                            local->sort2_field_len > 0))) {
-    rc = listed_sort(rows, nrows, local->sort_descending,
-        local->sort2_descending);
+    ListOrder order;
+    memset(&order, 0, sizeof order);
+    order.desc[0] = local->sort_descending;
+    order.desc[1] = local->sort2_descending;
+    order.type[0] = order.type[1] = GDEFSTOR_FIELD_TEXT;
+    if (local->sort_field != NULL && local->sort_field_len > 0) {
+      field_type_of(catalog, local->type_name, local->type_name_len,
+          local->sort_field, local->sort_field_len, &order.type[0],
+          &order.scale[0]);
+    }
+    if (local->sort2_field != NULL && local->sort2_field_len > 0) {
+      field_type_of(catalog, local->type_name, local->type_name_len,
+          local->sort2_field, local->sort2_field_len, &order.type[1],
+          &order.scale[1]);
+    }
+    rc = listed_sort(rows, nrows, &order);
     if (rc != GDEFCORE_OK) {
       drop_rows(catalog, rows, nrows, NULL, 0);
       return rc;
@@ -4806,8 +4921,8 @@ GDEFCORE_Result gdefcore_access_can(GDEFCORE_Catalog * catalog,
     }
     gdefcore_text_free(catalog, actual_type);
     /* The entity's version, not its latest revision: a publish, an
-     * unpublish, an activate and a clear change what a condition reads or
-     * whom a reader sees and move no revision. */
+     * unpublish and a clear change what a condition reads or whom a reader
+     * sees and write no revision. */
     rc = gdefcore_entity_version(catalog, canon, GDEFCORE_PUBLIC_ID_LEN,
         &version);
     if (rc == GDEFCORE_ERR_INVALID) {

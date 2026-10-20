@@ -6,7 +6,10 @@
 # path that makes it: the count, the page, the cap, the published flag, the
 # ceiling of an agent, the personal field, the way a failure is carried.
 # (The query form's own checks, the clause of an and, the integer rule, the
-# bind, are planted in defiant-storage and defiant-storage-sqlite.)
+# bind, are planted in defiant-storage and defiant-storage-sqlite.) Since
+# story S6b the compiled list is a query of the port's current tables, which
+# hold no draft and no older revision; the entity-by-entity list reads them
+# through core, so that is where a list can read either, and is planted.
 #
 # Usage: check-listplan.sh <make> <build-dir> [make args]
 
@@ -44,11 +47,9 @@ plant count-before-filter-evaluated src/access/access.c testListplan \
 # dropped and the rest sorted.
 plant offset-before-sort src/access/access.c testListplan \
   'ListPlan.PagesAreSlicesOfTheEvaluatedList' \
-  '    rc = listed_sort(rows, nrows, local->sort_descending,
-        local->sort2_descending);' \
+  '    rc = listed_sort(rows, nrows, &order);' \
   '    rc = listed_sort(rows + (local->offset < nrows ? (size_t)local->offset : nrows),
-        nrows - (local->offset < nrows ? (size_t)local->offset : nrows),
-        local->sort_descending, local->sort2_descending);'
+        nrows - (local->offset < nrows ? (size_t)local->offset : nrows), &order);'
 
 # The published flag left out of the compiled filter.
 plant unpublished-listed-compiled src/access/access.c testListplan \
@@ -73,12 +74,18 @@ plant limit-cap-removed src/access/access.c testListplan \
                          : local.limit);' \
   '  spec.limit = local.limit;'
 
-# Creation order as the last tiebreak lost: the store orders the row numbers
-# by their digits.
-plant tiebreak-as-text src/access/access.c testListplan \
+# Creation order as the last tiebreak lost: the compiled list ends in the
+# order of the public ids.
+plant tiebreak-by-id src/access/access.c testListplan \
   'ListPlan.TheLastTiebreakIsCreationOrder' \
-  '  sq.entity_numeric = 1; /* ends in creation order, as the index lists */' \
-  '  sq.entity_numeric = 0;'
+  '  sq.sort_count = nsorts;' \
+  '  if (nsorts < 2) {
+    memset(&sort_copy[nsorts], 0, sizeof sort_copy[nsorts]);
+    sort_copy[nsorts].key.kind = GDEFSTOR_QUERY_ENTITY;
+    nsorts += 1;
+    sq.sorts = sort_copy;
+  }
+  sq.sort_count = nsorts;'
 
 # A grant of one field taken for a grant of the entity.
 plant field-grant-widens src/access/access.c testListplan \
@@ -100,9 +107,12 @@ plant ceiling-ignored src/access/access.c testListplan \
 # A personal field read like any other: its ciphertext is compared.
 plant personal-field-accepted src/condition/condition_plan.c testListplan \
   'ListPlan.APersonalFieldIsNeverComparedAndNeverGrants' \
-  '  if (field_info(p, name, name_len, &info) != 0 || !info.found ||
-      info.personal) {' \
-  '  if (field_info(p, name, name_len, &info) != 0 || !info.found) {'
+  '  if (cond_field_info(p->catalog, p->type, p->type_len, name, name_len, info) !=
+          0 ||
+      !info->found || info->personal) {' \
+  '  if (cond_field_info(p->catalog, p->type, p->type_len, name, name_len, info) !=
+          0 ||
+      !info->found) {'
 
 # A failure that cannot be decided carried into no predicate: the evaluator
 # says no, the list says yes.
@@ -128,7 +138,30 @@ plant le-as-lt src/condition/condition_plan.c testListplan \
 # state compared with the wrong value of the flag.
 plant state-flag-swapped src/condition/condition_plan.c testListplan \
   'ListPlan.ConditionsAgreeWithTheEvaluator' \
-  '  return mk_or2(p, mk_and2(p, pub_is(p, 1), a), mk_and2(p, pub_is(p, 0), b));' \
-  '  return mk_or2(p, mk_and2(p, pub_is(p, 0), a), mk_and2(p, pub_is(p, 1), b));'
+  '  return mk_or2(p, mk_and2(p, pub_node(p, 1, outer), a),
+      mk_and2(p, pub_node(p, 0, outer), b));' \
+  '  return mk_or2(p, mk_and2(p, pub_node(p, 0, outer), a),
+      mk_and2(p, pub_node(p, 1, outer), b));'
+
+# A list that reads an older revision: the entity-by-entity list reads each
+# entity's first revision for its filter and its sort (story S6b).
+plant list-reads-old-revision src/access/access.c testListplan \
+  'ListPlan.AListReadsOnlyTheCurrentRevision' \
+  '  rc = gdefcore_entity_values(catalog, NULL, GDEFCORE_VIEW_PUBLISHED, id,
+      GDEFCORE_PUBLIC_ID_LEN, lang, lang_len, field, strlen(field), out_texts,
+      out_lens, out_count);' \
+  '  rc = gdefcore_entity_revision_values(catalog, id, GDEFCORE_PUBLIC_ID_LEN, 1,
+      lang, lang_len, field, strlen(field), out_texts, out_lens, out_count);'
+
+# Draft content in a list: the entity-by-entity list reads the draft over an
+# entity for its filter and its sort (story S6b).
+plant draft-content-listed src/access/access.c testListplan \
+  'ListPlan.ADraftIsNeverInAList' \
+  '  rc = gdefcore_entity_values(catalog, NULL, GDEFCORE_VIEW_PUBLISHED, id,
+      GDEFCORE_PUBLIC_ID_LEN, lang, lang_len, field, strlen(field), out_texts,
+      out_lens, out_count);' \
+  '  rc = gdefcore_entity_values(catalog, NULL, GDEFCORE_VIEW_DRAFT, id,
+      GDEFCORE_PUBLIC_ID_LEN, lang, lang_len, field, strlen(field), out_texts,
+      out_lens, out_count);'
 
 plant_finish

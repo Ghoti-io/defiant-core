@@ -26,11 +26,14 @@
  * failure is also reported through a flag, never as a grant.
  *
  * An operand is a set of texts. `type`, `state`, `now` and constants are one
- * text. `creator`, `revision.creator` and `principal` are one text, or none when there is no creator
- * or no principal, so that an absent creator and an anonymous request are never
- * equal. A field is its values in the call's language, or the single empty
- * text when it has none. A comparison holds when some text on the left stands
- * in the stated relation to some text on the right.
+ * text. `creator`, `revision.creator` and `principal` are one text, or none
+ * when there is no creator or no principal, so that an absent creator and an
+ * anonymous request are never equal. A field is its values in the call's
+ * language, each the canonical text of the field's logical type, or the
+ * single empty text when it has none. A comparison holds when some text on
+ * the left stands in the stated relation to some text on the right, read as
+ * condition_internal.h says: by bytes when no side is a field of a type other
+ * than text and reference, in that type when one is.
  */
 
 #include <ghoti.io/defiant-core/macros.h>
@@ -52,6 +55,9 @@ typedef struct Span {
 typedef struct Vals {
   Span v[kMaxFieldValues];
   size_t n;
+  int kind;        /* the operand node's kind */
+  CondField f;     /* kField: what the field is */
+  int64_t now;     /* kNow: the request time */
   char ** texts;
   size_t * lens;
   size_t ntexts;
@@ -107,40 +113,15 @@ static void vals_one(Vals * vals, const char * p, size_t n) {
 static int read_field(Ctx * ctx, const CNode * node, Vals * vals) {
   const char * name = ctx->c->pool + node->str;
   size_t name_len = node->str_len;
-  size_t count = 0;
   size_t i;
-  int found = 0;
   char ** texts = NULL;
   size_t * lens = NULL;
   size_t n = 0;
   GDEFCORE_Result rc;
-  if (gdefcore_type_field_count(ctx->catalog, ctx->type, ctx->type_len,
-          &count) != GDEFCORE_OK) {
-    return ctx_fail(ctx);
-  }
-  for (i = 0; i < count && !found; i++) {
-    char * got = NULL;
-    size_t got_len = 0;
-    int required = 0;
-    int many = 0;
-    int match;
-    if (gdefcore_type_field(ctx->catalog, ctx->type, ctx->type_len, i, &got,
-            &got_len, &required, &many) != GDEFCORE_OK) {
-      return ctx_fail(ctx);
-    }
-    match = got_len == name_len && memcmp(got, name, name_len) == 0;
-    gdefcore_text_free(ctx->catalog, got);
-    if (match) {
-      int personal = 0;
-      found = 1;
-      if (gdefcore_type_field_personal(ctx->catalog, ctx->type, ctx->type_len,
-              i, &personal) != GDEFCORE_OK || personal != 0) {
-        /* A personal value is ciphertext: never compare it. */
-        return ctx_fail(ctx);
-      }
-    }
-  }
-  if (!found) {
+  if (cond_field_info(ctx->catalog, ctx->type, ctx->type_len, name, name_len,
+          &vals->f) != 0 ||
+      !vals->f.found || vals->f.personal) {
+    /* A personal value is ciphertext: never compare it. */
     return ctx_fail(ctx);
   }
   if (!ctx->real) {
@@ -187,6 +168,7 @@ static int operand(Ctx * ctx, int idx, Vals * vals) {
   const char * p;
   size_t n = 0;
   memset(vals, 0, offsetof(Vals, num));
+  vals->kind = node->kind;
   switch (node->kind) {
     case kText:
     case kInt:
@@ -196,8 +178,9 @@ static int operand(Ctx * ctx, int idx, Vals * vals) {
       vals_one(vals, ctx->type, ctx->type_len);
       return 1;
     case kNow: {
-      int wn = snprintf(vals->num, sizeof vals->num, "%lld",
-          (long long)gdefcore_request_time(ctx->request));
+      int wn;
+      vals->now = gdefcore_request_time(ctx->request);
+      wn = snprintf(vals->num, sizeof vals->num, "%lld", (long long)vals->now);
       if (wn <= 0 || (size_t)wn >= sizeof vals->num) {
         return ctx_fail(ctx);
       }
@@ -313,12 +296,86 @@ static int any_ordered(int op, const Vals * a, const Vals * b) {
   return 0;
 }
 
+/* The type a side is read in: a field's of a type other than text and
+ * reference, or 0 for bytes. */
+static int typed(const Vals * s) {
+  return s->kind == kField && !cond_texty_type(s->f.type) ? s->f.type : 0;
+}
+
+/* Text @p k of a side as a value of @p f's type. 1 with *out set, 2 for the
+ * empty text (a field with no value, or the constant ""), 0 when the text is
+ * no value of the type: an identifier never is, `now` is its number. */
+static int as_type(const Vals * s, size_t k, const CondField * f,
+    GDEFSTOR_Value * out) {
+  if (s->kind == kPrincipal || s->kind == kCreator || s->kind == kRevCreator) {
+    return 0;
+  }
+  if (s->kind == kNow) {
+    return cond_now_as(f->type, f->scale, s->now, out);
+  }
+  if (s->v[k].n == 0) {
+    return 2;
+  }
+  return gdefcore_value_parse(f->type, f->scale, s->v[k].p, s->v[k].n, out) ==
+         GDEFCORE_OK;
+}
+
+static int cmp_holds(int op, int c) {
+  switch (op) {
+    case kEq:
+      return c == 0;
+    case kLt:
+      return c < 0;
+    case kLe:
+      return c <= 0;
+    case kGt:
+      return c > 0;
+    case kGe:
+      return c >= 0;
+    default:
+      return 0;
+  }
+}
+
+/* Some pair stands in @p op (kEq or an ordering), read in @p f's type. The
+ * empty text equals only the empty text and is never ordered. */
+static int any_typed(int op, const Vals * a, const Vals * b,
+    const CondField * f) {
+  size_t i;
+  size_t j;
+  for (i = 0; i < a->n; i++) {
+    GDEFSTOR_Value x;
+    int ra = as_type(a, i, f, &x);
+    if (ra == 0) {
+      continue;
+    }
+    for (j = 0; j < b->n; j++) {
+      GDEFSTOR_Value y;
+      int rb = as_type(b, j, f, &y);
+      if (rb == 0) {
+        continue;
+      }
+      if (ra == 2 || rb == 2) {
+        if (op == kEq && ra == 2 && rb == 2) {
+          return 1;
+        }
+        continue;
+      }
+      if (cmp_holds(op, gdefcore_value_compare(&x, &y))) {
+        return 1;
+      }
+    }
+  }
+  return 0;
+}
+
 static int eval_node(Ctx * ctx, int idx);
 
 static int eval_cmp(Ctx * ctx, const CNode * node) {
   Vals a;
   Vals b;
   int r = 0;
+  int ordered = node->op != kEq && node->op != kNe;
   if (!operand(ctx, ctx->c->kids[node->first], &a)) {
     return 0;
   }
@@ -326,7 +383,24 @@ static int eval_cmp(Ctx * ctx, const CNode * node) {
     vals_free(ctx, &a);
     return 0;
   }
-  if (node->op == kEq) {
+  if ((a.kind == kField && b.kind == kField &&
+          !cond_types_meet(a.f.type, a.f.scale, b.f.type, b.f.scale)) ||
+      (ordered && ((a.kind == kField && !cond_numeric_type(a.f.type)) ||
+                      (b.kind == kField && !cond_numeric_type(b.f.type))))) {
+    /* Refused at validation; a stored condition that predates a type change
+     * fails rather than answering (decision 12). */
+    vals_free(ctx, &a);
+    vals_free(ctx, &b);
+    return ctx_fail(ctx);
+  }
+  if (typed(&a) != 0 || typed(&b) != 0) {
+    const CondField * f = typed(&a) != 0 ? &a.f : &b.f;
+    if (node->op == kNe) {
+      r = !any_typed(kEq, &a, &b, f);
+    } else {
+      r = any_typed(node->op, &a, &b, f);
+    }
+  } else if (node->op == kEq) {
     r = any_equal(&a, &b);
   } else if (node->op == kNe) {
     r = !any_equal(&a, &b);
@@ -347,15 +421,14 @@ static int eval_in(Ctx * ctx, const CNode * node) {
   }
   for (k = 1; k < node->count && !r; k++) {
     const CNode * member = &ctx->c->nodes[ctx->c->kids[node->first + k]];
-    Span s;
-    size_t i;
-    s.p = ctx->c->pool + member->str;
-    s.n = member->str_len;
-    for (i = 0; i < a.n; i++) {
-      if (same_text(a.v[i], s)) {
-        r = 1;
-        break;
-      }
+    Vals m;
+    memset(&m, 0, offsetof(Vals, num));
+    m.kind = kText;
+    vals_one(&m, ctx->c->pool + member->str, member->str_len);
+    if (typed(&a) != 0) {
+      r = any_typed(kEq, &a, &m, &a.f);
+    } else {
+      r = any_equal(&a, &m);
     }
   }
   vals_free(ctx, &a);
@@ -364,12 +437,13 @@ static int eval_in(Ctx * ctx, const CNode * node) {
 
 /*
  * (related "name" (operand ...)): some row of the relation has, in each column
- * given, one of the texts of the operand for it. The relation is read as the
- * system, through the same unfiltered index every host read uses, and only if
- * an enabled module declares it with this many columns: a relation that is
- * gone (its module disabled) or changed shape is a failure, not a no, so that
- * `not` of it never becomes a grant. The read is noted on the request at the
- * relation's version, so a render key that depends on it moves with the rows.
+ * given, one of the texts of the operand for it (an integer column: one of
+ * them read as an integer). The relation is read as the system, through the
+ * same port query every host read uses, and only if an enabled module
+ * declares it with this many columns: a relation that is gone (its module
+ * disabled) or changed shape is a failure, not a no, so that `not` of it never
+ * becomes a grant. The read is noted on the request at the relation's version,
+ * so a render key that depends on it moves with the rows.
  */
 static int eval_related(Ctx * ctx, const CNode * node) {
   const CNode * name = &ctx->c->nodes[ctx->c->kids[node->first]];
@@ -383,11 +457,12 @@ static int eval_related(Ctx * ctx, const CNode * node) {
   const uint8_t * tenant = gdefcore_catalog_tenant(ctx->catalog, &tenant_len);
   size_t i;
   int declared = 0;
+  int kinds[GDEFCORE_RELATION_COLUMNS_MAX];
   Vals vals[GDEFCORE_RELATION_COLUMNS_MAX];
   int any[GDEFCORE_RELATION_COLUMNS_MAX];
   size_t got = 0;
-  GDEFSTOR_QueryText texts[1 + GDEFCORE_RELATION_COLUMNS_MAX * kMaxFieldValues];
-  size_t ntexts = 0;
+  GDEFSTOR_Value values[1 + GDEFCORE_RELATION_COLUMNS_MAX * kMaxFieldValues];
+  size_t nvalues = 0;
   GDEFSTOR_QueryNode leaves[1 + GDEFCORE_RELATION_COLUMNS_MAX];
   const GDEFSTOR_QueryNode * kids[1 + GDEFCORE_RELATION_COLUMNS_MAX];
   size_t nleaves = 0;
@@ -397,6 +472,7 @@ static int eval_related(Ctx * ctx, const CNode * node) {
   size_t nids = 0;
   int result = 0;
   int bad = 0;
+  int empty = 0;
   GDEFCORE_Result rc;
   if (host == NULL || arity == 0 || arity > GDEFCORE_RELATION_COLUMNS_MAX) {
     return ctx_fail(ctx);
@@ -407,7 +483,11 @@ static int eval_related(Ctx * ctx, const CNode * node) {
   }
   for (i = 0; i < nitems; i++) {
     if (items[i]->name_len == rel_len && memcmp(items[i]->name, rel, rel_len) == 0) {
+      size_t k;
       declared = items[i]->ncolumns == arity;
+      for (k = 0; declared && k < arity; k++) {
+        kinds[k] = items[i]->columns[k].kind;
+      }
       break;
     }
   }
@@ -435,62 +515,70 @@ static int eval_related(Ctx * ctx, const CNode * node) {
     bad = 1;
   }
   if (!bad) {
-    int empty = 0;
-    for (i = 0; i < arity; i++) {
-      if (!any[i] && vals[i].n == 0) {
-        empty = 1; /* a none: equal to nothing */
+    GDEFSTOR_QueryOperand * left;
+    /* relation = the name */
+    memset(&values[nvalues], 0, sizeof values[nvalues]);
+    values[nvalues].type = GDEFSTOR_FIELD_TEXT;
+    values[nvalues].bytes = (const uint8_t *)rel;
+    values[nvalues].len = rel_len;
+    memset(&leaves[nleaves], 0, sizeof leaves[nleaves]);
+    leaves[nleaves].op = GDEFSTOR_QUERY_EQ;
+    left = &leaves[nleaves].left;
+    left->kind = GDEFSTOR_QUERY_FIELD;
+    left->field = GDEFCORE_RELATION_FIELD_NAME;
+    left->field_len = strlen(GDEFCORE_RELATION_FIELD_NAME);
+    leaves[nleaves].right.kind = GDEFSTOR_QUERY_VALUES;
+    leaves[nleaves].right.values = &values[nvalues];
+    leaves[nleaves].right.value_count = 1;
+    kids[nleaves] = &leaves[nleaves];
+    nvalues += 1;
+    nleaves += 1;
+    for (i = 0; i < arity && !empty; i++) {
+      size_t k;
+      size_t first = nvalues;
+      int integer = kinds[i] == GDEFCORE_RELATION_INTEGER;
+      if (any[i]) {
+        continue;
       }
+      for (k = 0; k < vals[i].n; k++) {
+        GDEFSTOR_Value * v = &values[nvalues];
+        memset(v, 0, sizeof *v);
+        if (integer) {
+          /* A text that is no integer is equal to no row's. */
+          if (!cond_parse_int(vals[i].v[k].p, vals[i].v[k].n, &v->integer)) {
+            continue;
+          }
+          v->type = GDEFSTOR_FIELD_INTEGER;
+        } else {
+          v->type = GDEFSTOR_FIELD_TEXT;
+          v->bytes = (const uint8_t *)vals[i].v[k].p;
+          v->len = vals[i].v[k].n;
+        }
+        nvalues += 1;
+      }
+      if (nvalues == first) {
+        empty = 1; /* a none: equal to nothing */
+        break;
+      }
+      memset(&leaves[nleaves], 0, sizeof leaves[nleaves]);
+      leaves[nleaves].op = GDEFSTOR_QUERY_IN;
+      left = &leaves[nleaves].left;
+      left->kind = GDEFSTOR_QUERY_FIELD;
+      left->field = integer ? gdefcore_relation_number_field(i)
+                            : gdefcore_relation_column_field(i);
+      left->field_len = strlen(left->field);
+      if (!integer) {
+        /* A row's text column holds "" for an empty text: the operand's
+         * empty text is one. */
+        left->flags = GDEFSTOR_QUERY_EMPTY_IF_NONE;
+      }
+      leaves[nleaves].right.kind = GDEFSTOR_QUERY_VALUES;
+      leaves[nleaves].right.values = &values[first];
+      leaves[nleaves].right.value_count = nvalues - first;
+      kids[nleaves] = &leaves[nleaves];
+      nleaves += 1;
     }
     if (!empty) {
-      GDEFSTOR_QueryOperand * left;
-      /* name = relation */
-      texts[ntexts].bytes = (const uint8_t *)rel;
-      texts[ntexts].len = rel_len;
-      memset(&leaves[nleaves], 0, sizeof leaves[nleaves]);
-      leaves[nleaves].op = GDEFSTOR_QUERY_EQ;
-      left = &leaves[nleaves].left;
-      left->kind = GDEFSTOR_QUERY_COLUMN;
-      left->column = GDEFCORE_QUERY_COL_DOC;
-      left->column_len = strlen(GDEFCORE_QUERY_COL_DOC);
-      left->path_depth = 2;
-      left->path1 = GDEFCORE_RELATION_LANG;
-      left->path1_len = strlen(GDEFCORE_RELATION_LANG);
-      left->path2 = GDEFCORE_RELATION_FIELD_NAME;
-      left->path2_len = strlen(GDEFCORE_RELATION_FIELD_NAME);
-      leaves[nleaves].right.kind = GDEFSTOR_QUERY_CONST;
-      leaves[nleaves].right.texts = &texts[ntexts];
-      leaves[nleaves].right.text_count = 1;
-      kids[nleaves] = &leaves[nleaves];
-      ntexts += 1;
-      nleaves += 1;
-      for (i = 0; i < arity; i++) {
-        size_t k;
-        size_t first = ntexts;
-        if (any[i]) {
-          continue;
-        }
-        for (k = 0; k < vals[i].n; k++) {
-          texts[ntexts].bytes = (const uint8_t *)vals[i].v[k].p;
-          texts[ntexts].len = vals[i].v[k].n;
-          ntexts += 1;
-        }
-        memset(&leaves[nleaves], 0, sizeof leaves[nleaves]);
-        leaves[nleaves].op = GDEFSTOR_QUERY_IN;
-        left = &leaves[nleaves].left;
-        left->kind = GDEFSTOR_QUERY_COLUMN;
-        left->column = GDEFCORE_QUERY_COL_DOC;
-        left->column_len = strlen(GDEFCORE_QUERY_COL_DOC);
-        left->path_depth = 2;
-        left->path1 = GDEFCORE_RELATION_LANG;
-        left->path1_len = strlen(GDEFCORE_RELATION_LANG);
-        left->path2 = gdefcore_relation_column_field(i);
-        left->path2_len = strlen(left->path2);
-        leaves[nleaves].right.kind = GDEFSTOR_QUERY_CONST;
-        leaves[nleaves].right.texts = &texts[first];
-        leaves[nleaves].right.text_count = ntexts - first;
-        kids[nleaves] = &leaves[nleaves];
-        nleaves += 1;
-      }
       memset(&root, 0, sizeof root);
       root.op = GDEFSTOR_QUERY_AND;
       root.children = kids;
@@ -499,6 +587,8 @@ static int eval_related(Ctx * ctx, const CNode * node) {
       q.size = sizeof q;
       q.where = &root;
       q.limit = 1;
+      q.language = GDEFCORE_RELATION_LANG;
+      q.language_len = strlen(GDEFCORE_RELATION_LANG);
       rc = gdefcore_entity_query_active(ctx->catalog, GDEFCORE_RELATION_ROW_TYPE,
           strlen(GDEFCORE_RELATION_ROW_TYPE), &q, &ids, &nids, NULL);
       if (rc != GDEFCORE_OK) {

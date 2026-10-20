@@ -23,18 +23,35 @@ plant_control testRelations 'Relations.*:RelationsSurface.*'
 plant undeclared-relation-readable $EVAL testRelations \
   'Relations.AnUndeclaredRelationIsNeverRead' \
   '    if (items[i]->name_len == rel_len && memcmp(items[i]->name, rel, rel_len) == 0) {
+      size_t k;
       declared = items[i]->ncolumns == arity;
+      for (k = 0; declared && k < arity; k++) {
+        kinds[k] = items[i]->columns[k].kind;
+      }
       break;
     }' \
-  '    declared = 1;
-    break;'
+  '    {
+      size_t k;
+      declared = 1;
+      for (k = 0; k < arity; k++) {
+        kinds[k] = GDEFCORE_RELATION_TEXT;
+      }
+      break;
+    }'
 
 # 2. A column the declaration does not have: the number of operands is not
 # held to the number of columns.
 plant undeclared-column-readable $EVAL testRelations \
   'Relations.AnUndeclaredRelationIsNeverRead' \
-  '      declared = items[i]->ncolumns == arity;' \
-  '      declared = 1;'
+  '      declared = items[i]->ncolumns == arity;
+      for (k = 0; declared && k < arity; k++) {
+        kinds[k] = items[i]->columns[k].kind;
+      }' \
+  '      declared = 1;
+      for (k = 0; declared && k < arity; k++) {
+        kinds[k] = k < items[i]->ncolumns ? items[i]->columns[k].kind
+                                          : GDEFCORE_RELATION_TEXT;
+      }'
 
 # 3. A disabled module'"'"'s relation still decides: the declaration is not asked.
 plant disabled-relation-decides $EVAL testRelations \
@@ -53,8 +70,8 @@ plant disabled-relation-decides-compiled $PLAN testRelations \
 # 4. Membership compared on the wrong column.
 plant wrong-column $EVAL testRelations \
   'Relations.MembershipGrantsAndOnlyForTheRowsOwner' \
-  '        left->path2 = gdefcore_relation_column_field(i);' \
-  '        left->path2 = gdefcore_relation_column_field(arity - 1 - i);'
+  '                            : gdefcore_relation_column_field(i);' \
+  '                            : gdefcore_relation_column_field(arity - 1 - i);'
 
 # 5. The relation read as the principal: a principal who may not read the rows
 # is hidden from the decision.

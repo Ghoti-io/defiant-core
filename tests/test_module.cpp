@@ -32,7 +32,7 @@
 #include <ghoti.io/cutil/library.h>
 #include <ghoti.io/defiant-core/macros.h>
 #include <ghoti.io/defiant-core/defiant-core.h>
-#include <ghoti.io/defiant-storage/projection.h>
+#include <ghoti.io/defiant-storage/model.h>
 #include <ghoti.io/defiant-storage-memory/memory.h>
 
 #include <gtest/gtest.h>
@@ -180,27 +180,26 @@ extern "C" GDEFCORE_Result OnAppendThenFail(GDEFCORE_Request * request,
 }
 
 extern "C" void ProbeEntered(void) {
-  GDEFSTOR_Projection * row = NULL;
-  size_t i;
-  size_t n;
+  int found = 0;
+  uint8_t * bytes = NULL;
+  size_t len = 0;
   g_entered_seen = -1;
+  /* The installation's record of the module (a system record since story
+   * S6b): one line per fact, `entered <hex>`. */
   if (g_probe_store == NULL ||
-      gdefstor_projection_get(g_probe_store, "\x01", 1, "core.module.install",
-          19, "example", 7, &row) != GDEFSTOR_OK) {
+      gdefstor_record_get(g_probe_store, "\x01", 1, "core.module.install", 19,
+          "example", 7, &found, &bytes, &len) != GDEFSTOR_OK ||
+      !found) {
+    gdefstor_bytes_free(NULL, bytes);
     return;
   }
-  n = gdefstor_projection_column_count(row);
-  for (i = 0; i < n; i++) {
-    GDEFSTOR_Column column;
-    if (gdefstor_projection_column(row, i, &column) != GDEFSTOR_OK) {
-      continue;
-    }
-    if (column.name_len == 7 && memcmp(column.name, "entered", 7) == 0 &&
-        column.value != NULL && column.value_len >= 1) {
-      g_entered_seen = column.value[0];
-    }
+  std::string text((const char *)bytes, len);
+  gdefstor_bytes_free(NULL, bytes);
+  size_t at = text.find("entered ");
+  if (at != std::string::npos && (at == 0 || text[at - 1] == '\n') &&
+      at + 10 <= text.size()) {
+    g_entered_seen = (int)strtol(text.substr(at + 8, 2).c_str(), NULL, 16);
   }
-  gdefstor_projection_free(row);
 }
 
 extern "C" GDEFCORE_Result OnAfter(GDEFCORE_Request * request, const void * args,

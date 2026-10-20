@@ -108,10 +108,13 @@ set, **and** one of the read grants of the type holds, **and** the filter and
 the condition hold. Each grant is its base (`any` is true, `own` is "the
 record's creator is the principal", an expression is `plan.h` compiling it)
 and, for an agent, one of the acting principal's grants for the same permission
-with its base. A field is read from the active revision's document by language
-and field name; `creator` and the published flag from the record, joined by the
-row; `revision.creator` from the active copy; `now` and `principal` are
-constants of the request. `gdefcore_condition_eval()` remains the reference:
+with its base. Since story S6b this is the port's query over the type's
+current tables (defiant-storage `query.h`, "Over entities"), in the list's
+language: a field is a typed operand of the entity's newest revision;
+`creator`, the published fact and `revision.creator` (the newest revision's
+author) are the entity record's; a relation is an EXISTS over its rows; `now`
+and `principal` are constants of the request. A draft, and an older revision,
+are never read: the current tables hold neither. `gdefcore_condition_eval()` remains the reference:
 the compiled predicate selects the entities it holds on, including where it
 cannot decide (an operand that fails ends the evaluation and the condition does
 not hold, `not` included; `plan.h` carries that as a second predicate, "the
@@ -221,14 +224,17 @@ grant it needs are spelled once:
 | `GDEFCORE_ACTION_CREATE` | `create` | Add an entity. Asked of **the container the path names**, or at type level; see below. |
 | `GDEFCORE_ACTION_READ` | `read` | See an entity as readers do. Needs the published flag. |
 | `GDEFCORE_ACTION_UPDATE` | `update` | Save a draft. Decided on the entity as stored, before the change. |
-| `GDEFCORE_ACTION_PUBLISH` | `publish` | Set the published flag and make the head active; and `unpublish`, which is the same permission. |
-| `GDEFCORE_ACTION_DELETE` | `delete` | Clear the entity: unpublished, no active revision, every revision kept. |
-| `GDEFCORE_ACTION_REVISIONS_READ` | `revisions.read` | View history and the head draft, field by field. |
-| `GDEFCORE_ACTION_REVISIONS_REVERT` | `revisions.revert` | Append a copy of an earlier revision and make it active. |
-| `GDEFCORE_ACTION_REVISIONS_ACTIVATE` | `revisions.activate` | Make an existing revision the active one. |
+| `GDEFCORE_ACTION_PUBLISH` | `publish` | Apply the entity's draft, if it has one, and set the published flag; and `unpublish`, which is the same permission. |
+| `GDEFCORE_ACTION_DELETE` | `delete` | Clear the entity: unpublished and deleted, every revision kept. |
+| `GDEFCORE_ACTION_REVISIONS_READ` | `revisions.read` | View history, field by field. |
+| `GDEFCORE_ACTION_REVISIONS_REVERT` | `revisions.revert` | Write a new revision that copies an earlier one. |
 
-The revision actions are asked of the entity's **active state**: the permission
-`revisions.read` is decided on the entity as stored (its active revision and its
+There is no `revisions.activate`: access SPEC decision 13 retired the
+active-revision pointer, so the newest revision is always the content and an
+older one becomes it again only by a revert (story S6b).
+
+The revision actions are asked of the entity's **current state**: the permission
+`revisions.read` is decided on the entity as stored (its newest revision and its
 creator), not on the revision being looked at, and it does not need the
 published flag, because a revision view shows drafts that readers do not see.
 A grant of any of them is rated at least an edit.
@@ -264,9 +270,9 @@ action with a strong word (`delete`, `remove`, `erase`, `publish`, `unpublish`,
 `view`, `list`, `search`, `count`, `export`) is a read; an action with none of
 them is strong, so a name nobody recognises never lowers a rating. A part
 `revisions` makes the action **at least an edit**, whatever its verb says:
-`revisions.read` has the word `read`, but it shows drafts that nobody has
-published, so it is not rated as the read it looks like. `revisions.revert` and
-`revisions.activate` are strong already.
+`revisions.read` has the word `read`, but it shows revisions that nobody has
+published, so it is not rated as the read it looks like. `revisions.revert` is
+strong already. (`activate` stays a strong word for a module's own actions.)
 
 - **High** when the condition bounds nothing (it names no type and reads
   nothing of the entity: `true`, a condition about the time or the principal
@@ -286,7 +292,7 @@ may edit, and move it into the group that lets them edit it, or move one of
 theirs out of reach of anyone else's grant; the grant can widen itself. The
 actions that can change what a condition reads are `update`, `edit`, `save`,
 `draft`, `write`, `revert`, `restore` and `activate` (so also
-`revisions.revert` and `revisions.activate`). A grant of a single field is
+`revisions.revert`). A grant of a single field is
 asked about that field only; an entity-wide grant is asked about every field
 its condition names. A `create` is not one of them: its condition is evaluated
 on the container the path names, and the holder does not change that. `own`
@@ -329,7 +335,7 @@ ceiling.
   they cannot disagree about it; the oracle sweep found the first version
   telling an anonymous visitor that a draft existed, and the list went on
   listing such entities until it asked too. A condition reads the entity's
-  **active revision** and its creator whether or not it is published (see
+  **newest revision** and its creator whether or not it is published (see
   conditions.md), so a grant on `update` over group a holds for an unpublished
   group a entity, and `own` matches its creator: its author can edit it while
   readers cannot see it.
@@ -340,7 +346,7 @@ ceiling.
 - **Memo.** The answer is remembered on the request, keyed by principal, acting
   principal, permission, type, entity and the entity's version (the config
   epoch at type level). The version is `gdefcore_entity_version()`, which every
-  write that touches the entity bumps, a publish, an unpublish, an activate and a
+  write that touches the entity bumps, a draft, a publish, an unpublish and a
   clear included; the latest revision number moves for none of those, and a
   memo keyed on it answered a question about an entity that had become another
   one, so a question asked twice is answered once, an entity
@@ -371,7 +377,7 @@ ceiling.
 
 SPEC decision 7: **a library function runs at the trust of its caller.**
 `gdefcore_entity_save()`, `_save_draft()`, `_publish()`, `_unpublish()`,
-`_activate()`, `gdefcore_changeset_revert()`, `gdefcore_form_submit()` and
+`_clear()`, `gdefcore_changeset_revert()`, `_revert_to()`, `gdefcore_form_submit()` and
 `gdefcore_form_publish()` check no permission, there is no second, guarded copy
 of any of them, and `gdefcore_changeset_enforce_access()` and the flag behind it
 are gone. A system job, an importer and a handler call them with the authority
@@ -392,23 +398,23 @@ retires with the template veto.
 
 **A condition is evaluated only on the stored entity the path names, never on
 submitted data (SPEC decision 8).** The evaluator has no parameter for values and
-reads the active revision with no changeset (`gdefcore_entity_values()` with a
+reads the newest revision with no changeset (`gdefcore_entity_values()` with a
 NULL changeset), so a body cannot enter it; what the paths must get right is
 *which* entity is asked about and *when*:
 
 - **The target comes from the token.** A signed form binds its target and its
-  base revision with the session and the principal. `gdefcore_form_authorize()`
+  base version with the session and the principal. `gdefcore_form_authorize()`
   asks `can()` about the token's target; the id the request itself names (a route
   capture, a hidden field) is only checked against it, and a request whose id is
   not the token's target is refused, not decided on either one.
   `gdefcore_form_submit_authorized()` is the path for an update: that question,
   then `gdefcore_form_submit()`.
 - **Before the change, on what is stored.** The question is asked first, before
-  anything is staged, of the entity's active revision: `update` over
+  anything is staged, of the entity's newest revision: `update` over
   `(= field.group "a")` holds for a post that is in group a now, whatever the
   body says the group will be; a post can be moved out of the group by someone who
   may edit it, and cannot be moved in by someone who may not.
-- **Never the head.** A newer draft beside the active revision is not what is
+- **Never the draft.** A draft beside the newest revision is not what is
   asked about (a post that is group a as published and group b as drafted is still
   group a).
 - **The actor is the system's.** The creator of a revision is the principal of the

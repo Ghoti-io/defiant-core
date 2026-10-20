@@ -31,10 +31,13 @@ plant hook-chain-without-tenant src/module/module.c testTenant \
   '    if (memcmp(chain->tenant, tenant, tenant_len) == 0 &&' \
   '    if (((void)tenant, 1) &&'
 
-# "A tenant missing from a query": every projection read goes to tenant "A".
-plant projection-without-tenant src/entity/entity.c testTenant \
+# "A tenant missing from a query": every entity record read goes to tenant
+# "A" (the port's read, since story S6b).
+plant entity-read-without-tenant src/entity/store.c testTenant \
   'Tenant.Interleaved' \
-  '  return map_stor(gdefstor_projection_get(cat->store, (const char *)cat->tenant,' \
-  '  return map_stor(gdefstor_projection_get(cat->store, "A",'
+  '  src = gdefstor_entity_get(cat->store, (const char *)cat->tenant,
+      cat->tenant_len, canon, GDEFCORE_PUBLIC_ID_LEN, &e);' \
+  '  src = gdefstor_entity_get(cat->store, "A", 1, canon,
+      GDEFCORE_PUBLIC_ID_LEN, &e);'
 
 plant_finish

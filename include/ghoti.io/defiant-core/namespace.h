@@ -229,7 +229,11 @@
 #define gdefcore_catalog_limits GHOTIIO_DEFCORE(gdefcore_catalog_limits)
 #define gdefcore_entity_publish GHOTIIO_DEFCORE(gdefcore_entity_publish)
 #define gdefcore_entity_unpublish GHOTIIO_DEFCORE(gdefcore_entity_unpublish)
-#define gdefcore_entity_activate GHOTIIO_DEFCORE(gdefcore_entity_activate)
+#define gdefcore_type_field_type GHOTIIO_DEFCORE(gdefcore_type_field_type)
+#define gdefcore_value_parse GHOTIIO_DEFCORE(gdefcore_value_parse)
+#define gdefcore_value_compare GHOTIIO_DEFCORE(gdefcore_value_compare)
+#define gdefcore_changeset_set_why GHOTIIO_DEFCORE(gdefcore_changeset_set_why)
+#define gdefcore_changeset_revision GHOTIIO_DEFCORE(gdefcore_changeset_revision)
 #define gdefcore_entity_clear GHOTIIO_DEFCORE(gdefcore_entity_clear)
 #define gdefcore_entity_revision GHOTIIO_DEFCORE(gdefcore_entity_revision)
 #define gdefcore_entity_revision_at                                            \
@@ -513,6 +517,7 @@
 #define GDEFCORE_Plan GHOTIIO_DEFCORE(GDEFCORE_Plan)
 
 #define gdefcore_relation_column_field GHOTIIO_DEFCORE(gdefcore_relation_column_field)
+#define gdefcore_relation_number_field GHOTIIO_DEFCORE(gdefcore_relation_number_field)
 #define gdefcore_relation_add GHOTIIO_DEFCORE(gdefcore_relation_add)
 #define gdefcore_relation_remove GHOTIIO_DEFCORE(gdefcore_relation_remove)
 #define gdefcore_relation_version GHOTIIO_DEFCORE(gdefcore_relation_version)

@@ -1077,7 +1077,8 @@ TEST(RelationsSurface, NoCallReadsRowsPastTheFilter) {
     }
     at = end;
   }
-  std::set<std::string> want = {"gdefcore_relation_column_field", "gdefcore_relation_add",
+  std::set<std::string> want = {"gdefcore_relation_column_field",
+      "gdefcore_relation_number_field", "gdefcore_relation_add",
       "gdefcore_relation_remove", "gdefcore_relation_version",
       "gdefcore_relation_note_dependency"};
   EXPECT_EQ(want, found);

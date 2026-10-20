@@ -282,10 +282,10 @@ plantm own-is-the-last-writer-list testCan 'Can.OwnIsTheCreatorNotTheLastWriter'
   '    rc = gdefcore_entity_actor(catalog, ids[i], GDEFCORE_PUBLIC_ID_LEN, &actor,
         &actor_len);' \
   src/condition/condition_plan.c \
-  '  l = column_operand(GDEFCORE_QUERY_COL_CREATOR, 1, 0);
-  r = one_text(plan, plan->principal, plan->principal_len);' \
-  '  l = column_operand(GDEFCORE_QUERY_COL_REVISION_CREATOR, 0, 0);
-  r = one_text(plan, plan->principal, plan->principal_len);'
+  '  l = meta_operand(GDEFSTOR_META_CREATOR, GDEFSTOR_QUERY_AS_TEXT);
+  r = text_operand(plan, plan->principal, plan->principal_len);' \
+  '  l = meta_operand(GDEFSTOR_META_REVISION_WHO, GDEFSTOR_QUERY_AS_TEXT);
+  r = text_operand(plan, plan->principal, plan->principal_len);'
 
 # Plant 19: a list does not ask whether an entity is published.
 plant list-lists-unpublished $ACCESS testCan 'Can.AnUnpublishedEntityIsNotThereForReaders' \

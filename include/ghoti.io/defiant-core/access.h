@@ -56,15 +56,17 @@ extern "C" {
  *   level; a permission with a field limits what may be supplied, field by
  *   field (gdefcore_access_can_field()). Never a condition on the values
  *   being written.
- * - `read`: see an entity's published, active revision. Needs the published flag.
+ * - `read`: see an entity's newest revision while it is published. Needs the published flag.
  * - `update`: save a draft. Decided on the entity as stored, before the change.
- * - `publish`: set the published flag and make the head revision active; and
- *   take it away again (`unpublish` is the same permission).
- * - `delete`: clear the entity (it is unpublished and has no active revision;
- *   its revisions stay).
- * - `revisions.read`: view history and the head draft, field by field.
- * - `revisions.revert`: append a copy of an earlier revision and make it active.
- * - `revisions.activate`: make an existing revision the active one.
+ * - `publish`: apply the entity's draft, if it has one, and set the published
+ *   flag; and take it away again (`unpublish` is the same permission).
+ * - `delete`: clear the entity (it is unpublished and deleted; its revisions
+ *   stay).
+ * - `revisions.read`: view history and the draft, field by field.
+ * - `revisions.revert`: write a new revision that copies an earlier one.
+ *
+ * There is no action that makes an older revision current without writing
+ * one: the current revision is always the newest (access SPEC decision 13).
  */
 /** Add an entity. */
 #define GDEFCORE_ACTION_CREATE "create"
@@ -80,8 +82,6 @@ extern "C" {
 #define GDEFCORE_ACTION_REVISIONS_READ "revisions.read"
 /** Revert an entity to an earlier revision (appends a copy). */
 #define GDEFCORE_ACTION_REVISIONS_REVERT "revisions.revert"
-/** Make an existing revision the active one. */
-#define GDEFCORE_ACTION_REVISIONS_ACTIVATE "revisions.activate"
 
 /** The condition matches every entity of the type. */
 #define GDEFCORE_ACCESS_ANY 1
@@ -250,9 +250,9 @@ typedef struct GDEFCORE_Access_List {
 /**
  * @brief One field of one recorded revision, as a principal may see it.
  *
- * The read behind a revision view (history, the head draft, an earlier
+ * The read behind a revision view (history, the draft, an earlier
  * revision). Two checks, in this order, both on the entity **as it is stored**
- * (its active revision and its creator), never on the revision being viewed
+ * (its newest revision and its creator), never on the revision being viewed
  * and never on anything supplied by the caller:
  *
  * 1. `revisions.read` (::GDEFCORE_ACTION_REVISIONS_READ) by gdefcore_access_can().
@@ -439,7 +439,7 @@ GDEFCORE_API int gdefcore_access_grant_risk(const char * action,
  * a post into the group that lets them edit it: the grant can widen itself.
  * The action must be one that changes content (`update`, `edit`, `save`,
  * `draft`, `write`, `revert`, `restore`, `activate`, including as the last part
- * of `revisions.revert` and `revisions.activate`; not `create`, whose
+ * of `revisions.revert`; not `create`, whose
  * condition is on the container the path names), and the condition must test
  * the grant's @p field, or, for an entity-wide grant (@p field_len 0), any
  * field. Such a grant is rated **one step higher** than gdefcore_access_grant_risk()
@@ -612,8 +612,8 @@ GDEFCORE_API int gdefcore_access_permits(GDEFCORE_Catalog * catalog,
  *   and ::GDEFCORE_OK. This does not require the entity to be readable by the
  *   principal as well; a site that does not want the existence of an entity
  *   told to someone who may change it but not read it grants the read too.
- *   The one exception is the permission `read` itself, which is of the
- *   published projection: an entity with none (a draft never published) is not
+ *   The one exception is the permission `read` itself, which needs the
+ *   published flag: an entity without it (a draft never published) is not
  *   readable, as for gdefcore_access_read().
  * - **With no entity** (type level): whether the principal could hold the
  *   permission for some entity of the type, as gdefcore_access_permits() asks.

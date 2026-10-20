@@ -92,11 +92,12 @@ class Actions : public GrantsFixture {
     return rc;
   }
 
-  GDEFCORE_Result ActivateSeq(const std::string & id, uint64_t seq) {
+  /* A copy of revision @p seq as the newest: the only way an older revision's
+   * content becomes the entity's again (access SPEC decision 13). */
+  GDEFCORE_Result RevertTo(const std::string & id, uint64_t seq) {
     GDEFCORE_Changeset * cs = NULL;
-    GDEFCORE_Result rc;
-    EXPECT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
-    rc = gdefcore_entity_activate(cs, id.data(), id.size(), seq);
+    GDEFCORE_Result rc = gdefcore_changeset_revert_to(catalog_, id.data(),
+        id.size(), seq, NULL, 0, &cs);
     if (rc == GDEFCORE_OK) {
       rc = gdefcore_changeset_apply(cs, NULL, 0);
     }
@@ -171,15 +172,13 @@ TEST(ActionVocabulary, IsSpelledOnce) {
   EXPECT_STREQ("delete", GDEFCORE_ACTION_DELETE);
   EXPECT_STREQ("revisions.read", GDEFCORE_ACTION_REVISIONS_READ);
   EXPECT_STREQ("revisions.revert", GDEFCORE_ACTION_REVISIONS_REVERT);
-  EXPECT_STREQ("revisions.activate", GDEFCORE_ACTION_REVISIONS_ACTIVATE);
 }
 
 TEST_F(Actions, EveryActionCanBeDeclaredAndGranted) {
   DefinePost();
   const char * actions[] = {GDEFCORE_ACTION_CREATE, GDEFCORE_ACTION_READ,
       GDEFCORE_ACTION_UPDATE, GDEFCORE_ACTION_PUBLISH, GDEFCORE_ACTION_DELETE,
-      GDEFCORE_ACTION_REVISIONS_READ, GDEFCORE_ACTION_REVISIONS_REVERT,
-      GDEFCORE_ACTION_REVISIONS_ACTIVATE};
+      GDEFCORE_ACTION_REVISIONS_READ, GDEFCORE_ACTION_REVISIONS_REVERT};
   Role("all");
   for (const char * action : actions) {
     std::string label = std::string("Can ") + action;
@@ -315,13 +314,17 @@ TEST_F(Actions, RevisionViewNeedsThePermissionAndNotTheFlag) {
   std::string historian = Principal("historians");
   std::string reader = Principal("readers");
   std::string nobody = Principal();
-  /* A post that was never published: its first draft only. */
+  /* A post readers do not see: two revisions, then unpublished, and a draft
+   * over it. */
   std::string post = NewPost(Admin());
-  ASSERT_EQ(GDEFCORE_OK, Write(Admin(), post, "first", "a", true));
-  ASSERT_EQ(GDEFCORE_OK, Write(Admin(), post, "second", "a", true));
+  ASSERT_EQ(GDEFCORE_OK, Write(Admin(), post, "first", "a", false));
+  ASSERT_EQ(GDEFCORE_OK, Write(Admin(), post, "second", "a", false));
+  ASSERT_EQ(GDEFCORE_OK, Change(gdefcore_entity_unpublish, post));
+  ASSERT_EQ(GDEFCORE_OK, Write(Admin(), post, "draft", "a", true));
   EXPECT_EQ("shown:first", View(Req(historian), post, 1, "title"));
-  /* The head draft too, though it is not the active revision. */
   EXPECT_EQ("shown:second", View(Req(historian), post, 2, "title"));
+  /* A draft is not a revision, so there is no third to view. */
+  EXPECT_EQ("<denied>", View(Req(historian), post, 3, "title"));
   /* Controls: readers do not see an unpublished entity, and `read` is not
    * the right to see history. */
   EXPECT_EQ("<denied>", Read(Req(reader), post));
@@ -408,28 +411,31 @@ TEST_F(Actions, RevisionViewNeverShowsAPersonalFieldAsStored) {
   EXPECT_EQ("<denied>", View(Req(Principal()), post, 1, "ssn"));
 }
 
-TEST_F(Actions, RevisionViewAsksTheActiveStateNotTheViewedRevision) {
+TEST_F(Actions, RevisionViewAsksTheCurrentStateNotTheViewedRevision) {
   DefinePost();
   Declare(Perm("View history", GDEFCORE_ACTION_REVISIONS_READ, GDEFCORE_ACCESS_ANY));
   Role("group-a");
   ASSERT_EQ(GDEFCORE_OK, GrantWhen("group-a", "View history", kGroupA));
   std::string ga = Principal("group-a");
-  /* Revision 1 is group a and active; revision 2 is a newer draft in group b. */
+  /* Revision 1 is group a; revision 2, the newest, is group b. */
   std::string post = NewPost(Admin());
-  ASSERT_EQ(GDEFCORE_OK, Write(Admin(), post, "one", "a", true));
-  ASSERT_EQ(GDEFCORE_OK, Write(Admin(), post, "two", "b", true));
-  /* The question is about the entity as stored (group a), so the draft in
-   * another group is viewable: what the viewed revision holds decides nothing. */
-  EXPECT_EQ("shown:two", View(Req(ga), post, 2, "title"));
+  ASSERT_EQ(GDEFCORE_OK, Write(Admin(), post, "one", "a", false));
   EXPECT_EQ("shown:one", View(Req(ga), post, 1, "title"));
-  /* Make the group b draft active: the entity is now in group b, and the
-   * principal loses the history of the revision that still says group a. */
-  ASSERT_EQ(GDEFCORE_OK, ActivateSeq(post, 2));
+  ASSERT_EQ(GDEFCORE_OK, Write(Admin(), post, "two", "b", false));
+  /* The entity is now in group b, and the principal loses the history of the
+   * revision that still says group a: what the viewed revision holds decides
+   * nothing. */
   EXPECT_EQ("<denied>", View(Req(ga), post, 1, "title"));
   EXPECT_EQ("<denied>", View(Req(ga), post, 2, "title"));
-  /* Control: back to the group a revision and the history is theirs again. */
-  ASSERT_EQ(GDEFCORE_OK, ActivateSeq(post, 1));
+  /* A draft that puts it back in group a is not what the entity is: the
+   * condition reads the newest revision, never the draft. */
+  ASSERT_EQ(GDEFCORE_OK, Write(Admin(), post, "draft", "a", true));
+  EXPECT_EQ("<denied>", View(Req(ga), post, 1, "title"));
+  /* Back to group a by a revert (revision 3): the group b revision is
+   * viewable again, though it still says group b. */
+  ASSERT_EQ(GDEFCORE_OK, RevertTo(post, 1));
   EXPECT_EQ("shown:two", View(Req(ga), post, 2, "title"));
+  EXPECT_EQ("shown:one", View(Req(ga), post, 3, "title"));
 }
 
 TEST_F(Actions, AClearedEntitysHistoryIsStillThere) {

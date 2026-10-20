@@ -183,8 +183,6 @@ void DoOperation(const GDEFCORE_Route_Call * call) {
           gdefcore_entity_save_draft(cs, id.data(), id.size(), "en", 2, &value, 1));
     } else if (machine == "post.publish") {
       g_run.rc = Apply(cs, gdefcore_entity_publish(cs, id.data(), id.size()));
-    } else if (machine == "post.activate") {
-      g_run.rc = Apply(cs, gdefcore_entity_activate(cs, id.data(), id.size(), 1));
     } else {
       gdefcore_changeset_destroy(cs);
       cs = NULL;
@@ -337,6 +335,50 @@ class Can : public GrantsFixture {
     EXPECT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, NULL, 0));
     gdefcore_changeset_destroy(cs);
     return std::string(id);
+  }
+
+  /** A post saved and then unpublished: it has a revision readers do not
+   * see. (Before drafts were the port's, a save as a draft made this.) */
+  std::string Unpublished(const std::string & actor, const char * title,
+      const char * group) {
+    std::string id = Save(actor, title, group);
+    GDEFCORE_Changeset * cs = NULL;
+    EXPECT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
+    EXPECT_EQ(GDEFCORE_OK, gdefcore_entity_unpublish(cs, id.data(), id.size()));
+    EXPECT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, NULL, 0));
+    gdefcore_changeset_destroy(cs);
+    return id;
+  }
+
+  /** A second revision of @p id, by the system, with another title. */
+  void Resave(const std::string & id, const char * title) {
+    GDEFCORE_Changeset * cs = NULL;
+    GDEFCORE_Value value;
+    const char * text = title;
+    size_t len = strlen(title);
+    int state = 0;
+    memset(&value, 0, sizeof value);
+    value.size = sizeof value;
+    value.field = "title";
+    value.field_len = 5;
+    value.texts = &text;
+    value.text_lens = &len;
+    value.count = 1;
+    EXPECT_EQ(GDEFCORE_OK,
+        gdefcore_entity_state(catalog_, id.data(), id.size(), &state));
+    EXPECT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
+    EXPECT_EQ(GDEFCORE_OK,
+        gdefcore_entity_save(cs, id.data(), id.size(), "en", 2, &value, 1));
+    if (state != GDEFCORE_STATE_PUBLISHED) {
+      /* A save publishes; keep the entity as it was. */
+      EXPECT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, NULL, 0));
+      gdefcore_changeset_destroy(cs);
+      EXPECT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
+      EXPECT_EQ(GDEFCORE_OK,
+          gdefcore_entity_unpublish(cs, id.data(), id.size()));
+    }
+    EXPECT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, NULL, 0));
+    gdefcore_changeset_destroy(cs);
   }
 };
 
@@ -561,7 +603,7 @@ TEST_F(Can, APublishInTheRequestIsANewQuestion) {
   Role("readers");
   Grant("readers", "Read posts");
   std::string reader = Principal("readers");
-  std::string post = Draft("", "d", "a");
+  std::string post = Unpublished("", "d", "a");
   GDEFCORE_Request * req = Req(reader);
   EXPECT_FALSE(Yes(req, "read", post));
   EXPECT_FALSE(Yes(req, "read", post));   /* remembered */
@@ -633,7 +675,8 @@ TEST_F(Can, AnUnpublishedEntityIsNotThereForReaders) {
     (void)rc;
   }
   /* the author can still edit what is unpublished: the grant is on the
-   * creator and the active revision, neither of which needs the flag */
+   * creator, which a draft's entity has from its first draft, and which needs
+   * no flag */
   EXPECT_TRUE(Yes(Req(author), "update", never));
   EXPECT_TRUE(Yes(Req(author), "update", unpub));
   EXPECT_FALSE(Yes(Req(reader), "update", never));
@@ -1039,7 +1082,7 @@ TEST_F(Can, MarksTheRequestAndRecordsWhatItRead) {
 }
 
 /* The render key's read set names each entity at its version, not at its
- * latest revision: an unpublish, a publish or an activate moves no revision
+ * latest revision: an unpublish or a publish moves no revision
  * and changes what the page showed, so a fragment keyed on the revision
  * outlived it (defect 1.5.2). */
 TEST_F(Can, TheReadSetIsKeyedOnTheVersion) {
@@ -1242,7 +1285,8 @@ enum {
   kRoleDelete = 16,
   kRoleHistory = 32,   /* view the revisions of any post */
   kRoleRevert = 64,    /* revert any post to an earlier revision */
-  kRoleActivate = 128, /* make a revision active, for posts of group a */
+  kRoleRevertA = 128,  /* revert posts of group a (it was `activate`, which
+                        * decision 13 retired: a conditional strong grant) */
   kRoleCreate = 256    /* create posts in the open containers */
 };
 enum {
@@ -1252,11 +1296,10 @@ enum {
   kCeilDelete = 8,
   kCeilHistory = 16,
   kCeilRevert = 32,
-  kCeilActivate = 64,
   kCeilCreate = 128
 };
 enum { kOpUpdate, kOpPublish, kOpDelete, kOpRead, kOpHistory, kOpRevert,
-  kOpActivate, kOpCreate };
+  kOpCreate };
 
 struct Person {
   std::string name;
@@ -1273,8 +1316,7 @@ struct Person {
  * must hold the same permission by its own roles (a module grant is not part
  * of its set); reading is of what readers see: published entities only. The
  * rest of the actions are not about what is published: a condition reads the
- * entity's active revision, and the first revision of an entity is active
- * from the start.
+ * entity's newest revision, which an unpublished entity has too.
  */
 bool Model(const Person & p, int op, char group, const std::string & actor,
     bool draft) {
@@ -1300,12 +1342,9 @@ bool Model(const Person & p, int op, char group, const std::string & actor,
       need = kCeilHistory;
       break;
     case kOpRevert:
-      mine = (p.roles & kRoleRevert) != 0;
+      mine = (p.roles & kRoleRevert) != 0 ||
+             ((p.roles & kRoleRevertA) != 0 && group == 'a');
       need = kCeilRevert;
-      break;
-    case kOpActivate:
-      mine = (p.roles & kRoleActivate) != 0 && group == 'a';
-      need = kCeilActivate;
       break;
     case kOpCreate:
       /* `group` stands for the container's kind here: a is open. */
@@ -1350,7 +1389,7 @@ TEST_F(Can, TheDecisionIsTheOperation) {
       GDEFCORE_ACCESS_ANY));
   Declare(Perm("Revert posts", GDEFCORE_ACTION_REVISIONS_REVERT,
       GDEFCORE_ACCESS_ANY));
-  Declare(Perm("Activate posts", GDEFCORE_ACTION_REVISIONS_ACTIVATE,
+  Declare(Perm("Revert group posts", GDEFCORE_ACTION_REVISIONS_REVERT,
       GDEFCORE_ACCESS_ANY));
   /* A test-only container: posts are created in it. */
   Declare(Perm("Create in containers", GDEFCORE_ACTION_CREATE,
@@ -1374,11 +1413,11 @@ TEST_F(Can, TheDecisionIsTheOperation) {
   Grant("r-hist", "View post history");
   Grant("r-rev", "Revert posts");
   ASSERT_EQ(GDEFCORE_OK,
-      GrantWhen("r-act", "Activate posts", kGroupA));
+      GrantWhen("r-act", "Revert group posts", kGroupA));
   ASSERT_EQ(GDEFCORE_OK,
       GrantWhen("r-create", "Create in containers", "(= field.kind \"open\")"));
   for (const char * label : {"Read posts", "Edit posts", "Publish posts",
-           "Delete posts", "View post history", "Revert posts", "Activate posts",
+           "Delete posts", "View post history", "Revert posts", "Revert group posts",
            "Create in containers"}) {
     Grant("r-all", label);
   }
@@ -1405,8 +1444,6 @@ TEST_F(Can, TheDecisionIsTheOperation) {
       GDEFCORE_ACTION_REVISIONS_READ, "id", 5, DoOperation);
   Route("post.revert", "/post/:id/revert", GDEFCORE_ROUTE_TAB, "post.view",
       GDEFCORE_ACTION_REVISIONS_REVERT, "id", 6, DoOperation);
-  Route("post.activate", "/post/:id/activate", GDEFCORE_ROUTE_TAB, "post.view",
-      GDEFCORE_ACTION_REVISIONS_ACTIVATE, "id", 7, DoOperation);
   Route("post.new", "/container/:id/new", GDEFCORE_ROUTE_ACTION, NULL,
       GDEFCORE_ACTION_CREATE, "id", 1, DoOperation);
   ASSERT_EQ(GDEFCORE_OK,
@@ -1433,7 +1470,7 @@ TEST_F(Can, TheDecisionIsTheOperation) {
   std::string ag_pub = Principal("r-pubonly");
   std::string ag_none = Principal();
   const unsigned all = kCeilRead | kCeilUpdate | kCeilPublish | kCeilDelete |
-                       kCeilHistory | kCeilRevert | kCeilActivate | kCeilCreate;
+                       kCeilHistory | kCeilRevert | kCeilCreate;
   const Person people[] = {
       {"anonymous", "", "", 0, 0},
       {"nobody", nobody, "", 0, 0},
@@ -1445,17 +1482,17 @@ TEST_F(Can, TheDecisionIsTheOperation) {
       {"mixed", mixed, "", kRoleGroupA | kRolePublish, 0},
       {"hist", hist, "", kRoleHistory, 0},
       {"rev", rev, "", kRoleRevert, 0},
-      {"act", act, "", kRoleActivate, 0},
+      {"act", act, "", kRoleRevertA, 0},
       {"creator", creator, "", kRoleCreate, 0},
       {"ga/all", ga, ag_all, kRoleGroupA, all},
       {"ga/none", ga, ag_none, kRoleGroupA, 0},
       {"mixed/pub", mixed, ag_pub, kRoleGroupA | kRolePublish, kCeilPublish},
       {"author/all", author, ag_all, kRoleOwn, all},
       {"hist/all", hist, ag_all, kRoleHistory, all},
-      {"act/pub", act, ag_pub, kRoleActivate, kCeilPublish},
+      {"act/pub", act, ag_pub, kRoleRevertA, kCeilPublish},
       {"creator/all", creator, ag_all, kRoleCreate, all},
       {"nobody/all", nobody, ag_all, 0, all},
-      {"act/all", act, ag_all, kRoleActivate, all},
+      {"act/all", act, ag_all, kRoleRevertA, all},
       {"creator+hist", both, "", kRoleCreate | kRoleHistory, 0},
   };
   const char * groups[] = {"a", "b", "c"};
@@ -1500,8 +1537,14 @@ TEST_F(Can, TheDecisionIsTheOperation) {
           const std::string actor = owner == 0 ? who.id : owner == 1 ? author : "";
           std::string label = who.name + "/" + group + "/" + std::to_string(owner) +
                               "/" + (draft ? "draft" : "published");
-          auto Make = [&]() {
-            std::string id = draft ? Draft(actor, "t", group) : Save(actor, "t", group);
+          /* Two revisions, so that a revert to the first is a change; one
+           * for the delete, which clears by reverting the first. */
+          auto Make = [&](bool two) {
+            std::string id = draft ? Unpublished(actor, "t", group)
+                                   : Save(actor, "t", group);
+            if (two) {
+              Resave(id, "t2");
+            }
             return id;
           };
           struct Op {
@@ -1513,33 +1556,34 @@ TEST_F(Can, TheDecisionIsTheOperation) {
             bool own_entity;
           };
           /* The order matters and is part of the design: what a decision
-           * reads (the group, the creator, the active revision) is never
-           * changed by an earlier operation, and a read comes before the
-           * publish that would change what readers see. A delete would leave
-           * nothing to act on, so it has an entity of its own. */
+           * reads (the group, the creator, the newest revision's group) is
+           * never changed by an earlier operation, and a read comes before
+           * the publish that would change what readers see. The edit writes
+           * a draft, which the publish applies before the revert moves the
+           * head (a draft is applied only on the revision it was made from).
+           * A delete would leave nothing to act on, so it has an entity of
+           * its own. */
           const Op ops[] = {
               {kOpRead, "read", "post.read", "/read", false, false},
               {kOpHistory, GDEFCORE_ACTION_REVISIONS_READ, "post.history",
                   "/history", false, false},
               {kOpUpdate, "update", "post.edit", "/edit", true, false},
-              {kOpActivate, GDEFCORE_ACTION_REVISIONS_ACTIVATE, "post.activate",
-                  "/activate", true, false},
+              {kOpPublish, "publish", "post.publish", "/publish", true, false},
               {kOpRevert, GDEFCORE_ACTION_REVISIONS_REVERT, "post.revert",
                   "/revert", true, false},
-              {kOpPublish, "publish", "post.publish", "/publish", true, false},
               {kOpDelete, "delete", "post.delete", "/delete", true, true},
           };
-          const std::string shared = Make();
+          const std::string shared = Make(true);
+          bool drafted = false;
           /* the menu: the tabs of the page, as dispatch serves them */
           {
             std::string tabs = "tabs:";
             const char * names[] = {"post.read", "post.edit", "post.publish",
-                "post.delete", "post.history", "post.revert", "post.activate"};
+                "post.delete", "post.history", "post.revert"};
             const char * actions[] = {"read", "update", "publish", "delete",
-                GDEFCORE_ACTION_REVISIONS_READ, GDEFCORE_ACTION_REVISIONS_REVERT,
-                GDEFCORE_ACTION_REVISIONS_ACTIVATE};
+                GDEFCORE_ACTION_REVISIONS_READ, GDEFCORE_ACTION_REVISIONS_REVERT};
             bool any = false;
-            for (size_t k = 0; k < 7; k++) {
+            for (size_t k = 0; k < 6; k++) {
               if (Yes(Req(who.id, who.acting), actions[k], shared)) {
                 tabs += std::string(names[k]) + ",";
                 any = true;
@@ -1551,13 +1595,20 @@ TEST_F(Can, TheDecisionIsTheOperation) {
             checks++;
           }
           for (const Op & o : ops) {
-            std::string id = o.own_entity ? Make() : shared;
+            std::string id = o.own_entity ? Make(false) : shared;
             bool want = Yes(Req(who.id, who.acting), o.action, id);
             Done got = Walk(who, "/post/" + id + o.tail, o.machine, o.writes ? id : "");
             EXPECT_EQ(want, got.served) << o.action << " path " << label;
             EXPECT_EQ(want, got.ok) << o.action << " operation " << label;
             if (o.writes) {
-              EXPECT_EQ(want, got.moved) << o.action << " changed the entity " << label;
+              /* A publish of a published post with no draft has nothing to
+               * write, so it moves nothing; every other allowed write moves
+               * the entity. */
+              bool moves = want && (o.op != kOpPublish || draft || drafted);
+              EXPECT_EQ(moves, got.moved) << o.action << " changed the entity " << label;
+            }
+            if (o.op == kOpUpdate) {
+              drafted = got.ok;
             }
             EXPECT_EQ(Model(who, o.op, group[0], actor, draft != 0), want)
                 << o.action << " " << label;

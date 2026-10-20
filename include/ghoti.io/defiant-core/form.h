@@ -25,8 +25,8 @@
  *
  * One subsystem. A form is a tree of field names, flags, constraints and
  * values. It is not HTML. The token is AES-256-GCM under the tenant
- * keyring's `form` purpose. A draft save leaves the published projection
- * alone. An alias stays hidden until publish.
+ * keyring's `form` purpose. A submit writes a draft and leaves what readers
+ * see alone. An alias stays hidden until publish.
  *
  * A personal field (AD-19) is never stored as the caller's text. The plain
  * route, gdefcore_form_sign() and gdefcore_form_submit(), refuses a value for
@@ -98,8 +98,8 @@ GDEFCORE_API GDEFCORE_Result gdefcore_form_field(const GDEFCORE_Form * form,
 /**
  * @brief Build the tree for @p type_name.
  *
- * Current values come from the head revision when it has a projection,
- * otherwise from the active revision, published or not. @p id NULL builds a tree with no values. @p out is not
+ * Current values come from the entity's draft when it has one, otherwise
+ * from its newest revision, published or not. @p id NULL builds a tree with no values. @p out is not
  * written on failure.
  */
 GDEFCORE_API GDEFCORE_Result gdefcore_form_tree(GDEFCORE_Catalog * catalog,
@@ -172,12 +172,16 @@ GDEFCORE_API GDEFCORE_Result gdefcore_form_resign(GDEFCORE_Catalog * catalog,
     size_t * out_token_len);
 
 /**
- * @brief Submit @p token. A draft is appended. The published row is not.
+ * @brief Submit @p token. The values become the entity's draft (a draft is
+ * never a revision, and readers do not see it); what is published is not
+ * touched.
  *
  * A missing token, a bad tag, another session or another tenant writes
- * nothing. A second submit whose base revision is no longer current writes
- * nothing and sets @p out_conflict to 1 when it is not NULL. Other errors
- * set it to 0.
+ * nothing. The token's base is the entity's version when it was signed
+ * (gdefcore_entity_version(), which every write moves, a draft included): a
+ * submit once the entity has moved, a second submit of one token among them,
+ * writes nothing and sets @p out_conflict to 1 when it is not NULL. Other
+ * errors set it to 0.
  *
  * A token that holds a value for a personal field is
  * ::GDEFCORE_ERR_INVALID and writes nothing, whether or not the token has a
@@ -196,7 +200,7 @@ GDEFCORE_API GDEFCORE_Result gdefcore_form_submit(GDEFCORE_Catalog * catalog,
  * The question a signed-form path asks before it hands control to code (a
  * route, a button, a preview), answered by gdefcore_access_can() for **the
  * token's target**, which the token binds with the session, the principal
- * and the base revision, so a body cannot steer it. @p claimed is the entity
+ * and the base version, so a body cannot steer it. @p claimed is the entity
  * id the request itself names (a route capture, a hidden field), or NULL; if
  * it is not the token's target the answer is no, because such a request is
  * not about one entity. The condition is evaluated on the entity as it is
@@ -261,10 +265,14 @@ GDEFCORE_API GDEFCORE_Result gdefcore_form_submit_subject(
     size_t token_len, GDEFCORE_Subjects * subjects, int * out_conflict);
 
 /**
- * @brief Copy the draft onto the published projection and reveal the alias.
+ * @brief Apply the entity's draft as its next revision, set the published
+ * flag, and reveal the alias.
  *
- * A published path that is already taken gains a short random suffix.
- * An entity with no draft writes nothing.
+ * A published path that is already taken gains a short random suffix. The
+ * revision's author is whoever submitted the draft, and the entity's creator
+ * stays whoever made it. A draft made from a revision that
+ * is no longer the newest is a conflict and writes nothing. An entity that
+ * was never saved and has no draft is ::GDEFCORE_ERR_INVALID.
  */
 GDEFCORE_API GDEFCORE_Result gdefcore_form_publish(GDEFCORE_Catalog * catalog,
     const char * id, size_t id_len);
