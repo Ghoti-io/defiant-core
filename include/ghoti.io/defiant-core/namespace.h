@@ -245,6 +245,11 @@
 #define gdefcore_entity_revision_count                                         \
   GHOTIIO_DEFCORE(gdefcore_entity_revision_count)
 #define gdefcore_entity_save GHOTIIO_DEFCORE(gdefcore_entity_save)
+#define gdefcore_entity_schedule_publish                                       \
+  GHOTIIO_DEFCORE(gdefcore_entity_schedule_publish)
+#define gdefcore_entity_schedule_state                                         \
+  GHOTIIO_DEFCORE(gdefcore_entity_schedule_state)
+#define gdefcore_entity_unschedule GHOTIIO_DEFCORE(gdefcore_entity_unschedule)
 #define gdefcore_entity_save_draft GHOTIIO_DEFCORE(gdefcore_entity_save_draft)
 #define gdefcore_entity_type GHOTIIO_DEFCORE(gdefcore_entity_type)
 #define gdefcore_entity_values GHOTIIO_DEFCORE(gdefcore_entity_values)
@@ -402,6 +407,9 @@
 #define gdefcore_sched_create GHOTIIO_DEFCORE(gdefcore_sched_create)
 #define gdefcore_sched_destroy GHOTIIO_DEFCORE(gdefcore_sched_destroy)
 #define gdefcore_sched_offload GHOTIIO_DEFCORE(gdefcore_sched_offload)
+#define gdefcore_schedule_apply GHOTIIO_DEFCORE(gdefcore_schedule_apply)
+#define gdefcore_schedule_due GHOTIIO_DEFCORE(gdefcore_schedule_due)
+#define gdefcore_schedule_run GHOTIIO_DEFCORE(gdefcore_schedule_run)
 #define gdefcore_sched_run GHOTIIO_DEFCORE(gdefcore_sched_run)
 #define gdefcore_sched_spawn GHOTIIO_DEFCORE(gdefcore_sched_spawn)
 #define gdefcore_sched_watchdog_count                                           \

@@ -473,6 +473,106 @@ GDEFCORE_API GDEFCORE_Result gdefcore_entity_save_draft(
 GDEFCORE_API GDEFCORE_Result gdefcore_entity_publish(
     GDEFCORE_Changeset * changeset, const char * id, size_t id_len);
 
+/* ---- scheduled publish (story S6c) --------------------------------------- */
+
+/** gdefcore_entity_schedule_state(): the entity has no schedule. */
+#define GDEFCORE_SCHEDULE_NONE 0
+/** It is waiting for its time. */
+#define GDEFCORE_SCHEDULE_PENDING 1
+/** It was applied: the entity was published, its draft applied if it had one. */
+#define GDEFCORE_SCHEDULE_DONE 2
+/** It was refused as a conflict: the draft was made from a revision that was
+ * no longer the newest when its time came (CAP-S4). The draft is kept. */
+#define GDEFCORE_SCHEDULE_CONFLICT 3
+/** It was refused: there was nothing to publish, the draft did not fit its
+ * type as the type was then, or it held a new value of an erased subject.
+ * The draft is kept. */
+#define GDEFCORE_SCHEDULE_REFUSED 4
+/** gdefcore_schedule_apply(): the job was not there (applied already,
+ * cancelled, or moved to another time), and nothing was written. */
+#define GDEFCORE_SCHEDULE_GONE 5
+/** gdefcore_schedule_apply(): the job's time has not come, and nothing was
+ * written. */
+#define GDEFCORE_SCHEDULE_EARLY 6
+
+/** A due job (gdefcore_schedule_due()). */
+typedef struct GDEFCORE_ScheduleJob {
+  char id[GDEFCORE_PUBLIC_ID_LEN + 1]; ///< The entity, canonical, NUL-terminated.
+  int64_t at_ms;                       ///< Its time, in milliseconds since 1970 UTC.
+} GDEFCORE_ScheduleJob;
+
+/**
+ * @brief Publish entity @p id at time @p at_ms (AD-14: "scheduled publish
+ * applies a draft at a time"), as @p actor.
+ *
+ * A job row in the tenant's store (AD-33), written in a port write of its
+ * own; an entity has one schedule, which this replaces. When the job is
+ * applied (gdefcore_schedule_apply(), gdefcore_schedule_run()), at or after
+ * its time and once, the entity is published as by gdefcore_entity_publish()
+ * staged by @p actor (empty or NULL: the system): the draft it has then, if
+ * any, is validated against its type and applied on the revision it was made
+ * from, a moved head is a conflict, and the published flag is set. Clearing
+ * the entity cancels its schedule. The time is the caller's: a civil time and
+ * zone (AD-33) are converted before this.
+ *
+ * @return ::GDEFCORE_OK, ::GDEFCORE_ERR_INVALID (an id that is not a known
+ *   entity or reservation, an actor that is not a public id, a negative time),
+ *   or the store's error.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_entity_schedule_publish(
+    GDEFCORE_Catalog * catalog, const char * actor, size_t actor_len,
+    const char * id, size_t id_len, int64_t at_ms);
+
+/** @brief Cancel the entity's schedule, and forget what became of an ended
+ * one. An entity with none is ::GDEFCORE_OK. */
+GDEFCORE_API GDEFCORE_Result gdefcore_entity_unschedule(
+    GDEFCORE_Catalog * catalog, const char * id, size_t id_len);
+
+/**
+ * @brief The entity's schedule: ::GDEFCORE_SCHEDULE_NONE, or
+ * ::GDEFCORE_SCHEDULE_PENDING, _DONE, _CONFLICT or _REFUSED, and its time.
+ * @p out_at_ms may be NULL.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_entity_schedule_state(
+    GDEFCORE_Catalog * catalog, const char * id, size_t id_len, int * out_state,
+    int64_t * out_at_ms);
+
+/**
+ * @brief The jobs due at @p now_ms, earliest first: at most @p cap of them.
+ *
+ * A read. What it lists may be applied by another runner before this one
+ * reaches it; gdefcore_schedule_apply() says so.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_schedule_due(GDEFCORE_Catalog * catalog,
+    int64_t now_ms, GDEFCORE_ScheduleJob * out_jobs, size_t cap,
+    size_t * out_count);
+
+/**
+ * @brief Apply the job of entity @p id at @p at_ms, if it is still there and
+ * due at @p now_ms.
+ *
+ * The publish is one changeset, applied in one port write that reads the job
+ * row again and deletes it: a job is applied once, whichever runner gets to
+ * it first, and never before its time. @p now_ms is also the time the
+ * revision and the state change record. @p out_outcome receives
+ * ::GDEFCORE_SCHEDULE_DONE, _CONFLICT or _REFUSED (the job ended; the entity's
+ * schedule says the same), _GONE or _EARLY (nothing was written), or _PENDING
+ * when the write kept losing to other writers (::GDEFCORE_ERR_BUSY is returned
+ * and the job stays).
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_schedule_apply(
+    GDEFCORE_Catalog * catalog, const char * id, size_t id_len, int64_t at_ms,
+    int64_t now_ms, int * out_outcome);
+
+/**
+ * @brief The runner: apply every job due at @p now_ms, at most @p max.
+ *
+ * @p out_applied and @p out_ended (either may be NULL) receive how many were
+ * applied and how many ended refused or in conflict.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_schedule_run(GDEFCORE_Catalog * catalog,
+    int64_t now_ms, size_t max, size_t * out_applied, size_t * out_ended);
+
 /**
  * @brief Stage clearing the published flag.
  *

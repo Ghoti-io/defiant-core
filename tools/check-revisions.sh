@@ -26,6 +26,15 @@
 #   noop-save-writes-revision   Revisions.ANoOpSaveWritesNoRevisionAndSaysSo
 #   record-outside-its-write    EntityRollback.ATypeRecordIsWrittenInItsChangesetsWrite
 #
+# and story S6c's scheduled publish (a draft applied at a time T, once):
+#
+#   schedule-applies-early      Schedule.ADraftScheduledForTIsAppliedAtOrAfterTOnce
+#   schedule-applies-twice      Schedule.ADraftScheduledForTIsAppliedAtOrAfterTOnce
+#   schedule-job-not-reread     Schedule.AJobGoneSinceItWasListedIsNotApplied
+#   schedule-conflict-retried   Schedule.AScheduledPublishOnAMovedHeadIsAConflict
+#   draft-fits-skipped          Schedule.AScheduledDraftIsValidatedWhenItIsApplied
+#   schedule-survives-clear     Schedule.ClearingAnEntityCancelsItsSchedule
+#
 #   unpublish-deletes           Revisions.UnpublishClearsTheFlagAndNothingElse
 #   revert-leaves-deleted       Revisions.ClearUnpublishesDeletesAndDropsTheDraft
 #   revert-publishes            Revisions.RevertToCopiesATargetAndKeepsTheFlag
@@ -74,7 +83,7 @@ set -u
 . "$(dirname "$0")/plant-lib.sh"
 plant_setup "$@"
 
-plant_control testRevisions 'Revisions.*'
+plant_control testRevisions 'Revisions.*:Schedule.*'
 plant_control testForm 'Form.TreeFallsBackToTheCurrentRevision'
 plant_control testActions 'ActionVocabulary.*:ActionRating.*:Actions.*'
 plant_control testEntity 'EntityRollback.*'
@@ -425,5 +434,59 @@ plant condition-reads-draft src/condition/condition_eval.c testActions \
   'Actions.RevisionViewAsksTheCurrentStateNotTheViewedRevision' \
   '  rc = gdefcore_entity_values(ctx->catalog, NULL, GDEFCORE_VIEW_ACTIVE,' \
   '  rc = gdefcore_entity_values(ctx->catalog, NULL, GDEFCORE_VIEW_DRAFT,'
+
+# Scheduled publish (story S6c) ------------------------------------------------
+
+SCH=src/entity/schedule.c
+
+# A job applied before its time: the apply does not ask whether it is due.
+plant schedule-applies-early $SCH testRevisions \
+  'Schedule.ADraftScheduledForTIsAppliedAtOrAfterTOnce' \
+  '  if (at > cs->job_now) {
+    cs->job_outcome = GDEFCORE_SCHEDULE_EARLY;' \
+  '  if (0 && at > cs->job_now) {
+    cs->job_outcome = GDEFCORE_SCHEDULE_EARLY;'
+
+# A job applied twice: the publish leaves its job row, so the next run
+# publishes whatever draft the entity has by then.
+plant schedule-applies-twice $SCH testRevisions \
+  'Schedule.ADraftScheduledForTIsAppliedAtOrAfterTOnce' \
+  '  rc = map_stor(gdefstor_record_delete(write, kNs, sizeof kNs - 1,
+      cs->job_key.p, cs->job_key.n, NULL));
+  if (rc == GDEFCORE_OK) {
+    rc = id_put(write, canon, GDEFCORE_SCHEDULE_DONE, at);' \
+  '  rc = GDEFCORE_OK;
+  if (rc == GDEFCORE_OK) {
+    rc = id_put(write, canon, GDEFCORE_SCHEDULE_DONE, at);'
+
+# A job applied from what a runner listed, without reading the row again in
+# the publish'"'"'s write: one cancelled, moved or applied since is applied.
+plant schedule-job-not-reread $SCH testRevisions \
+  'Schedule.AJobGoneSinceItWasListedIsNotApplied' \
+  '  if (!found) {
+    cs->job_outcome = GDEFCORE_SCHEDULE_GONE;' \
+  '  if (0 && !found) {
+    cs->job_outcome = GDEFCORE_SCHEDULE_GONE;'
+
+# A moved head taken for a race with another writer: the job is tried again
+# and stays pending instead of ending as the conflict it is.
+plant schedule-conflict-retried $SCH testRevisions \
+  'Schedule.AScheduledPublishOnAMovedHeadIsAConflict' \
+  '    if (look.has_draft && look.exists && look.draft_base != look.revision) {' \
+  '    if (0) {'
+
+# A draft applied as it was written, not validated against its type as the
+# type is when it is applied.
+plant draft-fits-skipped $ENT testRevisions \
+  'Schedule.AScheduledDraftIsValidatedWhenItIsApplied' \
+  '        rc = draft_fits(cs, op);' \
+  '        rc = GDEFCORE_OK;'
+
+# A clear that leaves the entity's schedule: the publish at T brings the
+# cleared entity back.
+plant schedule-survives-clear $ENT testRevisions \
+  'Schedule.ClearingAnEntityCancelsItsSchedule' \
+  '    rc = gdefcore_ent_job_drop(cat, write, op->id.p);' \
+  '    rc = GDEFCORE_OK;'
 
 plant_finish

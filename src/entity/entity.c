@@ -1124,6 +1124,9 @@ GDEFCORE_Result gdefcore_epoch(GDEFCORE_Catalog * catalog, uint64_t * out_epoch)
 
 /* The port's clock for a write: the request's, else the wall's. */
 static int64_t now_ms(const GDEFCORE_Changeset * cs) {
+  if (cs != NULL && cs->job_key.p != NULL) {
+    return cs->job_now; /* a scheduled publish runs at its runner's now */
+  }
   if (cs != NULL && cs->request != NULL) {
     return gdefcore_request_time(cs->request) * 1000;
   }
@@ -1447,6 +1450,7 @@ void gdefcore_changeset_destroy(GDEFCORE_Changeset * changeset) {
   gdefcore_access_clear_staged(changeset);
   changeset_free_ops(changeset);
   notes_free(changeset);
+  text_clear(changeset->catalog->alloc, &changeset->job_key);
   gcu_allocator_free(changeset->catalog->alloc, changeset);
 }
 
@@ -3228,6 +3232,11 @@ static GDEFCORE_Result apply_op(GDEFCORE_Changeset * cs, GDEFSTOR_Write * write,
     }
     break;
   case GDEFCORE_OP_CLEAR:
+    /* A cleared entity is not published at a later time either. */
+    rc = gdefcore_ent_job_drop(cat, write, op->id.p);
+    if (rc != GDEFCORE_OK) {
+      return rc;
+    }
     if (look.exists) {
       rc = set_state(write, op, cs, 0, 1, when, &changed);
       if (rc == GDEFCORE_OK && look.has_draft) {
@@ -3366,6 +3375,19 @@ GDEFCORE_Result gdefcore_changeset_apply(GDEFCORE_Changeset * changeset,
   if (rc == GDEFCORE_OK && epoch != changeset->epoch) {
     conflict = 1;
   }
+  if (rc == GDEFCORE_OK && !conflict && changeset->job_key.p != NULL) {
+    /* A scheduled publish: its job row is read again inside the write, so
+     * that it is applied once, and not before its time (story S6c). */
+    int claimed = 0;
+    rc = gdefcore_ent_job_claim(changeset, &claimed);
+    if (rc == GDEFCORE_OK && !claimed) {
+      gdefstor_write_abort(write);
+      if (changeset->catalog->host != NULL) {
+        gdefcore_module_clear_pending(changeset->catalog->host);
+      }
+      return GDEFCORE_OK;
+    }
+  }
   when = now_ms(changeset);
   for (i = 0; rc == GDEFCORE_OK && !conflict && i < changeset->nops; i++) {
     GDEFCORE_Op * op = &changeset->ops[i];
@@ -3396,6 +3418,9 @@ GDEFCORE_Result gdefcore_changeset_apply(GDEFCORE_Changeset * changeset,
     rc = gdefcore_module_write_enables(changeset->catalog->host,
         changeset->catalog->tenant, changeset->catalog->tenant_len, write,
         changeset);
+  }
+  if (rc == GDEFCORE_OK && !conflict && changeset->job_key.p != NULL) {
+    rc = gdefcore_ent_job_done(changeset, write);
   }
   if (rc == GDEFCORE_OK && !conflict) {
     /* The config epoch moves in the write that applies the changeset

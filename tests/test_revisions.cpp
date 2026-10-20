@@ -925,6 +925,192 @@ TEST_F(Revisions, TheTouchedListNamesTheNewOperations) {
   }
 }
 
+/* ---- scheduled publish (story S6c) ------------------------------------- */
+
+class Schedule : public Revisions {
+ protected:
+  int State(const std::string & id, int64_t * at = NULL) {
+    int state = -1;
+    EXPECT_EQ(GDEFCORE_OK, gdefcore_entity_schedule_state(catalog_, id.c_str(),
+        id.size(), &state, at));
+    return state;
+  }
+
+  size_t Run(int64_t now, size_t * ended = NULL) {
+    size_t applied = 99;
+    EXPECT_EQ(GDEFCORE_OK,
+        gdefcore_schedule_run(catalog_, now, 100, &applied, ended));
+    return applied;
+  }
+
+  int Apply(const std::string & id, int64_t at, int64_t now) {
+    int outcome = -1;
+    EXPECT_EQ(GDEFCORE_OK, gdefcore_schedule_apply(catalog_, id.c_str(),
+        id.size(), at, now, &outcome));
+    return outcome;
+  }
+
+  size_t Due(int64_t now) {
+    GDEFCORE_ScheduleJob jobs[8];
+    size_t n = 99;
+    EXPECT_EQ(GDEFCORE_OK, gdefcore_schedule_due(catalog_, now, jobs, 8, &n));
+    return n;
+  }
+
+  void At(const std::string & actor, const std::string & id, int64_t at) {
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_entity_schedule_publish(catalog_,
+        actor.empty() ? NULL : actor.c_str(), actor.size(), id.c_str(),
+        id.size(), at));
+  }
+};
+
+/* A draft scheduled for T is applied by the runner at or after T, once: not
+ * before T, not again, and a draft written after it ran is not published by
+ * the job that already ran. The revision is the draft's author's. */
+TEST_F(Schedule, ADraftScheduledForTIsAppliedAtOrAfterTOnce) {
+  const int64_t kT = 1000000;
+  std::string id = Create();
+  Save(alice_, id, "first");
+  Draft(bob_, id, "second");
+  At(carol_, id, kT);
+  int64_t at = 0;
+  EXPECT_EQ(GDEFCORE_SCHEDULE_PENDING, State(id, &at));
+  EXPECT_EQ(kT, at);
+  /* Before T: the runner takes nothing, and an apply is refused as early. */
+  EXPECT_EQ(0u, Due(kT - 1));
+  EXPECT_EQ(0u, Run(kT - 1));
+  EXPECT_EQ(GDEFCORE_SCHEDULE_EARLY, Apply(id, kT, kT - 1));
+  EXPECT_EQ("first", Title(GDEFCORE_VIEW_PUBLISHED, id));
+  EXPECT_EQ(1u, Count(id));
+  EXPECT_EQ("second", Title(GDEFCORE_VIEW_DRAFT, id));
+  /* At T. */
+  EXPECT_EQ(1u, Due(kT));
+  EXPECT_EQ(1u, Run(kT));
+  EXPECT_EQ("second", Title(GDEFCORE_VIEW_PUBLISHED, id));
+  EXPECT_EQ(2u, Count(id));
+  EXPECT_EQ(bob_, Actor(id));
+  EXPECT_EQ(GDEFCORE_SCHEDULE_DONE, State(id));
+  /* Once: the job is gone, and the next draft waits for its own publish. */
+  EXPECT_EQ(0u, Due(kT + 5000));
+  EXPECT_EQ(0u, Run(kT + 5000));
+  EXPECT_EQ(GDEFCORE_SCHEDULE_GONE, Apply(id, kT, kT + 5000));
+  Draft(bob_, id, "third");
+  EXPECT_EQ(0u, Run(kT + 9000));
+  EXPECT_EQ(GDEFCORE_SCHEDULE_GONE, Apply(id, kT, kT + 9000));
+  EXPECT_EQ(2u, Count(id));
+  EXPECT_EQ("second", Title(GDEFCORE_VIEW_PUBLISHED, id));
+  EXPECT_EQ("third", Title(GDEFCORE_VIEW_DRAFT, id));
+  /* The control: a job at a later time publishes "third". */
+  At(carol_, id, kT + 10000);
+  EXPECT_EQ(1u, Run(kT + 10000));
+  EXPECT_EQ("third", Title(GDEFCORE_VIEW_PUBLISHED, id));
+}
+
+/* A job listed by one runner and applied, or cancelled, before another runner
+ * gets to it: the second finds it gone inside its own write and writes
+ * nothing. */
+TEST_F(Schedule, AJobGoneSinceItWasListedIsNotApplied) {
+  const int64_t kT = 5000;
+  std::string id = Create();
+  Save(alice_, id, "first");
+  Draft(bob_, id, "second");
+  At(carol_, id, kT);
+  GDEFCORE_ScheduleJob jobs[4];
+  size_t n = 0;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_schedule_due(catalog_, kT, jobs, 4, &n));
+  ASSERT_EQ(1u, n);
+  EXPECT_EQ(id, std::string(jobs[0].id));
+  EXPECT_EQ(kT, jobs[0].at_ms);
+  /* Cancelled after it was listed. */
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_entity_unschedule(catalog_, id.c_str(), id.size()));
+  EXPECT_EQ(GDEFCORE_SCHEDULE_NONE, State(id));
+  EXPECT_EQ(GDEFCORE_SCHEDULE_GONE, Apply(id, jobs[0].at_ms, kT));
+  EXPECT_EQ(1u, Count(id));
+  EXPECT_EQ("first", Title(GDEFCORE_VIEW_PUBLISHED, id));
+  /* Moved to another time after it was listed: the old listing is gone, the
+   * new time is the one that applies. */
+  At(carol_, id, kT);
+  At(carol_, id, kT + 100);
+  EXPECT_EQ(GDEFCORE_SCHEDULE_GONE, Apply(id, kT, kT + 200));
+  EXPECT_EQ(1u, Count(id));
+  EXPECT_EQ(GDEFCORE_SCHEDULE_DONE, Apply(id, kT + 100, kT + 200));
+  EXPECT_EQ(2u, Count(id));
+}
+
+/* A moved head is a conflict when the job runs: the draft was made from a
+ * revision a revert has since superseded. Nothing is written, the draft is
+ * kept, the job ends and says so. */
+TEST_F(Schedule, AScheduledPublishOnAMovedHeadIsAConflict) {
+  const int64_t kT = 7000;
+  std::string id = Create();
+  Save(alice_, id, "first");
+  Save(alice_, id, "second");
+  Draft(bob_, id, "third");
+  ASSERT_EQ(GDEFCORE_OK, RevertTo(alice_, id, 1));
+  ASSERT_EQ(3u, Count(id));
+  At(carol_, id, kT);
+  size_t ended = 0;
+  EXPECT_EQ(0u, Run(kT, &ended));
+  EXPECT_EQ(1u, ended);
+  EXPECT_EQ(GDEFCORE_SCHEDULE_CONFLICT, State(id));
+  EXPECT_EQ(3u, Count(id));
+  EXPECT_EQ("first", Title(GDEFCORE_VIEW_PUBLISHED, id));
+  EXPECT_EQ("third", Title(GDEFCORE_VIEW_DRAFT, id));
+  EXPECT_EQ(0u, Due(kT + 1000));
+}
+
+/* The draft is validated against its type as the type is when the job runs:
+ * a field made required since is refused, the draft kept, the job ended. */
+TEST_F(Schedule, AScheduledDraftIsValidatedWhenItIsApplied) {
+  const int64_t kT = 9000;
+  std::string id = Create();
+  Save(alice_, id, "first");
+  Draft(bob_, id, "second");
+  At(carol_, id, kT);
+  GDEFCORE_Field fields[3];
+  memset(fields, 0, sizeof fields);
+  fields[0].size = sizeof fields[0];
+  fields[0].name = "title";
+  fields[0].name_len = 5;
+  fields[0].required = 1;
+  fields[1].size = sizeof fields[1];
+  fields[1].name = "tags";
+  fields[1].name_len = 4;
+  fields[1].many = 1;
+  fields[2].size = sizeof fields[2];
+  fields[2].name = "body";
+  fields[2].name_len = 4;
+  fields[2].required = 1;
+  {
+    GDEFCORE_Changeset * cs = Prepare(alice_);
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_define(cs, "site.note", 9,
+        GDEFCORE_TYPE_CONTENT, fields, 3));
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, "site.note", 9));
+    gdefcore_changeset_destroy(cs);
+  }
+  size_t ended = 0;
+  EXPECT_EQ(0u, Run(kT, &ended));
+  EXPECT_EQ(1u, ended);
+  EXPECT_EQ(GDEFCORE_SCHEDULE_REFUSED, State(id));
+  EXPECT_EQ(1u, Count(id));
+  EXPECT_EQ("first", Title(GDEFCORE_VIEW_PUBLISHED, id));
+  EXPECT_EQ("second", Title(GDEFCORE_VIEW_DRAFT, id));
+}
+
+/* Clearing an entity cancels its schedule: a cleared entity is not published
+ * later. */
+TEST_F(Schedule, ClearingAnEntityCancelsItsSchedule) {
+  const int64_t kT = 11000;
+  std::string id = Create();
+  Save(alice_, id, "first");
+  At(carol_, id, kT);
+  Clear(id);
+  EXPECT_EQ(GDEFCORE_SCHEDULE_NONE, State(id));
+  EXPECT_EQ(0u, Run(kT));
+  EXPECT_EQ("<none>", Title(GDEFCORE_VIEW_PUBLISHED, id));
+}
+
 int main(int argc, char ** argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();

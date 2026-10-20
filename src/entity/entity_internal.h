@@ -144,6 +144,11 @@ struct GDEFCORE_Changeset {
   GDEFCORE_SealNote * notes;
   size_t nnotes;
   struct GDEFCORE_Subjects * subjects; /* over the catalog's, when set */
+  /* A scheduled publish (schedule.c): its job row's key, the runner's now,
+   * which is also the write's clock, and what the apply found. */
+  GDEFCORE_Text job_key;
+  int64_t job_now;
+  int job_outcome;
 };
 
 /* ---- store.c ------------------------------------------------------------- */
@@ -266,6 +271,26 @@ GDEFCORE_Result gdefcore_ent_value_subject(GDEFCORE_Catalog * cat,
     const char * canon, const char * lang, size_t lang_len, const char * field,
     size_t field_len, const char * text, size_t len,
     char out[GDEFCORE_PUBLIC_ID_LEN + 1], int * out_found);
+
+/* ---- schedule.c ---------------------------------------------------------- */
+
+/* The record namespaces of scheduled publishes (story S6c): the queue, keyed
+ * `<20-digit time>.<public id>` and holding the scheduling actor, and each
+ * entity's one schedule, keyed by public id, holding `<state> <time>`. */
+#define GDEFCORE_ENT_SCHED_NS "core.sched"
+#define GDEFCORE_ENT_SCHED_ID_NS "core.sched.id"
+
+/* Inside a scheduled publish's write: whether its job row is still there and
+ * due. *out_claimed 0 leaves the outcome in the changeset. */
+GDEFCORE_Result gdefcore_ent_job_claim(GDEFCORE_Changeset * cs,
+    int * out_claimed);
+/* In the same write as the publish: the job row goes and the entity's
+ * schedule says it was applied. */
+GDEFCORE_Result gdefcore_ent_job_done(GDEFCORE_Changeset * cs,
+    GDEFSTOR_Write * write);
+/* In the write of a clear: the entity's pending schedule goes with it. */
+GDEFCORE_Result gdefcore_ent_job_drop(GDEFCORE_Catalog * cat,
+    GDEFSTOR_Write * write, const char * canon);
 
 /* Revision @p index (oldest first) and its author, or the count. */
 GDEFCORE_Result gdefcore_ent_history(GDEFCORE_Catalog * cat,

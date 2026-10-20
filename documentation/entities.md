@@ -95,6 +95,30 @@ personal). There is no hard delete: erasure is by key (AD-19), not by
 deleting records, and a cleared entity is brought back by a revert to one of
 its revisions or by a save.
 
+### Scheduled publish
+
+`gdefcore_entity_schedule_publish(catalog, actor, id, T)` publishes an
+entity at time `T` (AD-14: "scheduled publish applies a draft at a time";
+story S6c). It is a job row in the tenant's store (AD-33), a port record
+`core.sched/<20-digit T>.<public id>` holding who scheduled it, beside the
+entity's one schedule, `core.sched.id/<public id>` (`pending`, `done`,
+`conflict` or `refused`, and `T`), which a new schedule replaces and
+`gdefcore_entity_unschedule` cancels. A runner calls `gdefcore_schedule_run`
+(or `gdefcore_schedule_due` and `gdefcore_schedule_apply` one job at a time)
+with the time it is: each due job is a changeset that publishes the entity as
+its scheduler, and that changeset's write reads the job row again and deletes
+it, so a job is applied once, whichever runner reaches it first, and never
+before `T`. The publish is an ordinary one: the draft the entity has then is
+validated against its type as it is then and applied on the revision it was
+made from, as its author's revision; a moved head ends the job as a conflict
+and a refused draft ends it as refused, each keeping the draft and leaving no
+revision. With no draft the job only sets the published flag. Clearing the
+entity cancels its schedule, so a cleared entity is not brought back. The
+time is milliseconds since 1970 UTC; a civil time and zone are the caller's
+to convert. A job does not yet check its scheduler's permission again when it
+runs (AD-33 asks it of jobs, which are out of milestone 1): the path that
+schedules asks it.
+
 `gdefcore_type_define` writes a type without moving the config epoch, so a
 content save can still be the epoch's first step. A changeset that defines
 or changes a type is high risk. Apply of a high-risk changeset requires the
