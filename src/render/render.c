@@ -42,6 +42,7 @@
 #include <ghoti.io/archive/stream.h>
 #include <ghoti.io/archive/writer.h>
 #include <ghoti.io/lang-tang/compile.h>
+#include <ghoti.io/lang-tang/description.h>
 #include <ghoti.io/lang-tang/execution.h>
 #include <ghoti.io/lang-tang/parse.h>
 #include <ghoti.io/lang-tang/value.h>
@@ -619,6 +620,10 @@ typedef struct {
   uint64_t scope_fuel;
   const TangBind * binds;
   size_t nbinds;
+  /* A described value bound to one name (story S6d: an entity, its groups
+   * and multiples as lists), or NULL. */
+  const char * value_name;
+  GLTANG_ValueDescription * value;
   GLTANG_NativeFn native;
   void * native_user;
   const char * native_name;
@@ -746,6 +751,17 @@ static GDEFCORE_Result build_library(TangJob * job, GLTANG_Library ** out_lib,
     if (gltang_library_add_string(lib, job->binds[i].name, text,
             job->binds[i].len, GLTANG_UNICODE_STRING_TYPE_HTML_ATTRIBUTE) !=
         GLTANG_OK) {
+      goto fail;
+    }
+  }
+  if (job->value != NULL && job->value_name != NULL) {
+    GDEFCORE_Contract_Var v;
+    /* Bound only where the contract declares it, as a text bind is. */
+    if (gdefcore_template_contract_var(c, job->value_name,
+            strlen(job->value_name), &v) == GDEFCORE_OK &&
+        v.contributed == NULL &&
+        gltang_library_add_value(lib, job->value_name, job->value) !=
+            GLTANG_OK) {
       goto fail;
     }
   }
@@ -968,10 +984,11 @@ static GDEFCORE_Result side_stack_run(TangJob * job) {
 #endif
 }
 
-static GDEFCORE_Result tang_run(GDEFCORE_Catalog * catalog,
+static GDEFCORE_Result tang_run_value(GDEFCORE_Catalog * catalog,
     GDEFCORE_Request * request, const GDEFCORE_Contract * contract,
     const char * source, size_t source_len, uint64_t scope_fuel,
-    const TangBind * binds, size_t nbinds, GLTANG_NativeFn native,
+    const TangBind * binds, size_t nbinds, const char * value_name,
+    GLTANG_ValueDescription * value, GLTANG_NativeFn native,
     void * native_user, const char * native_name, char ** out,
     size_t * out_len) {
   TangJob job;
@@ -979,6 +996,8 @@ static GDEFCORE_Result tang_run(GDEFCORE_Catalog * catalog,
       scope_fuel == 0) {
     return GDEFCORE_ERR_INVALID;
   }
+  job.value_name = value_name;
+  job.value = value;
   job.catalog = catalog;
   job.request = request;
   job.contract = contract;
@@ -994,6 +1013,17 @@ static GDEFCORE_Result tang_run(GDEFCORE_Catalog * catalog,
   job.out_len = out_len;
   job.rc = GDEFCORE_ERR_INVALID;
   return side_stack_run(&job);
+}
+
+static GDEFCORE_Result tang_run(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Request * request, const GDEFCORE_Contract * contract,
+    const char * source, size_t source_len, uint64_t scope_fuel,
+    const TangBind * binds, size_t nbinds, GLTANG_NativeFn native,
+    void * native_user, const char * native_name, char ** out,
+    size_t * out_len) {
+  return tang_run_value(catalog, request, contract, source, source_len,
+      scope_fuel, binds, nbinds, NULL, NULL, native, native_user, native_name,
+      out, out_len);
 }
 
 static GDEFCORE_Result access_copy(GDEFCORE_Catalog * catalog,
@@ -1619,6 +1649,299 @@ done:
   free(texts);
   free(binds);
   gdefcore_template_contract_close(contract);
+  return rc;
+}
+
+/* ---- an entity in the render context (story S6d) ------------------------ */
+
+/* Which paths of a type are personal: their sealed text is never rendered. */
+typedef struct Personal {
+  char (*paths)[GDEFCORE_FIELD_PATH_MAX + 1];
+  size_t n;
+} Personal;
+
+static GDEFCORE_Result personal_load(GDEFCORE_Catalog * catalog,
+    const char * type, size_t type_len, Personal * out) {
+  size_t n = 0;
+  size_t i;
+  GDEFCORE_Result rc;
+  memset(out, 0, sizeof *out);
+  rc = gdefcore_type_tree_field_count(catalog, type, type_len, &n);
+  if (rc != GDEFCORE_OK || n == 0) {
+    return rc;
+  }
+  out->paths = (char (*)[GDEFCORE_FIELD_PATH_MAX + 1])calloc(n,
+      sizeof *out->paths);
+  if (out->paths == NULL) {
+    return GDEFCORE_ERR_OOM;
+  }
+  for (i = 0; i < n; i++) {
+    GDEFCORE_FieldInfo f;
+    memset(&f, 0, sizeof f);
+    f.size = sizeof f;
+    rc = gdefcore_type_tree_field(catalog, type, type_len, i, &f);
+    if (rc != GDEFCORE_OK) {
+      free(out->paths);
+      memset(out, 0, sizeof *out);
+      return rc;
+    }
+    if (f.personal) {
+      memcpy(out->paths[out->n], f.path, f.path_len + 1);
+      out->n += 1;
+    }
+  }
+  return GDEFCORE_OK;
+}
+
+static int personal_at(const Personal * p, const char * path, size_t n) {
+  size_t i;
+  for (i = 0; i < p->n; i++) {
+    if (strlen(p->paths[i]) == n && memcmp(p->paths[i], path, n) == 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+typedef struct Kids {
+  size_t * head;
+  size_t * next;
+} Kids;
+
+/* The item @p item of @p tree as a map: each single field a string, each
+ * group and multiple field a list in item order, a group's items maps and a
+ * multiple field's its values. A personal value is left out. */
+static GLTANG_Result describe_item(GLTANG_ValueDescription * d,
+    const GDEFCORE_Tree * tree, const Kids * kids, const Personal * personal,
+    size_t item, GLTANG_ValueRef * out) {
+  GDEFCORE_TreeItem it;
+  GLTANG_ValueRef map;
+  GLTANG_Result rc;
+  size_t k;
+  size_t c;
+  memset(&it, 0, sizeof it);
+  it.size = sizeof it;
+  if (gdefcore_tree_item(tree, item, &it) != GDEFCORE_OK) {
+    return GLTANG_ERR_INVALID;
+  }
+  rc = gltang_value_map(d, &map);
+  for (k = 0; rc == GLTANG_OK && k < it.value_count; k++) {
+    const char * field = NULL;
+    size_t field_len = 0;
+    const char * text = NULL;
+    size_t len = 0;
+    char path[GDEFCORE_FIELD_PATH_MAX + 2];
+    size_t pn = it.path_len + (it.path_len > 0 ? 1 : 0);
+    GLTANG_ValueRef v;
+    if (gdefcore_tree_value(tree, item, k, &field, &field_len, &text, &len) !=
+            GDEFCORE_OK ||
+        field_len == 0 || pn + field_len > GDEFCORE_FIELD_PATH_MAX) {
+      continue;
+    }
+    if (it.path_len > 0) {
+      memcpy(path, it.path, it.path_len);
+      path[it.path_len] = '.';
+    }
+    memcpy(path + pn, field, field_len);
+    if (personal_at(personal, path, pn + field_len)) {
+      continue;
+    }
+    rc = gltang_value_string(d, text, len,
+        GLTANG_UNICODE_STRING_TYPE_HTML_ATTRIBUTE, &v);
+    if (rc == GLTANG_OK) {
+      rc = gltang_value_map_set(d, map, field, field_len,
+          GLTANG_UNICODE_STRING_TYPE_HTML_ATTRIBUTE, v);
+    }
+  }
+  /* Each field's items as one list, in their order. */
+  for (c = kids->head[item]; rc == GLTANG_OK && c != SIZE_MAX;
+       c = kids->next[c]) {
+    GDEFCORE_TreeItem ci;
+    GLTANG_ValueRef list;
+    size_t e;
+    size_t prior;
+    int seen = 0;
+    memset(&ci, 0, sizeof ci);
+    ci.size = sizeof ci;
+    if (gdefcore_tree_item(tree, c, &ci) != GDEFCORE_OK) {
+      return GLTANG_ERR_INVALID;
+    }
+    for (prior = kids->head[item]; prior != c && !seen;
+         prior = kids->next[prior]) {
+      GDEFCORE_TreeItem pi;
+      memset(&pi, 0, sizeof pi);
+      pi.size = sizeof pi;
+      seen = gdefcore_tree_item(tree, prior, &pi) == GDEFCORE_OK &&
+             pi.field_len == ci.field_len &&
+             memcmp(pi.field, ci.field, ci.field_len) == 0;
+    }
+    if (seen || personal_at(personal, ci.path, ci.path_len)) {
+      continue;
+    }
+    rc = gltang_value_array(d, &list);
+    if (rc == GLTANG_OK) {
+      rc = gltang_value_map_set(d, map, ci.field, ci.field_len,
+          GLTANG_UNICODE_STRING_TYPE_HTML_ATTRIBUTE, list);
+    }
+    for (e = c; rc == GLTANG_OK && e != SIZE_MAX; e = kids->next[e]) {
+      GDEFCORE_TreeItem ei;
+      GLTANG_ValueRef el;
+      const char * own = NULL;
+      size_t own_len = 0;
+      memset(&ei, 0, sizeof ei);
+      ei.size = sizeof ei;
+      if (gdefcore_tree_item(tree, e, &ei) != GDEFCORE_OK) {
+        return GLTANG_ERR_INVALID;
+      }
+      if (ei.field_len != ci.field_len ||
+          memcmp(ei.field, ci.field, ci.field_len) != 0) {
+        continue;
+      }
+      if (gdefcore_tree_get(tree, e, NULL, 0, &own, &own_len) ==
+              GDEFCORE_OK &&
+          own != NULL) {
+        rc = gltang_value_string(d, own, own_len,
+            GLTANG_UNICODE_STRING_TYPE_HTML_ATTRIBUTE, &el);
+      } else {
+        rc = describe_item(d, tree, kids, personal, e, &el);
+      }
+      if (rc == GLTANG_OK) {
+        rc = gltang_value_array_push(d, list, el);
+      }
+    }
+  }
+  if (rc == GLTANG_OK) {
+    *out = map;
+  }
+  return rc;
+}
+
+static GDEFCORE_Result describe_entity(GDEFCORE_Catalog * catalog,
+    const char * type, size_t type_len, const GDEFCORE_Tree * tree,
+    GLTANG_ValueDescription ** out) {
+  GLTANG_ValueDescription * d = NULL;
+  Personal personal;
+  Kids kids;
+  size_t * tail = NULL;
+  size_t n = gdefcore_tree_item_count(tree);
+  size_t i;
+  GLTANG_ValueRef root;
+  GLTANG_Result lr;
+  GDEFCORE_Result rc;
+  *out = NULL;
+  rc = personal_load(catalog, type, type_len, &personal);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  kids.head = (size_t *)malloc((n == 0 ? 1 : n) * sizeof *kids.head);
+  kids.next = (size_t *)malloc((n == 0 ? 1 : n) * sizeof *kids.next);
+  tail = (size_t *)malloc((n == 0 ? 1 : n) * sizeof *tail);
+  if (kids.head == NULL || kids.next == NULL || tail == NULL) {
+    rc = GDEFCORE_ERR_OOM;
+    goto done;
+  }
+  for (i = 0; i < n; i++) {
+    kids.head[i] = SIZE_MAX;
+    kids.next[i] = SIZE_MAX;
+    tail[i] = SIZE_MAX;
+  }
+  /* A child comes after its parent, and siblings in their order. */
+  for (i = 1; i < n; i++) {
+    GDEFCORE_TreeItem it;
+    memset(&it, 0, sizeof it);
+    it.size = sizeof it;
+    if (gdefcore_tree_item(tree, i, &it) != GDEFCORE_OK || it.parent >= i) {
+      rc = GDEFCORE_ERR_CORRUPT;
+      goto done;
+    }
+    if (tail[it.parent] == SIZE_MAX) {
+      kids.head[it.parent] = i;
+    } else {
+      kids.next[tail[it.parent]] = i;
+    }
+    tail[it.parent] = i;
+  }
+  if (gltang_value_description_create(NULL, &d) != GLTANG_OK) {
+    rc = GDEFCORE_ERR_OOM;
+    goto done;
+  }
+  lr = describe_item(d, tree, &kids, &personal, 0, &root);
+  if (lr == GLTANG_OK) {
+    lr = gltang_value_set_root(d, root);
+  }
+  if (lr != GLTANG_OK) {
+    gltang_value_description_release(d);
+    d = NULL;
+    rc = lr == GLTANG_ERR_LIMIT ? GDEFCORE_ERR_LIMIT : GDEFCORE_ERR_OOM;
+    goto done;
+  }
+  *out = d;
+done:
+  free(kids.head);
+  free(kids.next);
+  free(tail);
+  free(personal.paths);
+  return rc;
+}
+
+GDEFCORE_Result gdefcore_render_entity(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Request * request, const char * template_name,
+    size_t template_len, const char * id, size_t id_len, const char * lang,
+    size_t lang_len, uint64_t scope_fuel, char ** out_bytes,
+    size_t * out_len) {
+  GDEFCORE_Tree * tree = NULL;
+  GLTANG_ValueDescription * value = NULL;
+  GDEFCORE_Contract * contract = NULL;
+  char * type = NULL;
+  size_t type_len = 0;
+  char * body = NULL;
+  char * kind = NULL;
+  size_t body_len = 0;
+  size_t kind_len = 0;
+  char * bytes = NULL;
+  size_t n = 0;
+  GDEFCORE_Result rc;
+  if (catalog == NULL || request == NULL || template_name == NULL ||
+      template_len == 0 || id == NULL || lang == NULL || out_bytes == NULL ||
+      out_len == NULL || scope_fuel == 0) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  /* The entity as the principal may read it, field by field in every item:
+   * one the principal may not see answers as one that is not there. */
+  rc = gdefcore_access_tree(catalog, request, id, id_len, lang, lang_len,
+      &tree);
+  if (rc == GDEFCORE_OK) {
+    rc = gdefcore_entity_type(catalog, id, id_len, &type, &type_len);
+  }
+  if (rc == GDEFCORE_OK) {
+    rc = describe_entity(catalog, type, type_len, tree, &value);
+  }
+  if (rc == GDEFCORE_OK) {
+    rc = template_load(catalog, template_name, template_len, &body, &body_len,
+        &kind, &kind_len);
+  }
+  if (rc == GDEFCORE_OK) {
+    rc = gdefcore_template_contract_open(catalog, NULL, kind, kind_len,
+        &contract, NULL);
+    if (rc != GDEFCORE_OK && rc != GDEFCORE_ERR_OOM) {
+      rc = GDEFCORE_ERR_INVALID;
+    }
+  }
+  if (rc == GDEFCORE_OK) {
+    rc = tang_run_value(catalog, request, contract, body, body_len, scope_fuel,
+        NULL, 0, "entity", value, NULL, NULL, NULL, &bytes, &n);
+  }
+  if (rc == GDEFCORE_OK) {
+    (void)fragment_offer("live", 4);
+    *out_bytes = bytes;
+    *out_len = n;
+  }
+  gdefcore_template_contract_close(contract);
+  gdefcore_text_free(catalog, body);
+  gdefcore_text_free(catalog, kind);
+  gdefcore_text_free(catalog, type);
+  gltang_value_description_release(value);
+  gdefcore_tree_free(tree);
   return rc;
 }
 

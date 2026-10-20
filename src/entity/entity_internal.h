@@ -53,16 +53,28 @@ typedef struct GDEFCORE_Text {
   size_t n;
 } GDEFCORE_Text;
 
+/* The values of one field of the root group. A multiple field's values are
+ * the items of that field, in order: @ref ids, when it is not NULL, holds each
+ * one's item id (0 for a new item), so a save keeps them by id and a reorder
+ * moves order keys only (story S6d). With no ids (the flat API, a patch) the
+ * k-th value goes in the item that holds the k-th value now. */
 typedef struct GDEFCORE_Vals {
   GDEFCORE_Text name;
   GDEFCORE_Text * vals;
   size_t nvals;
+  uint64_t * ids;
 } GDEFCORE_Vals;
 
+struct GDEFCORE_Tree;
+
+/* One language: the root group's values (@ref fields), and the items of its
+ * group fields, at every depth (@ref groups: a tree whose root item holds no
+ * value; NULL when there are none). */
 typedef struct GDEFCORE_Lang {
   GDEFCORE_Text lang;
   GDEFCORE_Vals * fields;
   size_t nfields;
+  struct GDEFCORE_Tree * groups;
 } GDEFCORE_Lang;
 
 /* An entity's values in every language, each as the canonical text of its
@@ -72,6 +84,9 @@ typedef struct GDEFCORE_Doc {
   size_t nlangs;
 } GDEFCORE_Doc;
 
+/* A field. @ref name is its path: a field of the root group is its name, one
+ * inside a group `group.field` (story S6d). A type's decls are in pre-order,
+ * each group before its fields. */
 typedef struct GDEFCORE_Decl {
   GDEFCORE_Text name;
   int required;
@@ -86,7 +101,53 @@ typedef struct GDEFCORE_Decl {
   int type;    /* a GDEFSTOR_FieldType, never 0 */
   int scale;   /* DECIMAL */
   int indexed;
+  GDEFCORE_Text subject; /* PERSONAL: the sibling reference naming the subject */
 } GDEFCORE_Decl;
+
+/* A field's place: one of the root group that holds values (what the flat
+ * calls see), or a group or a field inside one. */
+int gdefcore_ent_decl_flat(const GDEFCORE_Decl * d);
+/* The decl at @p path, or NULL. */
+const GDEFCORE_Decl * gdefcore_ent_decl_at(const GDEFCORE_Decl * decls,
+    size_t n, const char * path, size_t path_len);
+
+/* A field tree in texts (story S6d): the public GDEFCORE_Tree. Values are
+ * canonical texts held as text values of a port tree; each item knows the
+ * path of the field it sits under. */
+struct GDEFCORE_Tree {
+  const GDEFCORE_Allocator * alloc;
+  GDEFSTOR_Tree * t;
+  GDEFCORE_Text * paths;
+  size_t npaths;
+  size_t cap;
+};
+
+GDEFCORE_Result gdefcore_ent_tree_new(const GDEFCORE_Allocator * alloc,
+    struct GDEFCORE_Tree ** out);
+GDEFCORE_Result gdefcore_ent_tree_clone(const struct GDEFCORE_Tree * in,
+    struct GDEFCORE_Tree ** out);
+/* Same items (ids, parents, fields, order) and the same values. */
+int gdefcore_ent_tree_equal(const struct GDEFCORE_Tree * a,
+    const struct GDEFCORE_Tree * b);
+/* Whether the items under root field @p field (and below) are the same. */
+int gdefcore_ent_tree_field_equal(const struct GDEFCORE_Tree * a,
+    const struct GDEFCORE_Tree * b, const char * field, size_t field_len);
+/* Items directly under the root of @p t at @p field. */
+size_t gdefcore_ent_tree_count_under(const struct GDEFCORE_Tree * t,
+    size_t item, const char * field, size_t field_len);
+/* Set a value, with the subject a personal value names (may be NULL). */
+GDEFCORE_Result gdefcore_ent_tree_put(struct GDEFCORE_Tree * t, size_t item,
+    const char * field, size_t field_len, const char * text, size_t len,
+    const char * subject, size_t subject_len);
+/* Append @p value (taken over on success) to field @p name of @p l; with
+ * @p has_id, as the item @p id of a multiple field. */
+GDEFCORE_Result gdefcore_ent_lang_add(const GDEFCORE_Allocator * alloc,
+    GDEFCORE_Lang * l, const char * name, size_t name_len,
+    const GDEFCORE_Text * value, int has_id, uint64_t id);
+/* The path of a value of item @p item: @p field under the item's path. */
+GDEFCORE_Result gdefcore_ent_tree_value_path(const struct GDEFCORE_Tree * t,
+    size_t item, const char * field, size_t field_len, GDEFCORE_Text * out);
+
 
 typedef struct GDEFCORE_Op {
   int kind;

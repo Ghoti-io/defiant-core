@@ -628,6 +628,77 @@ inline std::string ReadLine(World & w, const std::string & who,
   return out + Diag(w, req);
 }
 
+/** The entity as a tree, as the principal may read it (story S6d). */
+inline std::string TreeLine(World & w, const std::string & who,
+    const std::string & id) {
+  Fresh fresh(w, who);
+  GDEFCORE_Request * req = fresh.req;
+  GDEFCORE_Tree * tree = (GDEFCORE_Tree *)0x1;
+  std::string out;
+  GDEFCORE_Result rc;
+  Note("gdefcore_access_tree");
+  rc = gdefcore_access_tree(w.site.catalog, req, id.data(), id.size(), "en", 2,
+      &tree);
+  out = "rc=" + Rc(rc);
+  if (tree == (GDEFCORE_Tree *)0x1) {
+    out += " untouched";
+  } else if (rc != GDEFCORE_OK) {
+    out += " WROTE-ON-FAILURE";
+  }
+  if (rc == GDEFCORE_OK) {
+    size_t n = gdefcore_tree_item_count(tree);
+    size_t i;
+    for (i = 0; i < n; i++) {
+      GDEFCORE_TreeItem it;
+      size_t k;
+      memset(&it, 0, sizeof it);
+      it.size = sizeof it;
+      if (gdefcore_tree_item(tree, i, &it) != GDEFCORE_OK) {
+        out += " BAD-ITEM";
+        break;
+      }
+      out += " {" + std::string(it.path, it.path_len);
+      for (k = 0; k < it.value_count; k++) {
+        const char * f = NULL;
+        size_t fn = 0;
+        const char * t = NULL;
+        size_t tn = 0;
+        if (gdefcore_tree_value(tree, i, k, &f, &fn, &t, &tn) == GDEFCORE_OK) {
+          out += " " + std::string(f, fn) + "=[" + std::string(t, tn) + "]";
+        }
+      }
+      out += "}";
+    }
+    gdefcore_tree_free(tree);
+  }
+  return out + Diag(w, req);
+}
+
+/** A stored template rendered with the entity in its context (story S6d). */
+inline std::string RenderEntityLine(World & w, const std::string & who,
+    const std::string & id, const char * tmpl) {
+  Fresh fresh(w, who);
+  GDEFCORE_Request * req = fresh.req;
+  char * bytes = (char *)0x1;
+  size_t n = 99;
+  std::string out;
+  GDEFCORE_Result rc;
+  Note("gdefcore_render_entity");
+  rc = gdefcore_render_entity(w.site.catalog, req, tmpl, strlen(tmpl),
+      id.data(), id.size(), "en", 2, GDEFCORE_RENDER_PAGE_FUEL, &bytes, &n);
+  out = "rc=" + Rc(rc);
+  if (bytes == (char *)0x1 && n == 99) {
+    out += " untouched";
+  } else if (rc != GDEFCORE_OK) {
+    out += " WROTE-ON-FAILURE";
+  }
+  if (rc == GDEFCORE_OK && bytes != NULL) {
+    out += " bytes=" + Norm(w, std::string(bytes, n));
+    gdefcore_text_free(w.site.catalog, bytes);
+  }
+  return out + Diag(w, req);
+}
+
 /** One field of the first revision, as the revision view answers it. */
 inline std::string RevisionLine(World & w, const std::string & who,
     const std::string & id, uint64_t seq, const char * field) {
@@ -903,6 +974,8 @@ inline Obs Observe(World & w, const std::string & who, const Ask & ask) {
     o.kv[pre + "read.title"] = ReadLine(w, who, target, "title");
     o.kv[pre + "read.secret"] = ReadLine(w, who, target, "secret");
     o.kv[pre + "read.nope"] = ReadLine(w, who, target, "nope");
+    o.kv[pre + "tree"] = TreeLine(w, who, target);
+    o.kv[pre + "render-entity"] = RenderEntityLine(w, who, target, "entity");
     o.kv[pre + "revisions.title"] = RevisionLine(w, who, target, 1, "title");
     o.kv[pre + "revisions.secret"] = RevisionLine(w, who, target, 1, "secret");
     o.kv[pre + "resolve.echo"] =

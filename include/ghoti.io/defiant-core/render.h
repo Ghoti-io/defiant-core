@@ -110,6 +110,35 @@ GDEFCORE_API GDEFCORE_Result gdefcore_render_sample(GDEFCORE_Catalog * catalog,
     int * out_shareable);
 
 /**
+ * @brief Render the stored template @p template_name with entity @p id in its
+ * context, in language @p lang, as the request's principal may read it
+ * (story S6d).
+ *
+ * The template's kind declares a variable `entity` (of type `entity`), which
+ * is bound to a map: each single field of the root a string, each group and
+ * each multiple field a list in item order, a group's items maps of the same
+ * shape at every depth, a multiple field's items its values. It is
+ * gdefcore_access_tree() made into a value: the access filter is applied per
+ * field in every item, so a field the principal may not read is absent from
+ * every item that has it, and so is a field with no value or a group with no
+ * items (absent, not hidden: a template cannot tell them apart). Values are
+ * texts bound for the strictest encoding, as every bound field is (render.md).
+ * A personal value is left out: its sealed text is never rendered, and a
+ * render that decrypts is story S7's. A kind that does not declare `entity`
+ * binds nothing.
+ *
+ * An entity the principal may not see, an unknown template, one with no kind
+ * and a kind that does not exist are one answer, ::GDEFCORE_ERR_INVALID, and
+ * @p out_bytes is not written. Free @p out_bytes with gdefcore_text_free().
+ *
+ * @param scope_fuel The budget of the template. Zero is ::GDEFCORE_ERR_INVALID.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_render_entity(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Request * request, const char * template_name,
+    size_t template_len, const char * id, size_t id_len, const char * lang,
+    size_t lang_len, uint64_t scope_fuel, char ** out_bytes, size_t * out_len);
+
+/**
  * @brief How many fragments this process has offered to a shared cache.
  *
  * A render of a stored template is offered under the `live` overlay. A

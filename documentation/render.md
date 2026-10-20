@@ -121,3 +121,19 @@ kind, against sample data, under an overlay that no shared cache may keep. See
 "Previewing an edited body" in templates.md. A `core.template` also carries
 two optional fields, `attached` (a public id) and `classification` (text),
 which a module's `template-write` decision can refine edits by.
+
+## An entity in the context
+
+`gdefcore_render_entity()` renders a stored template with one entity bound
+to its kind's variable `entity` (story S6d), as the request's principal may
+read it: the root's single fields are strings, each group and each multiple
+field is a list in item order, a group's items are maps of the same shape at
+every depth and a multiple field's items are its values. It is
+`gdefcore_access_tree()` made into a value, so the access filter is applied
+per field in every item: a field the reader may not read is absent from every
+line that has it, as a field with no value is. A personal value is left out.
+
+```
+<% use entity; %><% for (line : entity.lines) { %><%= line.sku %>
+<% for (tax : line.taxes) { %><%= tax.name %><% } %><% } %>
+```

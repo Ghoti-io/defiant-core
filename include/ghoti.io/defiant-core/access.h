@@ -536,6 +536,25 @@ GDEFCORE_API GDEFCORE_Result gdefcore_access_read(GDEFCORE_Catalog * catalog,
     char *** out_texts, size_t ** out_lens, size_t * out_count);
 
 /**
+ * @brief Read one language of an entity as a tree through the access filter
+ * (story S6d).
+ *
+ * The entity as gdefcore_access_read() sees it (published, a read grant
+ * holds; else ::GDEFCORE_ERR_INVALID, the same as an id never created, and
+ * nothing is written), as gdefcore_entity_tree() gives it, with the field
+ * filter applied per field in every item: a field the principal may not read
+ * is absent from the root and from every group item, and a group field the
+ * principal may not read is absent with all its items. A field-read
+ * permission names a field inside a group by its path (`lines.price`). A
+ * personal value is the sealed text it is stored as, as from
+ * gdefcore_access_read(). An entity with no content in @p lang is
+ * ::GDEFCORE_ERR_INVALID. Free @p out_tree with gdefcore_tree_free().
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_access_tree(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Request * request, const char * id, size_t id_len,
+    const char * lang, size_t lang_len, GDEFCORE_Tree ** out_tree);
+
+/**
  * @brief List public ids the principal may see.
  *
  * @p out_count is the number of ids. Free @p out_ids with

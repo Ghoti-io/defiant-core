@@ -283,6 +283,8 @@ TEST(Oracle, Control) {
       std::vector<std::string> diffs = Differences(a, b);
       EXPECT_TRUE(HasKey(diffs, "t:note1:read.title")) << Join(diffs);
       EXPECT_TRUE(HasKey(diffs, "t:note1:read.secret")) << Join(diffs);
+      /* The tree read (story S6d) sees the note too. */
+      EXPECT_TRUE(HasKey(diffs, "t:note1:tree")) << Join(diffs);
       /* The one decision sees the note, and so does the route guarded by it;
        * a permission the readers lack is a no for both worlds. */
       EXPECT_TRUE(HasKey(diffs, "t:note1:can.read")) << Join(diffs);

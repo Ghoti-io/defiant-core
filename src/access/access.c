@@ -2252,6 +2252,246 @@ GDEFCORE_Result gdefcore_access_read(GDEFCORE_Catalog * catalog,
       out_lens, out_count);
 }
 
+/* What one path of a type reads as to the principal: decided once a read. */
+typedef struct PathSeen {
+  char path[GDEFCORE_FIELD_PATH_MAX + 1];
+  size_t path_len;
+  int shown;
+} PathSeen;
+
+typedef struct TreeFilter {
+  Eval * ev;
+  const Grant * grants;
+  size_t ngrants;
+  const Grant * decls;
+  size_t ndecls;
+  const char * type;
+  size_t type_len;
+  const char * actor;
+  size_t actor_len;
+  const char * principal;
+  size_t principal_len;
+  PathSeen seen[64];
+  size_t nseen;
+} TreeFilter;
+
+/* Whether the principal may read the field at @p path: the field-read grants
+ * of that field, as gdefcore_access_read() applies them to a field of the
+ * root, applied to a field at any depth (story S6d). */
+static int path_shown(TreeFilter * f, const char * path, size_t path_len) {
+  size_t i;
+  int shown;
+  for (i = 0; i < f->nseen; i++) {
+    if (same(f->seen[i].path, f->seen[i].path_len, path, path_len)) {
+      return f->seen[i].shown;
+    }
+  }
+  shown = !field_restricted(f->decls, f->ndecls, f->type, f->type_len, path,
+              path_len) ||
+          field_granted(f->ev, f->grants, f->ngrants, f->type, f->type_len,
+              path, path_len, f->actor, f->actor_len, f->principal,
+              f->principal_len);
+  if (f->nseen < sizeof f->seen / sizeof f->seen[0] &&
+      path_len <= GDEFCORE_FIELD_PATH_MAX) {
+    memcpy(f->seen[f->nseen].path, path, path_len);
+    f->seen[f->nseen].path_len = path_len;
+    f->seen[f->nseen].shown = shown;
+    f->nseen += 1;
+  }
+  return shown;
+}
+
+/* The path of value @p field of an item at @p item_path, in @p buf. */
+static size_t value_path(const char * item_path, size_t item_len,
+    const char * field, size_t field_len, char * buf, size_t cap) {
+  size_t n = item_len + (item_len > 0 && field_len > 0 ? 1 : 0) + field_len;
+  if (n >= cap) {
+    return 0;
+  }
+  if (item_len > 0) {
+    memcpy(buf, item_path, item_len);
+  }
+  if (item_len > 0 && field_len > 0) {
+    buf[item_len] = '.';
+  }
+  if (field_len > 0) {
+    memcpy(buf + n - field_len, field, field_len);
+  }
+  buf[n] = '\0';
+  return n;
+}
+
+/* @p in without what the principal may not read: a hidden field is absent
+ * from every item, and a hidden group takes its items with it. */
+static GDEFCORE_Result filter_tree(GDEFCORE_Catalog * catalog, TreeFilter * f,
+    const GDEFCORE_Tree * in, GDEFCORE_Tree ** out) {
+  GDEFCORE_Tree * t = NULL;
+  size_t n = gdefcore_tree_item_count(in);
+  size_t * map;
+  size_t i;
+  GDEFCORE_Result rc;
+  const size_t kGone = SIZE_MAX;
+  *out = NULL;
+  map = (size_t *)gcu_allocator_calloc(alloc_default(), n == 0 ? 1 : n,
+      sizeof *map);
+  if (map == NULL) {
+    return GDEFCORE_ERR_OOM;
+  }
+  rc = gdefcore_tree_create(catalog, &t);
+  for (i = 0; rc == GDEFCORE_OK && i < n; i++) {
+    GDEFCORE_TreeItem it;
+    size_t item = 0;
+    size_t k;
+    memset(&it, 0, sizeof it);
+    it.size = sizeof it;
+    rc = gdefcore_tree_item(in, i, &it);
+    if (rc != GDEFCORE_OK) {
+      break;
+    }
+    map[i] = kGone;
+    if (i > 0) {
+      if (map[it.parent] == kGone || !path_shown(f, it.path, it.path_len)) {
+        continue;
+      }
+      rc = gdefcore_tree_add(t, map[it.parent], it.field, it.field_len, it.id,
+          &item);
+      if (rc != GDEFCORE_OK) {
+        break;
+      }
+    }
+    map[i] = item;
+    for (k = 0; rc == GDEFCORE_OK && k < it.value_count; k++) {
+      const char * field = NULL;
+      size_t field_len = 0;
+      const char * text = NULL;
+      size_t len = 0;
+      char path[GDEFCORE_FIELD_PATH_MAX + 1];
+      size_t pn;
+      rc = gdefcore_tree_value(in, i, k, &field, &field_len, &text, &len);
+      if (rc != GDEFCORE_OK) {
+        break;
+      }
+      pn = value_path(it.path, it.path_len, field, field_len, path, sizeof path);
+      if (pn == 0) {
+        rc = GDEFCORE_ERR_CORRUPT;
+        break;
+      }
+      /* An item's own value is its field's, and was decided with the item. */
+      if (field_len > 0 && !path_shown(f, path, pn)) {
+        continue;
+      }
+      rc = gdefcore_tree_set(t, item, field, field_len, text, len);
+    }
+  }
+  gcu_allocator_free(alloc_default(), map);
+  if (rc != GDEFCORE_OK) {
+    gdefcore_tree_free(t);
+    return rc;
+  }
+  *out = t;
+  return GDEFCORE_OK;
+}
+
+GDEFCORE_Result gdefcore_access_tree(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Request * request, const char * id, size_t id_len,
+    const char * lang, size_t lang_len, GDEFCORE_Tree ** out_tree) {
+  char canon[GDEFCORE_PUBLIC_ID_LEN + 1];
+  char * type_name = NULL;
+  size_t type_len = 0;
+  char * actor = NULL;
+  size_t actor_len = 0;
+  const char * principal = NULL;
+  size_t principal_len = 0;
+  Grant grants[kGrantMax];
+  Grant decls[kGrantMax];
+  size_t ngrants = 0;
+  size_t ndecls = 0;
+  int read_principal = 0;
+  Eval ev;
+  int visible;
+  GDEFCORE_Tree * full = NULL;
+  TreeFilter * filter = NULL;
+  GDEFCORE_Result rc;
+  if (catalog == NULL || request == NULL || out_tree == NULL || lang == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  if (gdefcore_id_canonical(id, id_len, canon) != GDEFCORE_OK) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  rc = ensure(catalog);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  rc = gdefcore_entity_type(catalog, canon, GDEFCORE_PUBLIC_ID_LEN, &type_name,
+      &type_len);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  /* `own` is the entity's creator, as for gdefcore_access_read(). */
+  rc = gdefcore_entity_creator(catalog, canon, GDEFCORE_PUBLIC_ID_LEN,
+      &actor, &actor_len);
+  if (rc != GDEFCORE_OK) {
+    gdefcore_text_free(catalog, type_name);
+    return rc;
+  }
+  principal = gdefcore_request_principal(request, &principal_len);
+  rc = load_effective(catalog, request, grants, kGrantMax, &ngrants,
+      &read_principal);
+  if (rc == GDEFCORE_OK) {
+    rc = load_decls(catalog, decls, kGrantMax, &ndecls);
+  }
+  if (rc != GDEFCORE_OK) {
+    gdefcore_text_free(catalog, type_name);
+    gdefcore_text_free(catalog, actor);
+    return rc;
+  }
+  eval_init(&ev, catalog, request, lang, lang_len);
+  (void)setup_ceiling(&ev);
+  ev.id = canon;
+  /* An entity readers may not see answers as one that is not there: the
+   * published flag, then a read grant, as gdefcore_access_read() asks. */
+  visible = reader_sees(catalog, canon, &ev);
+  if (visible) {
+    visible = entity_visible(&ev, grants, ngrants, type_name, type_len, actor,
+        actor_len, principal, principal_len);
+  }
+  if (visible) {
+    rc = gdefcore_entity_tree(catalog, NULL, GDEFCORE_VIEW_PUBLISHED, canon,
+        GDEFCORE_PUBLIC_ID_LEN, lang, lang_len, &full);
+  } else {
+    rc = GDEFCORE_ERR_INVALID;
+  }
+  if (rc == GDEFCORE_OK) {
+    filter = (TreeFilter *)gcu_allocator_calloc(alloc_default(), 1,
+        sizeof *filter);
+    if (filter == NULL) {
+      rc = GDEFCORE_ERR_OOM;
+    }
+  }
+  if (rc == GDEFCORE_OK) {
+    filter->ev = &ev;
+    filter->grants = grants;
+    filter->ngrants = ngrants;
+    filter->decls = decls;
+    filter->ndecls = ndecls;
+    filter->type = type_name;
+    filter->type_len = type_len;
+    filter->actor = actor;
+    filter->actor_len = actor_len;
+    filter->principal = principal;
+    filter->principal_len = principal_len;
+    rc = filter_tree(catalog, filter, full, out_tree);
+  }
+  /* A condition that could not be decided has not granted: the field reads
+   * as hidden, which is also what a missing one reads as. */
+  eval_done(&ev);
+  gcu_allocator_free(alloc_default(), filter);
+  gdefcore_tree_free(full);
+  gdefcore_text_free(catalog, type_name);
+  gdefcore_text_free(catalog, actor);
+  return rc;
+}
+
 /* 1 when the type's field is personal (AD-19). A field the type lacks is not. */
 static int field_is_personal(GDEFCORE_Catalog * catalog, const char * type,
     size_t type_len, const char * field, size_t field_len) {

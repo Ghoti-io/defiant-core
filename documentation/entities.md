@@ -175,3 +175,71 @@ The fields a declaration indexes are indexed by the store, so an equality, an
 This function filters nothing for a principal; it is not a way to read for
 one. `gdefcore_access_list()` builds a principal's access filter into the
 predicate it hands it (access.md, "Lists").
+
+## Groups, multiples and order
+
+Since story S6d a field may be a **group** (`GDEFCORE_Field::type` is
+`GDEFSTOR_FIELD_GROUP`): it holds items, each with the fields in
+`GDEFCORE_Field::children`, recursively, at most `GDEFSTOR_MODEL_MAX_DEPTH`
+groups deep. Any field may be **multiple** (`GDEFCORE_Field::many`), a group
+included; a group that is not multiple holds at most one item. A group is a
+field of the entity, never an entity of its own (AD-14): a change anywhere in
+it is a change to the entity, one revision of its one history. A group holds
+no value, so it is never personal or indexed, has no constraint and no scale,
+and `required` on it means at least one item. A field is named by its path,
+the names from the root group joined by `.`: `lines.taxes.rate`. Core's
+declaration maps to the port's field tree one to one; the type record lists
+every field by its path, in pre-order.
+
+The purchase order is the design's own example and core's fixture
+(`tests/test_groups.cpp`): lines with taxes and with discounts that have
+breakdowns, and shipments with packages with tracking events.
+
+**The flat calls see the root.** `gdefcore_entity_save()`, the field
+enumeration (`gdefcore_type_field_count()` and its siblings), conditions,
+forms and lists see the root group's fields that hold values, and nothing
+else; for a type with no group that is every field, and nothing about such a
+type has changed. A flat save of a type with groups keeps the group items as
+they are. `gdefcore_type_tree_field_count()` and `gdefcore_type_tree_field()`
+describe every field at every depth. A condition naming a group or a field
+inside one is refused as one naming a field the type lacks: conditions on
+nested fields are deferred (storage SPEC, "Deferred").
+
+**Trees.** `GDEFCORE_Tree` is one language's content in texts: item 0 is the
+root and holds the root's single fields; every other item sits under a group
+field (and holds that group's single fields and items of its own) or under a
+multiple single field (and holds one value, its own). Values are canonical
+texts, as `gdefcore_entity_values()` gives them. `gdefcore_tree_save()` and
+`gdefcore_tree_save_draft()` stage a tree as the language's whole content;
+`gdefcore_entity_tree()` and `gdefcore_entity_revision_tree()` read one
+unfiltered, and `gdefcore_access_tree()` reads one as a principal may.
+
+**Item ids are the port's and stable.** A tree read from storage carries each
+item's id; a tree staged for a save names an item the entity has by its id and
+a new one by 0, and states order by the order it adds items. So:
+
+- only what changed is written: a tracking event appended three groups deep
+  is one item version and one revision, and an item named by its id whose
+  values and place are the same writes nothing;
+- a reorder (the same items, by their ids, in another order) changes order
+  keys and nothing else;
+- a tree equal to the current one writes no revision.
+
+The flat API keeps matching a multiple field's values by position (the k-th
+value in the item that holds the k-th value now), as it always has; a tree
+names them by id.
+
+**Personal fields inside groups name their subject source**
+(`GDEFCORE_Field::subject`): a sibling field that is a single, non-personal
+reference, whose value in the same item is the subject of the value
+(AD-19). A field of the root may name one too, or leave it NULL and name each
+value's subject as it is sealed (story S6c). A value is sealed for its
+field's path (`gdefcore_subject_seal(..., "contacts.note", ...)`), and every
+place that opens one, the save's MAC, the probe that finds a subject by
+opening the text, the export and the re-index, opens it under that path.
+
+**Not yet:** the patch form (`defiant-changeset/1`) has no file for a group or
+its items, so `gdefcore_changeset_serialize()` refuses a changeset that
+defines a type with groups or stages group items (`GDEFCORE_ERR_UNSUPPORTED`),
+and forms for groups are the site-admin stories'. `gdefcore_subject_read()`
+reads a field of the root.

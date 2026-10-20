@@ -1284,6 +1284,100 @@ static void json_escape(Buf * b, const char * s, size_t n) {
  * now, published or not, each opened with the subject's key @p raw and added
  * to @p buf. A value that does not open under it is another subject's (a
  * multiple can hold several people's) and is left out. */
+/* Whether value @p f of an item whose field is at @p ip is the field @p path. */
+static int value_at_path(const char * ip, size_t ipn, const char * f,
+    size_t fn, const char * path, size_t path_len) {
+  if (fn == 0) {
+    return span_eq(ip, ipn, path, path_len);
+  }
+  if (ipn == 0) {
+    return span_eq(f, fn, path, path_len);
+  }
+  return path_len == ipn + 1 + fn && memcmp(path, ip, ipn) == 0 &&
+         path[ipn] == '.' && memcmp(path + ipn + 1, f, fn) == 0;
+}
+
+/* The current texts of a field inside a group (story S6d), at any depth: the
+ * flat read gdefcore_entity_values() sees the root's fields only. The texts
+ * are borrowed from @p *out_tree, which the caller frees. */
+static GDEFCORE_Result nested_texts(GDEFCORE_Subjects * subjects,
+    GDEFCORE_Catalog * catalog, const char * eid, const char * field,
+    size_t field_len, const char * lang, size_t lang_len,
+    GDEFCORE_Tree ** out_tree, const char *** out_texts, size_t ** out_lens,
+    size_t * out_count) {
+  GDEFCORE_Tree * tree = NULL;
+  size_t n;
+  size_t i;
+  size_t count = 0;
+  const char ** texts = NULL;
+  size_t * lens = NULL;
+  GDEFCORE_Result rc = gdefcore_entity_tree(catalog, NULL,
+      GDEFCORE_VIEW_CURRENT, eid, GDEFCORE_PUBLIC_ID_LEN, lang, lang_len,
+      &tree);
+  *out_tree = NULL;
+  *out_texts = NULL;
+  *out_lens = NULL;
+  *out_count = 0;
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  n = gdefcore_tree_item_count(tree);
+  for (i = 0; rc == GDEFCORE_OK && i < n; i++) {
+    GDEFCORE_TreeItem it;
+    size_t k;
+    memset(&it, 0, sizeof it);
+    it.size = sizeof it;
+    if (gdefcore_tree_item(tree, i, &it) != GDEFCORE_OK) {
+      rc = GDEFCORE_ERR_CORRUPT;
+      break;
+    }
+    for (k = 0; rc == GDEFCORE_OK && k < it.value_count; k++) {
+      const char * f = NULL;
+      size_t fn = 0;
+      const char * t = NULL;
+      size_t tn = 0;
+      if (gdefcore_tree_value(tree, i, k, &f, &fn, &t, &tn) != GDEFCORE_OK) {
+        rc = GDEFCORE_ERR_CORRUPT;
+        break;
+      }
+      if (!value_at_path(it.path, it.path_len, f, fn, field, field_len)) {
+        continue;
+      }
+      {
+        const char ** nt = (const char **)gcu_allocator_realloc(subjects->alloc,
+            (void *)texts, (count + 1) * sizeof *nt);
+        size_t * nl;
+        if (nt == NULL) {
+          rc = GDEFCORE_ERR_OOM;
+          break;
+        }
+        texts = nt;
+        nl = (size_t *)gcu_allocator_realloc(subjects->alloc, lens,
+            (count + 1) * sizeof *nl);
+        if (nl == NULL) {
+          rc = GDEFCORE_ERR_OOM;
+          break;
+        }
+        lens = nl;
+        texts[count] = t;
+        lens[count] = tn;
+        count += 1;
+      }
+    }
+  }
+  if (rc != GDEFCORE_OK) {
+    gcu_allocator_free(subjects->alloc, (void *)texts);
+    gcu_allocator_free(subjects->alloc, lens);
+    gdefcore_tree_free(tree);
+    return rc;
+  }
+  *out_tree = tree;
+  *out_texts = texts;
+  *out_lens = lens;
+  *out_count = count;
+  return GDEFCORE_OK;
+}
+
 static GDEFCORE_Result export_values(GDEFCORE_Subjects * subjects,
     GDEFCORE_Catalog * catalog, const char * sid, const uint8_t raw[kKey],
     const char * eid, const char * field, size_t field_len, const char * lang,
@@ -1292,9 +1386,17 @@ static GDEFCORE_Result export_values(GDEFCORE_Subjects * subjects,
   size_t * lens = NULL;
   size_t count = 0;
   size_t i;
-  GDEFCORE_Result rc = gdefcore_entity_values(catalog, NULL, GDEFCORE_VIEW_CURRENT,
-      eid, GDEFCORE_PUBLIC_ID_LEN, lang, lang_len, field, field_len, &texts,
-      &lens, &count);
+  GDEFCORE_Tree * nested = NULL;
+  GDEFCORE_Result rc;
+  if (memchr(field, '.', field_len) != NULL) {
+    /* A field inside a group (story S6d): its values in every item. */
+    rc = nested_texts(subjects, catalog, eid, field, field_len, lang,
+        lang_len, &nested, (const char ***)&texts, &lens, &count);
+  } else {
+    rc = gdefcore_entity_values(catalog, NULL, GDEFCORE_VIEW_CURRENT, eid,
+        GDEFCORE_PUBLIC_ID_LEN, lang, lang_len, field, field_len, &texts,
+        &lens, &count);
+  }
   if (rc == GDEFCORE_ERR_INVALID) {
     /* Nothing there now (a cleared entity reads as one with no content). */
     return GDEFCORE_OK;
@@ -1331,7 +1433,13 @@ static GDEFCORE_Result export_values(GDEFCORE_Subjects * subjects,
     wipe(plain, plain_len);
     gdefcore_subject_free(subjects, plain);
   }
-  gdefcore_values_free(catalog, texts, lens, count);
+  if (nested != NULL || memchr(field, '.', field_len) != NULL) {
+    gcu_allocator_free(subjects->alloc, (void *)texts);
+    gcu_allocator_free(subjects->alloc, lens);
+    gdefcore_tree_free(nested);
+  } else {
+    gdefcore_values_free(catalog, texts, lens, count);
+  }
   return rc;
 }
 

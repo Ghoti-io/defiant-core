@@ -372,7 +372,9 @@ TEST(Paths, NoPermission) {
       const std::string & v = it->second;
       if (key.compare(0, 2, "t:") == 0 &&
           (key.find(":read.") != std::string::npos ||
-              key.find(":page.echo") != std::string::npos)) {
+              key.find(":page.echo") != std::string::npos ||
+              key.find(":tree") != std::string::npos ||
+              key.find(":render-entity") != std::string::npos)) {
         EXPECT_NE(std::string::npos, v.find("rc=Invalid")) << key << ": " << v;
       }
       if (key.compare(0, 7, "g:list.") == 0) {

@@ -76,6 +76,15 @@ parses, a field is gone from the type or is personal) the grant does not hold,
 the read answers as for a hidden entity, and the request carries the note
 `defiant.condition.failed` with the value `1`.
 
+A field inside a group (story S6d) is named by its path in a field-read
+permission (`lines.price`). `gdefcore_access_tree()` reads an entity's tree
+through the filter: the entity as `gdefcore_access_read()` sees it, with each
+field's read grants applied in every item that has the field, so a field the
+principal may not read is absent from the root and from every group item, and
+a group the principal may not read is absent with all its items. A condition
+still reads only the root's fields (nested conditions are deferred), so the
+answer for a field is the same in every item of one entity.
+
 ## Lists
 
 `gdefcore_access_list()` returns the public ids of the published entities of a

@@ -571,9 +571,88 @@ static GDEFCORE_Result doc_set_field(const GDEFCORE_Allocator * alloc,
     text_clear(alloc, &slot->vals[i]);
   }
   gcu_allocator_free(alloc, slot->vals);
+  /* Values set by the flat API are matched by position (story S6d keeps
+   * that for flat callers); only a tree names items by id. */
+  gcu_allocator_free(alloc, slot->ids);
+  slot->ids = NULL;
   slot->vals = vals;
   slot->nvals = count;
   return GDEFCORE_OK;
+}
+
+/* Whether @p path is a field directly inside the group at @p group ("" the
+ * root group). */
+static int directly_in(const GDEFCORE_Text * path, const char * group,
+    size_t group_len, const char ** leaf, size_t * leaf_len) {
+  const char * rest = path->p;
+  size_t rn = path->n;
+  if (group_len > 0) {
+    if (rn <= group_len + 1 || memcmp(rest, group, group_len) != 0 ||
+        rest[group_len] != '.') {
+      return 0;
+    }
+    rest += group_len + 1;
+    rn -= group_len + 1;
+  }
+  if (rn == 0 || memchr(rest, '.', rn) != NULL) {
+    return 0;
+  }
+  *leaf = rest;
+  *leaf_len = rn;
+  return 1;
+}
+
+/* The required groups of the root, and the required fields and items of
+ * every group item, are there (story S6d). */
+static int groups_have_required(const GDEFCORE_Lang * l,
+    const GDEFCORE_Decl * decls, size_t ndecls) {
+  const GDEFCORE_Tree * g = l->groups;
+  size_t n = gdefcore_tree_item_count(g);
+  size_t d;
+  size_t i;
+  for (d = 0; d < ndecls; d++) {
+    const char * leaf;
+    size_t ln;
+    if (decls[d].required && decls[d].type == GDEFSTOR_FIELD_GROUP &&
+        directly_in(&decls[d].name, NULL, 0, &leaf, &ln) &&
+        gdefcore_tree_child_count(g, 0, leaf, ln) == 0) {
+      return 0;
+    }
+  }
+  for (i = 1; i < n; i++) {
+    GDEFCORE_TreeItem it;
+    const GDEFCORE_Decl * under;
+    memset(&it, 0, sizeof it);
+    it.size = sizeof it;
+    if (gdefcore_tree_item(g, i, &it) != GDEFCORE_OK) {
+      return 0;
+    }
+    under = gdefcore_ent_decl_at(decls, ndecls, it.path, it.path_len);
+    if (under == NULL || under->type != GDEFSTOR_FIELD_GROUP) {
+      continue; /* an item of a multiple field: its value is required by the port */
+    }
+    for (d = 0; d < ndecls; d++) {
+      const char * leaf;
+      size_t ln;
+      if (!decls[d].required ||
+          !directly_in(&decls[d].name, it.path, it.path_len, &leaf, &ln)) {
+        continue;
+      }
+      if (decls[d].type == GDEFSTOR_FIELD_GROUP || decls[d].many) {
+        if (gdefcore_tree_child_count(g, i, leaf, ln) == 0) {
+          return 0;
+        }
+      } else {
+        const char * text = NULL;
+        size_t len = 0;
+        if (gdefcore_tree_get(g, i, leaf, ln, &text, &len) != GDEFCORE_OK ||
+            text == NULL) {
+          return 0;
+        }
+      }
+    }
+  }
+  return 1;
 }
 
 static int doc_has_required(const GDEFCORE_Doc * doc, const GDEFCORE_Decl * decls,
@@ -583,7 +662,8 @@ static int doc_has_required(const GDEFCORE_Doc * doc, const GDEFCORE_Decl * decl
   size_t d;
   if (doc->nlangs == 0) {
     for (d = 0; d < ndecls; d++) {
-      if (decls[d].required) {
+      if (decls[d].required &&
+          memchr(decls[d].name.p, '.', decls[d].name.n) == NULL) {
         return 0;
       }
     }
@@ -592,7 +672,7 @@ static int doc_has_required(const GDEFCORE_Doc * doc, const GDEFCORE_Decl * decl
   for (i = 0; i < doc->nlangs; i++) {
     for (d = 0; d < ndecls; d++) {
       int found = 0;
-      if (!decls[d].required) {
+      if (!decls[d].required || !gdefcore_ent_decl_flat(&decls[d])) {
         continue;
       }
       for (j = 0; j < doc->langs[i].nfields; j++) {
@@ -607,6 +687,9 @@ static int doc_has_required(const GDEFCORE_Doc * doc, const GDEFCORE_Decl * decl
       if (!found) {
         return 0;
       }
+    }
+    if (!groups_have_required(&doc->langs[i], decls, ndecls)) {
+      return 0;
     }
   }
   return 1;
@@ -992,30 +1075,113 @@ static int field_indexed_of(const GDEFCORE_Field * field) {
   return field->indexed ? 1 : 0;
 }
 
-static GDEFCORE_Result check_fields(const GDEFCORE_Field * fields,
-    size_t count, const GDEFCORE_Limits * limits) {
+static int field_has_tree(const GDEFCORE_Field * field) {
+  return field_covers(field,
+      offsetof(GDEFCORE_Field, subject_len) + sizeof(size_t));
+}
+
+static const GDEFCORE_Field * field_children(const GDEFCORE_Field * field,
+    size_t * out_count) {
+  if (!field_has_tree(field)) {
+    *out_count = 0;
+    return NULL;
+  }
+  *out_count = field->child_count;
+  return field->children;
+}
+
+static size_t field_subject(const GDEFCORE_Field * field, const char ** out) {
+  if (!field_has_tree(field) || field->subject_len == 0) {
+    *out = NULL;
+    return 0;
+  }
+  *out = field->subject;
+  return field->subject_len;
+}
+
+/* One group's fields (the root group's at @p depth 0), and every group below
+ * them (story S6d). @p total counts the fields at every depth. */
+static GDEFCORE_Result check_level(const GDEFCORE_Field * fields, size_t count,
+    const GDEFCORE_Limits * limits, int depth, size_t * total) {
   size_t i;
   size_t j;
-  if (count > limits->max_fields || (fields == NULL && count != 0)) {
-    return count > limits->max_fields ? GDEFCORE_ERR_LIMIT
-                                      : GDEFCORE_ERR_INVALID;
+  if (fields == NULL && count != 0) {
+    return GDEFCORE_ERR_INVALID;
   }
   for (i = 0; i < count; i++) {
     int type;
     int scale;
+    const GDEFCORE_Field * kids;
+    size_t nkids = 0;
+    const char * subject = NULL;
+    size_t subject_len;
     if (fields[i].size < offsetof(GDEFCORE_Field, many) + sizeof(int) ||
         !field_name_ok(fields[i].name, fields[i].name_len)) {
       return GDEFCORE_ERR_INVALID;
     }
+    *total += 1;
+    if (*total > limits->max_fields) {
+      return GDEFCORE_ERR_LIMIT;
+    }
     type = field_type_of(&fields[i]);
     scale = field_scale_of(&fields[i]);
-    /* A logical type of the port's, never a group: core's fields are
-     * flat until story S6d. A scale is a decimal's. */
-    if (type < GDEFSTOR_FIELD_TEXT || type > GDEFSTOR_FIELD_REFERENCE ||
-        type == GDEFSTOR_FIELD_GROUP ||
+    kids = field_children(&fields[i], &nkids);
+    subject_len = field_subject(&fields[i], &subject);
+    /* A logical type of the port's. A scale is a decimal's. A group holds
+     * fields, and needs the members that say which. */
+    if (type < GDEFSTOR_FIELD_TEXT || type > GDEFSTOR_FIELD_GROUP ||
+        (type == GDEFSTOR_FIELD_GROUP && !field_has_tree(&fields[i])) ||
         (type == GDEFSTOR_FIELD_DECIMAL
                 ? (scale < 0 || scale > GDEFSTOR_MODEL_MAX_SCALE)
                 : scale != 0)) {
+      return GDEFCORE_ERR_INVALID;
+    }
+    if (type == GDEFSTOR_FIELD_GROUP) {
+      GDEFCORE_Result gr;
+      /* A group has no value: nothing personal, indexed or constrained. */
+      if (kids == NULL || nkids == 0 || field_personal(&fields[i]) ||
+          field_indexed_of(&fields[i]) || subject_len != 0 ||
+          (field_covers(&fields[i],
+               offsetof(GDEFCORE_Field, pattern_len) + sizeof(size_t)) &&
+              (fields[i].min_len != 0 || fields[i].max_len != 0 ||
+                  fields[i].has_range || fields[i].pattern_len != 0))) {
+        return GDEFCORE_ERR_INVALID;
+      }
+      if (depth + 1 > GDEFSTOR_MODEL_MAX_DEPTH) {
+        return GDEFCORE_ERR_LIMIT;
+      }
+      gr = check_level(kids, nkids, limits, depth + 1, total);
+      if (gr != GDEFCORE_OK) {
+        return gr;
+      }
+    } else if (kids != NULL || nkids != 0) {
+      return GDEFCORE_ERR_INVALID;
+    }
+    if (subject_len != 0) {
+      /* The subject source: a single, non-personal reference among its
+       * siblings (the port's rule too). */
+      int found = 0;
+      if (!field_personal(&fields[i]) || subject == NULL ||
+          !field_name_ok(subject, subject_len)) {
+        return GDEFCORE_ERR_INVALID;
+      }
+      for (j = 0; j < count; j++) {
+        if (j != i && span_eq(fields[j].name, fields[j].name_len, subject,
+                          subject_len)) {
+          if (field_type_of(&fields[j]) != GDEFSTOR_FIELD_REFERENCE ||
+              fields[j].many || field_personal(&fields[j])) {
+            return GDEFCORE_ERR_INVALID;
+          }
+          found = 1;
+        }
+      }
+      if (!found) {
+        return GDEFCORE_ERR_INVALID;
+      }
+    } else if (depth > 0 && field_personal(&fields[i])) {
+      /* A personal field inside a group names its subject source (story
+       * S6d): a group's item is not the entity, and nothing else says whose
+       * the value is. */
       return GDEFCORE_ERR_INVALID;
     }
     if (field_covers(&fields[i],
@@ -1043,40 +1209,147 @@ static GDEFCORE_Result check_fields(const GDEFCORE_Field * fields,
   return GDEFCORE_OK;
 }
 
-static GDEFCORE_Result fields_to_decls(const GDEFCORE_Allocator * alloc,
-    const GDEFCORE_Field * fields, size_t count, GDEFCORE_Decl ** out) {
-  GDEFCORE_Decl * decls;
+static GDEFCORE_Result check_fields(const GDEFCORE_Field * fields,
+    size_t count, const GDEFCORE_Limits * limits) {
+  size_t total = 0;
+  if (count > limits->max_fields || (fields == NULL && count != 0)) {
+    return count > limits->max_fields ? GDEFCORE_ERR_LIMIT
+                                      : GDEFCORE_ERR_INVALID;
+  }
+  return check_level(fields, count, limits, 0, &total);
+}
+
+/* Fields at every depth: what fields_to_decls() makes. */
+static size_t fields_total(const GDEFCORE_Field * fields, size_t count) {
+  size_t n = 0;
   size_t i;
-  *out = NULL;
-  if (count == 0) {
-    return GDEFCORE_OK;
-  }
-  decls = (GDEFCORE_Decl *)mem0(alloc, count * sizeof *decls);
-  if (decls == NULL) {
-    return GDEFCORE_ERR_OOM;
-  }
   for (i = 0; i < count; i++) {
-    if (text_set(alloc, &decls[i].name, fields[i].name, fields[i].name_len) !=
-        GDEFCORE_OK) {
-      decls_free(alloc, decls, i + 1);
+    const GDEFCORE_Field * kids;
+    size_t nkids = 0;
+    n += 1;
+    kids = field_children(&fields[i], &nkids);
+    if (field_type_of(&fields[i]) == GDEFSTOR_FIELD_GROUP && kids != NULL) {
+      n += fields_total(kids, nkids);
+    }
+  }
+  return n;
+}
+
+static GDEFCORE_Result fill_decls(const GDEFCORE_Allocator * alloc,
+    const GDEFCORE_Field * fields, size_t count, const char * prefix,
+    size_t prefix_len, GDEFCORE_Decl * decls, size_t * at) {
+  size_t i;
+  for (i = 0; i < count; i++) {
+    GDEFCORE_Decl * d = &decls[*at];
+    const char * subject = NULL;
+    size_t subject_len = field_subject(&fields[i], &subject);
+    size_t n = prefix_len + (prefix_len > 0 ? 1 : 0) + fields[i].name_len;
+    char * path = (char *)mem(alloc, n + 1);
+    GDEFCORE_Result cr;
+    if (path == NULL) {
       return GDEFCORE_ERR_OOM;
     }
-    decls[i].required = fields[i].required ? 1 : 0;
-    decls[i].many = fields[i].many ? 1 : 0;
-    decls[i].personal = field_personal(&fields[i]);
-    decls[i].type = field_type_of(&fields[i]);
-    decls[i].scale = field_scale_of(&fields[i]);
-    decls[i].indexed = field_indexed_of(&fields[i]);
-    {
-      GDEFCORE_Result cr = copy_constraints(alloc, &fields[i], &decls[i]);
+    if (prefix_len > 0) {
+      memcpy(path, prefix, prefix_len);
+      path[prefix_len] = '.';
+    }
+    memcpy(path + n - fields[i].name_len, fields[i].name, fields[i].name_len);
+    path[n] = '\0';
+    d->name.p = path;
+    d->name.n = n;
+    *at += 1;
+    d->required = fields[i].required ? 1 : 0;
+    d->many = fields[i].many ? 1 : 0;
+    d->personal = field_personal(&fields[i]);
+    d->type = field_type_of(&fields[i]);
+    d->scale = field_scale_of(&fields[i]);
+    d->indexed = field_indexed_of(&fields[i]);
+    cr = copy_constraints(alloc, &fields[i], d);
+    if (cr == GDEFCORE_OK && subject_len > 0) {
+      cr = text_set(alloc, &d->subject, subject, subject_len);
+    }
+    if (cr != GDEFCORE_OK) {
+      return cr;
+    }
+    if (d->type == GDEFSTOR_FIELD_GROUP) {
+      size_t nkids = 0;
+      const GDEFCORE_Field * kids = field_children(&fields[i], &nkids);
+      cr = fill_decls(alloc, kids, nkids, path, n, decls, at);
       if (cr != GDEFCORE_OK) {
-        decls_free(alloc, decls, i + 1);
         return cr;
       }
     }
   }
-  *out = decls;
   return GDEFCORE_OK;
+}
+
+/* A type's fields as decls: every field at every depth, in pre-order, each
+ * named by its path (story S6d). */
+static GDEFCORE_Result fields_to_decls(const GDEFCORE_Allocator * alloc,
+    const GDEFCORE_Field * fields, size_t count, GDEFCORE_Decl ** out,
+    size_t * out_n) {
+  GDEFCORE_Decl * decls;
+  size_t total = fields_total(fields, count);
+  size_t at = 0;
+  GDEFCORE_Result rc;
+  *out = NULL;
+  *out_n = 0;
+  if (total == 0) {
+    return GDEFCORE_OK;
+  }
+  decls = (GDEFCORE_Decl *)mem0(alloc, total * sizeof *decls);
+  if (decls == NULL) {
+    return GDEFCORE_ERR_OOM;
+  }
+  rc = fill_decls(alloc, fields, count, NULL, 0, decls, &at);
+  if (rc != GDEFCORE_OK || at != total) {
+    decls_free(alloc, decls, total);
+    return rc != GDEFCORE_OK ? rc : GDEFCORE_ERR_INTERNAL;
+  }
+  *out = decls;
+  *out_n = total;
+  return GDEFCORE_OK;
+}
+
+int gdefcore_ent_decl_flat(const GDEFCORE_Decl * d) {
+  return d->type != GDEFSTOR_FIELD_GROUP &&
+         memchr(d->name.p, '.', d->name.n) == NULL;
+}
+
+const GDEFCORE_Decl * gdefcore_ent_decl_at(const GDEFCORE_Decl * decls,
+    size_t n, const char * path, size_t path_len) {
+  size_t i;
+  for (i = 0; i < n; i++) {
+    if (span_eq(decls[i].name.p, decls[i].name.n, path, path_len)) {
+      return &decls[i];
+    }
+  }
+  return NULL;
+}
+
+/* The @p index th field the flat calls see: a field of the root group that
+ * holds values (story S6d). NULL past the end. */
+static const GDEFCORE_Decl * flat_decl(const GDEFCORE_Decl * decls, size_t n,
+    size_t index) {
+  size_t i;
+  for (i = 0; i < n; i++) {
+    if (gdefcore_ent_decl_flat(&decls[i])) {
+      if (index == 0) {
+        return &decls[i];
+      }
+      index -= 1;
+    }
+  }
+  return NULL;
+}
+
+static size_t flat_count(const GDEFCORE_Decl * decls, size_t n) {
+  size_t i;
+  size_t c = 0;
+  for (i = 0; i < n; i++) {
+    c += gdefcore_ent_decl_flat(&decls[i]) ? 1u : 0u;
+  }
+  return c;
 }
 
 GDEFCORE_Result gdefcore_catalog_open(GDEFSTOR_Store * store,
@@ -1165,6 +1438,7 @@ GDEFCORE_Result gdefcore_type_define(GDEFCORE_Catalog * catalog,
     size_t field_count) {
   GDEFSTOR_Write * write = NULL;
   GDEFCORE_Decl * decls = NULL;
+  size_t ndecls = 0;
   GDEFCORE_Result rc;
   int existing = 0;
   if (catalog == NULL || !machine_ok(name, name_len) ||
@@ -1184,19 +1458,18 @@ GDEFCORE_Result gdefcore_type_define(GDEFCORE_Catalog * catalog,
   if (rc != GDEFCORE_ERR_INVALID) {
     return rc;
   }
-  rc = fields_to_decls(catalog->alloc, fields, field_count, &decls);
+  rc = fields_to_decls(catalog->alloc, fields, field_count, &decls, &ndecls);
   if (rc != GDEFCORE_OK) {
     return rc;
   }
   rc = map_stor(gdefstor_write_begin(catalog->store, (const char *)catalog->tenant,
       catalog->tenant_len, NULL, &write));
   if (rc != GDEFCORE_OK) {
-    decls_free(catalog->alloc, decls, field_count);
+    decls_free(catalog->alloc, decls, ndecls);
     return rc;
   }
-  rc = write_type(catalog, write, name, name_len, kind, decls, field_count,
-      NULL, 0);
-  decls_free(catalog->alloc, decls, field_count);
+  rc = write_type(catalog, write, name, name_len, kind, decls, ndecls, NULL, 0);
+  decls_free(catalog->alloc, decls, ndecls);
   if (rc != GDEFCORE_OK) {
     gdefstor_write_abort(write);
     return rc;
@@ -1217,12 +1490,15 @@ GDEFCORE_Result gdefcore_type_field_type(GDEFCORE_Catalog * catalog,
   if (rc != GDEFCORE_OK) {
     return rc;
   }
-  if (index >= n) {
-    decls_free(catalog->alloc, decls, n);
-    return GDEFCORE_ERR_INVALID;
+  {
+    const GDEFCORE_Decl * d = flat_decl(decls, n, index);
+    if (d == NULL) {
+      decls_free(catalog->alloc, decls, n);
+      return GDEFCORE_ERR_INVALID;
+    }
+    *out_type = d->type;
+    *out_scale = d->scale;
   }
-  *out_type = decls[index].type;
-  *out_scale = decls[index].scale;
   decls_free(catalog->alloc, decls, n);
   return GDEFCORE_OK;
 }
@@ -1313,8 +1589,8 @@ GDEFCORE_Result gdefcore_type_field_count(GDEFCORE_Catalog * catalog,
   if (rc != GDEFCORE_OK) {
     return rc;
   }
+  *out_count = flat_count(decls, n);
   decls_free(catalog->alloc, decls, n);
-  *out_count = n;
   return GDEFCORE_OK;
 }
 
@@ -1332,18 +1608,21 @@ GDEFCORE_Result gdefcore_type_field(GDEFCORE_Catalog * catalog, const char * nam
   if (rc != GDEFCORE_OK) {
     return rc;
   }
-  if (index >= n) {
-    decls_free(catalog->alloc, decls, n);
-    return GDEFCORE_ERR_INVALID;
+  {
+    const GDEFCORE_Decl * d = flat_decl(decls, n, index);
+    if (d == NULL) {
+      decls_free(catalog->alloc, decls, n);
+      return GDEFCORE_ERR_INVALID;
+    }
+    *out_name = dup_span(catalog->alloc, d->name.p, d->name.n);
+    if (*out_name == NULL) {
+      decls_free(catalog->alloc, decls, n);
+      return GDEFCORE_ERR_OOM;
+    }
+    *out_name_len = d->name.n;
+    *out_required = d->required;
+    *out_many = d->many;
   }
-  *out_name = dup_span(catalog->alloc, decls[index].name.p, decls[index].name.n);
-  if (*out_name == NULL) {
-    decls_free(catalog->alloc, decls, n);
-    return GDEFCORE_ERR_OOM;
-  }
-  *out_name_len = decls[index].name.n;
-  *out_required = decls[index].required;
-  *out_many = decls[index].many;
   decls_free(catalog->alloc, decls, n);
   return GDEFCORE_OK;
 }
@@ -1360,11 +1639,11 @@ GDEFCORE_Result gdefcore_type_field_personal(GDEFCORE_Catalog * catalog,
   if (rc != GDEFCORE_OK) {
     return rc;
   }
-  if (index >= n) {
+  if (flat_decl(decls, n, index) == NULL) {
     decls_free(catalog->alloc, decls, n);
     return GDEFCORE_ERR_INVALID;
   }
-  *out_personal = decls[index].personal ? 1 : 0;
+  *out_personal = flat_decl(decls, n, index)->personal ? 1 : 0;
   decls_free(catalog->alloc, decls, n);
   return GDEFCORE_OK;
 }
@@ -1385,27 +1664,27 @@ GDEFCORE_Result gdefcore_type_field_constraints(GDEFCORE_Catalog * catalog,
   if (rc != GDEFCORE_OK) {
     return rc;
   }
-  if (index >= n) {
+  if (flat_decl(decls, n, index) == NULL) {
     decls_free(catalog->alloc, decls, n);
     return GDEFCORE_ERR_INVALID;
   }
   {
+    const GDEFCORE_Decl * d = flat_decl(decls, n, index);
     char * pattern = NULL;
     size_t pattern_len = 0;
-    if (decls[index].pattern.n > 0) {
-      pattern = dup_span(catalog->alloc, decls[index].pattern.p,
-          decls[index].pattern.n);
+    if (d->pattern.n > 0) {
+      pattern = dup_span(catalog->alloc, d->pattern.p, d->pattern.n);
       if (pattern == NULL) {
         decls_free(catalog->alloc, decls, n);
         return GDEFCORE_ERR_OOM;
       }
-      pattern_len = decls[index].pattern.n;
+      pattern_len = d->pattern.n;
     }
-    *out_min_len = decls[index].min_len;
-    *out_max_len = decls[index].max_len;
-    *out_has_range = decls[index].has_range ? 1 : 0;
-    *out_range_min = decls[index].range_min;
-    *out_range_max = decls[index].range_max;
+    *out_min_len = d->min_len;
+    *out_max_len = d->max_len;
+    *out_has_range = d->has_range ? 1 : 0;
+    *out_range_min = d->range_min;
+    *out_range_max = d->range_max;
     *out_pattern = pattern;
     *out_pattern_len = pattern_len;
   }
@@ -1531,6 +1810,7 @@ GDEFCORE_Result gdefcore_changeset_define(GDEFCORE_Changeset * changeset,
     size_t field_count) {
   GDEFCORE_Op * op;
   GDEFCORE_Decl * decls = NULL;
+  size_t ndecls = 0;
   GDEFCORE_Result rc;
   char * existing_id = NULL;
   size_t existing_id_len = 0;
@@ -1555,21 +1835,22 @@ GDEFCORE_Result gdefcore_changeset_define(GDEFCORE_Changeset * changeset,
   } else if (rc != GDEFCORE_ERR_INVALID) {
     return rc;
   }
-  rc = fields_to_decls(changeset->catalog->alloc, fields, field_count, &decls);
+  rc = fields_to_decls(changeset->catalog->alloc, fields, field_count, &decls,
+      &ndecls);
   if (rc != GDEFCORE_OK) {
     gcu_allocator_free(changeset->catalog->alloc, existing_id);
     return rc;
   }
   rc = add_op(changeset, &op);
   if (rc != GDEFCORE_OK) {
-    decls_free(changeset->catalog->alloc, decls, field_count);
+    decls_free(changeset->catalog->alloc, decls, ndecls);
     gcu_allocator_free(changeset->catalog->alloc, existing_id);
     return rc;
   }
   op->kind = GDEFCORE_OP_DEFINE;
   op->type_kind = kind;
   op->decls = decls;
-  op->ndecls = field_count;
+  op->ndecls = ndecls;
   if (text_set(changeset->catalog->alloc, &op->machine, name, name_len) !=
           GDEFCORE_OK ||
       text_set(changeset->catalog->alloc, &op->type_name, "core.entity_type",
@@ -1596,12 +1877,14 @@ GDEFCORE_Result gdefcore_changeset_define(GDEFCORE_Changeset * changeset,
   return GDEFCORE_OK;
 }
 
+/* A field the flat calls take a value for: one of the root group that holds
+ * values. A group, and a field inside one, is not (story S6d). */
 static const GDEFCORE_Decl * decl_named(const GDEFCORE_Decl * decls, size_t n,
     const char * name, size_t name_len) {
   size_t i;
   for (i = 0; i < n; i++) {
     if (span_eq(decls[i].name.p, decls[i].name.n, name, name_len)) {
-      return &decls[i];
+      return gdefcore_ent_decl_flat(&decls[i]) ? &decls[i] : NULL;
     }
   }
   return NULL;
@@ -1650,12 +1933,48 @@ static int personal_value_ok(const GDEFCORE_Changeset * changeset,
 /* Every personal value in a document restored from a stored revision or a
  * draft must already be sealed. Used where no value passes through
  * stage_values: a revert and a publish. */
+static int groups_personal_sealed(const GDEFCORE_Tree * g,
+    const GDEFCORE_Decl * decls, size_t ndecls) {
+  size_t n = gdefcore_tree_item_count(g);
+  size_t i;
+  for (i = 1; i < n; i++) {
+    GDEFCORE_TreeItem it;
+    size_t k;
+    memset(&it, 0, sizeof it);
+    it.size = sizeof it;
+    if (gdefcore_tree_item(g, i, &it) != GDEFCORE_OK) {
+      return 0;
+    }
+    for (k = 0; k < it.value_count; k++) {
+      const char * f = NULL;
+      size_t fn = 0;
+      const char * text = NULL;
+      size_t len = 0;
+      GDEFCORE_Text path;
+      const GDEFCORE_Decl * d;
+      if (gdefcore_tree_value(g, i, k, &f, &fn, &text, &len) != GDEFCORE_OK ||
+          gdefcore_ent_tree_value_path(g, i, f, fn, &path) != GDEFCORE_OK) {
+        return 0;
+      }
+      d = gdefcore_ent_decl_at(decls, ndecls, path.p, path.n);
+      gcu_allocator_free(g->alloc, path.p);
+      if (d != NULL && d->personal && !sealed_ok(text, len)) {
+        return 0;
+      }
+    }
+  }
+  return 1;
+}
+
 static int doc_personal_sealed(const GDEFCORE_Doc * doc,
     const GDEFCORE_Decl * decls, size_t ndecls) {
   size_t li;
   size_t fi;
   size_t vi;
   for (li = 0; li < doc->nlangs; li++) {
+    if (!groups_personal_sealed(doc->langs[li].groups, decls, ndecls)) {
+      return 0;
+    }
     for (fi = 0; fi < doc->langs[li].nfields; fi++) {
       const GDEFCORE_Vals * f = &doc->langs[li].fields[fi];
       const GDEFCORE_Decl * decl = decl_named(decls, ndecls, f->name.p, f->name.n);
@@ -1769,6 +2088,76 @@ static GDEFCORE_Result canonical_values(GDEFCORE_Catalog * cat,
   return GDEFCORE_OK;
 }
 
+/*
+ * What a save or a draft of an entity builds on: the doc the changeset
+ * already stages for it (@p out_op is that op), or, for the entity's first op
+ * in the changeset, the draft or what it is now. A draft builds on the draft
+ * the entity has, else on what it is now. A save builds on the draft too when
+ * the draft was made from the newest revision (it saves the working copy, as
+ * a publish of it would), else on what the entity is now; either way the save
+ * consumes the draft.
+ */
+static GDEFCORE_Result staged_base(GDEFCORE_Changeset * changeset,
+    const char * canon, const Staging * st, int draft, GDEFCORE_Op ** out_op,
+    GDEFCORE_Doc * tentative) {
+  GDEFCORE_Catalog * cat = changeset->catalog;
+  GDEFCORE_Op * op = find_op_id(changeset, canon, GDEFCORE_PUBLIC_ID_LEN);
+  GDEFCORE_Result rc = GDEFCORE_OK;
+  memset(tentative, 0, sizeof *tentative);
+  *out_op = op;
+  if (op != NULL && op->kind != GDEFCORE_OP_CLEAR) {
+    rc = doc_clone(cat->alloc, &op->staged, tentative);
+  } else if (op == NULL) {
+    if (st->look.has_draft &&
+        (draft || st->look.draft_base == st->look.revision)) {
+      rc = gdefcore_ent_read_doc(cat, canon, 0, 1, tentative);
+    } else {
+      rc = current_doc(cat, canon, &st->look, tentative);
+    }
+  }
+  return rc;
+}
+
+/* Stage @p tentative (taken, whatever the result) as what the op on the
+ * entity writes, making the op when the changeset has none for it. */
+static GDEFCORE_Result stage_finish(GDEFCORE_Changeset * changeset,
+    const char * canon, Staging * st, GDEFCORE_Op * op,
+    GDEFCORE_Doc * tentative, int draft) {
+  GDEFCORE_Catalog * cat = changeset->catalog;
+  GDEFCORE_Result rc = GDEFCORE_OK;
+  int created = 0;
+  if (!doc_has_required(tentative, st->decls, st->ndecls)) {
+    doc_free(cat->alloc, tentative);
+    staging_free(cat, st);
+    return GDEFCORE_ERR_INVALID;
+  }
+  if (op == NULL) {
+    rc = add_op(changeset, &op);
+    if (rc == GDEFCORE_OK) {
+      created = 1;
+      rc = op_from_staging(cat, op, canon, st);
+    }
+    if (rc == GDEFCORE_OK) {
+      rc = current_doc(cat, canon, &st->look, &op->base);
+    }
+    if (rc != GDEFCORE_OK) {
+      if (created) {
+        op_free(cat->alloc, op);
+        changeset->nops -= 1;
+      }
+      doc_free(cat->alloc, tentative);
+      staging_free(cat, st);
+      return rc;
+    }
+  }
+  staging_free(cat, st);
+  doc_free(cat->alloc, &op->staged);
+  op->staged = *tentative;
+  memset(tentative, 0, sizeof *tentative);
+  op->kind = draft ? GDEFCORE_OP_DRAFT : GDEFCORE_OP_SAVE;
+  return GDEFCORE_OK;
+}
+
 static GDEFCORE_Result stage_values(GDEFCORE_Changeset * changeset,
     const char * id, size_t id_len, const char * lang, size_t lang_len,
     const GDEFCORE_Value * values, size_t value_count, int draft) {
@@ -1779,7 +2168,6 @@ static GDEFCORE_Result stage_values(GDEFCORE_Changeset * changeset,
   Staging st;
   GDEFCORE_Result rc;
   size_t i;
-  int created = 0;
   if (changeset == NULL || changeset->applied || !lang_ok(lang, lang_len)) {
     return GDEFCORE_ERR_INVALID;
   }
@@ -1826,22 +2214,7 @@ static GDEFCORE_Result stage_values(GDEFCORE_Changeset * changeset,
       }
     }
   }
-  op = find_op_id(changeset, canon, GDEFCORE_PUBLIC_ID_LEN);
-  memset(&tentative, 0, sizeof tentative);
-  if (op != NULL && op->kind != GDEFCORE_OP_CLEAR) {
-    rc = doc_clone(cat->alloc, &op->staged, &tentative);
-  } else if (op == NULL) {
-    /* A draft builds on the draft the entity has, else on what it is now. A
-     * save builds on the draft too when the draft was made from the newest
-     * revision (it saves the working copy, as a publish of it would), else
-     * on what the entity is now; either way the save consumes the draft. */
-    if (st.look.has_draft &&
-        (draft || st.look.draft_base == st.look.revision)) {
-      rc = gdefcore_ent_read_doc(cat, canon, 0, 1, &tentative);
-    } else {
-      rc = current_doc(cat, canon, &st.look, &tentative);
-    }
-  }
+  rc = staged_base(changeset, canon, &st, draft, &op, &tentative);
   if (rc != GDEFCORE_OK) {
     doc_free(cat->alloc, &tentative);
     staging_free(cat, &st);
@@ -1882,35 +2255,7 @@ static GDEFCORE_Result stage_values(GDEFCORE_Changeset * changeset,
       return rc;
     }
   }
-  if (!doc_has_required(&tentative, st.decls, st.ndecls)) {
-    doc_free(cat->alloc, &tentative);
-    staging_free(cat, &st);
-    return GDEFCORE_ERR_INVALID;
-  }
-  if (op == NULL) {
-    rc = add_op(changeset, &op);
-    if (rc == GDEFCORE_OK) {
-      created = 1;
-      rc = op_from_staging(cat, op, canon, &st);
-    }
-    if (rc == GDEFCORE_OK) {
-      rc = current_doc(cat, canon, &st.look, &op->base);
-    }
-    if (rc != GDEFCORE_OK) {
-      if (created) {
-        op_free(cat->alloc, op);
-        changeset->nops -= 1;
-      }
-      doc_free(cat->alloc, &tentative);
-      staging_free(cat, &st);
-      return rc;
-    }
-  }
-  staging_free(cat, &st);
-  doc_free(cat->alloc, &op->staged);
-  op->staged = tentative;
-  op->kind = draft ? GDEFCORE_OP_DRAFT : GDEFCORE_OP_SAVE;
-  return GDEFCORE_OK;
+  return stage_finish(changeset, canon, &st, op, &tentative, draft);
 }
 
 GDEFCORE_Result gdefcore_entity_save(GDEFCORE_Changeset * changeset,
@@ -1925,6 +2270,664 @@ GDEFCORE_Result gdefcore_entity_save_draft(GDEFCORE_Changeset * changeset,
     const GDEFCORE_Value * values, size_t value_count) {
   return stage_values(changeset, id, id_len, lang, lang_len, values,
       value_count, 1);
+}
+
+/* The doc @p view reads of an entity: gdefcore_entity_values() and
+ * gdefcore_entity_tree() (story S6d) read through this one rule. */
+static GDEFCORE_Result view_doc(GDEFCORE_Catalog * catalog, const char * canon,
+    int view, GDEFCORE_EntLook * out_look, GDEFCORE_Doc * doc) {
+  GDEFCORE_EntLook look;
+  GDEFCORE_Result rc;
+  memset(doc, 0, sizeof *doc);
+  rc = gdefcore_ent_lookup(catalog, canon, &look);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  if (out_look != NULL) {
+    *out_look = look;
+  }
+  if (view == GDEFCORE_VIEW_DRAFT && look.has_draft) {
+    /* An editor's view: the draft, over what the entity is now. */
+    rc = gdefcore_ent_read_doc(catalog, canon, 0, 1, doc);
+  } else {
+    /* A reader's view is the newest revision, and only while the flag is
+     * set. The unpublished entity answers as one that is not there; so
+     * does a cleared one, and one never saved. */
+    if (!look.exists || look.revision == 0 || look.deleted ||
+        (view == GDEFCORE_VIEW_PUBLISHED && !look.published)) {
+      return GDEFCORE_ERR_INVALID;
+    }
+    rc = gdefcore_ent_read_doc(catalog, canon, 0, 0, doc);
+  }
+  return rc;
+}
+
+/* ---- field trees (story S6d) --------------------------------------------- */
+
+/* One value of a tree for field @p d in its canonical text: a personal value
+ * as the sealed text it is (and only when the caller may hand one over), any
+ * other as its type spells it. */
+static GDEFCORE_Result canon_one(GDEFCORE_Catalog * cat, int accept_personal,
+    const GDEFCORE_Decl * d, const char * text, size_t len,
+    GDEFCORE_Text * out) {
+  memset(out, 0, sizeof *out);
+  if (text == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  if (len > cat->limits.max_value_bytes) {
+    return GDEFCORE_ERR_LIMIT;
+  }
+  if (d->personal) {
+    if (!accept_personal || !sealed_ok(text, len)) {
+      return GDEFCORE_ERR_INVALID;
+    }
+    return text_set(cat->alloc, out, text, len);
+  }
+  return gdefcore_ent_value_check(cat->alloc, d, text, len, out);
+}
+
+/* Items of a tree keyed by parent and field, to count siblings once. */
+typedef struct Sib {
+  size_t parent;
+  const char * field;
+  size_t field_len;
+} Sib;
+
+static int sib_cmp(const void * a, const void * b) {
+  const Sib * x = (const Sib *)a;
+  const Sib * y = (const Sib *)b;
+  size_t n;
+  int c;
+  if (x->parent != y->parent) {
+    return x->parent < y->parent ? -1 : 1;
+  }
+  n = x->field_len < y->field_len ? x->field_len : y->field_len;
+  c = n == 0 ? 0 : memcmp(x->field, y->field, n);
+  if (c != 0) {
+    return c;
+  }
+  return x->field_len < y->field_len ? -1 : (x->field_len > y->field_len);
+}
+
+/* No field holds more items under one parent than it may: one for a field
+ * that is not multiple, the catalog's max_values for one that is. */
+static GDEFCORE_Result sibling_counts(GDEFCORE_Catalog * cat,
+    const GDEFCORE_Decl * decls, size_t ndecls, const GDEFCORE_Tree * in) {
+  size_t n = gdefcore_tree_item_count(in);
+  Sib * sibs;
+  size_t i;
+  size_t run = 0;
+  GDEFCORE_Result rc = GDEFCORE_OK;
+  if (n <= 1) {
+    return GDEFCORE_OK;
+  }
+  sibs = (Sib *)mem0(cat->alloc, (n - 1) * sizeof *sibs);
+  if (sibs == NULL) {
+    return GDEFCORE_ERR_OOM;
+  }
+  for (i = 1; i < n; i++) {
+    GDEFCORE_TreeItem it;
+    memset(&it, 0, sizeof it);
+    it.size = sizeof it;
+    if (gdefcore_tree_item(in, i, &it) != GDEFCORE_OK) {
+      gcu_allocator_free(cat->alloc, sibs);
+      return GDEFCORE_ERR_INVALID;
+    }
+    sibs[i - 1].parent = it.parent;
+    sibs[i - 1].field = it.path;
+    sibs[i - 1].field_len = it.path_len;
+  }
+  qsort(sibs, n - 1, sizeof *sibs, sib_cmp);
+  for (i = 0; rc == GDEFCORE_OK && i < n - 1; i++) {
+    run = i > 0 && sib_cmp(&sibs[i], &sibs[i - 1]) == 0 ? run + 1 : 1;
+    {
+      const GDEFCORE_Decl * d = gdefcore_ent_decl_at(decls, ndecls,
+          sibs[i].field, sibs[i].field_len);
+      if (d == NULL) {
+        rc = GDEFCORE_ERR_INVALID;
+      } else if (!d->many && run > 1) {
+        rc = GDEFCORE_ERR_INVALID;
+      } else if (run > cat->limits.max_values) {
+        rc = GDEFCORE_ERR_LIMIT;
+      }
+    }
+  }
+  gcu_allocator_free(cat->alloc, sibs);
+  return rc;
+}
+
+/*
+ * A tree checked against the type's decls, into language @p l: the root's
+ * values (with @p with_root) and the items of its multiple fields as @p l's
+ * fields, with their ids, and every group item, at any depth, into @p l's
+ * groups, each value in its canonical text. Anything the type does not
+ * declare where it sits is ::GDEFCORE_ERR_INVALID.
+ */
+static GDEFCORE_Result tree_to_lang(GDEFCORE_Catalog * cat, int accept_personal,
+    const GDEFCORE_Decl * decls, size_t ndecls, const GDEFCORE_Tree * in,
+    int with_root, GDEFCORE_Lang * l) {
+  size_t n = gdefcore_tree_item_count(in);
+  size_t * map = NULL;
+  size_t i;
+  GDEFCORE_Result rc;
+  const size_t kScalarItem = SIZE_MAX - 1;
+  if (in == NULL || n == 0) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  if (n > GDEFSTOR_MODEL_MAX_ITEMS) {
+    return GDEFCORE_ERR_LIMIT;
+  }
+  rc = sibling_counts(cat, decls, ndecls, in);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  map = (size_t *)mem0(cat->alloc, n * sizeof *map);
+  if (map == NULL) {
+    return GDEFCORE_ERR_OOM;
+  }
+  for (i = 0; rc == GDEFCORE_OK && i < n; i++) {
+    GDEFCORE_TreeItem it;
+    const GDEFCORE_Decl * under = NULL;
+    size_t gi = 0;
+    size_t k;
+    memset(&it, 0, sizeof it);
+    it.size = sizeof it;
+    if (gdefcore_tree_item(in, i, &it) != GDEFCORE_OK) {
+      rc = GDEFCORE_ERR_INVALID;
+      break;
+    }
+    if (i == 0) {
+      if (!with_root && it.value_count > 0) {
+        rc = GDEFCORE_ERR_INVALID;
+        break;
+      }
+      for (k = 0; rc == GDEFCORE_OK && k < it.value_count; k++) {
+        const char * f = NULL;
+        size_t fn = 0;
+        const char * text = NULL;
+        size_t len = 0;
+        const GDEFCORE_Decl * d;
+        GDEFCORE_Text canon;
+        rc = gdefcore_tree_value(in, 0, k, &f, &fn, &text, &len);
+        if (rc != GDEFCORE_OK) {
+          break;
+        }
+        d = decl_named(decls, ndecls, f, fn);
+        if (d == NULL || d->many) {
+          rc = GDEFCORE_ERR_INVALID;
+          break;
+        }
+        rc = canon_one(cat, accept_personal, d, text, len, &canon);
+        if (rc == GDEFCORE_OK) {
+          rc = gdefcore_ent_lang_add(cat->alloc, l, f, fn, &canon, 0, 0);
+          if (rc != GDEFCORE_OK) {
+            text_clear(cat->alloc, &canon);
+          }
+        }
+      }
+      map[0] = 0;
+      continue;
+    }
+    under = gdefcore_ent_decl_at(decls, ndecls, it.path, it.path_len);
+    if (under == NULL || it.parent >= i ||
+        (under->type != GDEFSTOR_FIELD_GROUP && !under->many) ||
+        map[it.parent] == kScalarItem) {
+      rc = GDEFCORE_ERR_INVALID;
+      break;
+    }
+    if (under->type != GDEFSTOR_FIELD_GROUP) {
+      /* An item of a multiple field: its one value, its own. */
+      const char * f = NULL;
+      size_t fn = 0;
+      const char * text = NULL;
+      size_t len = 0;
+      GDEFCORE_Text canon;
+      if (it.value_count != 1 ||
+          gdefcore_tree_value(in, i, 0, &f, &fn, &text, &len) != GDEFCORE_OK ||
+          fn != 0) {
+        rc = GDEFCORE_ERR_INVALID;
+        break;
+      }
+      rc = canon_one(cat, accept_personal, under, text, len, &canon);
+      if (rc != GDEFCORE_OK) {
+        break;
+      }
+      if (it.parent == 0) {
+        if (!with_root) {
+          text_clear(cat->alloc, &canon);
+          rc = GDEFCORE_ERR_INVALID;
+          break;
+        }
+        rc = gdefcore_ent_lang_add(cat->alloc, l, it.field, it.field_len,
+            &canon, 1, it.id);
+        if (rc != GDEFCORE_OK) {
+          text_clear(cat->alloc, &canon);
+        }
+        map[i] = kScalarItem;
+        continue;
+      }
+      if (l->groups == NULL) {
+        rc = gdefcore_ent_tree_new(cat->alloc, &l->groups);
+      }
+      if (rc == GDEFCORE_OK) {
+        rc = gdefcore_tree_add(l->groups, map[it.parent], it.field,
+            it.field_len, it.id, &gi);
+      }
+      if (rc == GDEFCORE_OK) {
+        rc = gdefcore_ent_tree_put(l->groups, gi, NULL, 0, canon.p, canon.n,
+            NULL, 0);
+      }
+      text_clear(cat->alloc, &canon);
+      map[i] = kScalarItem;
+      continue;
+    }
+    if (l->groups == NULL) {
+      rc = gdefcore_ent_tree_new(cat->alloc, &l->groups);
+      if (rc != GDEFCORE_OK) {
+        break;
+      }
+    }
+    rc = gdefcore_tree_add(l->groups, map[it.parent], it.field, it.field_len,
+        it.id, &gi);
+    if (rc != GDEFCORE_OK) {
+      break;
+    }
+    map[i] = gi;
+    for (k = 0; rc == GDEFCORE_OK && k < it.value_count; k++) {
+      const char * f = NULL;
+      size_t fn = 0;
+      const char * text = NULL;
+      size_t len = 0;
+      GDEFCORE_Text path;
+      GDEFCORE_Text canon;
+      const GDEFCORE_Decl * d;
+      rc = gdefcore_tree_value(in, i, k, &f, &fn, &text, &len);
+      if (rc != GDEFCORE_OK) {
+        break;
+      }
+      if (fn == 0) {
+        rc = GDEFCORE_ERR_INVALID; /* a group has no value of its own */
+        break;
+      }
+      rc = gdefcore_ent_tree_value_path(in, i, f, fn, &path);
+      if (rc != GDEFCORE_OK) {
+        break;
+      }
+      d = gdefcore_ent_decl_at(decls, ndecls, path.p, path.n);
+      text_clear(cat->alloc, &path);
+      if (d == NULL || d->type == GDEFSTOR_FIELD_GROUP || d->many) {
+        rc = GDEFCORE_ERR_INVALID;
+        break;
+      }
+      rc = canon_one(cat, accept_personal, d, text, len, &canon);
+      if (rc == GDEFCORE_OK) {
+        rc = gdefcore_ent_tree_put(l->groups, gi, f, fn, canon.p, canon.n,
+            NULL, 0);
+        text_clear(cat->alloc, &canon);
+      }
+    }
+  }
+  gcu_allocator_free(cat->alloc, map);
+  return rc;
+}
+
+/* Free what one language holds and empty it, leaving the struct itself. */
+static void lang_clear(const GDEFCORE_Allocator * alloc, GDEFCORE_Lang * l) {
+  size_t j;
+  size_t k;
+  for (j = 0; j < l->nfields; j++) {
+    for (k = 0; k < l->fields[j].nvals; k++) {
+      text_clear(alloc, &l->fields[j].vals[k]);
+    }
+    gcu_allocator_free(alloc, l->fields[j].vals);
+    gcu_allocator_free(alloc, l->fields[j].ids);
+    text_clear(alloc, &l->fields[j].name);
+  }
+  gcu_allocator_free(alloc, l->fields);
+  gdefcore_tree_free(l->groups);
+  text_clear(alloc, &l->lang);
+  memset(l, 0, sizeof *l);
+}
+
+/* The language @p lang of @p doc, emptied, or added empty. */
+static GDEFCORE_Lang * doc_lang_reset(GDEFCORE_Catalog * cat,
+    GDEFCORE_Doc * doc, const char * lang, size_t lang_len) {
+  size_t i;
+  GDEFCORE_Lang * l = NULL;
+  for (i = 0; i < doc->nlangs; i++) {
+    if (span_eq(doc->langs[i].lang.p, doc->langs[i].lang.n, lang, lang_len)) {
+      l = &doc->langs[i];
+      break;
+    }
+  }
+  if (l == NULL) {
+    GDEFCORE_Lang * langs;
+    if (doc->nlangs >= cat->limits.max_languages) {
+      return NULL;
+    }
+    langs = (GDEFCORE_Lang *)gcu_allocator_realloc(cat->alloc, doc->langs,
+        (doc->nlangs + 1) * sizeof *langs);
+    if (langs == NULL) {
+      return NULL;
+    }
+    doc->langs = langs;
+    l = &doc->langs[doc->nlangs];
+    memset(l, 0, sizeof *l);
+    if (text_set(cat->alloc, &l->lang, lang, lang_len) != GDEFCORE_OK) {
+      return NULL;
+    }
+    doc->nlangs += 1;
+    return l;
+  }
+  {
+    /* Free what the language held, then keep the slot with its tag. */
+    GDEFCORE_Text keep = l->lang;
+    l->lang.p = NULL;
+    l->lang.n = 0;
+    lang_clear(cat->alloc, l);
+    l->lang = keep;
+  }
+  return l;
+}
+
+static GDEFCORE_Result stage_tree(GDEFCORE_Changeset * changeset,
+    const char * id, size_t id_len, const char * lang, size_t lang_len,
+    const GDEFCORE_Tree * tree, int draft) {
+  char canon[GDEFCORE_PUBLIC_ID_LEN + 1];
+  GDEFCORE_Catalog * cat;
+  GDEFCORE_Op * op = NULL;
+  GDEFCORE_Doc tentative;
+  GDEFCORE_Lang fresh;
+  GDEFCORE_Lang * slot;
+  Staging st;
+  GDEFCORE_Result rc;
+  if (changeset == NULL || changeset->applied || tree == NULL ||
+      !lang_ok(lang, lang_len)) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  if (gdefcore_id_canonical(id, id_len, canon) != GDEFCORE_OK) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  cat = changeset->catalog;
+  rc = staging_load(cat, canon, &st);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  memset(&fresh, 0, sizeof fresh);
+  rc = tree_to_lang(cat, changeset->accept_sealed, st.decls, st.ndecls, tree,
+      1, &fresh);
+  if (rc == GDEFCORE_OK) {
+    rc = staged_base(changeset, canon, &st, draft, &op, &tentative);
+  } else {
+    memset(&tentative, 0, sizeof tentative);
+  }
+  if (rc == GDEFCORE_OK) {
+    slot = doc_lang_reset(cat, &tentative, lang, lang_len);
+    if (slot == NULL) {
+      rc = tentative.nlangs >= cat->limits.max_languages ? GDEFCORE_ERR_LIMIT
+                                                         : GDEFCORE_ERR_OOM;
+    } else {
+      /* The tree is the language's whole content (AD-14). */
+      slot->fields = fresh.fields;
+      slot->nfields = fresh.nfields;
+      slot->groups = fresh.groups;
+      memset(&fresh, 0, sizeof fresh);
+    }
+  }
+  if (rc != GDEFCORE_OK) {
+    lang_clear(cat->alloc, &fresh);
+    doc_free(cat->alloc, &tentative);
+    staging_free(cat, &st);
+    return rc;
+  }
+  return stage_finish(changeset, canon, &st, op, &tentative, draft);
+}
+
+GDEFCORE_Result gdefcore_tree_save(GDEFCORE_Changeset * changeset,
+    const char * id, size_t id_len, const char * lang, size_t lang_len,
+    const GDEFCORE_Tree * tree) {
+  return stage_tree(changeset, id, id_len, lang, lang_len, tree, 0);
+}
+
+GDEFCORE_Result gdefcore_tree_save_draft(GDEFCORE_Changeset * changeset,
+    const char * id, size_t id_len, const char * lang, size_t lang_len,
+    const GDEFCORE_Tree * tree) {
+  return stage_tree(changeset, id, id_len, lang, lang_len, tree, 1);
+}
+
+/* Language @p l as a public tree: the root's values on the root item, the
+ * items of its multiple fields (with their ids) and its group items. */
+static GDEFCORE_Result lang_to_tree(GDEFCORE_Catalog * cat,
+    const GDEFCORE_Decl * decls, size_t ndecls, const GDEFCORE_Lang * l,
+    GDEFCORE_Tree ** out) {
+  GDEFCORE_Tree * t = NULL;
+  size_t * map = NULL;
+  size_t gn = gdefcore_tree_item_count(l->groups);
+  size_t j;
+  size_t k;
+  GDEFCORE_Result rc = gdefcore_ent_tree_new(cat->alloc, &t);
+  for (j = 0; rc == GDEFCORE_OK && j < l->nfields; j++) {
+    const GDEFCORE_Vals * f = &l->fields[j];
+    const GDEFCORE_Decl * d = decl_named(decls, ndecls, f->name.p, f->name.n);
+    int items = f->ids != NULL || (d != NULL ? d->many : f->nvals != 1);
+    for (k = 0; rc == GDEFCORE_OK && k < f->nvals; k++) {
+      size_t item = 0;
+      if (items) {
+        rc = gdefcore_tree_add(t, 0, f->name.p, f->name.n,
+            f->ids != NULL ? f->ids[k] : 0, &item);
+        if (rc == GDEFCORE_OK) {
+          rc = gdefcore_ent_tree_put(t, item, NULL, 0, f->vals[k].p,
+              f->vals[k].n, NULL, 0);
+        }
+      } else {
+        rc = gdefcore_ent_tree_put(t, 0, f->name.p, f->name.n, f->vals[k].p,
+            f->vals[k].n, NULL, 0);
+      }
+    }
+  }
+  if (rc == GDEFCORE_OK && gn > 1) {
+    map = (size_t *)mem0(cat->alloc, gn * sizeof *map);
+    if (map == NULL) {
+      rc = GDEFCORE_ERR_OOM;
+    }
+  }
+  for (j = 1; rc == GDEFCORE_OK && j < gn; j++) {
+    GDEFCORE_TreeItem it;
+    size_t item = 0;
+    memset(&it, 0, sizeof it);
+    it.size = sizeof it;
+    rc = gdefcore_tree_item(l->groups, j, &it);
+    if (rc == GDEFCORE_OK) {
+      rc = gdefcore_tree_add(t, it.parent == 0 ? 0 : map[it.parent], it.field,
+          it.field_len, it.id, &item);
+    }
+    map[j] = item;
+    for (k = 0; rc == GDEFCORE_OK && k < it.value_count; k++) {
+      const char * f = NULL;
+      size_t fn = 0;
+      const char * text = NULL;
+      size_t len = 0;
+      rc = gdefcore_tree_value(l->groups, j, k, &f, &fn, &text, &len);
+      if (rc == GDEFCORE_OK) {
+        rc = gdefcore_ent_tree_put(t, item, f, fn, text, len, NULL, 0);
+      }
+    }
+  }
+  gcu_allocator_free(cat->alloc, map);
+  if (rc != GDEFCORE_OK) {
+    gdefcore_tree_free(t);
+    return rc;
+  }
+  *out = t;
+  return GDEFCORE_OK;
+}
+
+static GDEFCORE_Result doc_tree(GDEFCORE_Catalog * cat, const char * type,
+    size_t type_len, const GDEFCORE_Doc * doc, const char * lang,
+    size_t lang_len, GDEFCORE_Tree ** out) {
+  GDEFCORE_Decl * decls = NULL;
+  size_t ndecls = 0;
+  size_t i;
+  GDEFCORE_Result rc;
+  for (i = 0; i < doc->nlangs; i++) {
+    if (span_eq(doc->langs[i].lang.p, doc->langs[i].lang.n, lang, lang_len)) {
+      break;
+    }
+  }
+  if (i == doc->nlangs) {
+    return GDEFCORE_ERR_INVALID; /* no content in that language */
+  }
+  rc = load_type(cat, type, type_len, NULL, &decls, &ndecls, NULL, NULL, NULL);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  rc = lang_to_tree(cat, decls, ndecls, &doc->langs[i], out);
+  decls_free(cat->alloc, decls, ndecls);
+  return rc;
+}
+
+GDEFCORE_Result gdefcore_entity_tree(GDEFCORE_Catalog * catalog,
+    const GDEFCORE_Changeset * changeset, int view, const char * id,
+    size_t id_len, const char * lang, size_t lang_len,
+    GDEFCORE_Tree ** out_tree) {
+  char canon[GDEFCORE_PUBLIC_ID_LEN + 1];
+  GDEFCORE_EntLook look;
+  GDEFCORE_Doc doc;
+  GDEFCORE_Result rc;
+  if (catalog == NULL || out_tree == NULL || lang == NULL ||
+      (view != GDEFCORE_VIEW_PUBLISHED && view != GDEFCORE_VIEW_DRAFT &&
+          view != GDEFCORE_VIEW_CURRENT)) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  if (gdefcore_id_canonical(id, id_len, canon) != GDEFCORE_OK) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  if (changeset != NULL) {
+    size_t i;
+    for (i = 0; i < changeset->nops; i++) {
+      const GDEFCORE_Op * op = &changeset->ops[i];
+      if (op->id.p != NULL &&
+          span_eq(op->id.p, op->id.n, canon, GDEFCORE_PUBLIC_ID_LEN) &&
+          op->kind != GDEFCORE_OP_DEFINE) {
+        if (op->kind == GDEFCORE_OP_CLEAR) {
+          return GDEFCORE_ERR_INVALID;
+        }
+        return doc_tree(catalog, op->type_name.p, op->type_name.n, &op->staged,
+            lang, lang_len, out_tree);
+      }
+    }
+  }
+  rc = view_doc(catalog, canon, view, &look, &doc);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  rc = doc_tree(catalog, look.type, look.type_len, &doc, lang, lang_len,
+      out_tree);
+  doc_free(catalog->alloc, &doc);
+  return rc;
+}
+
+GDEFCORE_Result gdefcore_entity_revision_tree(GDEFCORE_Catalog * catalog,
+    const char * id, size_t id_len, uint64_t seq, const char * lang,
+    size_t lang_len, GDEFCORE_Tree ** out_tree) {
+  char canon[GDEFCORE_PUBLIC_ID_LEN + 1];
+  GDEFCORE_EntLook look;
+  GDEFCORE_Doc doc;
+  GDEFCORE_Result rc;
+  if (catalog == NULL || out_tree == NULL || lang == NULL || seq == 0) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  if (gdefcore_id_canonical(id, id_len, canon) != GDEFCORE_OK) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  rc = gdefcore_ent_lookup(catalog, canon, &look);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  if (!look.exists || seq > look.revision) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  rc = gdefcore_ent_read_doc(catalog, canon, seq, 0, &doc);
+  if (rc != GDEFCORE_OK) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  rc = doc_tree(catalog, look.type, look.type_len, &doc, lang, lang_len,
+      out_tree);
+  doc_free(catalog->alloc, &doc);
+  return rc;
+}
+
+GDEFCORE_Result gdefcore_type_tree_field_count(GDEFCORE_Catalog * catalog,
+    const char * name, size_t name_len, size_t * out_count) {
+  GDEFCORE_Decl * decls = NULL;
+  size_t n = 0;
+  GDEFCORE_Result rc;
+  if (catalog == NULL || out_count == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  rc = load_type(catalog, name, name_len, NULL, &decls, &n, NULL, NULL, NULL);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  decls_free(catalog->alloc, decls, n);
+  *out_count = n;
+  return GDEFCORE_OK;
+}
+
+GDEFCORE_Result gdefcore_type_tree_field(GDEFCORE_Catalog * catalog,
+    const char * name, size_t name_len, size_t index, GDEFCORE_FieldInfo * out) {
+  GDEFCORE_Decl * decls = NULL;
+  size_t n = 0;
+  size_t k;
+  const GDEFCORE_Decl * d;
+  GDEFCORE_FieldInfo info;
+  GDEFCORE_Result rc;
+  if (catalog == NULL || out == NULL || out->size != sizeof *out) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  rc = load_type(catalog, name, name_len, NULL, &decls, &n, NULL, NULL, NULL);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  if (index >= n || decls[index].name.n > GDEFCORE_FIELD_PATH_MAX ||
+      decls[index].subject.n >= sizeof info.subject) {
+    decls_free(catalog->alloc, decls, n);
+    return GDEFCORE_ERR_INVALID;
+  }
+  d = &decls[index];
+  memset(&info, 0, sizeof info);
+  info.size = sizeof info;
+  memcpy(info.path, d->name.p, d->name.n);
+  info.path_len = d->name.n;
+  info.parent = GDEFCORE_TREE_ROOT;
+  for (k = d->name.n; k > 0; k--) {
+    if (d->name.p[k - 1] == '.') {
+      size_t g;
+      info.name_at = k;
+      for (g = 0; g < index; g++) {
+        if (span_eq(decls[g].name.p, decls[g].name.n, d->name.p, k - 1)) {
+          info.parent = g;
+        }
+      }
+      break;
+    }
+  }
+  for (k = 0; k < d->name.n; k++) {
+    info.depth += d->name.p[k] == '.' ? 1u : 0u;
+  }
+  info.type = d->type;
+  info.scale = d->scale;
+  info.many = d->many;
+  info.required = d->required;
+  info.personal = d->personal;
+  info.indexed = d->indexed;
+  if (d->subject.n > 0) {
+    memcpy(info.subject, d->subject.p, d->subject.n);
+    info.subject_len = d->subject.n;
+  }
+  decls_free(catalog->alloc, decls, n);
+  *out = info;
+  return GDEFCORE_OK;
 }
 
 GDEFCORE_Result gdefcore_changeset_accept_sealed(
@@ -2218,7 +3221,6 @@ GDEFCORE_Result gdefcore_entity_values(GDEFCORE_Catalog * catalog,
     size_t * out_count) {
   char canon[GDEFCORE_PUBLIC_ID_LEN + 1];
   const GDEFCORE_Op * op;
-  GDEFCORE_EntLook look;
   GDEFCORE_Doc doc;
   GDEFCORE_Result rc;
   if (catalog == NULL || out_texts == NULL || out_lens == NULL ||
@@ -2245,23 +3247,7 @@ GDEFCORE_Result gdefcore_entity_values(GDEFCORE_Catalog * catalog,
       }
     }
   }
-  rc = gdefcore_ent_lookup(catalog, canon, &look);
-  if (rc != GDEFCORE_OK) {
-    return rc;
-  }
-  if (view == GDEFCORE_VIEW_DRAFT && look.has_draft) {
-    /* An editor's view: the draft, over what the entity is now. */
-    rc = gdefcore_ent_read_doc(catalog, canon, 0, 1, &doc);
-  } else {
-    /* A reader's view is the newest revision, and only while the flag is
-     * set. The unpublished entity answers as one that is not there; so
-     * does a cleared one, and one never saved. */
-    if (!look.exists || look.revision == 0 || look.deleted ||
-        (view == GDEFCORE_VIEW_PUBLISHED && !look.published)) {
-      return GDEFCORE_ERR_INVALID;
-    }
-    rc = gdefcore_ent_read_doc(catalog, canon, 0, 0, &doc);
-  }
+  rc = view_doc(catalog, canon, view, NULL, &doc);
   if (rc != GDEFCORE_OK) {
     return rc;
   }
@@ -2318,6 +3304,98 @@ static void free_cstrs(const GDEFCORE_Allocator * alloc, char ** items,
     gcu_allocator_free(alloc, items[i]);
   }
   gcu_allocator_free(alloc, items);
+}
+
+static const GDEFCORE_Lang * lang_of(const GDEFCORE_Doc * doc,
+    const GDEFCORE_Text * lang) {
+  size_t i;
+  for (i = 0; i < doc->nlangs; i++) {
+    if (span_eq(doc->langs[i].lang.p, doc->langs[i].lang.n, lang->p, lang->n)) {
+      return &doc->langs[i];
+    }
+  }
+  return NULL;
+}
+
+/* One line per language and group field of the root whose items changed
+ * (story S6d): `en lines: 2 items -> 3 items`. A group's items are compared
+ * whole, ids, order and values; the line counts them. */
+static GDEFCORE_Result group_lines(const GDEFCORE_Allocator * alloc,
+    const GDEFCORE_Op * op, char *** lines, size_t * nlines) {
+  size_t pass;
+  for (pass = 0; pass < 2; pass++) {
+    const GDEFCORE_Doc * doc = pass == 0 ? &op->base : &op->staged;
+    const GDEFCORE_Doc * other = pass == 0 ? &op->staged : &op->base;
+    size_t li;
+    for (li = 0; li < doc->nlangs; li++) {
+      const GDEFCORE_Lang * l = &doc->langs[li];
+      const GDEFCORE_Lang * o = lang_of(other, &l->lang);
+      size_t n = gdefcore_tree_item_count(l->groups);
+      size_t i;
+      for (i = 1; i < n; i++) {
+        GDEFCORE_TreeItem it;
+        const GDEFCORE_Tree * before;
+        const GDEFCORE_Tree * after;
+        size_t j;
+        int seen = 0;
+        char * line;
+        int kn;
+        memset(&it, 0, sizeof it);
+        it.size = sizeof it;
+        if (gdefcore_tree_item(l->groups, i, &it) != GDEFCORE_OK) {
+          return GDEFCORE_ERR_INTERNAL;
+        }
+        if (it.parent != 0) {
+          continue;
+        }
+        /* Each field once: its first item, and in the second pass only a
+         * field the first did not see. */
+        for (j = 1; j < i && !seen; j++) {
+          GDEFCORE_TreeItem e;
+          memset(&e, 0, sizeof e);
+          e.size = sizeof e;
+          seen = gdefcore_tree_item(l->groups, j, &e) == GDEFCORE_OK &&
+                 e.parent == 0 &&
+                 span_eq(e.field, e.field_len, it.field, it.field_len);
+        }
+        if (seen || (pass == 1 && o != NULL &&
+                        gdefcore_tree_child_count(o->groups, 0, it.field,
+                            it.field_len) > 0)) {
+          continue;
+        }
+        before = pass == 0 ? l->groups : (o == NULL ? NULL : o->groups);
+        after = pass == 0 ? (o == NULL ? NULL : o->groups) : l->groups;
+        if (gdefcore_ent_tree_field_equal(before, after, it.field,
+                it.field_len)) {
+          continue;
+        }
+        line = (char *)mem(alloc, l->lang.n + it.field_len + 64);
+        if (line == NULL) {
+          return GDEFCORE_ERR_OOM;
+        }
+        kn = snprintf(line, l->lang.n + it.field_len + 64,
+            "%.*s %.*s: %zu items -> %zu items", (int)l->lang.n, l->lang.p,
+            (int)it.field_len, it.field,
+            gdefcore_tree_child_count(before, 0, it.field, it.field_len),
+            gdefcore_tree_child_count(after, 0, it.field, it.field_len));
+        if (kn <= 0) {
+          gcu_allocator_free(alloc, line);
+          return GDEFCORE_ERR_LIMIT;
+        }
+        {
+          char ** next = (char **)gcu_allocator_realloc(alloc, *lines,
+              (*nlines + 1) * sizeof *next);
+          if (next == NULL) {
+            gcu_allocator_free(alloc, line);
+            return GDEFCORE_ERR_OOM;
+          }
+          *lines = next;
+          (*lines)[(*nlines)++] = line;
+        }
+      }
+    }
+  }
+  return GDEFCORE_OK;
 }
 
 GDEFCORE_Result gdefcore_changeset_diff(const GDEFCORE_Changeset * changeset,
@@ -2464,6 +3542,13 @@ GDEFCORE_Result gdefcore_changeset_diff(const GDEFCORE_Changeset * changeset,
             }
           }
         }
+      }
+    }
+    {
+      GDEFCORE_Result gr = group_lines(alloc, op, &lines, &nlines);
+      if (gr != GDEFCORE_OK) {
+        free_cstrs(alloc, lines, nlines);
+        return gr;
       }
     }
   }
@@ -3012,6 +4097,34 @@ static GDEFCORE_Result draft_fits(GDEFCORE_Changeset * cs, const GDEFCORE_Op * o
           return rc;
         }
         ok = rc == GDEFCORE_OK;
+      }
+    }
+  }
+  for (i = 0; ok && i < op->staged.nlangs; i++) {
+    /* The group items of a language, checked as a tree save checks them
+     * (story S6d); a language whose groups are what the entity has now is
+     * kept as it is, retired fields and all. */
+    const GDEFCORE_Lang * l = &op->staged.langs[i];
+    GDEFCORE_Lang tmp;
+    GDEFCORE_Result gr;
+    if (l->groups == NULL) {
+      continue;
+    }
+    memset(&tmp, 0, sizeof tmp);
+    gr = tree_to_lang(cat, 1, decls, ndecls, l->groups, 0, &tmp);
+    lang_clear(cat->alloc, &tmp);
+    if (gr == GDEFCORE_ERR_OOM) {
+      decls_free(cat->alloc, decls, ndecls);
+      return gr;
+    }
+    if (gr != GDEFCORE_OK) {
+      size_t b;
+      ok = 0;
+      for (b = 0; b < op->base.nlangs; b++) {
+        if (span_eq(op->base.langs[b].lang.p, op->base.langs[b].lang.n,
+                l->lang.p, l->lang.n)) {
+          ok = gdefcore_ent_tree_equal(l->groups, op->base.langs[b].groups);
+        }
       }
     }
   }
@@ -3871,6 +4984,25 @@ GDEFCORE_Result gdefcore_changeset_serialize(const GDEFCORE_Changeset * changese
     char base[32];
     size_t bn = 0;
     int kn;
+    {
+      /* The patch form has no file for a group or its items yet (story S6d
+       * leaves it to the site-admin stories, with forms for groups): such a
+       * changeset is refused, never written without them. */
+      size_t k;
+      for (k = 0; k < op->ndecls && op->kind == GDEFCORE_OP_DEFINE; k++) {
+        if (!gdefcore_ent_decl_flat(&op->decls[k])) {
+          rc = GDEFCORE_ERR_UNSUPPORTED;
+        }
+      }
+      for (k = 0; k < op->staged.nlangs; k++) {
+        if (gdefcore_tree_item_count(op->staged.langs[k].groups) > 1) {
+          rc = GDEFCORE_ERR_UNSUPPORTED;
+        }
+      }
+      if (rc != GDEFCORE_OK) {
+        break;
+      }
+    }
     if (op->kind == GDEFCORE_OP_DEFINE) {
       const char * kind = op->type_kind == GDEFCORE_TYPE_CONFIG ? "config"
                                                                 : "content";

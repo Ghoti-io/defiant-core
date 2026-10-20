@@ -256,9 +256,10 @@ plant draft-on-moved-head $ENT testRevisions \
 
 # A save of the values the entity has writes a revision: the items of a
 # multiple field get new ids every save, so the port sees them all change.
+# (Story S6d: the id is the item's own, from the doc, or by position.)
 plant noop-save-writes-revision $STO testRevisions \
   'Revisions.ANoOpSaveWritesNoRevisionAndSaysSo' \
-  '              f->name.n, k < nids ? ids[k] : 0, &item));' \
+  '              f->name.n, id, &item));' \
   '              f->name.n, 0, &item));'
 
 # A system record written outside its changeset's write: each type a changeset

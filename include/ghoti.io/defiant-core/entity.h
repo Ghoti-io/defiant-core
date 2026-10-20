@@ -132,6 +132,26 @@ typedef struct GDEFCORE_Changeset GDEFCORE_Changeset;
  * the sealed text of its value whatever its type, until subjects reach the
  * port (story S7). `<`, `<=`, `>` and `>=` in a condition need a numeric or
  * temporal field (access SPEC decision 12).
+ *
+ * Nested groups (story S6d): a field of @ref type ::GDEFSTOR_FIELD_GROUP holds
+ * items, each with the fields in @ref children, recursively, at most
+ * ::GDEFSTOR_MODEL_MAX_DEPTH groups deep. @ref many may be set on any field,
+ * a group included: a group that is not @ref many holds at most one item. A
+ * group is a field of the entity, never an entity of its own (AD-14). A
+ * group has no value, so it is never @ref personal or @ref indexed and has no
+ * constraint and no scale; @ref required on a group means at least one item.
+ * Field names are unique among siblings; a field is named by its path, the
+ * names from the root group joined by `.` (`lines.taxes.rate`).
+ *
+ * The flat calls of this header (gdefcore_entity_save(), the field
+ * enumeration gdefcore_type_field_count() and its siblings, conditions, forms
+ * and lists) see the fields of the root group that hold values, and nothing
+ * else: a group field and the fields inside it are reached through the tree
+ * calls (gdefcore_tree_save(), gdefcore_entity_tree(),
+ * gdefcore_type_tree_field()). A flat save of a type with groups keeps its
+ * group items as they are. Conditions on nested fields are not built (SPEC
+ * "Deferred"): a condition naming one is refused as one naming a field the
+ * type does not have.
  */
 typedef struct GDEFCORE_Field {
   size_t size;              ///< Must be `sizeof(GDEFCORE_Field)`.
@@ -150,6 +170,19 @@ typedef struct GDEFCORE_Field {
   int type;                 ///< A ::GDEFSTOR_FieldType other than GROUP; 0 is text.
   int scale;                ///< DECIMAL: digits after the point, 0 to 18.
   int indexed;              ///< Non-zero asks the store to index it (a hint).
+  /** GROUP (@ref type ::GDEFSTOR_FIELD_GROUP): its fields, at least one, each
+   * one a GDEFCORE_Field of its own, recursively (story S6d). NULL for any
+   * other field. */
+  const struct GDEFCORE_Field * children;
+  size_t child_count;       ///< How many in @ref children.
+  /** PERSONAL: where each value's subject comes from. The name of a sibling
+   * field (in the same group) that is a single, non-personal REFERENCE: the
+   * subject is that field's value in the same item. NULL: each value names
+   * its subject as it is sealed (gdefcore_changeset_note_sealed()), which
+   * only a field of the root group may do. A personal field inside a group
+   * must name its subject source. */
+  const char * subject;
+  size_t subject_len;       ///< Length of @ref subject.
 } GDEFCORE_Field;
 
 /**
@@ -261,7 +294,13 @@ GDEFCORE_API GDEFCORE_Result gdefcore_type_define(GDEFCORE_Catalog * catalog,
 GDEFCORE_API GDEFCORE_Result gdefcore_type_kind(GDEFCORE_Catalog * catalog,
     const char * name, size_t name_len, int * out_kind);
 
-/** @brief How many fields the type declares. */
+/**
+ * @brief How many fields of the root group that hold values the type
+ * declares: the fields the flat calls see. A group, and the fields inside one,
+ * are counted by gdefcore_type_tree_field_count() (story S6d); for a type with
+ * no group the two are the same. The index of gdefcore_type_field() and its
+ * siblings is among these.
+ */
 GDEFCORE_API GDEFCORE_Result gdefcore_type_field_count(
     GDEFCORE_Catalog * catalog, const char * name, size_t name_len,
     size_t * out_count);
@@ -784,7 +823,10 @@ GDEFCORE_API GDEFCORE_Result gdefcore_changeset_revert_to(
 /**
  * @brief Ordered relative paths and UTF-8 bytes, `defiant-changeset/1`.
  *
- * Free the list with gdefcore_patch_free().
+ * The format has no file for a group field or a group item (story S6d): a
+ * changeset that defines a type with a group, or stages an entity that has
+ * group items in any language, is ::GDEFCORE_ERR_UNSUPPORTED and nothing is
+ * returned. Free the list with gdefcore_patch_free().
  */
 GDEFCORE_API GDEFCORE_Result gdefcore_changeset_serialize(
     const GDEFCORE_Changeset * changeset, GDEFCORE_Patch ** out_files,
@@ -1099,6 +1141,196 @@ GDEFCORE_API GDEFCORE_Result gdefcore_changeset_set_why(
 GDEFCORE_API GDEFCORE_Result gdefcore_changeset_revision(
     const GDEFCORE_Changeset * changeset, const char * id, size_t id_len,
     uint64_t * out_revision);
+
+/* ---- nested groups, multiples and order (story S6d) ---------------------- */
+
+/** The parent of the root item of a GDEFCORE_Tree, and of a field of the root
+ * group in a GDEFCORE_FieldInfo. */
+#define GDEFCORE_TREE_ROOT SIZE_MAX
+
+/** Bytes of a field path: names of at most ::GDEFSTOR_MODEL_MAX_DEPTH groups
+ * and a field, each at most 64 bytes, joined by `.`. */
+#define GDEFCORE_FIELD_PATH_MAX 600
+
+/**
+ * @brief One field of a type, at any depth, as gdefcore_type_tree_field()
+ * describes it. @ref size is set by the caller.
+ */
+typedef struct GDEFCORE_FieldInfo {
+  size_t size;                         ///< `sizeof(GDEFCORE_FieldInfo)`.
+  char path[GDEFCORE_FIELD_PATH_MAX + 1]; ///< Its path, NUL-terminated.
+  size_t path_len;                     ///< Length of @ref path.
+  size_t name_at;                      ///< Where its own name starts in @ref path.
+  size_t parent;                       ///< Index of its group, or ::GDEFCORE_TREE_ROOT.
+  size_t depth;                        ///< 0 for a field of the root group.
+  int type;                            ///< A ::GDEFSTOR_FieldType (GROUP for a group).
+  int scale;                           ///< DECIMAL: digits after the point.
+  int many;                            ///< Non-zero: it holds any number of items.
+  int required;                        ///< Non-zero: a value (a group: an item) is required.
+  int personal;                        ///< Non-zero: personal (AD-19).
+  int indexed;                         ///< Non-zero: asked to be indexed.
+  char subject[65];                    ///< PERSONAL: its subject field, or empty.
+  size_t subject_len;                  ///< Length of @ref subject.
+} GDEFCORE_FieldInfo;
+
+/** @brief How many fields the type declares at every depth, groups included. */
+GDEFCORE_API GDEFCORE_Result gdefcore_type_tree_field_count(
+    GDEFCORE_Catalog * catalog, const char * name, size_t name_len,
+    size_t * out_count);
+
+/**
+ * @brief Describe field @p index of the type, in pre-order (each group before
+ * its fields). @p out is written only on success.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_type_tree_field(GDEFCORE_Catalog * catalog,
+    const char * name, size_t name_len, size_t index, GDEFCORE_FieldInfo * out);
+
+/**
+ * @brief One language's field tree of an entity, in texts (story S6d). Opaque.
+ *
+ * Item 0 is the root item: it holds the values of the root group's single
+ * fields. Every other item sits under one field of its parent: a GROUP field
+ * (the item holds that group's single fields, and items of its own) or a
+ * MULTIPLE single field (the item holds one value, its own, set with an empty
+ * field name). Values are texts, in their field type's canonical text as
+ * gdefcore_entity_values() gives them. Items carry an id that is the port's
+ * and is stable for the life of the item (AD-14): a tree for a save names an
+ * item the entity has by its id and a new one by 0, and states order by the
+ * order items are added. So a save that changes one item writes one item
+ * version, and moving an item (adding the same items, with their ids, in
+ * another order) changes only order keys.
+ */
+typedef struct GDEFCORE_Tree GDEFCORE_Tree;
+
+/** @brief An empty tree: the root item, with no value. */
+GDEFCORE_API GDEFCORE_Result gdefcore_tree_create(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Tree ** out_tree);
+
+/** @brief Release a tree. NULL is ignored. */
+GDEFCORE_API void gdefcore_tree_free(GDEFCORE_Tree * tree);
+
+/**
+ * @brief Add an item under @p field of item @p parent, after its siblings.
+ *
+ * @param id 0 for a new item, or the id of an item the entity has now under
+ *   the same field, in the same language (gdefcore_tree_item()).
+ * @param out_item Receives the new item's index. May be NULL.
+ * @return ::GDEFCORE_OK, ::GDEFCORE_ERR_INVALID, ::GDEFCORE_ERR_LIMIT or
+ *   ::GDEFCORE_ERR_OOM. Whether @p field is a group or a multiple field is
+ *   checked when the tree is staged.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_tree_add(GDEFCORE_Tree * tree,
+    size_t parent, const char * field, size_t field_len, uint64_t id,
+    size_t * out_item);
+
+/**
+ * @brief Set single field @p field of item @p item to @p text, replacing what
+ * was set; for an item of a multiple field, @p field_len is 0 (its own
+ * value). A NULL @p text unsets. The bytes are copied.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_tree_set(GDEFCORE_Tree * tree,
+    size_t item, const char * field, size_t field_len, const char * text,
+    size_t len);
+
+/** @return Items, the root included. */
+GDEFCORE_API size_t gdefcore_tree_item_count(const GDEFCORE_Tree * tree);
+
+/** One item. Pointers are valid until the tree is freed or changed. */
+typedef struct GDEFCORE_TreeItem {
+  size_t size;           ///< Set by the caller: `sizeof(GDEFCORE_TreeItem)`.
+  uint64_t id;           ///< Its id; 0 for a new item.
+  size_t parent;         ///< Its parent's index; ::GDEFCORE_TREE_ROOT for the root.
+  const char * field;    ///< The field of the parent it sits under ("" for the root).
+  size_t field_len;      ///< Its length.
+  const char * path;     ///< That field's path from the root ("" for the root).
+  size_t path_len;       ///< Its length.
+  size_t value_count;    ///< Values set on it.
+} GDEFCORE_TreeItem;
+
+/**
+ * @brief Describe item @p index. A parent comes before its children, and
+ * siblings in their order.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_tree_item(const GDEFCORE_Tree * tree,
+    size_t index, GDEFCORE_TreeItem * out);
+
+/**
+ * @brief The @p k th value set on item @p item, and its field ("" for an
+ * item's own value). Borrowed until the tree is freed or changed.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_tree_value(const GDEFCORE_Tree * tree,
+    size_t item, size_t k, const char ** out_field, size_t * out_field_len,
+    const char ** out_text, size_t * out_len);
+
+/**
+ * @brief The value of @p field on item @p item, borrowed: @p out_text NULL
+ * when there is none.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_tree_get(const GDEFCORE_Tree * tree,
+    size_t item, const char * field, size_t field_len, const char ** out_text,
+    size_t * out_len);
+
+/** @return The items directly under @p field of item @p item. */
+GDEFCORE_API size_t gdefcore_tree_child_count(const GDEFCORE_Tree * tree,
+    size_t item, const char * field, size_t field_len);
+
+/**
+ * @brief The index of the @p k th item directly under @p field of item
+ * @p item, in order. ::GDEFCORE_ERR_INVALID past the end.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_tree_child(const GDEFCORE_Tree * tree,
+    size_t item, const char * field, size_t field_len, size_t k,
+    size_t * out_item);
+
+/**
+ * @brief Stage @p tree as language @p lang's whole new content of entity
+ * @p id: the save of gdefcore_entity_save() (the next revision, published,
+ * the draft consumed), with the tree in place of the language's values.
+ *
+ * Every field of the type may be in it, at every depth: the root's single
+ * fields as values of the root item, multiple fields and groups as items.
+ * What the tree leaves out is removed from the language, as the port's save
+ * of a whole tree does (AD-14). Only what changed is written: an item named
+ * by its id whose values and place are unchanged writes nothing, a reorder
+ * writes order keys and nothing else, and a tree equal to the current one
+ * writes no revision. Each value is checked against its field as
+ * gdefcore_entity_save() checks one, at any depth; a field the type does not
+ * have, a value set on a group, an item under a single field, a second item
+ * of a field that is not multiple, a missing required field or item, or a
+ * personal value that is not a sealed text the changeset accepts
+ * (gdefcore_changeset_accept_sealed()) stages nothing and is
+ * ::GDEFCORE_ERR_INVALID. A personal field inside a group takes its subject
+ * from its subject field (GDEFCORE_Field::subject) in the same item.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_tree_save(GDEFCORE_Changeset * changeset,
+    const char * id, size_t id_len, const char * lang, size_t lang_len,
+    const GDEFCORE_Tree * tree);
+
+/** @brief gdefcore_tree_save() as the entity's draft, as
+ * gdefcore_entity_save_draft() is to gdefcore_entity_save(). */
+GDEFCORE_API GDEFCORE_Result gdefcore_tree_save_draft(
+    GDEFCORE_Changeset * changeset, const char * id, size_t id_len,
+    const char * lang, size_t lang_len, const GDEFCORE_Tree * tree);
+
+/**
+ * @brief Read language @p lang of an entity as a tree: what @p changeset
+ * stages when it touches the entity, else the @p view of
+ * gdefcore_entity_values(). Unfiltered, like gdefcore_entity_values();
+ * gdefcore_access_tree() is a principal's read. An entity with no content in
+ * that view or language is ::GDEFCORE_ERR_INVALID. Free @p out_tree with
+ * gdefcore_tree_free().
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_entity_tree(GDEFCORE_Catalog * catalog,
+    const GDEFCORE_Changeset * changeset, int view, const char * id,
+    size_t id_len, const char * lang, size_t lang_len, GDEFCORE_Tree ** out_tree);
+
+/**
+ * @brief Read language @p lang of recorded revision @p seq as a tree,
+ * unfiltered, as gdefcore_entity_revision_values() reads one field.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_entity_revision_tree(
+    GDEFCORE_Catalog * catalog, const char * id, size_t id_len, uint64_t seq,
+    const char * lang, size_t lang_len, GDEFCORE_Tree ** out_tree);
 
 #ifdef __cplusplus
 }
