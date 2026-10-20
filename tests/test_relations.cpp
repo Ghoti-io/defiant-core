@@ -1007,7 +1007,8 @@ TEST_F(Relations, TheMatrixSaysInWordsWhatRestsOnARelationAndRatesItAtLeastMediu
   ASSERT_EQ(GDEFCORE_OK, Install(plain));
   ASSERT_EQ(GDEFCORE_OK, Enable("p", {GrantLine("p", "p.see", "low", "(= field.group \"g1\")")}))
       << last_error_;
-  const Row * quiet = Find(Matrix(), "module p", "p.see");
+  const std::vector<Row> matrix = Matrix();
+  const Row * quiet = Find(matrix, "module p", "p.see");
   ASSERT_NE(quiet, nullptr);
   EXPECT_EQ(std::string::npos, quiet->explain.find("Its breadth"));
 }
