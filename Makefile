@@ -1700,6 +1700,16 @@ else
 	@GDEFCORE_TEST_KEYSTORE=postgres LD_LIBRARY_PATH="$(TEST_LD_PATH)" $(APP_DIR)/testSubject$(EXE_EXTENSION) --gtest_brief=1
 	@GDEFCORE_TEST_KEYSTORE=postgres LD_LIBRARY_PATH="$(TEST_LD_PATH)" $(APP_DIR)/testErasure$(EXE_EXTENSION) --gtest_brief=1
 endif
+# The compiled list on Postgres (story S6b): the A2 list suite, both sweeps
+# included, with every site's store on the Postgres entity port. A server
+# again, so the same derived image and tools/pg-test.sh as above.
+.PHONY: test-listplan-postgres
+test-listplan-postgres: $(APP_DIR)/testListplan$(EXE_EXTENSION) ## The list suite and its sweeps with the store on Postgres (a server: defiant-storage-postgres's tools/pg-test.sh)
+ifeq ($(strip $(PG_LIBS)),)
+	@printf '%s\n' "test-listplan-postgres: ghoti.io-defiant-storage-postgres was not found by pkg-config. It builds only in its derived image (ghoti-build:gcc16 plus libpq-dev, from defiant-storage-postgres's Containerfile): install it into PREFIX there and run this target through that library's tools/pg-test.sh." >&2; exit 1
+else
+	@GDEFCORE_TEST_LISTPLAN=postgres LD_LIBRARY_PATH="$(TEST_LD_PATH)" $(APP_DIR)/testListplan$(EXE_EXTENSION) --gtest_brief=1
+endif
 check-form: $(APP_DIR)/testForm$(EXE_EXTENSION) ## A signed submit stores a draft, with a plant
 	@LD_LIBRARY_PATH="$(TEST_LD_PATH)" tools/check-form.sh "$(APP_DIR)/testForm$(EXE_EXTENSION)"
 check-render: $(APP_DIR)/testRender$(EXE_EXTENSION) ## A tiny scope returns a prefix, with a plant
