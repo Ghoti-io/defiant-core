@@ -33,7 +33,6 @@
 
 #include "gate_fixture.h"
 
-#include <regex>
 
 namespace {
 
@@ -897,7 +896,18 @@ bool RefValid(const std::string & path, std::vector<std::string> * names) {
   if (path.empty() || path[0] != '/' || path.size() > GDEFCORE_ROUTE_PATH_MAX) {
     return false;
   }
-  std::regex name_re("^[a-z][a-z0-9_]{0,63}$");
+  /* [a-z][a-z0-9_]{0,63} */
+  auto name_ok = [](const std::string & name) {
+    if (name.empty() || name.size() > 64 || name[0] < 'a' || name[0] > 'z') {
+      return false;
+    }
+    for (char c : name) {
+      if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_')) {
+        return false;
+      }
+    }
+    return true;
+  };
   while (i < path.size()) {
     size_t j;
     std::string seg;
@@ -913,7 +923,7 @@ bool RefValid(const std::string & path, std::vector<std::string> * names) {
     i = j;
     if (seg[0] == ':') {
       std::string name = seg.substr(1);
-      if (!std::regex_match(name, name_re)) {
+      if (!name_ok(name)) {
         return false;
       }
       for (size_t k = 0; k < names->size(); k++) {

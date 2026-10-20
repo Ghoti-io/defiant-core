@@ -48,7 +48,6 @@
 #include <stdio.h>
 
 #include <fstream>
-#include <regex>
 #include <sstream>
 
 #define MODULE_STR2(x) #x
@@ -292,10 +291,22 @@ TEST(Paths, EveryPublicFunctionIsFiled) {
   std::vector<std::string> problems;
   std::set<std::string> seen;
   size_t i;
-  std::regex read_shaped(
-      "_(read|list|values|ids|resolve|page|render_key|export|snapshot|tree|"
-      "alias|roles|grants|type|actor|revision|revision_count|revision_at|diff|"
-      "serialize|regions|pane_at|kit|blind|blind_count|epoch|base_seq)$");
+  /* A name ending in `_` and one of these is named like a read. */
+  static const char * const read_shaped[] = {"read", "list", "values", "ids",
+      "resolve", "page", "render_key", "export", "snapshot", "tree", "alias",
+      "roles", "grants", "type", "actor", "revision", "revision_count",
+      "revision_at", "diff", "serialize", "regions", "pane_at", "kit", "blind",
+      "blind_count", "epoch", "base_seq"};
+  auto named_like_read = [&](const std::string & name) {
+    for (const char * s : read_shaped) {
+      std::string tail = std::string("_") + s;
+      if (name.size() >= tail.size() &&
+          name.compare(name.size() - tail.size(), tail.size(), tail) == 0) {
+        return true;
+      }
+    }
+    return false;
+  };
   ASSERT_FALSE(dir.empty()) << "the public headers were not found";
   protos = ScanHeaders(dir, &files);
   /* A scan that found nothing, or one header's worth, is not a denominator. */
@@ -328,7 +339,7 @@ TEST(Paths, EveryPublicFunctionIsFiled) {
       problems.push_back(p.name + " takes a request and is filed " + cat +
           ": only RF and W may");
     }
-    if (cat == "W" && std::regex_search(p.name, read_shaped)) {
+    if (cat == "W" && named_like_read(p.name)) {
       problems.push_back(p.name +
           " is filed W and is named like a read: file it RF or RA");
     }
