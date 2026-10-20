@@ -27,8 +27,11 @@
  * The subject is then erased and every byte the library can hand back is
  * searched for the canary as plaintext, hex and base64, as the blind-index
  * HMAC and every other tenant-key HMAC or hash of it, and for the subject's
- * key. "Every byte" is: all three data stores exported to snapshots (and
- * unpacked, so a compressed member cannot hide a hit), the data set and the
+ * key. "Every byte" is: both data stores exported to snapshots (and
+ * unpacked, so a compressed member cannot hide a hit), the tenant store's
+ * every row as the port dumps it (the blind table's with them, which a
+ * snapshot leaves out: story S6c moved the blind index there from a store of
+ * its own), the data set and the
  * key set the library itself makes, each revision document, each value read
  * back, the subject export, rendered pages, and what the process wrote to
  * standard output and standard error. The key store (keystore_rig.h picks its
@@ -37,7 +40,7 @@
  *
  * A sweep that cannot see passes. So before erasure each test requires
  * that the same machinery finds the canary where it must be (the export,
- * the blind store, the key set, the revision ciphertext), and that a
+ * the blind table, the key set, the revision ciphertext), and that a
  * survivor's data is
  * still found after the erasure. The scanner is itself checked against
  * synthetic haystacks. tools/check-erasure.sh plants the defects.
@@ -344,8 +347,7 @@ void OneValue(GDEFCORE_Value * value, const char * field, const char * text,
 class Erasure : public ::testing::Test {
  protected:
   GDEFSTOR_Store * registry_;
-  GDEFSTOR_Store * site_;
-  GDEFSTOR_Store * side_;    // the blind store: a data store
+  GDEFSTOR_Store * site_;    // the tenant's data store, its blind table too
   GDEFSTOR_KeyStore * keys_;
   ksrig::Counts counts_;
   GDEFCORE_Inst * inst_;
@@ -369,7 +371,6 @@ class Erasure : public ::testing::Test {
   void SetUp() override {
     registry_ = NULL;
     site_ = NULL;
-    side_ = NULL;
     keys_ = NULL;
     inst_ = NULL;
     catalog_ = NULL;
@@ -382,7 +383,6 @@ class Erasure : public ::testing::Test {
     memset(ef_, 0, sizeof ef_);
     ASSERT_EQ(GDEFSMEMORY_OK, gdefsmemory_store_create(NULL, NULL, &registry_));
     ASSERT_EQ(GDEFSMEMORY_OK, gdefsmemory_store_create(NULL, NULL, &site_));
-    ASSERT_EQ(GDEFSMEMORY_OK, gdefsmemory_store_create(NULL, NULL, &side_));
     ASSERT_EQ(GDEFSTOR_OK, ksrig::Open(ksrig::Chosen(), &counts_, &keys_));
     ASSERT_EQ(GDEFCORE_OK,
         gdefcore_inst_open_keys(registry_, site_, keys_, root_, sizeof root_, "",
@@ -393,10 +393,11 @@ class Erasure : public ::testing::Test {
     ASSERT_EQ(GDEFCORE_OK,
         gdefcore_inst_catalog_open(inst_, tenant_, strlen(tenant_), &catalog_));
     ASSERT_EQ(GDEFCORE_OK,
-        gdefcore_subject_open(keys_, side_, storage_, sizeof storage_, root_,
+        gdefcore_subject_open(keys_, site_, storage_, sizeof storage_, root_,
             sizeof root_,
             gdefcore_inst_tenant_keyring(inst_, tenant_, strlen(tenant_)), NULL,
             &subjects_));
+    gdefcore_catalog_bind_subjects(catalog_, subjects_);
     ASSERT_EQ(GDEFCORE_OK,
         gdefcore_request_create(storage_, sizeof storage_, 0, 0, NULL, &request_));
     ASSERT_EQ(GDEFCORE_OK,
@@ -410,7 +411,6 @@ class Erasure : public ::testing::Test {
     gdefcore_catalog_destroy(catalog_);
     gdefcore_inst_destroy(inst_);
     gdefstor_keystore_destroy(keys_);
-    gdefstor_store_destroy(side_);
     gdefstor_store_destroy(site_);
     gdefstor_store_destroy(registry_);
   }
@@ -590,8 +590,7 @@ class Erasure : public ::testing::Test {
         gdefcore_subject_snapshot(subjects_, site_, &zip, &zip_len));
     AddZip(out, "library subject snapshot " + stage, B(zip, zip_len), true);
     gdefstor_bytes_free(NULL, zip);
-    AddZip(out, "side store snapshot " + stage,
-        StorageExport(side_, storage_, sizeof storage_), true);
+    AddText(out, "tenant store rows " + stage, Rows(site_));
     AddKeyset(out, "key set " + stage);
     AddZip(out, "registry snapshot " + stage,
         StorageExport(registry_, kRegistryTenant, sizeof kRegistryTenant), false);
@@ -1033,10 +1032,35 @@ class Erasure : public ::testing::Test {
     return v;
   }
 
-  size_t BlindCount(const char * subject) {
+  /* Every row of the tenant in @p store as the port dumps it: the blind
+   * table's too, which no snapshot carries (AD-23). */
+  Bytes Rows(GDEFSTOR_Store * store) {
+    uint8_t * text = NULL;
     size_t n = 0;
-    EXPECT_EQ(GDEFCORE_OK,
-        gdefcore_subject_blind_count(subjects_, subject, strlen(subject), &n));
+    Bytes out;
+    EXPECT_EQ(GDEFSTOR_OK, gdefstor_model_dump(store,
+        reinterpret_cast<const char *>(storage_), sizeof storage_,
+        GDEFSTOR_MODEL_TRUTH, &text, &n));
+    if (text != NULL) {
+      out = B(text, n);
+    }
+    gdefstor_bytes_free(NULL, text);
+    return out;
+  }
+
+  /* The blind rows of a subject in the tenant store, read from the store
+   * itself: "B row item valid_from field <subject hex> <mac hex> ...". */
+  size_t BlindCount(const char * subject) {
+    Bytes rows = "\n" + Rows(site_);
+    Bytes want = " " + Hex(Bytes(subject), false) + " ";
+    size_t n = 0;
+    size_t at = 0;
+    while ((at = rows.find("\nB ", at)) != Bytes::npos) {
+      size_t end = rows.find('\n', at + 1);
+      Bytes line = rows.substr(at, end == Bytes::npos ? Bytes::npos : end - at);
+      n += line.find(want) != Bytes::npos;
+      at += 1;
+    }
     return n;
   }
 
@@ -1067,14 +1091,22 @@ class Erasure : public ::testing::Test {
             strlen(subject)));
   }
 
-  Bytes BlindMac(const char * subject, size_t index) {
+  /* The blind-index value of @p plain, as the library computes it. */
+  Bytes BlindMac(const char * plain) {
     uint8_t mac[32];
     memset(mac, 0, sizeof mac);
-    if (gdefcore_subject_blind(subjects_, subject, strlen(subject), index, mac) !=
-        GDEFCORE_OK) {
+    if (gdefcore_subject_mac(subjects_, kField, strlen(kField), plain,
+            strlen(plain), mac) != GDEFCORE_OK) {
       return Bytes();
     }
     return B(mac, sizeof mac);
+  }
+
+  /* Whether the tenant store holds a blind row of @p subject with @p mac. */
+  bool BlindRowHas(const char * subject, const Bytes & mac) {
+    Bytes rows = Rows(site_);
+    return rows.find(" " + Hex(Bytes(subject), false) + " " + Hex(mac, false) +
+                     " ") != Bytes::npos;
   }
 };
 
@@ -1166,12 +1198,12 @@ TEST_F(Erasure, Channels) {
     column.value = reinterpret_cast<const uint8_t *>(kCanary);
     column.value_len = strlen(kCanary);
     ASSERT_EQ(GDEFSTOR_OK,
-        gdefstor_write_begin(side_, reinterpret_cast<const char *>(storage_),
+        gdefstor_write_begin(site_, reinterpret_cast<const char *>(storage_),
             sizeof storage_, NULL, &write));
     ASSERT_EQ(GDEFSTOR_OK,
         gdefstor_projection_put(write, "x.test", 6, "row", 3, &column, 1));
     ASSERT_EQ(GDEFSTOR_OK, gdefstor_write_commit(write));
-    zip = StorageExport(side_, storage_, sizeof storage_);
+    zip = StorageExport(site_, storage_, sizeof storage_);
     ASSERT_FALSE(zip.empty());
     EXPECT_TRUE(Unpack(zip, &view));
     AddText(&arts, "unpacked member", view);
@@ -1209,20 +1241,26 @@ TEST_F(Erasure, Sweep) {
   if (HasFatalFailure()) {
     return;
   }
-  ASSERT_EQ(GDEFCORE_OK,
-      gdefcore_subject_blind_count(subjects_, a_, strlen(a_), &count));
-  ASSERT_EQ(3u, count);
-  mac_later = BlindMac(a_, 0);
-  mac_fr = BlindMac(a_, 1);
-  mac_form = BlindMac(a_, 2);
-  mac_survivor = BlindMac(b_, 0);
+  /* One blind row per value version (story S6c): the first value, the one
+   * that superseded it, the French one and the form's. */
+  count = BlindCount(a_);
+  ASSERT_EQ(4u, count);
+  mac_later = BlindMac(kCanaryLater);
+  mac_fr = BlindMac(kCanaryFr);
+  mac_form = BlindMac(kCanaryForm);
+  mac_survivor = BlindMac(kSurvivor);
   ASSERT_EQ(32u, mac_later.size());
   ASSERT_EQ(32u, mac_fr.size());
   ASSERT_EQ(32u, mac_form.size());
   ASSERT_EQ(32u, mac_survivor.size());
-  /* The first value was superseded, and its blind index with it, but its
-   * HMAC is still a form of the canary. Compute it independently, and check
-   * that the same computation reproduces the library's own for another. */
+  EXPECT_TRUE(BlindRowHas(a_, mac_later));
+  EXPECT_TRUE(BlindRowHas(a_, mac_fr));
+  EXPECT_TRUE(BlindRowHas(a_, mac_form));
+  EXPECT_TRUE(BlindRowHas(b_, mac_survivor));
+  /* The first value was superseded; its version keeps its row while the
+   * subject exists (history is searchable), and its HMAC is a form of the
+   * canary. Compute it independently, and check that the same computation
+   * reproduces the library's own for the others. */
   {
     uint8_t key[GDEFCORE_KEYRING_KEY_LEN];
     ASSERT_EQ(GDEFCORE_OK,
@@ -1259,22 +1297,24 @@ TEST_F(Erasure, Sweep) {
   EXPECT_TRUE(FoundIn(pre, kCanaryForm, "output: export of a"));
   EXPECT_TRUE(FoundIn(pre, kCanaryForm, "output: read of a (form route)"));
   EXPECT_TRUE(FoundIn(pre, Bytes("s1:"), "entity values (form route)"));
-  EXPECT_TRUE(FoundIn(pre, mac_form, "side store snapshot"));
-  EXPECT_TRUE(FoundIn(pre, mac_later, "side store snapshot"));
-  EXPECT_TRUE(FoundIn(pre, Hex(mac_later, false), "side store snapshot"));
-  EXPECT_TRUE(FoundIn(pre, mac_fr, "side store snapshot"));
+  EXPECT_TRUE(FoundIn(pre, Hex(mac_form, false), "tenant store rows"));
+  EXPECT_TRUE(FoundIn(pre, Hex(mac_later, false), "tenant store rows"));
+  EXPECT_TRUE(FoundIn(pre, Hex(mac_fr, false), "tenant store rows"));
+  EXPECT_TRUE(FoundIn(pre, Hex(mac_first, false), "tenant store rows"));
   EXPECT_TRUE(FoundIn(pre, wrapped, "key set"));
-  EXPECT_TRUE(FoundIn(pre, Bytes("s1:"), "site storage snapshot"));
-  EXPECT_TRUE(FoundIn(pre, Bytes("s1:"), "revision document"));
-  EXPECT_TRUE(FoundIn(pre, Bytes("s1:"), "library subject snapshot"));
+  /* A snapshot and a revision document hold a personal value as "@c": the
+   * hex of its sealed text (story S6c). */
+  EXPECT_TRUE(FoundIn(pre, Hex(Bytes("s1:"), false), "site storage snapshot"));
+  EXPECT_TRUE(FoundIn(pre, Hex(Bytes("s1:"), false), "revision document"));
+  EXPECT_TRUE(FoundIn(pre, Hex(Bytes("s1:"), false), "library subject snapshot"));
   EXPECT_TRUE(FoundIn(pre, Bytes("Welcome to the parish"), "rendered page"));
-  EXPECT_TRUE(FoundIn(pre, mac_survivor, "side store snapshot"));
+  EXPECT_TRUE(FoundIn(pre, Hex(mac_survivor, false), "tenant store rows"));
   EXPECT_TRUE(FoundIn(pre, kSurvivor, "output: export of b"));
   EXPECT_FALSE(Sweep(pre, needles_).empty())
       << "the control found nothing: the sweep cannot see";
   {
     /* The whole control, by name: the value is in the outputs, the HMAC is
-     * in the blind store, the wrapped key in the key set, and nothing is yet
+     * in the blind table, the wrapped key in the key set, and nothing is yet
      * in the tenant data. */
     std::vector<std::string> before = Sweep(pre, needles_);
     size_t i;
@@ -1285,7 +1325,7 @@ TEST_F(Erasure, Sweep) {
       if (before[i].find("plaintext in output: export of a") != std::string::npos) {
         export_has_plain = true;
       }
-      if (before[i].find("hmac key[blind-index:name] hex in side store") !=
+      if (before[i].find("hmac key[blind-index:name] hex in tenant store rows") !=
           std::string::npos) {
         side_has_mac = true;
       }
@@ -1317,18 +1357,17 @@ TEST_F(Erasure, Sweep) {
   /* The survivor is not a casualty, and the sweep still sees it: a sweep
    * that went blind between the two halves would fail here. */
   EXPECT_FALSE(leaks.empty()) << "the sweep no longer sees the survivor";
-  EXPECT_TRUE(FoundIn(post, mac_survivor, "side store snapshot"));
+  EXPECT_TRUE(FoundIn(post, Hex(mac_survivor, false), "tenant store rows"));
   EXPECT_TRUE(FoundIn(post, survivor_wrapped, "key set"));
   EXPECT_TRUE(FoundIn(post, kSurvivor, "output: export of b"));
-  EXPECT_TRUE(FoundIn(post, Bytes("s1:"), "site storage snapshot"));
+  EXPECT_TRUE(FoundIn(post, Hex(Bytes("s1:"), false), "site storage snapshot"));
   EXPECT_TRUE(FoundIn(post, Bytes("[erased]"), "output: read of a"));
   EXPECT_TRUE(FoundIn(post, Bytes("{\"erased\":\"[erased]\"}"),
       "output: export of a"));
-  ASSERT_EQ(GDEFCORE_OK,
-      gdefcore_subject_blind_count(subjects_, a_, strlen(a_), &count));
+  count = BlindCount(a_);
   EXPECT_EQ(0u, count);
   ASSERT_EQ(32u, mac_first.size());
-  EXPECT_FALSE(FoundIn(post, mac_first, "side store snapshot"));
+  EXPECT_FALSE(FoundIn(post, Hex(mac_first, false), "tenant store rows"));
   EXPECT_FALSE(FoundIn(post, Hex(mac_first, false), ""));
 }
 
@@ -1390,7 +1429,7 @@ TEST_F(Erasure, SnapshotCarriesNoKey) {
     }
   }
   EXPECT_TRUE(FoundIn(snap, Bytes("taken_ms"), "library subject snapshot"));
-  EXPECT_TRUE(FoundIn(snap, Bytes("s1:"), "library subject snapshot"));
+  EXPECT_TRUE(FoundIn(snap, Hex(Bytes("s1:"), false), "library subject snapshot"));
   {
     uint8_t * ledger = NULL;
     size_t ledger_len = 9;
@@ -1436,8 +1475,9 @@ TEST_F(Erasure, SnapshotCarriesNoKey) {
   }
   AddZip(&after, "restored tenant store snapshot",
       StorageExport(empty, storage_, sizeof storage_), true);
-  AddZip(&after, "side store snapshot after restore",
-      StorageExport(side_, storage_, sizeof storage_), true);
+  /* Every row of both tenants, the rebuilt blind table's with them. */
+  AddText(&after, "restored tenant store rows", Rows(empty));
+  AddText(&after, "live tenant store rows after restore", Rows(site_));
   AddKeyset(&after, "key set after restore");
   ASSERT_EQ(GDEFCORE_OK, gdefcore_subject_snapshot(subjects_, empty, &zip, &zip_len));
   AddZip(&after, "library subject snapshot after restore", B(zip, zip_len), true);
@@ -1499,7 +1539,7 @@ TEST_F(Erasure, FormPersonalField) {
   AddZip(&arts, "tenant store snapshot", TenantExport(), true);
   EXPECT_TRUE(Sweep(arts, needles).empty())
       << "a personal field written through a form is stored as plaintext";
-  EXPECT_TRUE(FoundIn(arts, Bytes("s1:"), "tenant store snapshot"));
+  EXPECT_TRUE(FoundIn(arts, Hex(Bytes("s1:"), false), "tenant store snapshot"));
 }
 
 /* The plain form route keeps working for every field that is not personal,
@@ -1950,11 +1990,25 @@ TEST_F(Erasure, ParsePersonalPatch) {
   value.text_lens = &sealed_len;
   ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
   ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_accept_sealed(cs));
+  /* Whose the value is travels with it (story S6c). */
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_changeset_note_sealed(cs, subjects_, sealed, sealed_len, a_,
+          strlen(a_), mac));
   ASSERT_EQ(GDEFCORE_OK,
       gdefcore_entity_save(cs, ea_, strlen(ea_), "en", 2, &value, 1));
   ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_serialize(cs, &files, &nfiles));
   gdefcore_changeset_destroy(cs);
   cs = NULL;
+  {
+    bool named = false;
+    for (i = 0; i < nfiles; i++) {
+      named |= files[i].len == strlen(a_) &&
+               memcmp(files[i].bytes, a_, strlen(a_)) == 0 &&
+               std::string(files[i].path, files[i].path_len).find("/subject/") !=
+                   std::string::npos;
+    }
+    EXPECT_TRUE(named) << "the patch does not say whose the value is";
+  }
 
   /* Sealed: the patch parses and applies, and the subject reads it. */
   ASSERT_EQ(GDEFCORE_OK,
@@ -2013,10 +2067,11 @@ TEST_F(Erasure, FormSubjectRoute) {
   NewPerson(ef_);
   ASSERT_FALSE(HasFatalFailure());
   blinds_before = BlindCount(a_);
-  ASSERT_EQ(2u, blinds_before);
+  ASSERT_EQ(3u, blinds_before);
 
   /* Create through the form. The draft holds ciphertext, the published row
-   * holds nothing yet, and the index has a row for it. */
+   * holds nothing yet, and the index has no row for it: a draft is never a
+   * revision and carries no MAC (story S6c). Publishing it writes the row. */
   ASSERT_EQ(GDEFCORE_OK, SignFor(a_, ef_, kCanaryForm, &token));
   ASSERT_EQ(GDEFCORE_OK, SubmitFor(token, &conflict));
   EXPECT_EQ(0, conflict);
@@ -2025,9 +2080,10 @@ TEST_F(Erasure, FormSubjectRoute) {
   EXPECT_EQ("s1:", draft.substr(0, 3));
   EXPECT_EQ(std::string::npos, draft.find(kCanaryForm));
   EXPECT_EQ("", Stored(ef_, GDEFCORE_VIEW_PUBLISHED));
-  EXPECT_EQ(blinds_before + 1, BlindCount(a_));
+  EXPECT_EQ(blinds_before, BlindCount(a_));
   Publish(ef_);
   ASSERT_FALSE(HasFatalFailure());
+  EXPECT_EQ(blinds_before + 1, BlindCount(a_));
   stored = Stored(ef_, GDEFCORE_VIEW_PUBLISHED);
   EXPECT_EQ(draft, stored);
   EXPECT_EQ(kCanaryForm, ReadAs(a_, ef_));
@@ -2043,7 +2099,8 @@ TEST_F(Erasure, FormSubjectRoute) {
             strlen("blind-index:name"), key, sizeof key));
     expect = Hmac(B(key, sizeof key), kCanaryForm);
     ASSERT_EQ(32u, expect.size());
-    EXPECT_EQ(expect, BlindMac(a_, blinds_before));
+    EXPECT_EQ(expect, BlindMac(kCanaryForm));
+    EXPECT_TRUE(BlindRowHas(a_, expect));
   }
 
   /* The editing round trip. The tree shows what is stored, which is
@@ -2087,12 +2144,14 @@ TEST_F(Erasure, FormSubjectRoute) {
   ASSERT_EQ(GDEFCORE_OK, SignFor(a_, ef_, ReadAs(a_, ef_).c_str(), &token));
   {
     /* An unchanged edit seals the plaintext again: new nonce, same value,
-     * and the row for this location is replaced, not added. */
+     * so a new value version (whether a value changed is decided on the
+     * ciphertext until story S7), and with it a row of its own; the
+     * version it superseded keeps its row while the subject exists. */
     ASSERT_EQ(GDEFCORE_OK, SubmitFor(token, &conflict));
     Publish(ef_);
     EXPECT_NE(stored, Stored(ef_, GDEFCORE_VIEW_PUBLISHED));
     EXPECT_EQ(kCanaryForm, ReadAs(a_, ef_));
-    EXPECT_EQ(blinds_before + 1, BlindCount(a_));
+    EXPECT_EQ(blinds_before + 2, BlindCount(a_));
   }
   ASSERT_EQ(GDEFCORE_OK, SignFor(a_, ef_, kCanaryEdit, &token));
   {
@@ -2115,7 +2174,7 @@ TEST_F(Erasure, FormSubjectRoute) {
   EXPECT_GT(Revisions(ef_), revisions);
   EXPECT_EQ(kCanaryEdit, ReadAs(a_, ef_));
   EXPECT_EQ("s1:", Stored(ef_, GDEFCORE_VIEW_PUBLISHED).substr(0, 3));
-  EXPECT_EQ(blinds_before + 1, BlindCount(a_));
+  EXPECT_EQ(blinds_before + 3, BlindCount(a_));
 
   /* The survivor edits through the same route and is only ever themself. */
   {
@@ -2163,7 +2222,7 @@ TEST_F(Erasure, FormSubjectRoute) {
   EXPECT_TRUE(FoundIn(pre, kCanaryEdit, "output: export of a"));
   EXPECT_TRUE(FoundIn(pre, kCanaryEdit, "output: read of a (form route)"));
   EXPECT_TRUE(FoundIn(pre, Bytes("s1:"), "entity values (form route)"));
-  EXPECT_TRUE(FoundIn(pre, Bytes("s1:"), "revision document"));
+  EXPECT_TRUE(FoundIn(pre, Hex(Bytes("s1:"), false), "revision document"));
   EXPECT_FALSE(Sweep(pre, needles).empty());
   {
     /* No form-route value is plaintext in tenant data, before erasure. */
@@ -2316,11 +2375,13 @@ TEST_F(Erasure, FormSubjectBinding) {
   EXPECT_EQ(0u, BlindCount(b_));
   EXPECT_EQ("", Stored(entity, GDEFCORE_VIEW_DRAFT));
 
-  /* The untouched token is the control: it submits, for a and only a. */
+  /* The untouched token is the control: it submits, for a and only a (the
+   * draft has no blind row; its publish writes one). */
   ASSERT_EQ(GDEFCORE_OK, SubmitFor(token, &conflict));
+  EXPECT_EQ(0u, BlindCount(a_));
+  Publish(entity);
   EXPECT_EQ(1u, BlindCount(a_));
   EXPECT_EQ(0u, BlindCount(b_));
-  Publish(entity);
   EXPECT_EQ(kCanary, ReadAs(a_, entity));
   EXPECT_NE(kCanary, ReadAs(b_, entity));
 }

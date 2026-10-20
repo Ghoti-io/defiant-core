@@ -21,8 +21,11 @@ port write): each type's declaration (namespace `core.type`, format
 field's shape, type, scale, index hint and constraints), and as counters the
 config epoch (`core.epoch`) and each entity's version (`core.v:<public id>`).
 The port's own declaration of the type is the fields' shape; a personal
-field is declared as text, since its value is the sealed text it is kept as
-until subjects reach the port (story S7). A value is stored as its type's
+field is a `PERSONAL` text field: its value is the sealed text with its
+subject's public id beside it, and each version of it has a blind-index row
+(story S6c, subjects.md). A field made personal after it was declared keeps
+its text column (a conversion is AD-15's), and a personal field cannot stop
+being personal in place. A value is stored as its type's
 value and read back as its canonical text: an integer `7` however it was
 written, a decimal of scale 2 `1.50`, a boolean `true` or `false`, a date
 `2026-10-19`, a date-time `2026-10-19T08:30:00Z` (`.mmm` with milliseconds),
@@ -70,7 +73,7 @@ does not make the publisher the author (defect 1.5.3).
 | `gdefcore_entity_create` | none: the id is reserved by an empty draft, and there is no port entity | the reservation | no | 0 |
 | `gdefcore_entity_save_draft` | none | written; it builds on the draft there is, made from the newest revision. The first draft of a reserved id makes the port entity, with the actor as its creator | unchanged | +1 |
 | `gdefcore_entity_save` ("save and publish") | the next, from the draft when it was made from the newest revision, else from the newest; nothing when the values are those the entity has, which `gdefcore_changeset_revision` says | consumed | yes | +1 when anything was written |
-| `gdefcore_entity_publish` | the draft applied as the next, only on the revision it was made from (a moved head is a conflict and writes nothing), with the draft's author as its author; with no draft, none | applied | yes | +1 when anything was written |
+| `gdefcore_entity_publish` | the draft applied as the next, only on the revision it was made from (a moved head is a conflict and writes nothing), with the draft's author as its author, validated against the type as it is now and refused for a new value of an erased subject (subjects.md); with no draft, none | applied | yes | +1 when anything was written |
 | `gdefcore_entity_unpublish` | none | unchanged | no | +1 when it was published |
 | `gdefcore_changeset_revert_to(seq)` | a copy of `seq` as the next (none when the content is already that); a cleared entity is no longer deleted | unchanged | unchanged | +1 |
 | `gdefcore_changeset_revert` (legacy) | as `revert_to(newest - 1)`; a clear when the newest is the first | | | |
@@ -78,7 +81,12 @@ does not make the publisher the author (defect 1.5.3).
 
 A draft is applied only on the revision it was made from (CAP-S4): a publish
 of a draft whose entity has a newer revision (a revert, or another writer
-between the draft and its publish) is a conflict and writes nothing. A save
+between the draft and its publish) is a conflict and writes nothing. A draft
+is validated against its type as the type is when it is applied (AD-14): a
+value of a field the type no longer has (unless it is what the entity holds
+there now), a value not of its field's type, or a required field missing
+refuses the publish in words (`gdefcore_changeset_refusal`), and the draft
+stays. A save
 consumes the draft: it saves the working copy when the draft was made from
 the newest revision, and otherwise saves on the newest revision and drops
 the stale draft. A revert, like a save, refuses a revision that holds a
@@ -115,6 +123,7 @@ version the entity has since left is a conflict, whatever the epoch says.
 | `entity/<id>/op` | `save`, `draft`, `publish`, `revert`, `unpublish` or `clear` |
 | `entity/<id>/target` | the decimal sequence a `revert` copies |
 | `entity/<id>/lang/<lang>/<field>/<index>` | one field value |
+| `entity/<id>/subject/<lang>/<field>/<index>` | the canonical public id of the subject of that value, for a personal field (story S6c; an addition to `/1`) |
 | `type/<machine>/kind` | `content` or `config` |
 | `type/<machine>/field/<name>` | `required one`, `required many`, `optional one`, or `optional many`, then ` personal` for a personal field, then the type word when it is not text (`integer`, `decimal <scale>`, `float`, `boolean`, `date`, `datetime`, `reference`), then ` indexed` for the index hint, then the constraints after a `|` |
 

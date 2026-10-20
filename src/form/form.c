@@ -2069,6 +2069,16 @@ static GDEFCORE_Result submit_impl(GDEFCORE_Catalog * catalog,
   if (sealed.nsealed > 0) {
     rc = gdefcore_changeset_accept_sealed(changeset);
   }
+  {
+    /* Whose each sealed value is: the draft records it beside the ciphertext
+     * (AD-14). A draft holds no blind-index value; publishing it gives one
+     * (story S6c). */
+    size_t k;
+    for (k = 0; rc == GDEFCORE_OK && k < sealed.nsealed; k++) {
+      rc = gdefcore_changeset_note_sealed(changeset, subjects, sealed.text[k],
+          sealed.len[k], opened.subject, GDEFCORE_PUBLIC_ID_LEN, NULL);
+    }
+  }
   if (rc == GDEFCORE_OK) {
     rc = gdefcore_entity_save_draft(changeset, opened.target,
         GDEFCORE_PUBLIC_ID_LEN, opened.lang, opened.lang_len, values, nvalues);
@@ -2089,18 +2099,6 @@ static GDEFCORE_Result submit_impl(GDEFCORE_Catalog * catalog,
   gdefcore_changeset_destroy(changeset);
   gdefcore_text_free(catalog, alias_id);
   gcu_allocator_free(def, values);
-  if (rc == GDEFCORE_OK) {
-    /* The blind-index rows go in the side store after the revision, as
-     * gdefcore_subject_save does. A failure here leaves the sealed revision
-     * and no row for it, which erasure handles (the key is what it destroys). */
-    size_t k;
-    for (k = 0; rc == GDEFCORE_OK && k < sealed.nsealed; k++) {
-      const FormField * f = &opened.fields[sealed.field[k]];
-      rc = gdefcore_subject_index(subjects, opened.subject,
-          GDEFCORE_PUBLIC_ID_LEN, opened.target, GDEFCORE_PUBLIC_ID_LEN,
-          f->name, f->name_len, opened.lang, opened.lang_len, sealed.mac[k]);
-    }
-  }
   sealed_free(subjects, &sealed);
   opened_free(catalog, &opened);
   return rc;

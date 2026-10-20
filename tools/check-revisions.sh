@@ -117,16 +117,17 @@ plant draft-creator-dropped $ENT testRevisions \
 # A draft is written as a revision.
 plant draft-writes-revision $ENT testRevisions \
   'Revisions.ADraftIsNeverARevision' \
-  '      rc = gdefcore_ent_put_draft(cat, write, op->id.p, op->type_name.p,
-          op->type_name.n, look.exists ? op->draft_base : 0, &op->staged);
+  '      rc = seals_refuse(cs, &seals, gdefcore_ent_put_draft(cat, write, op->id.p,
+          op->type_name.p, op->type_name.n, look.exists ? op->draft_base : 0,
+          &op->staged, &seals));
     }' \
   '      int moved_ = 0;
       rc = look.exists
                ? gdefcore_ent_save_doc(cat, write, op->id.p, op->type_name.p,
-                     op->type_name.n, op->draft_base, &meta, &op->staged, &rev,
-                     &moved_)
+                     op->type_name.n, op->draft_base, &meta, &op->staged,
+                     &seals, &rev, &moved_)
                : gdefcore_ent_put_draft(cat, write, op->id.p, op->type_name.p,
-                     op->type_name.n, 0, &op->staged);
+                     op->type_name.n, 0, &op->staged, &seals);
     }'
 
 # The first draft leaves the id reserved and makes no entity.
@@ -175,12 +176,14 @@ plant save-leaves-unpublished $ENT testRevisions \
       rc = set_state(write, op, cs, 1, 0, when, &changed);
     }
     break;
-  case GDEFCORE_OP_DRAFT:' \
+  }
+  case GDEFCORE_OP_DRAFT: {' \
   '    if (rc == GDEFCORE_OK) {
       rc = set_state(write, op, cs, look.published, 0, when, &changed);
     }
     break;
-  case GDEFCORE_OP_DRAFT:'
+  }
+  case GDEFCORE_OP_DRAFT: {'
 
 # A save leaves the draft it consumed.
 plant save-keeps-draft $ENT testRevisions \
@@ -234,7 +237,7 @@ plant draft-on-moved-head $ENT testRevisions \
         rc = gdefcore_ent_read_doc(cat, op->id.p, 0, 1, &moved_);
         if (rc == GDEFCORE_OK) {
           rc = gdefcore_ent_put_draft(cat, write, op->id.p, op->type_name.p,
-              op->type_name.n, look.revision, &moved_);
+              op->type_name.n, look.revision, &moved_, NULL);
         }
         gdefcore_ent_doc_free(cat->alloc, &moved_);
         if (rc != GDEFCORE_OK) {

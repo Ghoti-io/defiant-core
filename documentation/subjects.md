@@ -18,9 +18,42 @@ submitted with `gdefcore_form_sign_subject` and
 value (`gdefcore_entity_save`, the plain form route, a parsed patch),
 and a revert or publish refuses a personal value that is not sealed. The
 entity layer holds no key, so it checks that a value is shaped like a
-sealed one (`s1:` and hex), not that it is one. `gdefcore_subject_seal`
-and `gdefcore_subject_index` are the two halves of a save for a caller
-that has to stage the revision itself, as the form route does.
+sealed one (`s1:` and hex), not that it is one. A caller that has to stage
+the revision itself, as the form route does, seals with
+`gdefcore_subject_seal` and tells the changeset whose the sealed text is with
+`gdefcore_changeset_note_sealed` (the subject, and the blind-index value the
+seal returned).
+
+## On the entity port (story S6c)
+
+A personal field is a `PERSONAL` field of the port's declaration (AD-14): each
+value is stored as its sealed text with its subject's public id in the column
+beside it, and "everything about this person" is the port's subject lookup
+(`gdefstor_subject_lookup`), which `gdefcore_subject_export` reads. The
+subject of a value comes from the note a changeset was given, else from the
+entity's current tree or its draft (which record it with the text), else from
+opening the text with the key of a subject the field holds (the seal binds
+subject and field). A sealed text none of these names is refused, with a
+refusal (`gdefcore_changeset_refusal`). A patch carries the subject of each
+personal value beside it (`entity/<id>/subject/<lang>/<field>/<index>`).
+
+Every new version of a personal value that a save writes, a draft's publish
+included, gets its blind-index row in the port's blind table, in the same
+write: the MAC is the note's, or core opens the value with its subject's key
+(`gdefcore_subject_mac_sealed`, which needs the catalog bound to the subjects
+with `gdefcore_catalog_bind_subjects`). A draft holds the sealed text and the
+subject and no MAC. Inside the write core asks the key store whether the
+subject is erased: a new value of an erased subject is refused, the write is
+aborted and the changeset or the draft is kept, so no blind row is ever
+written for an erased subject. A value the entity already holds (another
+field changed) is not a new value, and the port carries its row. Blind
+equality is `gdefcore_subject_find`; `gdefcore_subject_mac` is the value a
+lookup asks with.
+
+A field that became personal after it was declared keeps its port column as
+text (changing a column in place is a new field and a conversion, AD-15): its
+values are sealed, with no subject column and no blind row. A personal field
+does not stop being personal in place: the redefinition is refused.
 
 A `secret` field is different. The password hash stays a secret under
 the tenant `secret` key. Subject erasure does not unwrap it, replace it,
@@ -50,14 +83,17 @@ backend. Core reaches it only through the port, and holds there:
 
 The key store is written when a subject is created, when a tenant's keyring
 wrap is first filed, when a subject is erased, and when a backup pair is
-restored. A save, a seal, an index row, a read, an export and a revision view
-only read it; the subject tests count the calls at the port.
+restored. A save, a seal, a publish, a read, an export, a rebuild and a
+revision view only read it; the subject tests count the calls at the port.
 
-The blind index is HMAC-SHA-256 of the value under that key. Its rows, and
-the places each subject's values are, live in the **blind store**, a data
-store the caller passes that is not the tenant store and holds no key, wrap
-or ledger row. They move onto the entity port, beside the values, in a later
-story. A snapshot or export of the tenant store holds ciphertext, never a key.
+The blind index is HMAC-SHA-256 of the value under that key (key id
+`GDEFCORE_SUBJECT_MAC_KEY_ID`, normalization version
+`GDEFCORE_SUBJECT_MAC_VERSION`: the bytes as given). Its rows live in the
+tenant's data store, in the port's blind table, one per value version, never
+in a revision row and never in a snapshot (story S6c; before it, a separate
+"blind store" the caller passed to `gdefcore_subject_open`, which now takes
+the tenant's data store). A snapshot or export of the tenant store holds
+ciphertext, never a key and never a blind row.
 
 `gdefcore_subject_cipher` is the cipher to give a key store that seals in
 process (AES-256-GCM, a fresh nonce): core keeps its keys as sealed material,
@@ -73,14 +109,15 @@ A matching id runs three steps, in this order:
 1. The key store destroys the subject key and appends the ledger row, in
    one step of its own. The ledger row is the public id and the time, and
    nothing else. From here every value of the subject reads `[erased]`.
-2. The subject's blind-index rows are deleted from the blind store.
+2. The subject's blind-index rows are deleted from the tenant's data store,
+   every type's, through the port (`gdefstor_blind_delete_subject`).
 3. Caches are purged. Core keeps no cache of a subject's values or key yet,
    so there is nothing to purge; a cache that holds one purges here.
 
 A failure of step 1 is returned and nothing else runs. Steps 2 and 3 are
 idempotent, and every `gdefcore_subject_open` and every restore replays the
 ledger through them, so an erasure cut short after step 1 (a crash, a failed
-blind store) is finished then. Erasing an erased subject runs them again and
+data store) is finished then. Erasing an erased subject runs them again and
 writes no second ledger row. Revisions stay, so the stored ciphertext stays.
 
 What an engine keeps of a destroyed key is its own: SQLite's key store clears
@@ -106,9 +143,14 @@ refuses a pair whose key set is older than its data set with
 `GDEFCORE_ERR_STALE` and writes nothing, since such a key set may hold a key
 erased between the two. Otherwise it merges the key set into the key store
 (its ledger replayed as erasures; no key comes back for a subject the live
-ledger or the set's names), imports the data set into an empty tenant, and
-replays the ledger, now the union of the two, over the blind store before it
-returns. An erasure newer than the data set still reads `[erased]`.
+ledger or the set's names), imports the data set into an empty tenant,
+replays the ledger, now the union of the two, over the restored tenant and
+over the subjects' own data store, and then rebuilds the restored tenant's
+blind index, which a data set does not carry, from the values that can still
+be decrypted (`gdefcore_subject_reindex`: every version the subject lookup
+names for a subject with a key, its row put back with `gdefstor_blind_put`;
+an erased subject has no key and gets no row). Only then does it return. An
+erasure newer than the data set still reads `[erased]`.
 
 A data set records nothing of the ledger; the ledger copy a backup carries is
 the key set's. A restore into an empty key store imports the key set into it
@@ -116,7 +158,8 @@ first (`gdefstor_keystore_import`), opens the subjects on it (which adopts the
 keyring from it), and then restores.
 
 Export is one JSON document of the plaintext values, returned to the
-caller. It is not written into the tenant store. After erasure the
+caller: every current value the subject lookup finds for the subject,
+published or not. It is not written into the tenant store. After erasure the
 document says erased and does not contain the plaintext.
 
 ## Revision views

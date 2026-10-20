@@ -159,6 +159,7 @@ static const Surface kSurface[] = {
     {"gdefcore_changeset_destroy", "W"},
     {"gdefcore_changeset_define", "W"},
     {"gdefcore_changeset_accept_sealed", "W"},
+    {"gdefcore_changeset_note_sealed", "W"},
     {"gdefcore_entity_save", "W"},
     {"gdefcore_entity_save_draft", "W"},
     {"gdefcore_entity_publish", "W"},
@@ -184,6 +185,7 @@ static const Surface kSurface[] = {
     {"gdefcore_changeset_parse", "W"},
     {"gdefcore_catalog_tenant", "P"},
     {"gdefcore_catalog_bind_host", "W"},
+    {"gdefcore_catalog_bind_subjects", "W"},
     {"gdefcore_changeset_set_request", "W"},
     {"gdefcore_changeset_stage_module", "W"},
     {"gdefcore_changeset_module_count", "P"},
@@ -397,7 +399,11 @@ static const Surface kSurface[] = {
     {"gdefcore_subject_create", "W"},
     {"gdefcore_subject_save", "W"},
     {"gdefcore_subject_seal", "W"},
-    {"gdefcore_subject_index", "W"},
+    {"gdefcore_subject_erased", "RA"},
+    {"gdefcore_subject_mac", "P"},
+    {"gdefcore_subject_mac_sealed", "RA"},
+    {"gdefcore_subject_find", "RA"},
+    {"gdefcore_subject_reindex", "W"},
     {"gdefcore_subject_read", "RA"},
     {"gdefcore_subject_revision_marker", "RA"},
     {"gdefcore_subject_free", "P"},
@@ -407,8 +413,6 @@ static const Surface kSurface[] = {
     {"gdefcore_subject_keyset", "RA"},
     {"gdefcore_subject_restore", "W"},
     {"gdefcore_subject_key", "RA"},
-    {"gdefcore_subject_blind_count", "RA"},
-    {"gdefcore_subject_blind", "RA"},
 };
 
 }  // namespace gate

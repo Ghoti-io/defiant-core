@@ -37,6 +37,7 @@
 #include <ghoti.io/defiant-core/allocator.h>
 #include <ghoti.io/defiant-core/core.h>
 #include <ghoti.io/defiant-storage/store.h>
+#include <ghoti.io/defiant-storage/model.h>
 #include <ghoti.io/defiant-storage/query.h>
 #include <ghoti.io/defiant-storage/value.h>
 #include <stddef.h>
@@ -388,6 +389,47 @@ GDEFCORE_API GDEFCORE_Result gdefcore_entity_save(GDEFCORE_Changeset * changeset
 GDEFCORE_API GDEFCORE_Result gdefcore_changeset_accept_sealed(
     GDEFCORE_Changeset * changeset);
 
+/* Defined in subject.h, which includes this header. */
+struct GDEFCORE_Subjects;
+
+/**
+ * @brief Tell @p changeset whose sealed value @p text is (story S6c).
+ *
+ * On the storage port a personal value is its sealed text and its subject's
+ * public id, and every new version of it gets a blind-index row (AD-14,
+ * AD-19). A text the entity already holds names its own subject, and one a
+ * draft holds names the subject the draft recorded; a text sealed for this
+ * changeset names none, and is told here: @p subject, and @p mac, the
+ * blind-index value gdefcore_subject_seal() returned with it (NULL for a
+ * draft, which carries no MAC; a save then computes it). @p subjects are the
+ * keys that made it: apply asks them, inside its write, whether the subject
+ * is erased, and refuses the value of one that is. gdefcore_subject_save()
+ * and the subject form route call this; it does not make the changeset
+ * accept sealed values (gdefcore_changeset_accept_sealed()). A text that is
+ * not shaped as a sealed one, a subject that is not a public id, another
+ * @p subjects than an earlier note's, or an applied changeset is
+ * ::GDEFCORE_ERR_INVALID.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_changeset_note_sealed(
+    GDEFCORE_Changeset * changeset, struct GDEFCORE_Subjects * subjects,
+    const char * text, size_t text_len, const char * subject,
+    size_t subject_len, const uint8_t mac[GDEFSTOR_BLIND_MAC_BYTES]);
+
+/**
+ * @brief The subjects whose keys index the personal values @p catalog's
+ * changesets write (story S6c). Borrowed; NULL unbinds.
+ *
+ * A save or a publish that writes a new version of a personal value gives
+ * it a blind-index MAC, computed under the tenant's blind-index key from the
+ * value it opens with its subject's key, and refuses a value whose subject
+ * is erased. A changeset given a note (gdefcore_changeset_note_sealed())
+ * uses that note's subjects; any other needs the catalog's, and without them
+ * such a write is ::GDEFCORE_ERR_INVALID. The subjects must be the tenant's,
+ * opened over the catalog's store.
+ */
+GDEFCORE_API void gdefcore_catalog_bind_subjects(GDEFCORE_Catalog * catalog,
+    struct GDEFCORE_Subjects * subjects);
+
 /**
  * @brief Stage field values as the entity's draft (access SPEC decision 13).
  *
@@ -398,7 +440,8 @@ GDEFCORE_API GDEFCORE_Result gdefcore_changeset_accept_sealed(
  * an entity that has a draft, it builds on the draft. The first draft of an
  * entity whose id its draft reserves makes the entity, with the changeset's
  * actor as its creator and no revision. The arguments are the same as
- * gdefcore_entity_save().
+ * gdefcore_entity_save(). A personal value is held in the draft as its
+ * sealed text and its subject, and no blind-index value (AD-14).
  */
 GDEFCORE_API GDEFCORE_Result gdefcore_entity_save_draft(
     GDEFCORE_Changeset * changeset, const char * id, size_t id_len,
@@ -416,6 +459,16 @@ GDEFCORE_API GDEFCORE_Result gdefcore_entity_save_draft(
  * ::GDEFCORE_ERR_INVALID. The revision's author is whoever wrote the draft
  * last (recorded with it), not the publisher (defect 1.5.3); the entity's
  * creator is whoever made it.
+ *
+ * At apply the draft is validated against its type as the type is then
+ * (AD-14): a value of a field the type no longer has (other than what the
+ * entity holds there now), a value not of its field's type, or a required
+ * field missing is ::GDEFCORE_ERR_INVALID with a refusal
+ * (gdefcore_changeset_refusal()). Each personal value the draft changes gets
+ * its blind-index MAC (gdefcore_catalog_bind_subjects()); one that names an
+ * erased subject refuses the apply, which writes nothing and keeps the draft
+ * (story S6c: an erased subject's key is gone, so no new value of theirs is
+ * written).
  */
 GDEFCORE_API GDEFCORE_Result gdefcore_entity_publish(
     GDEFCORE_Changeset * changeset, const char * id, size_t id_len);

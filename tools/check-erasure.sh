@@ -219,10 +219,13 @@ plant revision-blind src/subject/subject.c Erasure.Sweep \
   }
   if (text_len < 3 || memcmp(text, "s1:", 3) != 0 ||'
 
-# 2. Erasure that leaves the blind-index rows behind.
+# 2. Erasure that leaves the blind-index rows behind (in the port's blind
+#    table since story S6c; the sweep reads them in the tenant store's rows).
 plant keeps-blind-rows src/subject/subject.c Erasure.Sweep \
-  '  rc = delete_blinds(write, sid, row.blinds, row.blinds_len);' \
-  '  rc = GDEFCORE_OK;'
+  '  rc = from_stor(gdefstor_blind_delete_subject(write, sid,
+      GDEFCORE_PUBLIC_ID_LEN));' \
+  '  rc = GDEFCORE_OK;
+  (void)sid;'
 
 # 3. Erasure that leaves the wrapped subject key where it is kept: the key
 #    store is never asked to destroy it (story S5b moved it there from the
@@ -273,13 +276,21 @@ plant snapshot-key src/subject/subject.c Erasure.SnapshotCarriesNoKey \
 # The entity layer refuses a plaintext for a personal field on its own, and so
 # does the form layer; the plants that lift one layer lift both, or the other
 # refuses and the plant would show nothing. ENTITY_GATE is the entity layer's
-# refusal, the first test in personal_value_ok().
+# refusal, the first test in personal_value_ok(). Since story S6c a personal
+# value on the port also needs its subject, which a plaintext no note names
+# does not have; SUBJECT_GATE lifts that refusal (seal_value()) by naming a
+# made-up subject, so that a form plant can still store the plaintext.
 ENTITY_GATE_OLD='  if (!decl->personal || value->count == 0) {
     return 1;
   }'
 ENTITY_GATE_NEW='  if (1 || !decl->personal || value->count == 0) {
     return 1;
   }'
+SUBJECT_GATE_OLD='    /* A sealed text from nowhere: nothing says whose it is (AD-19). */
+    seals->unknown = 1;
+    return GDEFCORE_ERR_INVALID;'
+SUBJECT_GATE_NEW='    memcpy(subject, "0000000000000000000000000000",
+        GDEFCORE_PUBLIC_ID_LEN + 1);'
 
 # 5. The subject route of a form stores the caller's plaintext (the sealed text
 #    is built and then not used). The entity layer's refusal is lifted too, so
@@ -288,7 +299,8 @@ plant form-submit-stores-plaintext src/form/form.c Erasure.FormSubjectRoute \
   '          values[j].texts = &sealed_texts[k];
           values[j].text_lens = &sealed.len[k];' \
   '          (void)sealed_texts;' \
-  --file src/entity/entity.c "$ENTITY_GATE_OLD" "$ENTITY_GATE_NEW"
+  --file src/entity/entity.c "$ENTITY_GATE_OLD" "$ENTITY_GATE_NEW" \
+  --file src/entity/store.c "$SUBJECT_GATE_OLD" "$SUBJECT_GATE_NEW"
 
 # 6. The plain submit stops refusing a personal value. (The plain sign still
 #    refuses, so the token comes from the subject route.)
@@ -297,7 +309,8 @@ plant plain-submit-takes-personal src/form/form.c Erasure.FormPersonalField \
       (subjects == NULL || !opened.has_subject)) {' \
   '  if (rc == GDEFCORE_OK && 0 &&
       (subjects == NULL || !opened.has_subject)) {' \
-  --file src/entity/entity.c "$ENTITY_GATE_OLD" "$ENTITY_GATE_NEW"
+  --file src/entity/entity.c "$ENTITY_GATE_OLD" "$ENTITY_GATE_NEW" \
+  --file src/entity/store.c "$SUBJECT_GATE_OLD" "$SUBJECT_GATE_NEW"
 
 # 6b. The plain sign stops refusing a personal value (the token then holds
 #     plaintext for a subject-less submit to find).

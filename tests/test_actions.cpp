@@ -46,6 +46,41 @@ int Risk(const char * action, const char * field, const char * cond,
 
 class Actions : public GrantsFixture {
  protected:
+  /* The tenant's subjects, made the first time a personal value is written:
+   * a sealed value is somebody's, and a save indexes it (story S6c). */
+  GDEFSTOR_KeyStore * keys_ = NULL;
+  GDEFCORE_Keyring * ring_ = NULL;
+  GDEFCORE_Subjects * subjects_ = NULL;
+  char subject_[GDEFCORE_PUBLIC_ID_LEN + 1] = {0};
+  std::string sealed_;
+
+  void TearDown() override {
+    gdefcore_catalog_bind_subjects(catalog_, NULL);
+    gdefcore_subject_destroy(subjects_);
+    gdefstor_keystore_destroy(keys_);
+    gdefcore_keyring_destroy(ring_);
+    GrantsFixture::TearDown();
+  }
+
+  void Subjects() {
+    uint8_t root[GDEFCORE_ACCOUNT_ROOT_LEN];
+    GDEFSTOR_KeyCipher cipher;
+    size_t tenant_len = 0;
+    const uint8_t * tenant = gdefcore_catalog_tenant(catalog_, &tenant_len);
+    if (subjects_ != NULL) {
+      return;
+    }
+    memset(root, 0x42, sizeof root);
+    gdefcore_subject_cipher(&cipher);
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_keyring_create(root, sizeof root, NULL,
+        &ring_));
+    ASSERT_EQ(GDEFSMEMORY_OK, gdefsmemory_keystore_create(NULL, &cipher, &keys_));
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_subject_open(keys_, store_, tenant,
+        tenant_len, root, sizeof root, ring_, NULL, &subjects_));
+    gdefcore_catalog_bind_subjects(catalog_, subjects_);
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_subject_create(subjects_, subject_));
+  }
+
   GDEFCORE_Result Write(const std::string & actor, const std::string & id,
       const char * title, const char * group, bool draft, bool sealed = false) {
     GDEFCORE_Changeset * cs = NULL;
@@ -53,7 +88,19 @@ class Actions : public GrantsFixture {
     const char * texts[3] = {title, group, kSealed};
     size_t lens[3] = {strlen(title), strlen(group), strlen(kSealed)};
     const char * names[3] = {"title", "group", "ssn"};
+    uint8_t mac[GDEFCORE_SUBJECT_MAC_LEN];
     GDEFCORE_Result rc;
+    if (sealed) {
+      char * text = NULL;
+      size_t text_len = 0;
+      Subjects();
+      EXPECT_EQ(GDEFCORE_OK, gdefcore_subject_seal(subjects_, subject_,
+          strlen(subject_), "ssn", 3, "123-45-6789", 11, &text, &text_len, mac));
+      sealed_.assign(text == NULL ? "" : text, text_len);
+      gdefcore_subject_free(subjects_, text);
+      texts[2] = sealed_.c_str();
+      lens[2] = sealed_.size();
+    }
     EXPECT_EQ(GDEFCORE_OK,
         gdefcore_changeset_prepare(catalog_,
             actor.empty() ? NULL : actor.data(), actor.size(), &cs));
@@ -68,6 +115,8 @@ class Actions : public GrantsFixture {
     }
     if (sealed) {
       EXPECT_EQ(GDEFCORE_OK, gdefcore_changeset_accept_sealed(cs));
+      EXPECT_EQ(GDEFCORE_OK, gdefcore_changeset_note_sealed(cs, subjects_,
+          sealed_.data(), sealed_.size(), subject_, strlen(subject_), mac));
     }
     rc = (draft ? gdefcore_entity_save_draft : gdefcore_entity_save)(
         cs, id.data(), id.size(), "en", 2, values, sealed ? 3 : 2);
@@ -399,7 +448,7 @@ TEST_F(Actions, RevisionViewNeverShowsAPersonalFieldAsStored) {
         gdefcore_entity_revision_values(catalog_, post.data(), post.size(), 1,
             "en", 2, "ssn", 3, &texts, &lens, &count));
     ASSERT_EQ(1u, count);
-    EXPECT_EQ(std::string(kSealed), std::string(texts[0], lens[0]));
+    EXPECT_EQ(sealed_, std::string(texts[0], lens[0]));
     gdefcore_values_free(catalog_, texts, lens, count);
   }
   std::string view = View(Req(historian), post, 1, "ssn");

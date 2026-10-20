@@ -108,6 +108,15 @@ typedef struct GDEFCORE_Op {
   size_t ndecls;
 } GDEFCORE_Op;
 
+/* A sealed value a changeset was handed with its subject and, from the seal,
+ * its blind-index MAC (gdefcore_changeset_note_sealed()). */
+typedef struct GDEFCORE_SealNote {
+  GDEFCORE_Text text;
+  char subject[GDEFCORE_PUBLIC_ID_LEN + 1];
+  uint8_t mac[GDEFSTOR_BLIND_MAC_BYTES];
+  int has_mac;
+} GDEFCORE_SealNote;
+
 struct GDEFCORE_Catalog {
   GDEFSTOR_Store * store;
   uint8_t * tenant;
@@ -115,6 +124,7 @@ struct GDEFCORE_Catalog {
   const GDEFCORE_Allocator * alloc;
   GDEFCORE_Limits limits;
   GDEFCORE_Host * host;
+  struct GDEFCORE_Subjects * subjects; /* the keys that index its values */
 };
 
 struct GDEFCORE_Changeset {
@@ -131,6 +141,9 @@ struct GDEFCORE_Changeset {
   int applied;
   GDEFCORE_Request * request;
   int accept_sealed;
+  GDEFCORE_SealNote * notes;
+  size_t nnotes;
+  struct GDEFCORE_Subjects * subjects; /* over the catalog's, when set */
 };
 
 /* ---- store.c ------------------------------------------------------------- */
@@ -210,16 +223,49 @@ GDEFCORE_Result gdefcore_ent_lookup(GDEFCORE_Catalog * cat, const char * canon,
 GDEFCORE_Result gdefcore_ent_read_doc(GDEFCORE_Catalog * cat,
     const char * canon, uint64_t revision, int draft, GDEFCORE_Doc * out);
 
+/*
+ * Where the trees of a save or a draft find each personal value's subject,
+ * and how a save gives a changed one its blind-index MAC (story S6c). A
+ * personal value is a sealed text in a doc; on the port it is that text and
+ * its subject. The subject of a value is the one the current tree gives the
+ * same text, else the one a note gives it, else the one the entity's stored
+ * draft gives it; a value none of them names is refused (@ref unknown). A
+ * save (@ref index) gives every personal value that is not the current
+ * value of its place a MAC: the note's, else one computed from the value
+ * with @ref subjects. Neither is given for a subject that is erased, and the
+ * save is refused (@ref erased): an erased subject's key is gone, and with
+ * it every new value of theirs (AD-19). A draft gets no MAC (AD-14).
+ */
+typedef struct GDEFCORE_Seals {
+  const GDEFCORE_SealNote * notes;
+  size_t nnotes;
+  struct GDEFCORE_Subjects * subjects;
+  int index;
+  int with_draft; /* the entity's stored draft names subjects too */
+  int erased;     /* out */
+  int unknown;    /* out */
+} GDEFCORE_Seals;
+
 /* The trees of a doc for a save, items keyed to the current trees so an
  * unchanged value stays unchanged. */
 GDEFCORE_Result gdefcore_ent_save_doc(GDEFCORE_Catalog * cat,
     GDEFSTOR_Write * write, const char * canon, const char * type,
     size_t type_len, uint64_t base, const GDEFSTOR_RevisionMeta * meta,
-    const GDEFCORE_Doc * doc, uint64_t * out_revision, int * out_conflict);
+    const GDEFCORE_Doc * doc, GDEFCORE_Seals * seals, uint64_t * out_revision,
+    int * out_conflict);
 /* The doc as the draft of the entity, made from revision @p base. */
 GDEFCORE_Result gdefcore_ent_put_draft(GDEFCORE_Catalog * cat,
     GDEFSTOR_Write * write, const char * canon, const char * type,
-    size_t type_len, uint64_t base, const GDEFCORE_Doc * doc);
+    size_t type_len, uint64_t base, const GDEFCORE_Doc * doc,
+    GDEFCORE_Seals * seals);
+
+/* The subject the entity's current tree, else its draft, records for sealed
+ * text @p text of personal field @p field in @p lang; *out_found 0 when
+ * neither holds it. */
+GDEFCORE_Result gdefcore_ent_value_subject(GDEFCORE_Catalog * cat,
+    const char * canon, const char * lang, size_t lang_len, const char * field,
+    size_t field_len, const char * text, size_t len,
+    char out[GDEFCORE_PUBLIC_ID_LEN + 1], int * out_found);
 
 /* Revision @p index (oldest first) and its author, or the count. */
 GDEFCORE_Result gdefcore_ent_history(GDEFCORE_Catalog * cat,

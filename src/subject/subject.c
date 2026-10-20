@@ -21,15 +21,18 @@
 /**
  * @file
  *
- * Personal values are ciphertext in the tenant store. The subject keys
- * (wrapped under the keyring's subject-wrap purpose), the tenant keyring's
- * wrap and the erasure ledger are in the key store (defiant-storage's
- * keystore.h), read and written only through its port. The blind index, and
- * where each subject's values are, stay in the blind store, a data store
- * apart from the tenant's. Erasure destroys the key in the key store first,
- * then deletes the blind rows; every open and restore replays the ledger over
- * the blind store, so a restored pair still reads as erased and an erasure cut
- * short after its first step is finished.
+ * Personal values are ciphertext on the tenant's entity port, each with its
+ * subject's public id, and each version a save writes has its blind-index row
+ * in the port's blind table, in the same write (the entity layer gives it,
+ * from gdefcore_changeset_note_sealed() or gdefcore_subject_mac_sealed(); story
+ * S6c). The subject keys (wrapped under the keyring's subject-wrap purpose),
+ * the tenant keyring's wrap and the erasure ledger are in the key store
+ * (defiant-storage's keystore.h), read and written only through its port.
+ * Erasure destroys the key in the key store first, then deletes the blind
+ * rows through the data store's port; every open and restore replays the
+ * ledger, so a restored pair still reads as erased and an erasure cut short
+ * after its first step is finished. A restore then rebuilds the blind index
+ * from the values that can still be decrypted, since a data set carries none.
  */
 
 #include <ghoti.io/defiant-core/macros.h>
@@ -44,6 +47,8 @@
 #include <ghoti.io/defiant-core/access.h>
 #include <ghoti.io/defiant-storage/core.h>
 #include <ghoti.io/defiant-storage/projection.h>
+#include <ghoti.io/defiant-storage/model.h>
+#include <ghoti.io/defiant-storage/query.h>
 #include <ghoti.io/defiant-storage/snapshot.h>
 #include <ghoti.io/security/aes_gcm.h>
 #include <ghoti.io/text/json.h>
@@ -72,15 +77,13 @@ _Static_assert(kKey == GDEFCORE_SUBJECT_KEY_LEN, "subject key length");
 _Static_assert(sizeof GDEFCORE_SUBJECT_ERASED - 1 == GDEFCORE_SUBJECT_ERASED_LEN,
     "erased text");
 
-static const char kSubjectType[] = "core.subject";
-static const char kBlindType[] = "core.blind";
 static const char kPurpose[] = "subject-wrap";
 static const char kHex[] = "0123456789abcdef";
 
 struct GDEFCORE_Subjects {
   const GDEFCORE_Allocator * alloc;
   GDEFSTOR_KeyStore * keys; /* keys, the keyring's wrap, the ledger */
-  GDEFSTOR_Store * side;    /* the blind store: blind rows and locations */
+  GDEFSTOR_Store * data;    /* the tenant's data store: values, blind rows */
   uint8_t * tenant;
   size_t tenant_len;
   uint8_t root[GDEFCORE_ACCOUNT_ROOT_LEN];
@@ -94,16 +97,6 @@ typedef struct Buf {
   size_t cap;
   int oom;
 } Buf;
-
-/* A subject's row in the blind store: its blind-index lines and the places
- * its values are. It holds no key. */
-typedef struct SubjectRow {
-  char * blinds;
-  size_t blinds_len;
-  char * locs;
-  size_t locs_len;
-  int present;
-} SubjectRow;
 
 static void wipe(void * p, size_t n) {
   if (p != NULL && n > 0) {
@@ -270,76 +263,6 @@ static GDEFCORE_Result hex_decode(const char * text, size_t n, uint8_t * out,
   return GDEFCORE_OK;
 }
 
-static int column_find(const GDEFSTOR_Projection * row, const char * name,
-    const uint8_t ** val, size_t * len) {
-  size_t n = gdefstor_projection_column_count(row);
-  size_t i;
-  size_t name_len = strlen(name);
-  for (i = 0; i < n; i++) {
-    GDEFSTOR_Column col;
-    if (gdefstor_projection_column(row, i, &col) != GDEFSTOR_OK) {
-      return 0;
-    }
-    if (col.name_len == name_len && memcmp(col.name, name, name_len) == 0) {
-      *val = col.value;
-      *len = col.value_len;
-      return 1;
-    }
-  }
-  return 0;
-}
-
-static GDEFCORE_Result side_get(GDEFSTOR_Store * side, const uint8_t * tenant,
-    size_t tenant_len, const char * type, const char * entity, size_t entity_len,
-    GDEFSTOR_Projection ** out) {
-  return from_stor(gdefstor_projection_get(side, (const char *)tenant, tenant_len,
-      type, strlen(type), entity, entity_len, out));
-}
-
-static void row_clear(const GDEFCORE_Allocator * alloc, SubjectRow * row) {
-  gcu_allocator_free(alloc, row->blinds);
-  gcu_allocator_free(alloc, row->locs);
-  memset(row, 0, sizeof *row);
-}
-
-static GDEFCORE_Result row_load(GDEFCORE_Subjects * subjects, const char * id,
-    SubjectRow * row) {
-  GDEFSTOR_Projection * proj = NULL;
-  const uint8_t * val = NULL;
-  size_t len = 0;
-  GDEFCORE_Result rc;
-  memset(row, 0, sizeof *row);
-  rc = side_get(subjects->side, subjects->tenant, subjects->tenant_len,
-      kSubjectType, id, GDEFCORE_PUBLIC_ID_LEN, &proj);
-  if (rc == GDEFCORE_ERR_INVALID) {
-    return GDEFCORE_OK;
-  }
-  if (rc != GDEFCORE_OK) {
-    return rc;
-  }
-  row->present = 1;
-  if (column_find(proj, "blinds", &val, &len)) {
-    row->blinds = dup_n(subjects->alloc, val, len);
-    row->blinds_len = len;
-  } else {
-    row->blinds = dup_n(subjects->alloc, "", 0);
-    row->blinds_len = 0;
-  }
-  if (column_find(proj, "locs", &val, &len)) {
-    row->locs = dup_n(subjects->alloc, val, len);
-    row->locs_len = len;
-  } else {
-    row->locs = dup_n(subjects->alloc, "", 0);
-    row->locs_len = 0;
-  }
-  gdefstor_projection_free(proj);
-  if (row->blinds == NULL || row->locs == NULL) {
-    row_clear(subjects->alloc, row);
-    return GDEFCORE_ERR_OOM;
-  }
-  return GDEFCORE_OK;
-}
-
 /* ---- the key store ----------------------------------------------------------
  *
  * Every byte that leaves the key store through these comes from its
@@ -478,10 +401,11 @@ GDEFCORE_Result gdefcore_subject_bind_keyring(GDEFSTOR_KeyStore * keys,
   return rc;
 }
 
-static GDEFCORE_Result replay_ledger(GDEFCORE_Subjects * subjects);
+static GDEFCORE_Result replay_ledger(GDEFCORE_Subjects * subjects,
+    GDEFSTOR_Store * store);
 
 GDEFCORE_Result gdefcore_subject_open(GDEFSTOR_KeyStore * keys,
-    GDEFSTOR_Store * side, const uint8_t * tenant, size_t tenant_len,
+    GDEFSTOR_Store * data, const uint8_t * tenant, size_t tenant_len,
     const uint8_t * root, size_t root_len, const GDEFCORE_Keyring * keyring,
     const GDEFCORE_Allocator * allocator, GDEFCORE_Subjects ** out) {
   const GDEFCORE_Allocator * alloc;
@@ -489,7 +413,7 @@ GDEFCORE_Result gdefcore_subject_open(GDEFSTOR_KeyStore * keys,
   uint8_t wrapped[kWrap];
   int found = 0;
   GDEFCORE_Result rc;
-  if (keys == NULL || side == NULL || out == NULL || tenant == NULL ||
+  if (keys == NULL || data == NULL || out == NULL || tenant == NULL ||
       tenant_len == 0 || root == NULL ||
       root_len != GDEFCORE_ACCOUNT_ROOT_LEN) {
     return GDEFCORE_ERR_INVALID;
@@ -502,7 +426,7 @@ GDEFCORE_Result gdefcore_subject_open(GDEFSTOR_KeyStore * keys,
   memset(subjects, 0, sizeof *subjects);
   subjects->alloc = alloc;
   subjects->keys = keys;
-  subjects->side = side;
+  subjects->data = data;
   subjects->tenant = (uint8_t *)mem(alloc, tenant_len);
   if (subjects->tenant == NULL) {
     gcu_allocator_free(alloc, subjects);
@@ -534,7 +458,7 @@ GDEFCORE_Result gdefcore_subject_open(GDEFSTOR_KeyStore * keys,
   wipe(wrapped, sizeof wrapped);
   if (rc == GDEFCORE_OK) {
     /* An erasure cut short after its key-store step is finished here. */
-    rc = replay_ledger(subjects);
+    rc = replay_ledger(subjects, subjects->data);
   }
   if (rc != GDEFCORE_OK) {
     gdefcore_subject_destroy(subjects);
@@ -690,118 +614,6 @@ static GDEFCORE_Result open_key(GDEFCORE_Subjects * subjects,
   return rc;
 }
 
-static int line_span(const char * text, size_t n, size_t * at, size_t * line,
-    size_t * len) {
-  size_t i = *at;
-  if (i >= n) {
-    return 0;
-  }
-  *line = i;
-  while (i < n && text[i] != '\n') {
-    i += 1;
-  }
-  *len = i - *line;
-  *at = i < n ? i + 1 : i;
-  return *len > 0;
-}
-
-static int loc_match(const char * line, size_t len, const char * entity,
-    const char * field, size_t field_len, const char * lang, size_t lang_len) {
-  size_t field_at;
-  size_t lang_at;
-  if (len < GDEFCORE_PUBLIC_ID_LEN + 1 ||
-      memcmp(line, entity, GDEFCORE_PUBLIC_ID_LEN) != 0 ||
-      line[GDEFCORE_PUBLIC_ID_LEN] != ' ') {
-    return 0;
-  }
-  field_at = GDEFCORE_PUBLIC_ID_LEN + 1;
-  if (len < field_at + field_len + 1 + lang_len) {
-    return 0;
-  }
-  if (memcmp(line + field_at, field, field_len) != 0 ||
-      line[field_at + field_len] != ' ') {
-    return 0;
-  }
-  lang_at = field_at + field_len + 1;
-  return len - lang_at == lang_len && memcmp(line + lang_at, lang, lang_len) == 0;
-}
-
-static int loc_match_any(const char * text, size_t n, const char * entity,
-    const char * field, size_t field_len, const char * lang, size_t lang_len);
-
-static void blind_entity(char out[GDEFCORE_PUBLIC_ID_LEN + 64 + 1],
-    const char * subject, const char * hex) {
-  memcpy(out, subject, GDEFCORE_PUBLIC_ID_LEN);
-  memcpy(out + GDEFCORE_PUBLIC_ID_LEN, hex, kMac * 2);
-  out[GDEFCORE_PUBLIC_ID_LEN + kMac * 2] = '\0';
-}
-
-static GDEFCORE_Result drop_blind_line(const GDEFCORE_Allocator * alloc,
-    char ** text, size_t * n, const char * entity, const char * field,
-    size_t field_len, const char * lang, size_t lang_len, char * old_hex,
-    size_t * old_hex_len) {
-  Buf kept;
-  size_t at = 0;
-  memset(&kept, 0, sizeof kept);
-  kept.alloc = alloc;
-  *old_hex_len = 0;
-  old_hex[0] = '\0';
-  while (at < *n) {
-    size_t line = 0;
-    size_t len = 0;
-    int match;
-    if (!line_span(*text, *n, &at, &line, &len)) {
-      continue;
-    }
-    match = 0;
-    if (len > kMac * 2 + 1 && (*text)[line + kMac * 2] == ' ') {
-      match = loc_match(*text + line + kMac * 2 + 1, len - (kMac * 2 + 1),
-          entity, field, field_len, lang, lang_len);
-    }
-    if (match) {
-      if (*old_hex_len == 0) {
-        memcpy(old_hex, *text + line, kMac * 2);
-        old_hex[kMac * 2] = '\0';
-        *old_hex_len = kMac * 2;
-      }
-      continue;
-    }
-    buf_add(&kept, *text + line, len);
-    buf_add(&kept, "\n", 1);
-  }
-  if (kept.oom) {
-    buf_free(&kept);
-    return GDEFCORE_ERR_OOM;
-  }
-  gcu_allocator_free(alloc, *text);
-  if (kept.p == NULL) {
-    kept.p = dup_n(alloc, "", 0);
-    if (kept.p == NULL) {
-      *text = NULL;
-      *n = 0;
-      return GDEFCORE_ERR_OOM;
-    }
-  }
-  *text = kept.p;
-  *n = kept.n;
-  return GDEFCORE_OK;
-}
-
-static GDEFCORE_Result count_lines(const char * text, size_t n, size_t * out) {
-  size_t at = 0;
-  size_t count = 0;
-  while (at < n) {
-    size_t line = 0;
-    size_t len = 0;
-    if (!line_span(text, n, &at, &line, &len)) {
-      continue;
-    }
-    count += 1;
-  }
-  *out = count;
-  return GDEFCORE_OK;
-}
-
 static GDEFCORE_Result field_personal(GDEFCORE_Catalog * catalog,
     const char * type, size_t type_len, const char * field, size_t field_len,
     int * out) {
@@ -854,7 +666,7 @@ static GDEFCORE_Result encrypt_value(GDEFCORE_Subjects * subjects,
   char * text = NULL;
   GDEFCORE_Result rc;
   /* A read of the key store, never a write: the save path writes the tenant
-   * store and the blind store only. */
+   * store only. */
   rc = key_load(subjects, subject, &erased, wrapped);
   if (rc == GDEFCORE_OK && erased) {
     rc = GDEFCORE_ERR_INVALID;
@@ -1062,178 +874,6 @@ static GDEFCORE_Result index_value(GDEFCORE_Subjects * subjects,
   return rc;
 }
 
-static GDEFCORE_Result remember(GDEFCORE_Subjects * subjects, const char * subject,
-    const char * entity, const char * field, size_t field_len, const char * lang,
-    size_t lang_len, const uint8_t mac[kMac]) {
-  SubjectRow row;
-  char hex[kMac * 2 + 1];
-  size_t hex_len = 0;
-  char old_hex[kMac * 2 + 1];
-  size_t old_len = 0;
-  char * line = NULL;
-  size_t line_len;
-  GDEFSTOR_Write * write = NULL;
-  GDEFSTOR_Column blind_cols[3];
-  GDEFSTOR_Column subject_cols[2];
-  size_t nsub = 0;
-  GDEFCORE_Result rc = row_load(subjects, subject, &row);
-  if (rc != GDEFCORE_OK) {
-    return rc;
-  }
-  rc = hex_encode(subjects->alloc, mac, kMac, &line, &hex_len);
-  if (rc != GDEFCORE_OK) {
-    row_clear(subjects->alloc, &row);
-    return rc;
-  }
-  if (hex_len != kMac * 2) {
-    gcu_allocator_free(subjects->alloc, line);
-    row_clear(subjects->alloc, &row);
-    return GDEFCORE_ERR_INTERNAL;
-  }
-  memcpy(hex, line, hex_len);
-  hex[hex_len] = '\0';
-  gcu_allocator_free(subjects->alloc, line);
-  line = NULL;
-  rc = drop_blind_line(subjects->alloc, &row.blinds, &row.blinds_len, entity,
-      field, field_len, lang, lang_len, old_hex, &old_len);
-  if (rc != GDEFCORE_OK) {
-    row_clear(subjects->alloc, &row);
-    return rc;
-  }
-  line_len = hex_len + 1 + GDEFCORE_PUBLIC_ID_LEN + 1 + field_len + 1 + lang_len +
-             1;
-  line = (char *)mem(subjects->alloc, line_len + 1);
-  if (line == NULL) {
-    row_clear(subjects->alloc, &row);
-    return GDEFCORE_ERR_OOM;
-  }
-  {
-    int kn = snprintf(line, line_len + 1, "%s %s %.*s %.*s\n", hex, entity,
-        (int)field_len, field, (int)lang_len, lang);
-    if (kn <= 0 || (size_t)kn != line_len) {
-      gcu_allocator_free(subjects->alloc, line);
-      row_clear(subjects->alloc, &row);
-      return GDEFCORE_ERR_LIMIT;
-    }
-  }
-  {
-    char * next = (char *)gcu_allocator_realloc(subjects->alloc, row.blinds,
-        row.blinds_len + line_len + 1);
-    if (next == NULL) {
-      gcu_allocator_free(subjects->alloc, line);
-      row_clear(subjects->alloc, &row);
-      return GDEFCORE_ERR_OOM;
-    }
-    memcpy(next + row.blinds_len, line, line_len);
-    next[row.blinds_len + line_len] = '\0';
-    row.blinds = next;
-    row.blinds_len += line_len;
-  }
-  if (!loc_match_any(row.locs, row.locs_len, entity, field, field_len, lang,
-          lang_len)) {
-    char loc[160];
-    int kn;
-    if (GDEFCORE_PUBLIC_ID_LEN + field_len + lang_len + 4 >= sizeof loc) {
-      gcu_allocator_free(subjects->alloc, line);
-      row_clear(subjects->alloc, &row);
-      return GDEFCORE_ERR_LIMIT;
-    }
-    kn = snprintf(loc, sizeof loc, "%s %.*s %.*s\n", entity, (int)field_len,
-        field, (int)lang_len, lang);
-    if (kn <= 0) {
-      gcu_allocator_free(subjects->alloc, line);
-      row_clear(subjects->alloc, &row);
-      return GDEFCORE_ERR_LIMIT;
-    }
-    {
-      char * next = (char *)gcu_allocator_realloc(subjects->alloc, row.locs,
-          row.locs_len + (size_t)kn + 1);
-      if (next == NULL) {
-        gcu_allocator_free(subjects->alloc, line);
-        row_clear(subjects->alloc, &row);
-        return GDEFCORE_ERR_OOM;
-      }
-      memcpy(next + row.locs_len, loc, (size_t)kn);
-      next[row.locs_len + (size_t)kn] = '\0';
-      row.locs = next;
-      row.locs_len += (size_t)kn;
-    }
-  }
-  rc = from_stor(gdefstor_write_begin(subjects->side,
-      (const char *)subjects->tenant, subjects->tenant_len, NULL, &write));
-  if (rc != GDEFCORE_OK) {
-    gcu_allocator_free(subjects->alloc, line);
-    row_clear(subjects->alloc, &row);
-    return rc;
-  }
-  if (old_len == kMac * 2) {
-    char old_id[GDEFCORE_PUBLIC_ID_LEN + 64 + 1];
-    blind_entity(old_id, subject, old_hex);
-    rc = from_stor(gdefstor_projection_delete(write, kBlindType,
-        strlen(kBlindType), old_id, GDEFCORE_PUBLIC_ID_LEN + old_len));
-  }
-  if (rc == GDEFCORE_OK) {
-    char row_id[GDEFCORE_PUBLIC_ID_LEN + 64 + 1];
-    blind_entity(row_id, subject, hex);
-    memset(blind_cols, 0, sizeof blind_cols);
-    blind_cols[0].name = "mac";
-    blind_cols[0].name_len = 3;
-    blind_cols[0].value = mac;
-    blind_cols[0].value_len = kMac;
-    blind_cols[1].name = "field";
-    blind_cols[1].name_len = 5;
-    blind_cols[1].value = (const uint8_t *)field;
-    blind_cols[1].value_len = field_len;
-    blind_cols[2].name = "subject";
-    blind_cols[2].name_len = 7;
-    blind_cols[2].value = (const uint8_t *)subject;
-    blind_cols[2].value_len = GDEFCORE_PUBLIC_ID_LEN;
-    rc = from_stor(gdefstor_projection_put(write, kBlindType, strlen(kBlindType),
-        row_id, GDEFCORE_PUBLIC_ID_LEN + hex_len, blind_cols, 3));
-  }
-  if (rc == GDEFCORE_OK) {
-    memset(subject_cols, 0, sizeof subject_cols);
-    nsub = 0;
-    subject_cols[nsub].name = "blinds";
-    subject_cols[nsub].name_len = 6;
-    subject_cols[nsub].value = (const uint8_t *)row.blinds;
-    subject_cols[nsub].value_len = row.blinds_len;
-    nsub += 1;
-    subject_cols[nsub].name = "locs";
-    subject_cols[nsub].name_len = 4;
-    subject_cols[nsub].value = (const uint8_t *)row.locs;
-    subject_cols[nsub].value_len = row.locs_len;
-    nsub += 1;
-    rc = from_stor(gdefstor_projection_put(write, kSubjectType,
-        strlen(kSubjectType), subject, GDEFCORE_PUBLIC_ID_LEN, subject_cols,
-        nsub));
-  }
-  if (rc == GDEFCORE_OK) {
-    rc = from_stor(gdefstor_write_commit(write));
-  } else {
-    gdefstor_write_abort(write);
-  }
-  gcu_allocator_free(subjects->alloc, line);
-  row_clear(subjects->alloc, &row);
-  return rc;
-}
-
-static int loc_match_any(const char * text, size_t n, const char * entity,
-    const char * field, size_t field_len, const char * lang, size_t lang_len) {
-  size_t at = 0;
-  while (at < n) {
-    size_t line = 0;
-    size_t len = 0;
-    if (!line_span(text, n, &at, &line, &len)) {
-      continue;
-    }
-    if (loc_match(text + line, len, entity, field, field_len, lang, lang_len)) {
-      return 1;
-    }
-  }
-  return 0;
-}
-
 /* Whether @p text is shaped like what encrypt_value returns: "s1:" and the
  * lower-case hex of a nonce, the ciphertext and a tag. Such a text is a value
  * that came out of storage, not a person's data; sealing it would store a
@@ -1340,8 +980,14 @@ GDEFCORE_Result gdefcore_subject_save(GDEFCORE_Subjects * subjects,
   value.texts = texts;
   value.text_lens = lens;
   value.count = 1;
-  rc = gdefcore_entity_save(changeset, eid, GDEFCORE_PUBLIC_ID_LEN, lang,
-      lang_len, &value, 1);
+  /* Whose value it is, and its blind-index value, which the save writes in
+   * the port's blind table in the revision's own write (story S6c). */
+  rc = gdefcore_changeset_note_sealed(changeset, subjects, stored, stored_len,
+      sid, GDEFCORE_PUBLIC_ID_LEN, mac);
+  if (rc == GDEFCORE_OK) {
+    rc = gdefcore_entity_save(changeset, eid, GDEFCORE_PUBLIC_ID_LEN, lang,
+        lang_len, &value, 1);
+  }
   if (rc == GDEFCORE_OK) {
     if (kind == GDEFCORE_TYPE_CONFIG) {
       rc = gdefcore_changeset_apply(changeset, type, type_len);
@@ -1351,12 +997,8 @@ GDEFCORE_Result gdefcore_subject_save(GDEFCORE_Subjects * subjects,
   }
   gdefcore_changeset_destroy(changeset);
   gdefcore_text_free(catalog, type);
-  if (rc != GDEFCORE_OK) {
-    gcu_allocator_free(subjects->alloc, stored);
-    return rc;
-  }
   gcu_allocator_free(subjects->alloc, stored);
-  return remember(subjects, sid, eid, field, field_len, lang, lang_len, mac);
+  return rc;
 }
 
 GDEFCORE_Result gdefcore_subject_seal(GDEFCORE_Subjects * subjects,
@@ -1400,30 +1042,19 @@ GDEFCORE_Result gdefcore_subject_seal(GDEFCORE_Subjects * subjects,
   return GDEFCORE_OK;
 }
 
-GDEFCORE_Result gdefcore_subject_index(GDEFCORE_Subjects * subjects,
-    const char * subject, size_t subject_len, const char * entity,
-    size_t entity_len, const char * field, size_t field_len, const char * lang,
-    size_t lang_len, const uint8_t mac[GDEFCORE_SUBJECT_MAC_LEN]) {
+GDEFCORE_Result gdefcore_subject_erased(GDEFCORE_Subjects * subjects,
+    const char * subject, size_t subject_len, int * out_erased) {
   char sid[GDEFCORE_PUBLIC_ID_LEN + 1];
-  char eid[GDEFCORE_PUBLIC_ID_LEN + 1];
+  int known = 0;
   GDEFCORE_Result rc;
-  if (subjects == NULL || field == NULL || field_len == 0 || lang == NULL ||
-      mac == NULL) {
+  if (subjects == NULL || out_erased == NULL) {
     return GDEFCORE_ERR_INVALID;
   }
   rc = canon_id(subject, subject_len, sid);
   if (rc != GDEFCORE_OK) {
     return rc;
   }
-  rc = canon_id(entity, entity_len, eid);
-  if (rc != GDEFCORE_OK) {
-    return rc;
-  }
-  rc = not_erased(subjects, sid);
-  if (rc != GDEFCORE_OK) {
-    return rc;
-  }
-  return remember(subjects, sid, eid, field, field_len, lang, lang_len, mac);
+  return subject_state(subjects, sid, out_erased, &known);
 }
 
 GDEFCORE_Result gdefcore_subject_read(GDEFCORE_Subjects * subjects,
@@ -1518,72 +1149,25 @@ GDEFCORE_Result gdefcore_subject_revision_marker(GDEFCORE_Subjects * subjects,
   return rc;
 }
 
-static GDEFCORE_Result delete_blinds(GDEFSTOR_Write * write, const char * subject,
-    const char * text, size_t n) {
-  size_t at = 0;
-  while (at < n) {
-    size_t line = 0;
-    size_t len = 0;
-    char id[GDEFCORE_PUBLIC_ID_LEN + 64 + 1];
-    GDEFCORE_Result rc;
-    if (!line_span(text, n, &at, &line, &len)) {
-      continue;
-    }
-    if (len < kMac * 2 + 1 || text[line + kMac * 2] != ' ') {
-      return GDEFCORE_ERR_CORRUPT;
-    }
-    blind_entity(id, subject, text + line);
-    rc = from_stor(gdefstor_projection_delete(write, kBlindType,
-        strlen(kBlindType), id, GDEFCORE_PUBLIC_ID_LEN + kMac * 2));
-    if (rc != GDEFCORE_OK) {
-      return rc;
-    }
-  }
-  return GDEFCORE_OK;
-}
-
 /* Erasure's second step, and the ledger replay's: the subject's blind-index
- * rows go from the blind store. Idempotent: a subject with none writes
- * nothing. The places its values are stay, as the revisions do. */
+ * rows go from the data store @p store, every type's, through the port
+ * (gdefstor_blind_delete_subject()). Idempotent: a subject with none writes
+ * nothing. The ciphertext and the subject column stay, as the revisions do. */
 static GDEFCORE_Result forget_blinds(GDEFCORE_Subjects * subjects,
-    const char * sid) {
-  SubjectRow row;
+    GDEFSTOR_Store * store, const char * sid) {
   GDEFSTOR_Write * write = NULL;
-  GDEFSTOR_Column columns[2];
-  GDEFCORE_Result rc = row_load(subjects, sid, &row);
-  if (rc != GDEFCORE_OK) {
-    return rc;
-  }
-  if (!row.present || row.blinds_len == 0) {
-    row_clear(subjects->alloc, &row);
-    return GDEFCORE_OK;
-  }
-  rc = from_stor(gdefstor_write_begin(subjects->side,
+  GDEFCORE_Result rc = from_stor(gdefstor_write_begin(store,
       (const char *)subjects->tenant, subjects->tenant_len, NULL, &write));
   if (rc != GDEFCORE_OK) {
-    row_clear(subjects->alloc, &row);
     return rc;
   }
-  rc = delete_blinds(write, sid, row.blinds, row.blinds_len);
-  if (rc == GDEFCORE_OK) {
-    memset(columns, 0, sizeof columns);
-    columns[0].name = "blinds";
-    columns[0].name_len = 6;
-    columns[0].value = (const uint8_t *)"";
-    columns[0].value_len = 0;
-    columns[1].name = "locs";
-    columns[1].name_len = 4;
-    columns[1].value = (const uint8_t *)(row.locs == NULL ? "" : row.locs);
-    columns[1].value_len = row.locs_len;
-    rc = from_stor(gdefstor_projection_put(write, kSubjectType,
-        strlen(kSubjectType), sid, GDEFCORE_PUBLIC_ID_LEN, columns, 2));
-  }
+  rc = from_stor(gdefstor_blind_delete_subject(write, sid,
+      GDEFCORE_PUBLIC_ID_LEN));
   if (rc == GDEFCORE_OK) {
     rc = from_stor(gdefstor_write_commit(write));
   } else {
     gdefstor_write_abort(write);
   }
-  row_clear(subjects->alloc, &row);
   return rc;
 }
 
@@ -1628,8 +1212,8 @@ GDEFCORE_Result gdefcore_subject_erase(GDEFCORE_Subjects * subjects,
       return rc;
     }
   }
-  /* 2. Then the blind-index rows, in the blind store. */
-  rc = forget_blinds(subjects, sid);
+  /* 2. Then the blind-index rows, in the data store. */
+  rc = forget_blinds(subjects, subjects->data, sid);
   /* 3. Then caches: core keeps no cache of a subject's values or key, so
    *    there is nothing to purge yet. A cache that holds one purges here. */
   return rc;
@@ -1696,16 +1280,72 @@ static void json_escape(Buf * b, const char * s, size_t n) {
   buf_add(b, "\"", 1);
 }
 
+/* The values of field @p field of entity @p eid in @p lang, as the entity is
+ * now, published or not, each opened with the subject's key @p raw and added
+ * to @p buf. A value that does not open under it is another subject's (a
+ * multiple can hold several people's) and is left out. */
+static GDEFCORE_Result export_values(GDEFCORE_Subjects * subjects,
+    GDEFCORE_Catalog * catalog, const char * sid, const uint8_t raw[kKey],
+    const char * eid, const char * field, size_t field_len, const char * lang,
+    size_t lang_len, Buf * buf, int * first) {
+  char ** texts = NULL;
+  size_t * lens = NULL;
+  size_t count = 0;
+  size_t i;
+  GDEFCORE_Result rc = gdefcore_entity_values(catalog, NULL, GDEFCORE_VIEW_ACTIVE,
+      eid, GDEFCORE_PUBLIC_ID_LEN, lang, lang_len, field, field_len, &texts,
+      &lens, &count);
+  if (rc == GDEFCORE_ERR_INVALID) {
+    /* Nothing there now (a cleared entity reads as one with no content). */
+    return GDEFCORE_OK;
+  }
+  for (i = 0; rc == GDEFCORE_OK && i < count; i++) {
+    char * plain = NULL;
+    size_t plain_len = 0;
+    GDEFCORE_Result open_rc = decrypt_text(subjects, sid, raw, field, field_len,
+        texts[i], lens[i], &plain, &plain_len);
+    if (open_rc == GDEFCORE_ERR_OOM) {
+      rc = open_rc;
+      break;
+    }
+    if (open_rc != GDEFCORE_OK) {
+      continue;
+    }
+    if (!utf8_ok((const uint8_t *)plain, plain_len)) {
+      rc = GDEFCORE_ERR_INVALID;
+    } else {
+      if (!*first) {
+        buf_add(buf, ",", 1);
+      }
+      *first = 0;
+      buf_add(buf, "{\"entity\":", 10);
+      json_escape(buf, eid, GDEFCORE_PUBLIC_ID_LEN);
+      buf_add(buf, ",\"field\":", 9);
+      json_escape(buf, field, field_len);
+      buf_add(buf, ",\"lang\":", 8);
+      json_escape(buf, lang, lang_len);
+      buf_add(buf, ",\"text\":", 8);
+      json_escape(buf, plain, plain_len);
+      buf_add(buf, "}", 1);
+    }
+    wipe(plain, plain_len);
+    gdefcore_subject_free(subjects, plain);
+  }
+  gdefcore_values_free(catalog, texts, lens, count);
+  return rc;
+}
+
 GDEFCORE_Result gdefcore_subject_export(GDEFCORE_Subjects * subjects,
     GDEFCORE_Catalog * catalog, const char * subject, size_t subject_len,
     char ** out_json, size_t * out_len) {
   char sid[GDEFCORE_PUBLIC_ID_LEN + 1];
   int erased = 0;
-  int known = 0;
-  SubjectRow row;
+  uint8_t wrapped[kWrap];
+  uint8_t raw[kKey];
+  GDEFSTOR_SubjectHits * hits = NULL;
   Buf buf;
-  size_t at = 0;
   int first = 1;
+  size_t i;
   GDEFCORE_Result rc;
   if (subjects == NULL || out_json == NULL || out_len == NULL) {
     return GDEFCORE_ERR_INVALID;
@@ -1714,7 +1354,7 @@ GDEFCORE_Result gdefcore_subject_export(GDEFCORE_Subjects * subjects,
   if (rc != GDEFCORE_OK) {
     return rc;
   }
-  rc = subject_state(subjects, sid, &erased, &known);
+  rc = key_load(subjects, sid, &erased, wrapped);
   if (rc != GDEFCORE_OK) {
     return rc;
   }
@@ -1727,83 +1367,63 @@ GDEFCORE_Result gdefcore_subject_export(GDEFCORE_Subjects * subjects,
     return GDEFCORE_OK;
   }
   if (catalog == NULL) {
+    wipe(wrapped, sizeof wrapped);
     return GDEFCORE_ERR_INVALID;
   }
-  rc = row_load(subjects, sid, &row);
+  rc = open_key(subjects, wrapped, raw);
+  wipe(wrapped, sizeof wrapped);
   if (rc != GDEFCORE_OK) {
+    wipe(raw, sizeof raw);
     return rc;
   }
+  /* "Everything about this person": every value naming them, by the subject
+   * column beside each ciphertext (AD-19), of which the current ones are
+   * read. */
+  rc = from_stor(gdefstor_subject_lookup(subjects->data,
+      (const char *)subjects->tenant, subjects->tenant_len, sid,
+      GDEFCORE_PUBLIC_ID_LEN, &hits));
   memset(&buf, 0, sizeof buf);
   buf.alloc = subjects->alloc;
   buf_add(&buf, "{\"values\":[", 11);
-  while (at < row.locs_len) {
-    size_t line = 0;
-    size_t len = 0;
-    char eid[GDEFCORE_PUBLIC_ID_LEN + 1];
-    const char * field;
-    size_t field_len;
-    const char * lang;
-    size_t lang_len;
-    size_t sp;
-    char * plain = NULL;
-    size_t plain_len = 0;
-    if (!line_span(row.locs, row.locs_len, &at, &line, &len)) {
+  for (i = 0; rc == GDEFCORE_OK && i < gdefstor_subject_hits_count(hits); i++) {
+    GDEFSTOR_SubjectHit h;
+    size_t k;
+    int seen = 0;
+    memset(&h, 0, sizeof h);
+    h.size = sizeof h;
+    rc = from_stor(gdefstor_subject_hit(hits, i, &h));
+    if (rc != GDEFCORE_OK || h.valid_to != 0 ||
+        h.public_id_len != GDEFCORE_PUBLIC_ID_LEN) {
       continue;
     }
-    if (len < GDEFCORE_PUBLIC_ID_LEN + 3 ||
-        row.locs[line + GDEFCORE_PUBLIC_ID_LEN] != ' ') {
-      row_clear(subjects->alloc, &row);
-      buf_free(&buf);
-      return GDEFCORE_ERR_CORRUPT;
+    /* One entry per entity, field and language: the field's items are read
+     * together. */
+    for (k = 0; k < i && !seen; k++) {
+      GDEFSTOR_SubjectHit e;
+      memset(&e, 0, sizeof e);
+      e.size = sizeof e;
+      seen = gdefstor_subject_hit(hits, k, &e) == GDEFSTOR_OK &&
+             e.valid_to == 0 &&
+             span_eq(e.public_id, e.public_id_len, h.public_id,
+                 h.public_id_len) &&
+             span_eq(e.field, e.field_len, h.field, h.field_len) &&
+             span_eq(e.language, e.language_len, h.language, h.language_len);
     }
-    memcpy(eid, row.locs + line, GDEFCORE_PUBLIC_ID_LEN);
-    eid[GDEFCORE_PUBLIC_ID_LEN] = '\0';
-    field = row.locs + line + GDEFCORE_PUBLIC_ID_LEN + 1;
-    sp = 0;
-    while (sp < len - (GDEFCORE_PUBLIC_ID_LEN + 1) && field[sp] != ' ') {
-      sp += 1;
+    if (!seen) {
+      char eid[GDEFCORE_PUBLIC_ID_LEN + 1];
+      memcpy(eid, h.public_id, GDEFCORE_PUBLIC_ID_LEN);
+      eid[GDEFCORE_PUBLIC_ID_LEN] = '\0';
+      rc = export_values(subjects, catalog, sid, raw, eid, h.field, h.field_len,
+          h.language, h.language_len, &buf, &first);
     }
-    if (sp == 0 || sp >= len - (GDEFCORE_PUBLIC_ID_LEN + 1)) {
-      row_clear(subjects->alloc, &row);
-      buf_free(&buf);
-      return GDEFCORE_ERR_CORRUPT;
-    }
-    field_len = sp;
-    lang = field + sp + 1;
-    lang_len = len - (GDEFCORE_PUBLIC_ID_LEN + 1 + field_len + 1);
-    rc = gdefcore_subject_read(subjects, catalog, sid, GDEFCORE_PUBLIC_ID_LEN,
-        eid, GDEFCORE_PUBLIC_ID_LEN, field, field_len, lang, lang_len, &plain,
-        &plain_len);
-    if (rc != GDEFCORE_OK) {
-      row_clear(subjects->alloc, &row);
-      buf_free(&buf);
-      return rc;
-    }
-    if (!utf8_ok((const uint8_t *)plain, plain_len)) {
-      wipe(plain, plain_len);
-      gdefcore_subject_free(subjects, plain);
-      row_clear(subjects->alloc, &row);
-      buf_free(&buf);
-      return GDEFCORE_ERR_INVALID;
-    }
-    if (!first) {
-      buf_add(&buf, ",", 1);
-    }
-    first = 0;
-    buf_add(&buf, "{\"entity\":", 10);
-    json_escape(&buf, eid, GDEFCORE_PUBLIC_ID_LEN);
-    buf_add(&buf, ",\"field\":", 9);
-    json_escape(&buf, field, field_len);
-    buf_add(&buf, ",\"lang\":", 8);
-    json_escape(&buf, lang, lang_len);
-    buf_add(&buf, ",\"text\":", 8);
-    json_escape(&buf, plain, plain_len);
-    buf_add(&buf, "}", 1);
-    wipe(plain, plain_len);
-    gdefcore_subject_free(subjects, plain);
   }
+  wipe(raw, sizeof raw);
+  gdefstor_subject_hits_free(hits);
   buf_add(&buf, "]}", 2);
-  row_clear(subjects->alloc, &row);
+  if (rc != GDEFCORE_OK) {
+    buf_free(&buf);
+    return rc;
+  }
   if (buf.oom || buf.p == NULL) {
     buf_free(&buf);
     return GDEFCORE_ERR_OOM;
@@ -1841,79 +1461,290 @@ GDEFCORE_Result gdefcore_subject_key(GDEFCORE_Subjects * subjects,
   return rc;
 }
 
-GDEFCORE_Result gdefcore_subject_blind_count(GDEFCORE_Subjects * subjects,
-    const char * subject, size_t subject_len, size_t * out_count) {
-  char sid[GDEFCORE_PUBLIC_ID_LEN + 1];
-  SubjectRow row;
-  int erased = 0;
-  int known = 0;
+GDEFCORE_Result gdefcore_subject_mac(GDEFCORE_Subjects * subjects,
+    const char * field, size_t field_len, const void * plain, size_t plain_len,
+    uint8_t out[GDEFCORE_SUBJECT_MAC_LEN]) {
+  uint8_t mac[kMac];
   GDEFCORE_Result rc;
-  if (subjects == NULL || out_count == NULL) {
+  if (subjects == NULL || field == NULL || field_len == 0 || out == NULL ||
+      (plain == NULL && plain_len != 0)) {
     return GDEFCORE_ERR_INVALID;
   }
-  rc = canon_id(subject, subject_len, sid);
-  if (rc != GDEFCORE_OK) {
-    return rc;
+  rc = index_value(subjects, field, field_len, plain, plain_len, mac);
+  if (rc == GDEFCORE_OK) {
+    memcpy(out, mac, kMac);
   }
-  rc = subject_state(subjects, sid, &erased, &known);
-  if (rc == GDEFCORE_OK && !known) {
-    rc = GDEFCORE_ERR_INVALID;
-  }
-  if (rc != GDEFCORE_OK) {
-    return rc;
-  }
-  rc = row_load(subjects, sid, &row);
-  if (rc != GDEFCORE_OK) {
-    return rc;
-  }
-  rc = count_lines(row.blinds, row.blinds_len, out_count);
-  row_clear(subjects->alloc, &row);
+  wipe(mac, sizeof mac);
   return rc;
 }
 
-GDEFCORE_Result gdefcore_subject_blind(GDEFCORE_Subjects * subjects,
-    const char * subject, size_t subject_len, size_t index, uint8_t out[32]) {
+/* The MAC of a sealed value, opened with the key @p raw of @p sid. */
+static GDEFCORE_Result mac_of_sealed(GDEFCORE_Subjects * subjects,
+    const char * sid, const uint8_t raw[kKey], const char * field,
+    size_t field_len, const char * sealed, size_t sealed_len,
+    uint8_t out[kMac]) {
+  char * plain = NULL;
+  size_t plain_len = 0;
+  GDEFCORE_Result rc = decrypt_text(subjects, sid, raw, field, field_len,
+      sealed, sealed_len, &plain, &plain_len);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  rc = index_value(subjects, field, field_len, plain, plain_len, out);
+  wipe(plain, plain_len);
+  gdefcore_subject_free(subjects, plain);
+  return rc;
+}
+
+/* The subject's raw key, or ::GDEFCORE_ERR_INVALID when it is erased. */
+static GDEFCORE_Result raw_key(GDEFCORE_Subjects * subjects, const char * sid,
+    uint8_t raw[kKey]) {
+  uint8_t wrapped[kWrap];
+  int erased = 0;
+  GDEFCORE_Result rc = key_load(subjects, sid, &erased, wrapped);
+  if (rc == GDEFCORE_OK && erased) {
+    rc = GDEFCORE_ERR_INVALID;
+  }
+  if (rc == GDEFCORE_OK) {
+    rc = open_key(subjects, wrapped, raw);
+  }
+  wipe(wrapped, sizeof wrapped);
+  if (rc != GDEFCORE_OK) {
+    wipe(raw, kKey);
+  }
+  return rc;
+}
+
+GDEFCORE_Result gdefcore_subject_mac_sealed(GDEFCORE_Subjects * subjects,
+    const char * subject, size_t subject_len, const char * field,
+    size_t field_len, const char * sealed, size_t sealed_len,
+    uint8_t out[GDEFCORE_SUBJECT_MAC_LEN]) {
   char sid[GDEFCORE_PUBLIC_ID_LEN + 1];
-  SubjectRow row;
-  size_t at = 0;
-  size_t seen = 0;
+  uint8_t raw[kKey];
+  uint8_t mac[kMac];
   GDEFCORE_Result rc;
-  if (subjects == NULL || out == NULL) {
+  if (subjects == NULL || field == NULL || field_len == 0 || out == NULL ||
+      sealed == NULL) {
     return GDEFCORE_ERR_INVALID;
   }
   rc = canon_id(subject, subject_len, sid);
+  if (rc == GDEFCORE_OK) {
+    rc = raw_key(subjects, sid, raw);
+  }
   if (rc != GDEFCORE_OK) {
     return rc;
   }
-  rc = row_load(subjects, sid, &row);
+  rc = mac_of_sealed(subjects, sid, raw, field, field_len, sealed, sealed_len,
+      mac);
+  wipe(raw, sizeof raw);
+  if (rc == GDEFCORE_OK) {
+    memcpy(out, mac, kMac);
+  }
+  wipe(mac, sizeof mac);
+  return rc;
+}
+
+GDEFCORE_Result gdefcore_subject_find(GDEFCORE_Subjects * subjects,
+    GDEFCORE_Catalog * catalog, const char * type, size_t type_len,
+    const char * field, size_t field_len, const char * lang, size_t lang_len,
+    const void * plain, size_t plain_len, char *** out_ids, size_t * out_count) {
+  uint8_t mac[kMac];
+  GDEFSTOR_QueryText text;
+  GDEFSTOR_QueryNode node;
+  GDEFSTOR_Query q;
+  GDEFCORE_Result rc;
+  if (out_ids == NULL || out_count == NULL || catalog == NULL || lang == NULL ||
+      lang_len == 0) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  *out_ids = NULL;
+  *out_count = 0;
+  rc = gdefcore_subject_mac(subjects, field, field_len, plain, plain_len, mac);
   if (rc != GDEFCORE_OK) {
     return rc;
   }
-  while (at < row.blinds_len) {
-    size_t line = 0;
-    size_t len = 0;
-    if (!line_span(row.blinds, row.blinds_len, &at, &line, &len)) {
-      continue;
+  text.bytes = mac;
+  text.len = sizeof mac;
+  memset(&node, 0, sizeof node);
+  node.op = GDEFSTOR_QUERY_BLIND;
+  node.left.kind = GDEFSTOR_QUERY_FIELD;
+  node.left.field = field;
+  node.left.field_len = field_len;
+  node.right.kind = GDEFSTOR_QUERY_CONST;
+  node.right.texts = &text;
+  node.right.text_count = 1;
+  memset(&q, 0, sizeof q);
+  q.size = sizeof q;
+  q.where = &node;
+  q.language = lang;
+  q.language_len = lang_len;
+  rc = gdefcore_entity_query_active(catalog, type, type_len, &q, out_ids,
+      out_count, NULL);
+  wipe(mac, sizeof mac);
+  return rc;
+}
+
+/* One subject's rows put back: every version naming it, opened with its key,
+ * gets the row its value's MAC makes. */
+static GDEFCORE_Result reindex_subject(GDEFCORE_Subjects * subjects,
+    GDEFSTOR_Store * data, const char * sid, size_t * rows) {
+  uint8_t raw[kKey];
+  GDEFSTOR_SubjectHits * hits = NULL;
+  GDEFSTOR_Write * write = NULL;
+  size_t i;
+  GDEFCORE_Result rc = raw_key(subjects, sid, raw);
+  if (rc == GDEFCORE_ERR_INVALID) {
+    return GDEFCORE_OK; /* erased: its key is gone, and so are its rows */
+  }
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  rc = from_stor(gdefstor_subject_lookup(data, (const char *)subjects->tenant,
+      subjects->tenant_len, sid, GDEFCORE_PUBLIC_ID_LEN, &hits));
+  if (rc == GDEFCORE_OK && gdefstor_subject_hits_count(hits) > 0) {
+    rc = from_stor(gdefstor_write_begin(data, (const char *)subjects->tenant,
+        subjects->tenant_len, NULL, &write));
+  }
+  for (i = 0; rc == GDEFCORE_OK && write != NULL &&
+              i < gdefstor_subject_hits_count(hits);
+       i++) {
+    GDEFSTOR_SubjectHit h;
+    GDEFSTOR_Tree * tree = NULL;
+    GDEFSTOR_Value v;
+    size_t n;
+    size_t k;
+    int found = 0;
+    const char * leaf;
+    size_t leaf_len;
+    memset(&h, 0, sizeof h);
+    h.size = sizeof h;
+    rc = from_stor(gdefstor_subject_hit(hits, i, &h));
+    if (rc != GDEFCORE_OK) {
+      break;
     }
-    if (seen == index) {
-      if (len < kMac * 2) {
-        row_clear(subjects->alloc, &row);
-        return GDEFCORE_ERR_CORRUPT;
+    leaf = h.field;
+    leaf_len = h.field_len;
+    for (k = h.field_len; k > 0; k--) {
+      if (h.field[k - 1] == '.') {
+        leaf = h.field + k;
+        leaf_len = h.field_len - k;
+        break;
       }
-      rc = hex_decode(row.blinds + line, kMac * 2, out, kMac);
-      row_clear(subjects->alloc, &row);
-      return rc;
     }
-    seen += 1;
+    /* The version as it was when it began: its item in that revision. */
+    rc = from_stor(gdefstor_entity_tree(data, (const char *)subjects->tenant,
+        subjects->tenant_len, h.public_id, h.public_id_len, h.language,
+        h.language_len, h.valid_from, &tree));
+    n = rc == GDEFCORE_OK ? gdefstor_tree_item_count(tree) : 0;
+    memset(&v, 0, sizeof v);
+    for (k = 0; rc == GDEFCORE_OK && k < n && !found; k++) {
+      GDEFSTOR_TreeItem it;
+      memset(&it, 0, sizeof it);
+      it.size = sizeof it;
+      if (gdefstor_tree_item(tree, k, &it) != GDEFSTOR_OK) {
+        rc = GDEFCORE_ERR_CORRUPT;
+        break;
+      }
+      if (it.id != h.item) {
+        continue;
+      }
+      found = 1;
+      if (span_eq(it.field, it.field_len, leaf, leaf_len)) {
+        rc = from_stor(gdefstor_tree_get(tree, k, NULL, 0, &v));
+      } else {
+        rc = from_stor(gdefstor_tree_get(tree, k, leaf, leaf_len, &v));
+      }
+    }
+    if (rc == GDEFCORE_OK && (!found || v.type == 0 || v.bytes == NULL)) {
+      rc = GDEFCORE_ERR_CORRUPT; /* the lookup named a version that is not there */
+    }
+    if (rc == GDEFCORE_OK) {
+      uint8_t mac[kMac];
+      GDEFSTOR_BlindMac m;
+      rc = mac_of_sealed(subjects, sid, raw, h.field, h.field_len,
+          (const char *)v.bytes, v.len, mac);
+      if (rc == GDEFCORE_OK) {
+        memset(&m, 0, sizeof m);
+        m.size = sizeof m;
+        m.mac = mac;
+        m.mac_len = sizeof mac;
+        m.key_id = GDEFCORE_SUBJECT_MAC_KEY_ID;
+        m.version = GDEFCORE_SUBJECT_MAC_VERSION;
+        rc = from_stor(gdefstor_blind_put(write, h.type, h.type_len,
+            h.public_id, h.public_id_len, h.field, h.field_len, h.item,
+            h.valid_from, h.language, h.language_len, &m));
+      }
+      wipe(mac, sizeof mac);
+      if (rc == GDEFCORE_OK && rows != NULL) {
+        *rows += 1;
+      }
+    }
+    gdefstor_tree_free(tree);
   }
-  row_clear(subjects->alloc, &row);
-  return GDEFCORE_ERR_INVALID;
+  wipe(raw, sizeof raw);
+  gdefstor_subject_hits_free(hits);
+  if (write != NULL) {
+    if (rc == GDEFCORE_OK) {
+      rc = from_stor(gdefstor_write_commit(write));
+    } else {
+      gdefstor_write_abort(write);
+    }
+  }
+  return rc;
+}
+
+GDEFCORE_Result gdefcore_subject_reindex(GDEFCORE_Subjects * subjects,
+    GDEFSTOR_Store * data, size_t * out_rows) {
+  uint8_t * bytes = NULL;
+  size_t len = 0;
+  GDEFSTOR_KeySet * set = NULL;
+  size_t rows = 0;
+  size_t i;
+  int64_t taken;
+  GDEFCORE_Result rc;
+  if (subjects == NULL || data == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  if (out_rows != NULL) {
+    *out_rows = 0;
+  }
+  taken = now_ms();
+  if (taken < 0) {
+    return GDEFCORE_ERR_IO;
+  }
+  /* The subjects the key store holds a key for: the only ones whose values
+   * can be opened, so the only ones indexed (AD-19). */
+  rc = from_stor(gdefstor_keystore_export(subjects->keys,
+      (const char *)subjects->tenant, subjects->tenant_len, taken, &bytes,
+      &len));
+  if (rc == GDEFCORE_OK) {
+    rc = from_stor(gdefstor_keyset_parse(subjects->alloc, bytes, len, &set));
+  }
+  for (i = 0; rc == GDEFCORE_OK && i < gdefstor_keyset_count(set); i++) {
+    GDEFSTOR_KeyRow row;
+    char sid[GDEFCORE_PUBLIC_ID_LEN + 1];
+    rc = from_stor(gdefstor_keyset_row(set, i, &row));
+    if (rc == GDEFCORE_OK && row.kind == GDEFSTOR_KEYROW_SEALED &&
+        canon_id(row.name, row.name_len, sid) == GDEFCORE_OK) {
+      rc = reindex_subject(subjects, data, sid, &rows);
+    }
+  }
+  gdefstor_keyset_free(set);
+  if (bytes != NULL) {
+    wipe(bytes, len);
+  }
+  gdefstor_bytes_free(NULL, bytes);
+  if (rc == GDEFCORE_OK && out_rows != NULL) {
+    *out_rows = rows;
+  }
+  return rc;
 }
 
 /* The ledger replay: erasure's second step again for every subject the key
  * store's ledger names. Each is a no-op once done, so this writes only what
  * an interrupted erasure left. */
-static GDEFCORE_Result replay_ledger(GDEFCORE_Subjects * subjects) {
+static GDEFCORE_Result replay_ledger(GDEFCORE_Subjects * subjects,
+    GDEFSTOR_Store * store) {
   GDEFSTOR_Ledger * ledger = NULL;
   size_t i;
   GDEFCORE_Result rc = from_stor(gdefstor_keystore_ledger(subjects->keys,
@@ -1929,7 +1760,7 @@ static GDEFCORE_Result replay_ledger(GDEFCORE_Subjects * subjects) {
     rc = from_stor(gdefstor_ledger_row(ledger, i, &id, &id_len, &when));
     if (rc == GDEFCORE_OK && canon_id(id, id_len, sid) == GDEFCORE_OK) {
       /* A row that is not a public id is not one of ours to replay. */
-      rc = forget_blinds(subjects, sid);
+      rc = forget_blinds(subjects, store, sid);
     }
   }
   gdefstor_ledger_free(ledger);
@@ -1939,8 +1770,8 @@ static GDEFCORE_Result replay_ledger(GDEFCORE_Subjects * subjects) {
 GDEFCORE_Result gdefcore_subject_snapshot(GDEFCORE_Subjects * subjects,
     GDEFSTOR_Store * tenant_store, uint8_t ** out_bytes, size_t * out_len) {
   int64_t taken;
-  if (subjects == NULL || tenant_store == NULL || tenant_store == subjects->side ||
-      out_bytes == NULL || out_len == NULL) {
+  if (subjects == NULL || tenant_store == NULL || out_bytes == NULL ||
+      out_len == NULL) {
     return GDEFCORE_ERR_INVALID;
   }
   taken = now_ms();
@@ -2269,7 +2100,7 @@ GDEFCORE_Result gdefcore_subject_restore(GDEFCORE_Subjects * subjects,
   int64_t data_taken = 0;
   int64_t keys_taken = 0;
   GDEFCORE_Result rc;
-  if (subjects == NULL || tenant_store == NULL || tenant_store == subjects->side ||
+  if (subjects == NULL || tenant_store == NULL ||
       (data == NULL && data_len != 0) || (keys == NULL && keys_len != 0)) {
     return GDEFCORE_ERR_INVALID;
   }
@@ -2304,8 +2135,18 @@ GDEFCORE_Result gdefcore_subject_restore(GDEFCORE_Subjects * subjects,
   }
   if (rc == GDEFCORE_OK) {
     /* Then the ledger, the live one and the set's together now, before
-     * anything is served from the restored tenant. */
-    rc = replay_ledger(subjects);
+     * anything is served from the restored tenant: in it, and in this
+     * subjects' own data store, whose blind rows an erasure the set's ledger
+     * names would otherwise keep. */
+    rc = replay_ledger(subjects, tenant_store);
+    if (rc == GDEFCORE_OK && tenant_store != subjects->data) {
+      rc = replay_ledger(subjects, subjects->data);
+    }
+  }
+  if (rc == GDEFCORE_OK) {
+    /* Last, the derived data a data set leaves out (AD-23): the blind index,
+     * from the values that can still be decrypted. */
+    rc = gdefcore_subject_reindex(subjects, tenant_store, NULL);
   }
   return rc;
 }

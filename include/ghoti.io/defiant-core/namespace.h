@@ -184,11 +184,15 @@
 #define gdefcore_alter_set GHOTIIO_DEFCORE(gdefcore_alter_set)
 #define gdefcore_alter_text GHOTIIO_DEFCORE(gdefcore_alter_text)
 #define gdefcore_catalog_bind_host GHOTIIO_DEFCORE(gdefcore_catalog_bind_host)
+#define gdefcore_catalog_bind_subjects                                         \
+  GHOTIIO_DEFCORE(gdefcore_catalog_bind_subjects)
 #define gdefcore_catalog_destroy GHOTIIO_DEFCORE(gdefcore_catalog_destroy)
 #define gdefcore_catalog_open GHOTIIO_DEFCORE(gdefcore_catalog_open)
 #define gdefcore_catalog_tenant GHOTIIO_DEFCORE(gdefcore_catalog_tenant)
 #define gdefcore_changeset_add_confirm_line                                    \
   GHOTIIO_DEFCORE(gdefcore_changeset_add_confirm_line)
+#define gdefcore_changeset_note_sealed                                         \
+  GHOTIIO_DEFCORE(gdefcore_changeset_note_sealed)
 #define gdefcore_changeset_accept_sealed                                       \
   GHOTIIO_DEFCORE(gdefcore_changeset_accept_sealed)
 #define gdefcore_changeset_apply GHOTIIO_DEFCORE(gdefcore_changeset_apply)
@@ -407,19 +411,21 @@
 #define gdefcore_sched_yield GHOTIIO_DEFCORE(gdefcore_sched_yield)
 #define gdefcore_subject_bind_keyring                                          \
   GHOTIIO_DEFCORE(gdefcore_subject_bind_keyring)
-#define gdefcore_subject_blind GHOTIIO_DEFCORE(gdefcore_subject_blind)
 #define gdefcore_subject_cipher GHOTIIO_DEFCORE(gdefcore_subject_cipher)
-#define gdefcore_subject_blind_count GHOTIIO_DEFCORE(gdefcore_subject_blind_count)
 #define gdefcore_subject_create GHOTIIO_DEFCORE(gdefcore_subject_create)
 #define gdefcore_subject_destroy GHOTIIO_DEFCORE(gdefcore_subject_destroy)
 #define gdefcore_subject_erase GHOTIIO_DEFCORE(gdefcore_subject_erase)
+#define gdefcore_subject_erased GHOTIIO_DEFCORE(gdefcore_subject_erased)
 #define gdefcore_subject_export GHOTIIO_DEFCORE(gdefcore_subject_export)
+#define gdefcore_subject_find GHOTIIO_DEFCORE(gdefcore_subject_find)
 #define gdefcore_subject_free GHOTIIO_DEFCORE(gdefcore_subject_free)
-#define gdefcore_subject_index GHOTIIO_DEFCORE(gdefcore_subject_index)
 #define gdefcore_subject_key GHOTIIO_DEFCORE(gdefcore_subject_key)
 #define gdefcore_subject_keyset GHOTIIO_DEFCORE(gdefcore_subject_keyset)
+#define gdefcore_subject_mac GHOTIIO_DEFCORE(gdefcore_subject_mac)
+#define gdefcore_subject_mac_sealed GHOTIIO_DEFCORE(gdefcore_subject_mac_sealed)
 #define gdefcore_subject_open GHOTIIO_DEFCORE(gdefcore_subject_open)
 #define gdefcore_subject_read GHOTIIO_DEFCORE(gdefcore_subject_read)
+#define gdefcore_subject_reindex GHOTIIO_DEFCORE(gdefcore_subject_reindex)
 #define gdefcore_subject_restore GHOTIIO_DEFCORE(gdefcore_subject_restore)
 #define gdefcore_subject_revision_marker \
   GHOTIIO_DEFCORE(gdefcore_subject_revision_marker)

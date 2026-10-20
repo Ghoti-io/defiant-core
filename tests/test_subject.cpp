@@ -23,13 +23,17 @@
  *
  * Story 12's matrix, and story S5b's: subject keys, the keyring's wrap and
  * the ledger in the key store (keystore_rig.h picks memory, SQLite or
- * Postgres), the erasure order, and the backup pair. One test per row.
+ * Postgres), the erasure order, and the backup pair; and story S6c's: the
+ * blind index on the tenant's entity port (its blind table, read here from
+ * the port's dump), blind equality after a save and a draft apply, no row for
+ * an erased subject, and the rebuild. One test per row.
  */
 
 #include <ghoti.io/archive/reader.h>
 #include <ghoti.io/archive/stream.h>
 #include <ghoti.io/defiant-core/defiant-core.h>
 #include <ghoti.io/defiant-storage-memory/memory.h>
+#include <ghoti.io/defiant-storage/model.h>
 #include <ghoti.io/defiant-storage/projection.h>
 #include <ghoti.io/defiant-storage/snapshot.h>
 #include <ghoti.io/defiant-storage/store.h>
@@ -43,6 +47,7 @@
 #include <string.h>
 
 #include <chrono>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -126,7 +131,6 @@ class Subject : public ::testing::Test {
  protected:
   GDEFSTOR_Store * registry_;
   GDEFSTOR_Store * site_;
-  GDEFSTOR_Store * side_;
   GDEFSTOR_KeyStore * keys_;
   ksrig::Counts counts_;
   GDEFCORE_Inst * inst_;
@@ -139,7 +143,6 @@ class Subject : public ::testing::Test {
   void SetUp() override {
     registry_ = NULL;
     site_ = NULL;
-    side_ = NULL;
     keys_ = NULL;
     inst_ = NULL;
     catalog_ = NULL;
@@ -149,7 +152,6 @@ class Subject : public ::testing::Test {
     memset(tenant_, 0, sizeof tenant_);
     ASSERT_EQ(GDEFSMEMORY_OK, gdefsmemory_store_create(NULL, NULL, &registry_));
     ASSERT_EQ(GDEFSMEMORY_OK, gdefsmemory_store_create(NULL, NULL, &site_));
-    ASSERT_EQ(GDEFSMEMORY_OK, gdefsmemory_store_create(NULL, NULL, &side_));
     ASSERT_EQ(GDEFSTOR_OK, ksrig::Open(ksrig::Chosen(), &counts_, &keys_));
   }
 
@@ -158,7 +160,6 @@ class Subject : public ::testing::Test {
     gdefcore_catalog_destroy(catalog_);
     gdefcore_inst_destroy(inst_);
     gdefstor_keystore_destroy(keys_);
-    gdefstor_store_destroy(side_);
     gdefstor_store_destroy(site_);
     gdefstor_store_destroy(registry_);
   }
@@ -173,10 +174,11 @@ class Subject : public ::testing::Test {
     ASSERT_EQ(GDEFCORE_OK,
         gdefcore_inst_catalog_open(inst_, tenant_, strlen(tenant_), &catalog_));
     ASSERT_EQ(GDEFCORE_OK,
-        gdefcore_subject_open(keys_, side_, storage_, sizeof storage_, root_,
+        gdefcore_subject_open(keys_, site_, storage_, sizeof storage_, root_,
             sizeof root_,
             gdefcore_inst_tenant_keyring(inst_, tenant_, strlen(tenant_)), NULL,
             &subjects_));
+    gdefcore_catalog_bind_subjects(catalog_, subjects_);
   }
 
   void CloseHandles() {
@@ -284,56 +286,155 @@ class Subject : public ::testing::Test {
     std::this_thread::sleep_for(std::chrono::milliseconds(3));
   }
 
-  size_t BlindCount(const char * subject) {
-    size_t n = 99;
-    EXPECT_EQ(GDEFCORE_OK,
-        gdefcore_subject_blind_count(subjects_, subject, strlen(subject), &n));
-    return n;
+  static std::string HexOf(const void * p, size_t n) {
+    static const char kHex[] = "0123456789abcdef";
+    const unsigned char * b = static_cast<const unsigned char *>(p);
+    std::string out;
+    for (size_t i = 0; i < n; i++) {
+      out += kHex[b[i] >> 4];
+      out += kHex[b[i] & 0x0f];
+    }
+    return out;
   }
 
-  /* The blind lines of a subject, read from the blind store itself, not
-   * through the library: what is there at the moment it is asked. */
-  size_t BlindLinesInTheStore(const char * subject) {
-    GDEFSTOR_Projection * row = NULL;
-    size_t lines = 0;
-    if (gdefstor_projection_get(side_, (const char *)storage_, sizeof storage_,
-            "core.subject", 12, subject, GDEFCORE_PUBLIC_ID_LEN, &row) !=
-        GDEFSTOR_OK) {
-      return 0;
-    }
-    for (size_t i = 0; i < gdefstor_projection_column_count(row); i++) {
-      GDEFSTOR_Column c;
-      if (gdefstor_projection_column(row, i, &c) == GDEFSTOR_OK &&
-          c.name_len == 6 && memcmp(c.name, "blinds", 6) == 0) {
-        for (size_t k = 0; k < c.value_len; k++) {
-          lines += c.value[k] == '\n';
-        }
+  /* The blind rows of a data store's tenant, read from the store itself (the
+   * port's dump), not through the library: what is there at the moment it is
+   * asked. Each is "B row item valid_from field subject mac key version
+   * language", strings in hex. */
+  std::vector<std::vector<std::string>> BlindRowsIn(GDEFSTOR_Store * store) {
+    std::vector<std::vector<std::string>> out;
+    uint8_t * text = NULL;
+    size_t n = 0;
+    EXPECT_EQ(GDEFSTOR_OK, gdefstor_model_dump(store, (const char *)storage_,
+        sizeof storage_, GDEFSTOR_MODEL_TRUTH, &text, &n));
+    std::istringstream in(std::string(reinterpret_cast<const char *>(text),
+        text == NULL ? 0 : n));
+    gdefstor_bytes_free(NULL, text);
+    std::string line;
+    while (std::getline(in, line)) {
+      if (line.compare(0, 2, "B ") != 0) {
+        continue;
       }
+      std::istringstream words(line);
+      std::vector<std::string> w;
+      std::string word;
+      while (words >> word) {
+        w.push_back(word);
+      }
+      out.push_back(w);
     }
-    gdefstor_projection_free(row);
+    return out;
+  }
+
+  size_t BlindLinesIn(GDEFSTOR_Store * store, const char * subject) {
+    size_t lines = 0;
+    for (const auto & w : BlindRowsIn(store)) {
+      lines += w.size() > 5 && w[5] == HexOf(subject, strlen(subject));
+    }
     return lines;
   }
 
+  size_t BlindLinesInTheStore(const char * subject) {
+    return BlindLinesIn(site_, subject);
+  }
+
+  size_t BlindCount(const char * subject) {
+    return BlindLinesInTheStore(subject);
+  }
+
   bool BlindRow(const char * subject, const uint8_t mac[32]) {
-    static const char kHex[] = "0123456789abcdef";
-    char id[GDEFCORE_PUBLIC_ID_LEN + 64];
-    char hex[65];
-    GDEFSTOR_Projection * row = NULL;
-    GDEFSTOR_Result rc;
-    int i;
-    for (i = 0; i < 32; i++) {
-      hex[i * 2] = kHex[mac[i] >> 4];
-      hex[i * 2 + 1] = kHex[mac[i] & 0x0f];
-    }
-    memcpy(id, subject, GDEFCORE_PUBLIC_ID_LEN);
-    memcpy(id + GDEFCORE_PUBLIC_ID_LEN, hex, 64);
-    rc = gdefstor_projection_get(side_, (const char *)storage_, sizeof storage_,
-        "core.blind", 10, id, GDEFCORE_PUBLIC_ID_LEN + 64, &row);
-    if (rc == GDEFSTOR_OK) {
-      gdefstor_projection_free(row);
-      return true;
+    for (const auto & w : BlindRowsIn(site_)) {
+      if (w.size() > 6 && w[5] == HexOf(subject, strlen(subject)) &&
+          w[6] == HexOf(mac, 32)) {
+        return true;
+      }
     }
     return false;
+  }
+
+  /* Blind equality, as a lookup by a value asks it. */
+  std::vector<std::string> Find(GDEFCORE_Catalog * catalog, const char * plain,
+      const char * type = "site.person", const char * lang = "en") {
+    char ** ids = NULL;
+    size_t n = 0;
+    std::vector<std::string> out;
+    EXPECT_EQ(GDEFCORE_OK,
+        gdefcore_subject_find(subjects_, catalog, type, strlen(type), kField,
+            strlen(kField), lang, strlen(lang), plain, strlen(plain), &ids, &n));
+    for (size_t i = 0; i < n; i++) {
+      out.push_back(ids[i]);
+    }
+    gdefcore_ids_free(catalog, ids, n);
+    return out;
+  }
+
+  /* Stage @p plain for @p subject in a changeset of the caller's, as the
+   * subject routes do: sealed, told whose it is, and saved or drafted. */
+  GDEFCORE_Result Stage(GDEFCORE_Changeset * cs, const char * subject,
+      const char * entity, const char * plain, bool draft, bool with_mac = true) {
+    char * text = NULL;
+    size_t text_len = 0;
+    uint8_t mac[GDEFCORE_SUBJECT_MAC_LEN];
+    const char * texts[1];
+    size_t lens[1];
+    GDEFCORE_Value value;
+    GDEFCORE_Result rc = gdefcore_subject_seal(subjects_, subject,
+        strlen(subject), kField, strlen(kField), plain, strlen(plain), &text,
+        &text_len, mac);
+    if (rc == GDEFCORE_OK) {
+      rc = gdefcore_changeset_accept_sealed(cs);
+    }
+    if (rc == GDEFCORE_OK) {
+      rc = gdefcore_changeset_note_sealed(cs, subjects_, text, text_len,
+          subject, strlen(subject), with_mac ? mac : NULL);
+    }
+    if (rc == GDEFCORE_OK) {
+      texts[0] = text;
+      lens[0] = text_len;
+      memset(&value, 0, sizeof value);
+      value.size = sizeof value;
+      value.field = kField;
+      value.field_len = strlen(kField);
+      value.texts = texts;
+      value.text_lens = lens;
+      value.count = 1;
+      rc = (draft ? gdefcore_entity_save_draft : gdefcore_entity_save)(cs,
+          entity, strlen(entity), "en", 2, &value, 1);
+    }
+    gdefcore_subject_free(subjects_, text);
+    return rc;
+  }
+
+  GDEFCORE_Result Publish(const char * entity) {
+    GDEFCORE_Changeset * cs = NULL;
+    GDEFCORE_Result rc = gdefcore_changeset_prepare(catalog_, NULL, 0, &cs);
+    if (rc == GDEFCORE_OK) {
+      rc = gdefcore_entity_publish(cs, entity, strlen(entity));
+    }
+    if (rc == GDEFCORE_OK) {
+      rc = gdefcore_changeset_apply(cs, NULL, 0);
+    }
+    if (rc != GDEFCORE_OK) {
+      size_t n = 0;
+      const char * why = gdefcore_changeset_refusal(cs, &n);
+      last_refusal_.assign(why == NULL ? "" : why, n);
+    }
+    gdefcore_changeset_destroy(cs);
+    return rc;
+  }
+
+  std::string last_refusal_;
+
+  /* The port's dump of a data store's tenant: every row it holds, the blind
+   * table's included (a snapshot leaves those out). */
+  Bytes TruthDump(GDEFSTOR_Store * store) {
+    uint8_t * text = NULL;
+    size_t n = 0;
+    EXPECT_EQ(GDEFSTOR_OK, gdefstor_model_dump(store, (const char *)storage_,
+        sizeof storage_, GDEFSTOR_MODEL_TRUTH, &text, &n));
+    Bytes out(reinterpret_cast<const char *>(text), text == NULL ? 0 : n);
+    gdefstor_bytes_free(NULL, text);
+    return "\n" + out;
   }
 
   /* Every byte of a data store's tenant, members unpacked. */
@@ -438,30 +539,32 @@ TEST_F(Subject, BlindIndex) {
   MakeEntity(other_entity);
   Save(subject, entity);
   Save(other, other_entity);
-  ASSERT_EQ(GDEFCORE_OK,
-      gdefcore_subject_blind_count(subjects_, subject, strlen(subject), &count));
+  count = BlindCount(subject);
   EXPECT_EQ(1u, count);
   memset(mac, 0, sizeof mac);
   memset(other_mac, 0, sizeof other_mac);
   ASSERT_EQ(GDEFCORE_OK,
-      gdefcore_subject_blind(subjects_, subject, strlen(subject), 0, mac));
+      gdefcore_subject_mac(subjects_, kField, strlen(kField), kPlain,
+          strlen(kPlain), mac));
   ASSERT_EQ(GDEFCORE_OK,
-      gdefcore_subject_blind(subjects_, other, strlen(other), 0, other_mac));
+      gdefcore_subject_mac(subjects_, kField, strlen(kField), kPlain,
+          strlen(kPlain), other_mac));
   EXPECT_FALSE(HasBytes(mac, sizeof mac, kPlain, strlen(kPlain)));
   EXPECT_EQ(0, memcmp(mac, other_mac, sizeof mac));
   EXPECT_TRUE(BlindRow(subject, mac));
   EXPECT_TRUE(BlindRow(other, other_mac));
+  EXPECT_EQ((std::vector<std::string>{entity, other_entity}).size(),
+      Find(catalog_, kPlain).size());
   ASSERT_EQ(GDEFCORE_OK,
       gdefcore_subject_erase(subjects_, subject, strlen(subject), subject,
           strlen(subject)));
-  ASSERT_EQ(GDEFCORE_OK,
-      gdefcore_subject_blind_count(subjects_, subject, strlen(subject), &count));
+  count = BlindCount(subject);
   EXPECT_EQ(0u, count);
   EXPECT_FALSE(BlindRow(subject, mac));
-  ASSERT_EQ(GDEFCORE_OK,
-      gdefcore_subject_blind_count(subjects_, other, strlen(other), &count));
+  count = BlindCount(other);
   EXPECT_EQ(1u, count);
   EXPECT_TRUE(BlindRow(other, other_mac));
+  EXPECT_EQ(std::vector<std::string>{other_entity}, Find(catalog_, kPlain));
 }
 
 TEST_F(Subject, OtherKey) {
@@ -476,7 +579,7 @@ TEST_F(Subject, OtherKey) {
   Save(subject, entity);
   memset(other, 0x24, sizeof other);
   EXPECT_EQ(GDEFCORE_ERR_INVALID,
-      gdefcore_subject_open(keys_, side_, storage_, sizeof storage_, other,
+      gdefcore_subject_open(keys_, site_, storage_, sizeof storage_, other,
           sizeof other, NULL, NULL, &bad));
   EXPECT_EQ(nullptr, bad);
   EXPECT_TRUE(ReadIs(catalog_, subject, entity, kPlain));
@@ -702,7 +805,9 @@ TEST_F(Subject, NoKey) {
   EXPECT_FALSE(Has(data, wrapb));
   EXPECT_FALSE(Has(data, Hex(wrapb)));
   EXPECT_FALSE(Has(data, kPlain));
-  EXPECT_TRUE(Has(data, "s1:")) << "the data set holds the ciphertext";
+  /* A personal value is "@c": the hex of its sealed text, and "@s": its
+   * subject (story S6c). */
+  EXPECT_TRUE(Has(data, Hex("s1:"))) << "the data set holds the ciphertext";
   ASSERT_EQ(GDEFSTOR_OK,
       gdefstor_snapshot_ledger(site_, U(zip), zip.size(), NULL, &ledger,
           &ledger_len));
@@ -752,8 +857,9 @@ TEST_F(Subject, Gate) {
     gdefstor_keystore_destroy(keys_);
     keys_ = fresh;
     ASSERT_EQ(GDEFCORE_OK,
-        gdefcore_subject_open(keys_, side_, storage_, sizeof storage_, root_,
+        gdefcore_subject_open(keys_, site_, storage_, sizeof storage_, root_,
             sizeof root_, NULL, NULL, &subjects_));
+    gdefcore_catalog_bind_subjects(catalog_, subjects_);
     ASSERT_EQ(GDEFSTOR_OK,
         gdefstor_snapshot_import(empty, (const char *)storage_, sizeof storage_,
             U(data), data.size(), NULL));
@@ -772,9 +878,9 @@ TEST_F(Subject, Gate) {
 /* ---- story S5b ------------------------------------------------------------ */
 
 /* Separation: whatever is saved and erased, no data store (the tenant store,
- * the blind store, the registry) holds a subject key, raw or wrapped, the
- * keyring's wrap, or a ledger row. The key set, where they belong, is the
- * control: the same search finds each of them there. */
+ * with its blind table, and the registry) holds a subject key, raw or
+ * wrapped, the keyring's wrap, or a ledger row. The key set, where they
+ * belong, is the control: the same search finds each of them there. */
 TEST_F(Subject, KeysNeverReachADataStore) {
   char a[GDEFCORE_PUBLIC_ID_LEN + 1];
   char b[GDEFCORE_PUBLIC_ID_LEN + 1];
@@ -834,7 +940,7 @@ TEST_F(Subject, KeysNeverReachADataStore) {
     Bytes bytes;
   } hays[] = {
       {"tenant store", StoreBytes(site_, storage_, sizeof storage_)},
-      {"blind store", StoreBytes(side_, storage_, sizeof storage_)},
+      {"tenant store's rows, the blind table's with them", TruthDump(site_)},
       {"registry", StoreBytes(registry_, kRegistry, sizeof kRegistry)},
   };
   /* Control: the search sees what it looks for, where it belongs. */
@@ -843,8 +949,8 @@ TEST_F(Subject, KeysNeverReachADataStore) {
   }
   EXPECT_TRUE(Has(after, Hex(Bytes((const char *)wrap, sizeof wrap))));
   EXPECT_TRUE(Has(after, "\nledger " + std::string(a) + " "));
-  EXPECT_TRUE(Has(hays[1].bytes, "blinds")) << "the blind store is searched";
-  EXPECT_TRUE(Has(hays[0].bytes, "s1:")) << "the tenant store is searched";
+  EXPECT_TRUE(Has(hays[1].bytes, "\nB ")) << "the blind table is searched";
+  EXPECT_TRUE(Has(hays[0].bytes, Hex("s1:"))) << "the tenant store is searched";
   for (const Hay & h : hays) {
     for (const auto & n : needles) {
       EXPECT_FALSE(Has(h.bytes, n.second)) << n.first << " in the " << h.name;
@@ -879,10 +985,16 @@ TEST_F(Subject, ASaveWritesNothingToTheKeyStore) {
       gdefcore_subject_seal(subjects_, subject, strlen(subject), kField,
           strlen(kField), "x", 1, &text, &text_len, mac));
   gdefcore_subject_free(subjects_, text);
-  ASSERT_EQ(GDEFCORE_OK,
-      gdefcore_subject_index(subjects_, subject, strlen(subject), entity,
-          strlen(entity), kField, strlen(kField), "de", 2, mac));
-  EXPECT_TRUE(ReadIs(catalog_, subject, entity, kPlain));
+  /* A draft, and its publish, which computes a MAC from the key it reads. */
+  {
+    GDEFCORE_Changeset * cs = NULL;
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
+    ASSERT_EQ(GDEFCORE_OK, Stage(cs, subject, entity, "y", true, false));
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, NULL, 0));
+    gdefcore_changeset_destroy(cs);
+    ASSERT_EQ(GDEFCORE_OK, Publish(entity));
+  }
+  EXPECT_TRUE(ReadIs(catalog_, subject, entity, "y"));
   EXPECT_EQ(writes, counts_.writes) << "a save wrote to the key store";
   EXPECT_LT(reads, counts_.reads) << "the window does not see reads";
 }
@@ -977,7 +1089,7 @@ TEST_F(Subject, ARestoreRefusesAnOlderKeySet) {
         sizeof storage_, NULL, &zip, &n));
     Bytes view = Unpacked(zip, n);
     gdefstor_bytes_free(NULL, zip);
-    EXPECT_FALSE(Has(view, "s1:")) << "a refused restore imported the data";
+    EXPECT_FALSE(Has(view, Hex("s1:"))) << "a refused restore imported the data";
   }
   ASSERT_EQ(GDEFCORE_OK, gdefcore_subject_erase(subjects_, a, strlen(a), a,
       strlen(a)));
@@ -1030,6 +1142,269 @@ TEST_F(Subject, ARestoreReplaysTheLedgerBeforeItReturns) {
   ASSERT_EQ(GDEFCORE_OK, Restore(empty, data, keys));
   EXPECT_EQ(0u, BlindLinesInTheStore(subject))
       << "the restore returned before the ledger was replayed";
+  gdefstor_store_destroy(empty);
+}
+
+/* ---- story S6c: the blind index on the port --------------------------- */
+
+/* Blind equality finds an entity by its current value only: after a save of
+ * a new value the old one finds nothing; a draft's value is found only once
+ * the draft is applied, and then the value it replaced is not. */
+TEST_F(Subject, BlindEqualityFindsOnlyTheNewValueAfterASaveAndADraftApply) {
+  char subject[GDEFCORE_PUBLIC_ID_LEN + 1];
+  char entity[GDEFCORE_PUBLIC_ID_LEN + 1];
+  Open();
+  DefinePerson();
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_subject_create(subjects_, subject));
+  MakeEntity(entity);
+  const std::vector<std::string> it{entity};
+  const std::vector<std::string> none;
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_subject_save(subjects_, catalog_, subject, strlen(subject),
+          entity, strlen(entity), kField, strlen(kField), "en", 2, "ann", 3));
+  EXPECT_EQ(it, Find(catalog_, "ann"));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_subject_save(subjects_, catalog_, subject, strlen(subject),
+          entity, strlen(entity), kField, strlen(kField), "en", 2, "bob", 3));
+  EXPECT_EQ(none, Find(catalog_, "ann"));
+  EXPECT_EQ(it, Find(catalog_, "bob"));
+  /* Each value version has its row: the history keeps "ann". */
+  EXPECT_EQ(2u, BlindCount(subject));
+  {
+    GDEFCORE_Changeset * cs = NULL;
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
+    ASSERT_EQ(GDEFCORE_OK, Stage(cs, subject, entity, "cy", true, false));
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, NULL, 0));
+    gdefcore_changeset_destroy(cs);
+  }
+  /* A draft is never a revision and carries no blind row. */
+  EXPECT_EQ(none, Find(catalog_, "cy"));
+  EXPECT_EQ(it, Find(catalog_, "bob"));
+  EXPECT_EQ(2u, BlindCount(subject));
+  ASSERT_EQ(GDEFCORE_OK, Publish(entity));
+  EXPECT_EQ(it, Find(catalog_, "cy"));
+  EXPECT_EQ(none, Find(catalog_, "bob"));
+  EXPECT_EQ(3u, BlindCount(subject));
+  /* Another language's value is another language's. */
+  EXPECT_EQ(none, Find(catalog_, "cy", "site.person", "fr"));
+}
+
+/* No blind row is ever written for an erased subject. A value sealed, told
+ * to a changeset with its MAC, and applied after its subject was erased is
+ * refused inside the apply's write, and the store holds no row of theirs; the
+ * same flow for a living subject writes one (the control). */
+TEST_F(Subject, ABlindRowIsNeverWrittenForAnErasedSubject) {
+  char gone[GDEFCORE_PUBLIC_ID_LEN + 1];
+  char alive[GDEFCORE_PUBLIC_ID_LEN + 1];
+  char eg[GDEFCORE_PUBLIC_ID_LEN + 1];
+  char ea[GDEFCORE_PUBLIC_ID_LEN + 1];
+  GDEFCORE_Changeset * late = NULL;
+  GDEFCORE_Changeset * ok = NULL;
+  Open();
+  DefinePerson();
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_subject_create(subjects_, gone));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_subject_create(subjects_, alive));
+  MakeEntity(eg);
+  MakeEntity(ea);
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &late));
+  ASSERT_EQ(GDEFCORE_OK, Stage(late, gone, eg, kPlain, false));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &ok));
+  ASSERT_EQ(GDEFCORE_OK, Stage(ok, alive, ea, kPlain, false));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_subject_erase(subjects_, gone, strlen(gone), gone, strlen(gone)));
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, gdefcore_changeset_apply(late, NULL, 0));
+  size_t why_len = 0;
+  const char * why = gdefcore_changeset_refusal(late, &why_len);
+  EXPECT_NE(std::string::npos,
+      std::string(why == NULL ? "" : why, why_len).find("erased"));
+  gdefcore_changeset_destroy(late);
+  EXPECT_EQ(0u, BlindLinesInTheStore(gone)) << "a blind row for an erased subject";
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(ok, NULL, 0));
+  gdefcore_changeset_destroy(ok);
+  EXPECT_EQ(1u, BlindLinesInTheStore(alive)) << "the store read cannot see rows";
+  EXPECT_EQ(std::vector<std::string>{ea}, Find(catalog_, kPlain));
+}
+
+/* The decision for a draft that names an erased subject (story S6c): it is
+ * refused, not applied with "[erased]" in place of the value. A new value of
+ * someone erased would be a write for a subject whose key is gone (AD-19:
+ * the key is present at every write), and could get no blind row. The draft
+ * is kept, so an editor can replace the value; a draft that leaves an erased
+ * subject's value as it is (another field changed) applies, and that value
+ * still reads [erased]. */
+TEST_F(Subject, ADraftNamingAnErasedSubjectIsRefusedAndKept) {
+  GDEFCORE_Field fields[2];
+  char subject[GDEFCORE_PUBLIC_ID_LEN + 1];
+  char later[GDEFCORE_PUBLIC_ID_LEN + 1];
+  char entity[GDEFCORE_PUBLIC_ID_LEN + 1];
+  char other[GDEFCORE_PUBLIC_ID_LEN + 1];
+  Open();
+  memset(fields, 0, sizeof fields);
+  fields[0].size = sizeof fields[0];
+  fields[0].name = kField;
+  fields[0].name_len = strlen(kField);
+  fields[0].personal = 1;
+  fields[1].size = sizeof fields[1];
+  fields[1].name = "note";
+  fields[1].name_len = 4;
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_type_define(catalog_, "site.person", 11, GDEFCORE_TYPE_CONTENT,
+          fields, 2));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_subject_create(subjects_, subject));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_subject_create(subjects_, later));
+  MakeEntity(entity);
+  MakeEntity(other);
+  Save(subject, entity);
+  Save(later, other);
+  /* A draft of a new value for `later`, made while they are alive. */
+  {
+    GDEFCORE_Changeset * cs = NULL;
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
+    ASSERT_EQ(GDEFCORE_OK, Stage(cs, later, other, "new words", true, false));
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, NULL, 0));
+    gdefcore_changeset_destroy(cs);
+  }
+  /* A draft of `subject`'s entity that changes only the other field. */
+  {
+    GDEFCORE_Changeset * cs = NULL;
+    GDEFCORE_Value value;
+    const char * texts[1] = {"a note"};
+    size_t lens[1] = {6};
+    memset(&value, 0, sizeof value);
+    value.size = sizeof value;
+    value.field = "note";
+    value.field_len = 4;
+    value.texts = texts;
+    value.text_lens = lens;
+    value.count = 1;
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_entity_save_draft(cs, entity, strlen(entity), "en", 2, &value,
+            1));
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, NULL, 0));
+    gdefcore_changeset_destroy(cs);
+  }
+  size_t before = 0;
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_entity_revision_count(catalog_, other, strlen(other), &before));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_subject_erase(subjects_, later, strlen(later), later,
+          strlen(later)));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_subject_erase(subjects_, subject, strlen(subject), subject,
+          strlen(subject)));
+  /* Refused, in words; nothing written; the draft is still there. */
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, Publish(other));
+  EXPECT_NE(std::string::npos, last_refusal_.find("erased")) << last_refusal_;
+  size_t after = 0;
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_entity_revision_count(catalog_, other, strlen(other), &after));
+  EXPECT_EQ(before, after);
+  EXPECT_EQ(0u, BlindLinesInTheStore(later));
+  {
+    char ** texts = NULL;
+    size_t * lens = NULL;
+    size_t n = 0;
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_entity_values(catalog_, NULL, GDEFCORE_VIEW_DRAFT, other,
+            strlen(other), "en", 2, kField, strlen(kField), &texts, &lens, &n));
+    EXPECT_EQ(1u, n);
+    EXPECT_NE(Stored(other), std::string(texts[0], lens[0]))
+        << "the draft's value is not the published one";
+    gdefcore_values_free(catalog_, texts, lens, n);
+  }
+  /* The draft that leaves the erased value as it is applies. */
+  EXPECT_EQ(GDEFCORE_OK, Publish(entity)) << last_refusal_;
+  EXPECT_TRUE(ReadIs(catalog_, subject, entity, GDEFCORE_SUBJECT_ERASED));
+  EXPECT_EQ(0u, BlindLinesInTheStore(subject));
+}
+
+/* The rebuild: every row deleted, then put back from the values that can be
+ * decrypted, gives the blind table it was; run on a live tenant it changes
+ * nothing; and an erased subject gets no row back. */
+TEST_F(Subject, AReindexPutsBackEveryRowThatCanBeDecrypted) {
+  char a[GDEFCORE_PUBLIC_ID_LEN + 1];
+  char b[GDEFCORE_PUBLIC_ID_LEN + 1];
+  char c[GDEFCORE_PUBLIC_ID_LEN + 1];
+  char ea[GDEFCORE_PUBLIC_ID_LEN + 1];
+  char eb[GDEFCORE_PUBLIC_ID_LEN + 1];
+  char ec[GDEFCORE_PUBLIC_ID_LEN + 1];
+  size_t rows = 0;
+  Open();
+  DefinePerson();
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_subject_create(subjects_, a));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_subject_create(subjects_, b));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_subject_create(subjects_, c));
+  MakeEntity(ea);
+  MakeEntity(eb);
+  MakeEntity(ec);
+  Save(a, ea);
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_subject_save(subjects_, catalog_, a, strlen(a), ea, strlen(ea),
+          kField, strlen(kField), "en", 2, "later", 5));
+  Save(a, ea, "fr");
+  Save(b, eb);
+  Save(c, ec);
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_subject_erase(subjects_, c, strlen(c), c, strlen(c)));
+  auto rows_now = BlindRowsIn(site_);
+  ASSERT_EQ(4u, rows_now.size());
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_subject_reindex(subjects_, site_, &rows));
+  EXPECT_EQ(4u, rows);
+  EXPECT_EQ(rows_now, BlindRowsIn(site_));
+  for (const char * s : {(const char *)a, (const char *)b, (const char *)c}) {
+    GDEFSTOR_Write * w = NULL;
+    ASSERT_EQ(GDEFSTOR_OK, gdefstor_write_begin(site_, (const char *)storage_,
+        sizeof storage_, NULL, &w));
+    ASSERT_EQ(GDEFSTOR_OK, gdefstor_blind_delete_subject(w, s, strlen(s)));
+    ASSERT_EQ(GDEFSTOR_OK, gdefstor_write_commit(w));
+  }
+  ASSERT_TRUE(BlindRowsIn(site_).empty());
+  EXPECT_TRUE(Find(catalog_, "later").empty());
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_subject_reindex(subjects_, site_, &rows));
+  EXPECT_EQ(4u, rows);
+  EXPECT_EQ(rows_now, BlindRowsIn(site_));
+  EXPECT_EQ(std::vector<std::string>{ea}, Find(catalog_, "later"));
+  EXPECT_EQ(std::vector<std::string>{eb}, Find(catalog_, kPlain));
+  EXPECT_EQ(0u, BlindLinesInTheStore(c));
+}
+
+/* A restore rebuilds the blind index a data set does not carry: a living
+ * subject's value is found again in the restored tenant, an erased one's is
+ * not, and the restored store holds rows for the living only. */
+TEST_F(Subject, ARestoreRebuildsTheBlindIndexOfWhatCanBeDecrypted) {
+  char a[GDEFCORE_PUBLIC_ID_LEN + 1];
+  char b[GDEFCORE_PUBLIC_ID_LEN + 1];
+  char ea[GDEFCORE_PUBLIC_ID_LEN + 1];
+  char eb[GDEFCORE_PUBLIC_ID_LEN + 1];
+  GDEFSTOR_Store * empty = NULL;
+  GDEFCORE_Catalog * restored = NULL;
+  Open();
+  DefinePerson();
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_subject_create(subjects_, a));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_subject_create(subjects_, b));
+  MakeEntity(ea);
+  MakeEntity(eb);
+  Save(a, ea);
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_subject_save(subjects_, catalog_, b, strlen(b), eb, strlen(eb),
+          kField, strlen(kField), "en", 2, "bea", 3));
+  Bytes data = Snapshot();
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_subject_erase(subjects_, a, strlen(a), a,
+      strlen(a)));
+  NextMillisecond();
+  Bytes keys = Keyset();
+  ASSERT_EQ(GDEFSMEMORY_OK, gdefsmemory_store_create(NULL, NULL, &empty));
+  ASSERT_EQ(GDEFCORE_OK, Restore(empty, data, keys));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_catalog_open(empty, storage_, sizeof storage_, NULL, NULL,
+          &restored));
+  EXPECT_EQ(std::vector<std::string>{eb}, Find(restored, "bea"));
+  EXPECT_TRUE(Find(restored, kPlain).empty());
+  EXPECT_EQ(1u, BlindLinesIn(empty, b));
+  EXPECT_EQ(0u, BlindLinesIn(empty, a));
+  EXPECT_TRUE(ReadIs(restored, a, ea, GDEFCORE_SUBJECT_ERASED));
+  gdefcore_catalog_destroy(restored);
   gdefstor_store_destroy(empty);
 }
 

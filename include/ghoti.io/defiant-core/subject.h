@@ -29,10 +29,11 @@
  * ledger live in the key store the caller passes (defiant-storage's
  * keystore.h, AD-19), one per tenant and apart from every data store. The
  * blind-index keys are derived from the keyring, so the key store holds their
- * derivation input and nothing per field. Core's blind-index rows, and where
- * each subject's values are, live in a data store of their own (`blind`),
- * never the tenant store, until they move onto the entity port. Erasure has
- * no undo.
+ * derivation input and nothing per field. A personal value is stored on the
+ * tenant's entity port as its sealed text and its subject's public id
+ * (AD-14), and each version of it that a save writes has a blind-index row
+ * in the port's blind table, in the same write (story S6c); "everything
+ * about this person" is the port's subject lookup. Erasure has no undo.
  *
  * Writes to the key store: creating a subject (its wrapped key), the first
  * open of a tenant (the keyring's wrap), erasure (the key destroyed and the
@@ -41,12 +42,15 @@
  *
  * Erasure runs in this order: (1) the key store destroys the key and appends
  * the ledger row, in one step, after which every value of the subject reads
- * ::GDEFCORE_SUBJECT_ERASED; (2) the subject's blind-index rows are deleted in
- * the blind store; (3) caches are purged (core holds no cache of a subject's
- * values or key, so there is nothing yet). Steps 2 and 3 are idempotent, and
- * every gdefcore_subject_open() and gdefcore_subject_restore() replays the
- * ledger through them before returning, so an erasure interrupted after step
- * 1 is completed then.
+ * ::GDEFCORE_SUBJECT_ERASED; (2) the subject's blind-index rows are deleted
+ * from the tenant's data store (gdefstor_blind_delete_subject()); (3) caches
+ * are purged (core holds no cache of a subject's values or key, so there is
+ * nothing yet). Steps 2 and 3 are idempotent, and every gdefcore_subject_open()
+ * and gdefcore_subject_restore() replays the ledger through them before
+ * returning, so an erasure interrupted after step 1 is completed then. No
+ * blind row is written for an erased subject: a save of a new value of one is
+ * refused inside its write (gdefcore_changeset_note_sealed()), and a rebuild
+ * (gdefcore_subject_reindex()) skips one, its key being gone.
  *
  * Backups are two sets (AD-19, AD-23): the data set, gdefcore_subject_snapshot()
  * (the tenant store's logical export, no key and no ledger), and the key set,
@@ -85,13 +89,21 @@ extern "C" {
 /** Length of a blind-index value, as gdefcore_subject_seal() returns it. */
 #define GDEFCORE_SUBJECT_MAC_LEN 32
 
+/** The key id recorded with every blind-index row core writes (AD-14): the
+ * tenant keyring's per-field `blind-index:<field>` key. */
+#define GDEFCORE_SUBJECT_MAC_KEY_ID 1
+
+/** The normalization version recorded with every blind-index row core
+ * writes (AD-14): 1 is the plaintext's bytes as given, not normalized. */
+#define GDEFCORE_SUBJECT_MAC_VERSION 1
+
 /**
  * The tenant secret, in the key store, that holds the tenant keyring's wrap
  * (gdefstor_keystore_secret_put()).
  */
 #define GDEFCORE_SUBJECT_KEYRING_SECRET "core-keyring"
 
-/** One tenant's subjects: its key store and its blind store. Opaque. */
+/** One tenant's subjects: its key store and its data store. Opaque. */
 typedef struct GDEFCORE_Subjects GDEFCORE_Subjects;
 
 /**
@@ -106,23 +118,25 @@ typedef struct GDEFCORE_Subjects GDEFCORE_Subjects;
 GDEFCORE_API void gdefcore_subject_cipher(GDEFSTOR_KeyCipher * out);
 
 /**
- * @brief Open @p tenant's subjects over its key store and its blind store.
+ * @brief Open @p tenant's subjects over its key store and its data store.
  *
  * The first open writes @p keyring's wrap into @p keys as the tenant secret
  * ::GDEFCORE_SUBJECT_KEYRING_SECRET. A later open adopts that wrap and
  * ignores @p keyring. A wrap that does not unwrap under @p root is an error
  * and @p out is not written. The open then replays the key store's ledger:
- * the blind-index rows of every subject it names are deleted from @p blind
+ * the blind-index rows of every subject it names are deleted from @p data
  * (erasure's step 2, done again for one interrupted after step 1).
  *
  * @param keys The tenant's key store (borrowed). Never a data store.
- * @param blind The data store that holds core's blind-index rows and the
- *   places each subject's values are (borrowed). It holds no key, wrap or
- *   ledger row, and it is not the tenant store: a snapshot of the tenant
- *   store carries no blind index (AD-23).
+ * @param data The tenant's data store (borrowed): the store with the entity
+ *   port that the tenant's catalog is opened over, which holds the personal
+ *   values and their blind-index rows (story S6c; before it, a separate
+ *   "blind store"). It holds no key, wrap or ledger row. A catalog whose
+ *   changesets index personal values is bound to these subjects
+ *   (gdefcore_catalog_bind_subjects()).
  */
 GDEFCORE_API GDEFCORE_Result gdefcore_subject_open(GDEFSTOR_KeyStore * keys,
-    GDEFSTOR_Store * blind, const uint8_t * tenant, size_t tenant_len,
+    GDEFSTOR_Store * data, const uint8_t * tenant, size_t tenant_len,
     const uint8_t * root, size_t root_len, const GDEFCORE_Keyring * keyring,
     const GDEFCORE_Allocator * allocator, GDEFCORE_Subjects ** out);
 
@@ -159,12 +173,14 @@ GDEFCORE_API GDEFCORE_Result gdefcore_subject_create(
 /**
  * @brief Encrypt @p plain for @p subject and store it as the field text.
  *
- * The field must be personal. The stored revision text is ciphertext.
- * A blind-index row is HMAC-SHA-256 under `blind-index:<field>`, written to
- * the blind store. A failure of the revision writes nothing. The key store
- * is only read: a save never writes it. This and the form route
- * (gdefcore_form_submit_subject()) are the only ways to store a value in a
- * personal field: gdefcore_entity_save() and the plain form route refuse it.
+ * The field must be personal. The stored revision text is ciphertext, with
+ * the subject's public id beside it. Its blind-index row, HMAC-SHA-256 of
+ * the plaintext under `blind-index:<field>`, goes in the port's blind table
+ * in the same write as the revision (story S6c), so a failure writes neither.
+ * The key store is only read: a save never writes it. This and the form
+ * route (gdefcore_form_submit_subject()) are the only ways to store a value
+ * in a personal field: gdefcore_entity_save() and the plain form route
+ * refuse it. @p catalog must be opened over this subjects' data store.
  */
 GDEFCORE_API GDEFCORE_Result gdefcore_subject_save(GDEFCORE_Subjects * subjects,
     GDEFCORE_Catalog * catalog, const char * subject, size_t subject_len,
@@ -179,7 +195,8 @@ GDEFCORE_API GDEFCORE_Result gdefcore_subject_save(GDEFCORE_Subjects * subjects,
  * the revision itself, as the subject route of a form does
  * (gdefcore_form_submit_subject()). @p out_text receives the same ciphertext
  * gdefcore_subject_save() would store, in the same format and under the same
- * key, and @p out_mac the blind-index value for gdefcore_subject_index().
+ * key, and @p out_mac its blind-index value, for
+ * gdefcore_changeset_note_sealed().
  * A @p plain that is itself a sealed text (it came out of storage, from
  * gdefcore_form_tree() or gdefcore_entity_values(), not from a person) is
  * ::GDEFCORE_ERR_INVALID: it would be sealed a second time. The same is
@@ -198,21 +215,75 @@ GDEFCORE_API GDEFCORE_Result gdefcore_subject_seal(GDEFCORE_Subjects * subjects,
     size_t * out_len, uint8_t out_mac[GDEFCORE_SUBJECT_MAC_LEN]);
 
 /**
- * @brief Record the blind-index row for a value already stored.
+ * @brief Whether @p subject is erased: the key store destroyed its key.
  *
- * The second half of gdefcore_subject_save(). Call it after the revision
- * holding the text from gdefcore_subject_seal() has been applied. It
- * replaces the row the same @p entity, @p field and @p lang had before, in
- * the blind store. The two halves are separate commits, in two stores, so a
- * failure between them
- * leaves a sealed revision with no index row; erasure does not need the row
- * to make the revision unreadable. An erased subject is
- * ::GDEFCORE_ERR_INVALID and writes nothing.
+ * A subject the key store does not know is not erased (@p out_erased 0).
+ * Only reads the key store.
  */
-GDEFCORE_API GDEFCORE_Result gdefcore_subject_index(GDEFCORE_Subjects * subjects,
-    const char * subject, size_t subject_len, const char * entity,
-    size_t entity_len, const char * field, size_t field_len, const char * lang,
-    size_t lang_len, const uint8_t mac[GDEFCORE_SUBJECT_MAC_LEN]);
+GDEFCORE_API GDEFCORE_Result gdefcore_subject_erased(
+    GDEFCORE_Subjects * subjects, const char * subject, size_t subject_len,
+    int * out_erased);
+
+/**
+ * @brief The blind-index value of @p plain for personal field @p field:
+ * HMAC-SHA-256 under the tenant's `blind-index:<field>` key, as every blind
+ * row of that field holds it (key ::GDEFCORE_SUBJECT_MAC_KEY_ID, version
+ * ::GDEFCORE_SUBJECT_MAC_VERSION).
+ *
+ * The key is the tenant's, not a subject's, so this works whoever the value
+ * belongs to, erased or not: it is what a blind lookup asks with. @p out is
+ * written only on success.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_subject_mac(GDEFCORE_Subjects * subjects,
+    const char * field, size_t field_len, const void * plain, size_t plain_len,
+    uint8_t out[GDEFCORE_SUBJECT_MAC_LEN]);
+
+/**
+ * @brief The blind-index value of a stored sealed value: @p sealed is opened
+ * with @p subject's key and its plaintext given to gdefcore_subject_mac().
+ *
+ * What a save computes for a personal value it did not seal itself (one a
+ * draft holds, or one a rebuild indexes). The plaintext is wiped before
+ * this returns and is never handed out. An erased subject (its key is gone)
+ * and an unknown one are ::GDEFCORE_ERR_INVALID; a text that does not open
+ * under the subject's key for @p field is ::GDEFCORE_ERR_INVALID too.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_subject_mac_sealed(
+    GDEFCORE_Subjects * subjects, const char * subject, size_t subject_len,
+    const char * field, size_t field_len, const char * sealed,
+    size_t sealed_len, uint8_t out[GDEFCORE_SUBJECT_MAC_LEN]);
+
+/**
+ * @brief Blind-index equality: the public ids of the entities of @p type
+ * whose current value of personal field @p field, in @p lang, is @p plain.
+ *
+ * The MAC of @p plain (gdefcore_subject_mac()) is matched against the port's
+ * blind rows of each entity's current value version (GDEFSTOR_QUERY_BLIND):
+ * an older value does not match, and neither does any value of an erased
+ * subject, whose rows are gone. Read as the system: no principal's filter
+ * is applied (gdefcore_entity_query_active()). Free @p out_ids with
+ * gdefcore_ids_free().
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_subject_find(GDEFCORE_Subjects * subjects,
+    GDEFCORE_Catalog * catalog, const char * type, size_t type_len,
+    const char * field, size_t field_len, const char * lang, size_t lang_len,
+    const void * plain, size_t plain_len, char *** out_ids, size_t * out_count);
+
+/**
+ * @brief Rebuild the blind index of the tenant in @p data from the values
+ * that can still be decrypted (AD-14, CAP-S1).
+ *
+ * Every subject the key store holds a key for is visited; for each personal
+ * value version the port's subject lookup names for it, across history, the
+ * value is opened with its key and its row put back in the blind table
+ * (gdefstor_blind_put()), replacing the row the version had. An erased
+ * subject has no key and gets no row. Blind rows are not in a snapshot
+ * (AD-23), so gdefcore_subject_restore() runs this after its ledger replay;
+ * run on a live tenant it changes nothing. @p out_rows (may be NULL)
+ * receives how many rows were put.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_subject_reindex(
+    GDEFCORE_Subjects * subjects, GDEFSTOR_Store * data, size_t * out_rows);
 
 /**
  * @brief The plaintext, or ::GDEFCORE_SUBJECT_ERASED when the subject is
@@ -258,7 +329,7 @@ GDEFCORE_API GDEFCORE_Result gdefcore_subject_revision_marker(
  * @p confirmation is the subject's public id, one line. A wrong id writes
  * nothing. Then, in this order: the key store destroys the key and appends
  * the ledger row (subject id and time, nothing personal) in one step; the
- * subject's blind-index rows are deleted from the blind store; caches are
+ * subject's blind-index rows are deleted from the data store; caches are
  * purged (none are kept yet). The revisions stay, as ciphertext. A failure
  * of the first step is returned and nothing else runs. A failure after it
  * is returned too, and the subject already reads as erased; erasing it again,
@@ -272,9 +343,12 @@ GDEFCORE_API GDEFCORE_Result gdefcore_subject_erase(GDEFCORE_Subjects * subjects
 /**
  * @brief One JSON document of the plaintext values.
  *
- * The bytes are returned to the caller. Nothing is written into
- * @p catalog. After erasure the document says erased and does not contain
- * the plaintext. Free @p out_json with gdefcore_subject_free().
+ * The values are every current personal value the port's subject lookup
+ * finds for the subject (story S6c: the subject columns, AD-19), published or
+ * not, each opened with the subject's key. The bytes are returned to the
+ * caller. Nothing is written into @p catalog. After erasure the document says
+ * erased and does not contain the plaintext. Free @p out_json with
+ * gdefcore_subject_free().
  */
 GDEFCORE_API GDEFCORE_Result gdefcore_subject_export(
     GDEFCORE_Subjects * subjects, GDEFCORE_Catalog * catalog,
@@ -286,9 +360,9 @@ GDEFCORE_API GDEFCORE_Result gdefcore_subject_export(
  * records when it was taken (gdefstor_snapshot_export_at()).
  *
  * It holds the tenant's rows, personal values as ciphertext, and nothing of
- * the key store: no key, no keyring wrap, no ledger. @p tenant_store must
- * not be the blind store. Free @p out_bytes with gdefstor_bytes_free() and
- * the store allocator.
+ * the key store: no key, no keyring wrap, no ledger. It holds no blind-index
+ * row either (AD-23): gdefcore_subject_restore() rebuilds them. Free
+ * @p out_bytes with gdefstor_bytes_free() and the store allocator.
  */
 GDEFCORE_API GDEFCORE_Result gdefcore_subject_snapshot(
     GDEFCORE_Subjects * subjects, GDEFSTOR_Store * tenant_store,
@@ -319,8 +393,11 @@ GDEFCORE_API GDEFCORE_Result gdefcore_subject_keyset(
  * as erasures, and no key brought back for a subject the live ledger or the
  * set's names), the data set is imported into @p tenant_store, and the
  * ledger, now the union of the live one and the set's, is replayed: the
- * blind-index rows of every subject it names are deleted. So an erasure newer
- * than either set still reads ::GDEFCORE_SUBJECT_ERASED afterwards. A key set
+ * blind-index rows of every subject it names are deleted, in @p tenant_store
+ * and in this subjects' own data store. So an erasure newer than either set
+ * still reads ::GDEFCORE_SUBJECT_ERASED afterwards. Then the blind index of
+ * @p tenant_store, which a data set does not carry, is rebuilt from the
+ * values that can be decrypted (gdefcore_subject_reindex()). A key set
  * whose keyring wrap is not this tenant's is ::GDEFCORE_ERR_INVALID before
  * anything is imported.
  *
@@ -341,20 +418,6 @@ GDEFCORE_API GDEFCORE_Result gdefcore_subject_restore(
 GDEFCORE_API GDEFCORE_Result gdefcore_subject_key(GDEFCORE_Subjects * subjects,
     const char * subject, size_t subject_len,
     uint8_t out[GDEFCORE_SUBJECT_KEY_LEN]);
-
-/** @brief How many blind-index rows this subject has. A subject the key
- * store does not know is ::GDEFCORE_ERR_INVALID. */
-GDEFCORE_API GDEFCORE_Result gdefcore_subject_blind_count(
-    GDEFCORE_Subjects * subjects, const char * subject, size_t subject_len,
-    size_t * out_count);
-
-/**
- * @brief One blind-index row. The bytes are not the plaintext.
- *
- * @p out is 32 bytes.
- */
-GDEFCORE_API GDEFCORE_Result gdefcore_subject_blind(GDEFCORE_Subjects * subjects,
-    const char * subject, size_t subject_len, size_t index, uint8_t out[32]);
 
 #ifdef __cplusplus
 }

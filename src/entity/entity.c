@@ -33,6 +33,7 @@
 #include <ghoti.io/defiant-core/entity.h>
 #include <ghoti.io/defiant-core/module.h>
 #include <ghoti.io/defiant-core/request.h>
+#include <ghoti.io/defiant-core/subject.h>
 #include <ghoti.io/defiant-core/template.h>
 
 #include <ghoti.io/cutil/allocator.h>
@@ -1266,6 +1267,13 @@ GDEFCORE_Result gdefcore_entity_create(GDEFCORE_Catalog * catalog,
   return GDEFCORE_OK;
 }
 
+void gdefcore_catalog_bind_subjects(GDEFCORE_Catalog * catalog,
+    struct GDEFCORE_Subjects * subjects) {
+  if (catalog != NULL) {
+    catalog->subjects = subjects;
+  }
+}
+
 void gdefcore_catalog_destroy(GDEFCORE_Catalog * catalog) {
   if (catalog == NULL) {
     return;
@@ -1422,12 +1430,23 @@ static void changeset_free_ops(GDEFCORE_Changeset * cs) {
   text_clear(cs->catalog->alloc, &cs->why);
 }
 
+static void notes_free(GDEFCORE_Changeset * cs) {
+  size_t i;
+  for (i = 0; i < cs->nnotes; i++) {
+    text_clear(cs->catalog->alloc, &cs->notes[i].text);
+  }
+  gcu_allocator_free(cs->catalog->alloc, cs->notes);
+  cs->notes = NULL;
+  cs->nnotes = 0;
+}
+
 void gdefcore_changeset_destroy(GDEFCORE_Changeset * changeset) {
   if (changeset == NULL) {
     return;
   }
   gdefcore_access_clear_staged(changeset);
   changeset_free_ops(changeset);
+  notes_free(changeset);
   gcu_allocator_free(changeset->catalog->alloc, changeset);
 }
 
@@ -1911,6 +1930,69 @@ GDEFCORE_Result gdefcore_changeset_accept_sealed(
   }
   changeset->accept_sealed = 1;
   return GDEFCORE_OK;
+}
+
+/* Record whose sealed @p text is; @p subjects NULL leaves the changeset's
+ * keys as they are (a parsed patch: the catalog's keys index it). */
+static GDEFCORE_Result note_add(GDEFCORE_Changeset * changeset,
+    struct GDEFCORE_Subjects * subjects, const char * text, size_t text_len,
+    const char * subject, size_t subject_len,
+    const uint8_t mac[GDEFSTOR_BLIND_MAC_BYTES]) {
+  char sid[GDEFCORE_PUBLIC_ID_LEN + 1];
+  GDEFCORE_SealNote * next;
+  GDEFCORE_SealNote * n;
+  if (changeset == NULL || changeset->applied || text == NULL ||
+      text_len == 0 ||
+      gdefcore_id_canonical(subject, subject_len, sid) != GDEFCORE_OK ||
+      (subjects != NULL && changeset->subjects != NULL &&
+          changeset->subjects != subjects)) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  next = (GDEFCORE_SealNote *)gcu_allocator_realloc(changeset->catalog->alloc,
+      changeset->notes, (changeset->nnotes + 1) * sizeof *next);
+  if (next == NULL) {
+    return GDEFCORE_ERR_OOM;
+  }
+  changeset->notes = next;
+  n = &changeset->notes[changeset->nnotes];
+  memset(n, 0, sizeof *n);
+  if (text_set(changeset->catalog->alloc, &n->text, text, text_len) !=
+      GDEFCORE_OK) {
+    return GDEFCORE_ERR_OOM;
+  }
+  memcpy(n->subject, sid, sizeof sid);
+  if (mac != NULL) {
+    memcpy(n->mac, mac, sizeof n->mac);
+    n->has_mac = 1;
+  }
+  changeset->nnotes += 1;
+  if (subjects != NULL) {
+    changeset->subjects = subjects;
+  }
+  return GDEFCORE_OK;
+}
+
+GDEFCORE_Result gdefcore_changeset_note_sealed(GDEFCORE_Changeset * changeset,
+    struct GDEFCORE_Subjects * subjects, const char * text, size_t text_len,
+    const char * subject, size_t subject_len,
+    const uint8_t mac[GDEFSTOR_BLIND_MAC_BYTES]) {
+  if (subjects == NULL || text == NULL || !sealed_ok(text, text_len)) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  return note_add(changeset, subjects, text, text_len, subject, subject_len,
+      mac);
+}
+
+/* The note a changeset holds for sealed @p text, or NULL. */
+static const GDEFCORE_SealNote * note_of(const GDEFCORE_Changeset * cs,
+    const char * text, size_t len) {
+  size_t i;
+  for (i = 0; i < cs->nnotes; i++) {
+    if (span_eq(cs->notes[i].text.p, cs->notes[i].text.n, text, len)) {
+      return &cs->notes[i];
+    }
+  }
+  return NULL;
 }
 
 /*
@@ -2810,6 +2892,136 @@ static GDEFCORE_Result drop_draft_author(GDEFSTOR_Write * write,
       sizeof GDEFCORE_ENT_DRAFT_NS - 1, op->id.p, op->id.n, NULL));
 }
 
+/* Where the trees of an op find their subjects and MACs (GDEFCORE_Seals). */
+static void seals_for(const GDEFCORE_Changeset * cs, int index, int with_draft,
+    GDEFCORE_Seals * out) {
+  memset(out, 0, sizeof *out);
+  out->notes = cs->notes;
+  out->nnotes = cs->nnotes;
+  out->subjects = cs->subjects != NULL ? cs->subjects : cs->catalog->subjects;
+  out->index = index;
+  out->with_draft = with_draft;
+}
+
+/* Say in words why the trees were refused, when it was a personal value. */
+static GDEFCORE_Result seals_refuse(GDEFCORE_Changeset * cs,
+    const GDEFCORE_Seals * seals, GDEFCORE_Result rc) {
+  static const char kErased[] =
+      "a personal value names an erased subject: their key is gone, and no "
+      "new value of theirs is written (the draft or the change is kept; "
+      "replace or remove that value and apply again)";
+  static const char kUnknown[] =
+      "a personal value has no subject this changeset can name, or there are "
+      "no subjects to index it with";
+  if (rc != GDEFCORE_OK && seals->erased) {
+    (void)gdefcore_changeset_set_refusal(cs, kErased, sizeof kErased - 1);
+  } else if (rc != GDEFCORE_OK && seals->unknown) {
+    (void)gdefcore_changeset_set_refusal(cs, kUnknown, sizeof kUnknown - 1);
+  }
+  return rc;
+}
+
+/* The values of field @p name in language @p lang of @p doc, or NULL. */
+static const GDEFCORE_Vals * doc_vals(const GDEFCORE_Doc * doc,
+    const GDEFCORE_Text * lang, const GDEFCORE_Text * name) {
+  size_t i;
+  size_t j;
+  for (i = 0; i < doc->nlangs; i++) {
+    if (!span_eq(doc->langs[i].lang.p, doc->langs[i].lang.n, lang->p, lang->n)) {
+      continue;
+    }
+    for (j = 0; j < doc->langs[i].nfields; j++) {
+      if (span_eq(doc->langs[i].fields[j].name.p, doc->langs[i].fields[j].name.n,
+              name->p, name->n)) {
+        return &doc->langs[i].fields[j];
+      }
+    }
+  }
+  return NULL;
+}
+
+static int vals_equal(const GDEFCORE_Vals * a, const GDEFCORE_Vals * b) {
+  size_t k;
+  size_t an = a == NULL ? 0 : a->nvals;
+  size_t bn = b == NULL ? 0 : b->nvals;
+  if (an != bn) {
+    return 0;
+  }
+  for (k = 0; k < an; k++) {
+    if (!span_eq(a->vals[k].p, a->vals[k].n, b->vals[k].p, b->vals[k].n)) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+/*
+ * A draft is validated against its type as it is when it is applied (AD-14),
+ * not as it was when the draft was written: every value it changes must be
+ * of a field the type has now, of that field's type, and the fields the type
+ * requires now must be there. A field the type no longer has may only hold
+ * what the entity holds there now (the port keeps a retired field's data).
+ */
+static GDEFCORE_Result draft_fits(GDEFCORE_Changeset * cs, const GDEFCORE_Op * op) {
+  static const char kFits[] =
+      "the draft does not fit its type as the type is now";
+  GDEFCORE_Catalog * cat = cs->catalog;
+  GDEFCORE_Decl * decls = NULL;
+  size_t ndecls = 0;
+  size_t i;
+  size_t j;
+  size_t k;
+  int ok = 1;
+  GDEFCORE_Result rc;
+  if (builtin_name(op->type_name.p, op->type_name.n)) {
+    return GDEFCORE_OK;
+  }
+  rc = load_type(cat, op->type_name.p, op->type_name.n, NULL, &decls, &ndecls,
+      NULL, NULL, NULL);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  for (i = 0; ok && i < op->staged.nlangs; i++) {
+    const GDEFCORE_Lang * l = &op->staged.langs[i];
+    for (j = 0; ok && j < l->nfields; j++) {
+      const GDEFCORE_Vals * f = &l->fields[j];
+      const GDEFCORE_Decl * decl = decl_named(decls, ndecls, f->name.p, f->name.n);
+      if (decl == NULL) {
+        ok = vals_equal(f, doc_vals(&op->base, &l->lang, &f->name));
+        continue;
+      }
+      if (!decl->many && f->nvals > 1) {
+        ok = 0;
+      }
+      for (k = 0; ok && k < f->nvals; k++) {
+        GDEFCORE_Text canon;
+        memset(&canon, 0, sizeof canon);
+        if (decl->personal) {
+          ok = sealed_ok(f->vals[k].p, f->vals[k].n);
+          continue;
+        }
+        rc = gdefcore_ent_value_check(cat->alloc, decl, f->vals[k].p,
+            f->vals[k].n, &canon);
+        text_clear(cat->alloc, &canon);
+        if (rc == GDEFCORE_ERR_OOM) {
+          decls_free(cat->alloc, decls, ndecls);
+          return rc;
+        }
+        ok = rc == GDEFCORE_OK;
+      }
+    }
+  }
+  if (ok && !doc_has_required(&op->staged, decls, ndecls)) {
+    ok = 0;
+  }
+  decls_free(cat->alloc, decls, ndecls);
+  if (!ok) {
+    (void)gdefcore_changeset_set_refusal(cs, kFits, sizeof kFits - 1);
+    return GDEFCORE_ERR_INVALID;
+  }
+  return GDEFCORE_OK;
+}
+
 /*
  * One op, in the changeset's write. The op was staged against the entity's
  * revision, version and (for a draft) the revision its draft was made from;
@@ -2867,26 +3079,37 @@ static GDEFCORE_Result apply_op(GDEFCORE_Changeset * cs, GDEFSTOR_Write * write,
     return GDEFCORE_OK;
   }
   switch (op->kind) {
-  case GDEFCORE_OP_SAVE:
+  case GDEFCORE_OP_SAVE: {
+    GDEFCORE_Seals seals;
+    seals_for(cs, 1, look.has_draft, &seals);
     if (!look.exists) {
-      /* The first save of an entity its draft reserves: the draft becomes
-       * these values and is applied, which makes the entity with the actor
-       * as its creator and writes its first revision. */
-      rc = gdefcore_ent_put_draft(cat, write, op->id.p, op->type_name.p,
-          op->type_name.n, 0, &op->staged);
+      /* The first save of an entity its draft reserves: the reservation
+       * gives way to the entity, made with the actor as its creator, and
+       * the values are its first revision, written as any save is, so that
+       * their personal values get their blind rows (story S6c). */
+      rc = map_stor(gdefstor_draft_delete(write, op->id.p, op->id.n));
       if (rc == GDEFCORE_OK) {
-        GDEFSTOR_Result src = gdefstor_draft_apply(write, op->id.p, op->id.n,
-            &meta, &rev);
-        if (src == GDEFSTOR_ERR_CONFLICT) {
-          *conflict = 1;
-          return GDEFCORE_OK;
-        }
-        rc = map_stor(src);
-        changed = 1;
+        rc = map_stor(gdefstor_entity_create(write, op->type_name.p,
+            op->type_name.n, op->id.p, op->id.n, meta.who, meta.who_len, when,
+            NULL));
       }
+      if (rc == GDEFCORE_OK) {
+        rc = seals_refuse(cs, &seals, gdefcore_ent_save_doc(cat, write,
+            op->id.p, op->type_name.p, op->type_name.n, 0, &meta, &op->staged,
+            &seals, &rev, &moved));
+      }
+      if (rc == GDEFCORE_OK && moved) {
+        *conflict = 1;
+        return GDEFCORE_OK;
+      }
+      if (rc == GDEFCORE_OK) {
+        rc = drop_draft_author(write, op);
+      }
+      changed = 1;
     } else {
-      rc = gdefcore_ent_save_doc(cat, write, op->id.p, op->type_name.p,
-          op->type_name.n, op->base_seq, &meta, &op->staged, &rev, &moved);
+      rc = seals_refuse(cs, &seals, gdefcore_ent_save_doc(cat, write, op->id.p,
+          op->type_name.p, op->type_name.n, op->base_seq, &meta, &op->staged,
+          &seals, &rev, &moved));
       if (rc == GDEFCORE_OK && moved) {
         *conflict = 1;
         return GDEFCORE_OK;
@@ -2904,7 +3127,10 @@ static GDEFCORE_Result apply_op(GDEFCORE_Changeset * cs, GDEFSTOR_Write * write,
       rc = set_state(write, op, cs, 1, 0, when, &changed);
     }
     break;
-  case GDEFCORE_OP_DRAFT:
+  }
+  case GDEFCORE_OP_DRAFT: {
+    GDEFCORE_Seals seals;
+    seals_for(cs, 0, look.has_draft, &seals);
     /* A draft is not a revision (AD-14): the values go in the draft, which
      * records the revision it is made from, and nothing else is written. */
     if (look.has_draft && look.draft_base != op->draft_base) {
@@ -2927,17 +3153,18 @@ static GDEFCORE_Result apply_op(GDEFCORE_Changeset * cs, GDEFSTOR_Write * write,
       }
     }
     if (rc == GDEFCORE_OK) {
-      rc = gdefcore_ent_put_draft(cat, write, op->id.p, op->type_name.p,
-          op->type_name.n, look.exists ? op->draft_base : 0, &op->staged);
+      rc = seals_refuse(cs, &seals, gdefcore_ent_put_draft(cat, write, op->id.p,
+          op->type_name.p, op->type_name.n, look.exists ? op->draft_base : 0,
+          &op->staged, &seals));
     }
     if (rc == GDEFCORE_OK) {
       rc = put_draft_author(write, cs, op);
     }
     changed = 1;
     break;
+  }
   case GDEFCORE_OP_PUBLISH:
     if (look.has_draft) {
-      GDEFSTOR_Result src;
       /* Applied only on the revision it was made from (CAP-S4). */
       if (look.exists && look.draft_base != look.revision) {
         *conflict = 1;
@@ -2949,19 +3176,41 @@ static GDEFCORE_Result apply_op(GDEFCORE_Changeset * cs, GDEFSTOR_Write * write,
         char who[GDEFCORE_PUBLIC_ID_LEN + 2];
         size_t who_len = 0;
         GDEFSTOR_RevisionMeta authored = meta;
+        GDEFCORE_Seals seals;
         rc = draft_author(cat, op, who, sizeof who, &who_len);
         if (rc != GDEFCORE_OK) {
           return rc;
         }
         authored.who = who;
         authored.who_len = who_len;
-        src = gdefstor_draft_apply(write, op->id.p, op->id.n, &authored, &rev);
+        /* Validated against the type as it is now, and applied as a save
+         * of the draft's values on the revision it was made from: core
+         * gives each changed personal value its blind-index MAC (the port's
+         * draft apply takes none, story S6c), and refuses one of an erased
+         * subject. */
+        rc = draft_fits(cs, op);
+        seals_for(cs, 1, 1, &seals);
+        if (rc == GDEFCORE_OK && !look.exists) {
+          rc = map_stor(gdefstor_draft_delete(write, op->id.p, op->id.n));
+          if (rc == GDEFCORE_OK) {
+            rc = map_stor(gdefstor_entity_create(write, op->type_name.p,
+                op->type_name.n, op->id.p, op->id.n, who, who_len, when,
+                NULL));
+          }
+        }
+        if (rc == GDEFCORE_OK) {
+          rc = seals_refuse(cs, &seals, gdefcore_ent_save_doc(cat, write,
+              op->id.p, op->type_name.p, op->type_name.n, look.revision,
+              &authored, &op->staged, &seals, &rev, &moved));
+        }
+        if (rc == GDEFCORE_OK && moved) {
+          *conflict = 1;
+          return GDEFCORE_OK;
+        }
+        if (rc == GDEFCORE_OK && look.exists) {
+          rc = map_stor(gdefstor_draft_delete(write, op->id.p, op->id.n));
+        }
       }
-      if (src == GDEFSTOR_ERR_CONFLICT) {
-        *conflict = 1;
-        return GDEFCORE_OK;
-      }
-      rc = map_stor(src);
       if (rc == GDEFCORE_OK) {
         rc = drop_draft_author(write, op);
       }
@@ -2993,7 +3242,7 @@ static GDEFCORE_Result apply_op(GDEFCORE_Changeset * cs, GDEFSTOR_Write * write,
       GDEFCORE_Doc none;
       memset(&none, 0, sizeof none);
       rc = gdefcore_ent_put_draft(cat, write, op->id.p, op->type_name.p,
-          op->type_name.n, 0, &none);
+          op->type_name.n, 0, &none, NULL);
       changed = 1;
     }
     break;
@@ -3525,6 +3774,48 @@ void gdefcore_patch_free(GDEFCORE_Catalog * catalog, GDEFCORE_Patch * files,
   gcu_allocator_free(catalog->alloc, files);
 }
 
+/*
+ * A personal value in a patch is its sealed text and, beside it at
+ * `entity/<id>/subject/<lang>/<field>/<index>`, its subject's public id (story
+ * S6c: on the port a personal value is both). The subject is the note's, else
+ * the one the entity's current tree or draft records with the text; a value
+ * neither names is written without one, and the patch's apply refuses it.
+ */
+static GDEFCORE_Result subject_file(const GDEFCORE_Changeset * cs,
+    const GDEFCORE_Op * op, const GDEFCORE_Lang * l, const GDEFCORE_Vals * f,
+    size_t vi, const char * index, GDEFCORE_Patch ** files, size_t * count) {
+  const GDEFCORE_Decl * decl = decl_named(op->decls, op->ndecls, f->name.p,
+      f->name.n);
+  const GDEFCORE_SealNote * note;
+  char sid[GDEFCORE_PUBLIC_ID_LEN + 1];
+  char path[512];
+  int found = 0;
+  int kn;
+  GDEFCORE_Result rc = GDEFCORE_OK;
+  if (decl == NULL || !decl->personal) {
+    return GDEFCORE_OK;
+  }
+  note = note_of(cs, f->vals[vi].p, f->vals[vi].n);
+  if (note != NULL) {
+    memcpy(sid, note->subject, sizeof sid);
+    found = 1;
+  } else {
+    rc = gdefcore_ent_value_subject(cs->catalog, op->id.p, l->lang.p, l->lang.n,
+        f->name.p, f->name.n, f->vals[vi].p, f->vals[vi].n, sid, &found);
+  }
+  if (rc != GDEFCORE_OK || !found) {
+    return rc;
+  }
+  kn = snprintf(path, sizeof path, "entity/%.*s/subject/%.*s/%.*s/%s",
+      (int)op->id.n, op->id.p, (int)l->lang.n, l->lang.p, (int)f->name.n,
+      f->name.p, index);
+  if (kn <= 0 || (size_t)kn >= sizeof path) {
+    return GDEFCORE_ERR_LIMIT;
+  }
+  return patch_add(cs->catalog->alloc, files, count, path, sid,
+      GDEFCORE_PUBLIC_ID_LEN);
+}
+
 GDEFCORE_Result gdefcore_changeset_serialize(const GDEFCORE_Changeset * changeset,
     GDEFCORE_Patch ** out_files, size_t * out_count) {
   const GDEFCORE_Allocator * alloc;
@@ -3747,6 +4038,10 @@ GDEFCORE_Result gdefcore_changeset_serialize(const GDEFCORE_Changeset * changese
             rc = patch_add(alloc, &files, &count, path,
                 op->staged.langs[li].fields[fi].vals[vi].p,
                 op->staged.langs[li].fields[fi].vals[vi].n);
+            if (rc == GDEFCORE_OK) {
+              rc = subject_file(changeset, op, &op->staged.langs[li],
+                  &op->staged.langs[li].fields[fi], vi, index, &files, &count);
+            }
           }
         }
       }
@@ -3780,6 +4075,17 @@ static const char * span_chr(const char * s, size_t n, char c) {
   size_t i;
   for (i = 0; i < n; i++) {
     if (s[i] == c) {
+      return s + i;
+    }
+  }
+  return NULL;
+}
+
+static const char * span_find(const char * s, size_t n, const char * w,
+    size_t wn) {
+  size_t i;
+  for (i = 0; wn > 0 && i + wn <= n; i++) {
+    if (memcmp(s + i, w, wn) == 0) {
       return s + i;
     }
   }
@@ -4083,7 +4389,8 @@ GDEFCORE_Result gdefcore_changeset_parse(GDEFCORE_Catalog * catalog,
                     span_eq(suffix, suffix_len, "/op", 3) ||
                     span_eq(suffix, suffix_len, "/ver", 4) ||
                     span_eq(suffix, suffix_len, "/target", 7) ||
-                    (suffix_len >= 6 && memcmp(suffix, "/lang/", 6) == 0);
+                    (suffix_len >= 6 && memcmp(suffix, "/lang/", 6) == 0) ||
+                    (suffix_len >= 9 && memcmp(suffix, "/subject/", 9) == 0);
         if (!known) {
           return GDEFCORE_ERR_CORRUPT;
         }
@@ -4429,6 +4736,41 @@ GDEFCORE_Result gdefcore_changeset_parse(GDEFCORE_Catalog * catalog,
         !u64_get((const char *)ver_file->bytes, ver_file->len, &op->base_ver)) {
       gdefcore_changeset_destroy(cs);
       return GDEFCORE_ERR_CORRUPT;
+    }
+  }
+  /* Whose each personal value is: a subject file names the value file of
+   * the same language, field and index. A save of the patch opens the value
+   * with that subject's key to index it, so a subject that is not the
+   * value's is refused then. */
+  for (i = 0; i < count; i++) {
+    const char * at;
+    size_t pre;
+    char value_path[600];
+    const GDEFCORE_Patch * value_file;
+    int kn;
+    if (files[i].path_len < 7 || memcmp(files[i].path, "entity/", 7) != 0) {
+      continue;
+    }
+    at = files[i].path_len > 7 + GDEFCORE_PUBLIC_ID_LEN
+             ? span_find(files[i].path, files[i].path_len, "/subject/", 9)
+             : NULL;
+    if (at == NULL) {
+      continue;
+    }
+    pre = (size_t)(at - files[i].path);
+    kn = snprintf(value_path, sizeof value_path, "%.*s/lang/%.*s", (int)pre,
+        files[i].path, (int)(files[i].path_len - pre - 9), at + 9);
+    value_file = kn > 0 && (size_t)kn < sizeof value_path
+                     ? find_file(files, count, value_path)
+                     : NULL;
+    rc = value_file == NULL
+             ? GDEFCORE_ERR_CORRUPT
+             : note_add(cs, NULL, (const char *)value_file->bytes,
+                   value_file->len, (const char *)files[i].bytes, files[i].len,
+                   NULL);
+    if (rc != GDEFCORE_OK) {
+      gdefcore_changeset_destroy(cs);
+      return rc == GDEFCORE_ERR_OOM ? rc : GDEFCORE_ERR_CORRUPT;
     }
   }
   *out_changeset = cs;
