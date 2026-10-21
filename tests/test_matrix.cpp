@@ -26,6 +26,7 @@
  */
 
 #include <ghoti.io/defiant-core/macros.h>
+#include <ghoti.io/cutil/fiber.h>
 #include <ghoti.io/defiant-core/defiant-core.h>
 #include <ghoti.io/defiant-storage-memory/memory.h>
 
@@ -300,6 +301,33 @@ extern "C" GDEFCORE_Turn WatchBody(GDEFCORE_Request * request, void * user) {
   return GDEFCORE_TURN_DONE;
 }
 
+/* The scheduler runs each request on a cutil fiber. Where cutil has none
+ * (GCU_FIBER_SUPPORTED is 0: every target but x86-64 and arm64 ELF, and
+ * Windows) a spawn is refused UNSUPPORTED, so the tests of the scheduler skip
+ * there, once a spawn is seen to be refused. suite/tools/xarch's first run
+ * (story S10) met it on s390x and SPARC64, where the failed tests also left
+ * their schedulers running and the program never exited. */
+#if GCU_FIBER_SUPPORTED
+#define GDEFCORE_TEST_NEEDS_FIBERS() (void)0
+#else
+GDEFCORE_Turn NoBody(GDEFCORE_Request *, void *) {
+  return GDEFCORE_TURN_DONE;
+}
+#define GDEFCORE_TEST_NEEDS_FIBERS()                                          \
+  do {                                                                         \
+    GDEFCORE_Sched * none = NULL;                                              \
+    GDEFCORE_Request * req = NULL;                                             \
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_sched_create(NULL, 1, 0, &none));          \
+    ASSERT_EQ(GDEFCORE_OK,                                                     \
+        gdefcore_request_create((const uint8_t *)"x", 1, 0, 0, NULL, &req));   \
+    EXPECT_EQ(GDEFCORE_ERR_UNSUPPORTED,                                        \
+        gdefcore_sched_spawn(none, req, NoBody, NULL));                        \
+    gdefcore_sched_destroy(none);                                              \
+    gdefcore_request_destroy(req);                                             \
+    GTEST_SKIP() << "cutil has no fibers on this target, so nothing spawns";  \
+  } while (0)
+#endif
+
 }  // namespace
 
 TEST(Result, StringCoversEveryCode) {
@@ -342,6 +370,7 @@ TEST(Ambient, TenantComesFromTheHandle) {
 }
 
 TEST(Fairness, OtherTenantRunsWhenOneDoesNotYield) {
+  GDEFCORE_TEST_NEEDS_FIBERS();
   const uint8_t a[] = {'A'};
   const uint8_t b[] = {'B'};
   GDEFCORE_Sched * sched = NULL;
@@ -366,6 +395,7 @@ TEST(Fairness, OtherTenantRunsWhenOneDoesNotYield) {
 }
 
 TEST(Offload, RunsOnThePoolAndResumesOnTheCreatingThread) {
+  GDEFCORE_TEST_NEEDS_FIBERS();
   const uint8_t tenant[] = {'t'};
   GDEFCORE_Sched * sched = NULL;
   GDEFCORE_Request * request = NULL;
@@ -390,6 +420,7 @@ TEST(Offload, RunsOnThePoolAndResumesOnTheCreatingThread) {
 }
 
 TEST(Offload, FullPoolReturnsBusyWithoutBlocking) {
+  GDEFCORE_TEST_NEEDS_FIBERS();
   const uint8_t a[] = {'a'};
   const uint8_t b[] = {'b'};
   const uint8_t c[] = {'c'};
@@ -423,6 +454,7 @@ TEST(Offload, FullPoolReturnsBusyWithoutBlocking) {
 }
 
 TEST(Deadline, WaitIsCancelledAtTheRequestBoundary) {
+  GDEFCORE_TEST_NEEDS_FIBERS();
   const uint8_t tenant[] = {'d'};
   GDEFCORE_Sched * sched = NULL;
   GDEFCORE_Request * request = NULL;
@@ -449,6 +481,7 @@ TEST(Deadline, WaitIsCancelledAtTheRequestBoundary) {
 }
 
 TEST(Write, OtherWaitAbortsThePortWrite) {
+  GDEFCORE_TEST_NEEDS_FIBERS();
   const char * tenant = "tenant-a";
   GDEFCORE_Sched * sched = NULL;
   GDEFCORE_Request * request = NULL;
@@ -492,6 +525,7 @@ TEST(Write, OtherWaitAbortsThePortWrite) {
 }
 
 TEST(Write, YieldWhileHoldingAbortsThePortWrite) {
+  GDEFCORE_TEST_NEEDS_FIBERS();
   const char * tenant = "tenant-y";
   GDEFCORE_Sched * sched = NULL;
   GDEFCORE_Request * request = NULL;
@@ -524,6 +558,7 @@ TEST(Write, YieldWhileHoldingAbortsThePortWrite) {
 }
 
 TEST(Write, TurnAgainWhileHoldingAbortsThePortWrite) {
+  GDEFCORE_TEST_NEEDS_FIBERS();
   const char * tenant = "tenant-t";
   GDEFCORE_Sched * sched = NULL;
   GDEFCORE_Request * request = NULL;
@@ -554,6 +589,7 @@ TEST(Write, TurnAgainWhileHoldingAbortsThePortWrite) {
 }
 
 TEST(Watchdog, ZeroBoundNamesNothing) {
+  GDEFCORE_TEST_NEEDS_FIBERS();
   const uint8_t tenant[] = {'z'};
   GDEFCORE_Sched * sched = NULL;
   GDEFCORE_Request * request = NULL;
@@ -571,6 +607,7 @@ TEST(Watchdog, ZeroBoundNamesNothing) {
 }
 
 TEST(Watchdog, NamesAFiberThatRunsPastItsYieldBound) {
+  GDEFCORE_TEST_NEEDS_FIBERS();
   const uint8_t tenant[] = {'w'};
   GDEFCORE_Sched * sched = NULL;
   GDEFCORE_Request * request = NULL;
