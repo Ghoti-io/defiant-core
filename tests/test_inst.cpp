@@ -351,13 +351,13 @@ TEST_F(Inst, SecondTenant) {
   EXPECT_EQ(where, std::string(placement, placement_n));
   EXPECT_EQ(0u, edition_n);
   EXPECT_EQ(std::string("active"), std::string(status, status_n));
-  EXPECT_EQ(expect.max_revisions, limits.max_revisions);
-  EXPECT_EQ(expect.max_blobs, limits.max_blobs);
+  EXPECT_EQ(expect.max_members, limits.max_members);
+  EXPECT_EQ(expect.max_snapshot_bytes, limits.max_snapshot_bytes);
   gdefcore_inst_text_free(inst, placement);
   gdefcore_inst_text_free(inst, edition);
   gdefcore_inst_text_free(inst, status);
   ASSERT_EQ(GDEFCORE_OK,
-      gdefcore_inst_limit_set(inst, id_b, strlen(id_b), "max_revisions", 13,
+      gdefcore_inst_limit_set(inst, id_b, strlen(id_b), "max_members", 11,
           7));
   placement = NULL;
   edition = NULL;
@@ -365,8 +365,8 @@ TEST_F(Inst, SecondTenant) {
   ASSERT_EQ(GDEFCORE_OK,
       gdefcore_inst_resolve(inst, "acme", 4, resolved, &placement, &placement_n,
           &edition, &edition_n, &status, &status_n, &limits));
-  EXPECT_EQ(7u, limits.max_revisions);
-  EXPECT_EQ(expect.max_blobs, limits.max_blobs);
+  EXPECT_EQ(7u, limits.max_members);
+  EXPECT_EQ(expect.max_snapshot_bytes, limits.max_snapshot_bytes);
   ASSERT_NE(access(where.c_str(), F_OK), 0);
   gdefcore_inst_text_free(inst, placement);
   gdefcore_inst_text_free(inst, edition);
@@ -389,7 +389,7 @@ TEST_F(Inst, SecondTenant) {
   EXPECT_EQ(0, memcmp(key_b, key_after, sizeof key_b));
   EXPECT_EQ(where, std::string(placement, placement_n));
   EXPECT_EQ(std::string("active"), std::string(status, status_n));
-  EXPECT_EQ(7u, limits.max_revisions);
+  EXPECT_EQ(7u, limits.max_members);
   gdefcore_inst_text_free(inst, placement);
   gdefcore_inst_text_free(inst, edition);
   gdefcore_inst_text_free(inst, status);

@@ -239,7 +239,7 @@ plant keeps-key src/subject/subject.c Erasure.Sweep \
 
 # 4. Erasure survives restore: a snapshot that carries a key. The data set is
 #    taken with the tenant keyring's wrap filed in the tenant store first, as
-#    a row of its own, so import still works and only the key travels.
+#    a record of its own, so import still works and only the key travels.
 plant snapshot-key src/subject/subject.c Erasure.SnapshotCarriesNoKey \
   '  return from_stor(gdefstor_snapshot_export_at(tenant_store,
       (const char *)subjects->tenant, subjects->tenant_len, NULL, taken,
@@ -248,18 +248,12 @@ plant snapshot-key src/subject/subject.c Erasure.SnapshotCarriesNoKey \
     uint8_t wrap[kWrap];
     int found = 0;
     GDEFSTOR_Write * kw = NULL;
-    GDEFSTOR_Column kc;
     if (wrap_load(subjects->keys, subjects->alloc, subjects->tenant,
             subjects->tenant_len, wrap, &found) == GDEFCORE_OK && found &&
         gdefstor_write_begin(tenant_store, (const char *)subjects->tenant,
             subjects->tenant_len, NULL, &kw) == GDEFSTOR_OK) {
-      memset(&kc, 0, sizeof kc);
-      kc.name = "bytes";
-      kc.name_len = 5;
-      kc.value = wrap;
-      kc.value_len = kWrap;
-      if (gdefstor_projection_put(kw, "core.keyring", 12, "wrap", 4, &kc, 1) ==
-          GDEFSTOR_OK) {
+      if (gdefstor_record_put(kw, "core.keyring", 12, "wrap", 4, wrap,
+              kWrap) == GDEFSTOR_OK) {
         (void)gdefstor_write_commit(kw);
       } else {
         gdefstor_write_abort(kw);

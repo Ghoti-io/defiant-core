@@ -221,7 +221,7 @@ GDEFCORE_API GDEFCORE_Keyring * gdefcore_inst_tenant_keyring(
 /**
  * @brief Record one ::GDEFSTOR_Limits field on the tenant.
  *
- * @p field is the member name, such as `max_revisions`. The directory
+ * @p field is the member name, such as `max_members`. The directory
  * returns it from gdefcore_inst_resolve(). The site store is not changed.
  */
 GDEFCORE_API GDEFCORE_Result gdefcore_inst_limit_set(GDEFCORE_Inst * inst,

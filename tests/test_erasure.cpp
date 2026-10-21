@@ -1187,21 +1187,16 @@ TEST_F(Erasure, Channels) {
           &page_len));
   AddText(&arts, "rendered scope", B(page, page_len));
   gdefcore_text_free(catalog_, page);
-  /* A projection written by the library with the canary in a column, then
+  /* A record written through the port with the canary as its value, then
    * exported and unpacked. */
   {
     GDEFSTOR_Write * write = NULL;
-    GDEFSTOR_Column column;
-    memset(&column, 0, sizeof column);
-    column.name = "text";
-    column.name_len = 4;
-    column.value = reinterpret_cast<const uint8_t *>(kCanary);
-    column.value_len = strlen(kCanary);
     ASSERT_EQ(GDEFSTOR_OK,
         gdefstor_write_begin(site_, reinterpret_cast<const char *>(storage_),
             sizeof storage_, NULL, &write));
     ASSERT_EQ(GDEFSTOR_OK,
-        gdefstor_projection_put(write, "x.test", 6, "row", 3, &column, 1));
+        gdefstor_record_put(write, "x.test", 6, "row", 3,
+            reinterpret_cast<const uint8_t *>(kCanary), strlen(kCanary)));
     ASSERT_EQ(GDEFSTOR_OK, gdefstor_write_commit(write));
     zip = StorageExport(site_, storage_, sizeof storage_);
     ASSERT_FALSE(zip.empty());

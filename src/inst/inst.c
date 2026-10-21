@@ -83,8 +83,6 @@ struct LimitField {
 };
 
 static const struct LimitField kLimits[] = {
-    {"max_document_bytes", offsetof(GDEFSTOR_Limits, max_document_bytes), 0},
-    {"max_blob_bytes", offsetof(GDEFSTOR_Limits, max_blob_bytes), 0},
     {"max_member_bytes", offsetof(GDEFSTOR_Limits, max_member_bytes), 0},
     {"max_members", offsetof(GDEFSTOR_Limits, max_members), 0},
     {"max_snapshot_bytes", offsetof(GDEFSTOR_Limits, max_snapshot_bytes), 0},
@@ -92,21 +90,7 @@ static const struct LimitField kLimits[] = {
     {"max_public_id_bytes", offsetof(GDEFSTOR_Limits, max_public_id_bytes), 0},
     {"max_tenant_bytes", offsetof(GDEFSTOR_Limits, max_tenant_bytes), 0},
     {"max_type_bytes", offsetof(GDEFSTOR_Limits, max_type_bytes), 0},
-    {"max_body_bytes", offsetof(GDEFSTOR_Limits, max_body_bytes), 0},
-    {"max_hash_bytes", offsetof(GDEFSTOR_Limits, max_hash_bytes), 0},
     {"max_json_depth", offsetof(GDEFSTOR_Limits, max_json_depth), 0},
-    {"max_columns", offsetof(GDEFSTOR_Limits, max_columns), 0},
-    {"max_column_name_bytes", offsetof(GDEFSTOR_Limits, max_column_name_bytes),
-        0},
-    {"max_column_value_bytes",
-        offsetof(GDEFSTOR_Limits, max_column_value_bytes), 0},
-    {"max_outbox_payload_bytes",
-        offsetof(GDEFSTOR_Limits, max_outbox_payload_bytes), 0},
-    {"max_stream_bytes", offsetof(GDEFSTOR_Limits, max_stream_bytes), 0},
-    {"max_revisions", offsetof(GDEFSTOR_Limits, max_revisions), 0},
-    {"max_blobs", offsetof(GDEFSTOR_Limits, max_blobs), 0},
-    {"max_projections", offsetof(GDEFSTOR_Limits, max_projections), 0},
-    {"max_outbox_rows", offsetof(GDEFSTOR_Limits, max_outbox_rows), 0},
 };
 
 struct TenantSlot {

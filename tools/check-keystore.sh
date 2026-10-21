@@ -54,16 +54,10 @@ plant key-in-a-data-store src/subject/subject.c testSubject \
   memcpy(out_id, id, GDEFCORE_PUBLIC_ID_LEN + 1);' \
   '  if (rc == GDEFCORE_OK) {
     GDEFSTOR_Write * kw = NULL;
-    GDEFSTOR_Column kc;
-    memset(&kc, 0, sizeof kc);
-    kc.name = "key";
-    kc.name_len = 3;
-    kc.value = wrapped;
-    kc.value_len = kWrap;
     if (gdefstor_write_begin(subjects->data, (const char *)subjects->tenant,
             subjects->tenant_len, NULL, &kw) == GDEFSTOR_OK) {
-      if (gdefstor_projection_put(kw, "core.key", 8, id,
-              GDEFCORE_PUBLIC_ID_LEN, &kc, 1) == GDEFSTOR_OK) {
+      if (gdefstor_record_put(kw, "core.key", 8, id, GDEFCORE_PUBLIC_ID_LEN,
+              wrapped, kWrap) == GDEFSTOR_OK) {
         (void)gdefstor_write_commit(kw);
       } else {
         gdefstor_write_abort(kw);

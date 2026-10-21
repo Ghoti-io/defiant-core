@@ -27,7 +27,7 @@
 
 #include <ghoti.io/defiant-core/macros.h>
 #include <ghoti.io/defiant-core/defiant-core.h>
-#include <ghoti.io/defiant-storage/blob.h>
+#include <ghoti.io/defiant-storage-memory/memory.h>
 
 #include <gtest/gtest.h>
 
@@ -50,141 +50,18 @@ uint64_t MonoMs() {
   return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
 }
 
-struct Row {
-  char * tenant;
-  size_t tenant_len;
-  char * key;
-  size_t key_len;
-  uint8_t * bytes;
-  size_t len;
-  Row * next;
-};
-
-struct Mem {
-  Row * rows;
-};
-
-int SpanEq(const char * a, size_t a_len, const char * b, size_t b_len) {
-  return a_len == b_len && (a_len == 0 || memcmp(a, b, a_len) == 0);
-}
-
-extern "C" void MemDestroy(void * ctx) {
-  Mem * mem = (Mem *)ctx;
-  Row * row = mem->rows;
-  while (row != NULL) {
-    Row * next = row->next;
-    free(row->tenant);
-    free(row->key);
-    free(row->bytes);
-    free(row);
-    row = next;
-  }
-  mem->rows = NULL;
-}
-
-extern "C" GDEFSTOR_Result MemPut(void * ctx, const char * tenant,
-    size_t tenant_len, const char * key, size_t key_len, const uint8_t * bytes,
-    size_t len) {
-  Mem * mem = (Mem *)ctx;
-  Row * row = (Row *)calloc(1, sizeof *row);
-  if (row == NULL) {
-    return GDEFSTOR_ERR_OOM;
-  }
-  row->tenant = (char *)malloc(tenant_len);
-  row->key = (char *)malloc(key_len == 0 ? 1 : key_len);
-  row->bytes = (uint8_t *)malloc(len == 0 ? 1 : len);
-  if (row->tenant == NULL || row->key == NULL || row->bytes == NULL) {
-    free(row->tenant);
-    free(row->key);
-    free(row->bytes);
-    free(row);
-    return GDEFSTOR_ERR_OOM;
-  }
-  memcpy(row->tenant, tenant, tenant_len);
-  if (key_len > 0) {
-    memcpy(row->key, key, key_len);
-  }
-  if (len > 0) {
-    memcpy(row->bytes, bytes, len);
-  }
-  row->tenant_len = tenant_len;
-  row->key_len = key_len;
-  row->len = len;
-  row->next = mem->rows;
-  mem->rows = row;
-  return GDEFSTOR_OK;
-}
-
-extern "C" GDEFSTOR_Result MemGet(void * ctx, const char * tenant,
-    size_t tenant_len, const char * key, size_t key_len, uint8_t ** out_bytes,
-    size_t * out_len) {
-  Mem * mem = (Mem *)ctx;
-  Row * row;
-  for (row = mem->rows; row != NULL; row = row->next) {
-    if (!SpanEq(row->tenant, row->tenant_len, tenant, tenant_len) ||
-        !SpanEq(row->key, row->key_len, key, key_len)) {
-      continue;
-    }
-    *out_bytes = (uint8_t *)malloc(row->len == 0 ? 1 : row->len);
-    if (*out_bytes == NULL) {
-      return GDEFSTOR_ERR_OOM;
-    }
-    if (row->len > 0) {
-      memcpy(*out_bytes, row->bytes, row->len);
-    }
-    *out_len = row->len;
-    return GDEFSTOR_OK;
-  }
-  return GDEFSTOR_ERR_INVALID;
-}
-
-extern "C" GDEFSTOR_Result MemRemove(void * ctx, const char * tenant,
-    size_t tenant_len, const char * key, size_t key_len) {
-  Mem * mem = (Mem *)ctx;
-  Row ** link = &mem->rows;
-  while (*link != NULL) {
-    Row * row = *link;
-    if (SpanEq(row->tenant, row->tenant_len, tenant, tenant_len) &&
-        SpanEq(row->key, row->key_len, key, key_len)) {
-      *link = row->next;
-      free(row->tenant);
-      free(row->key);
-      free(row->bytes);
-      free(row);
-      return GDEFSTOR_OK;
-    }
-    link = &row->next;
-  }
-  return GDEFSTOR_ERR_INVALID;
-}
-
-extern "C" GDEFSTOR_Result MemList(void * ctx, const char * tenant,
-    size_t tenant_len, const char * prefix, size_t prefix_len, char *** out_keys,
-    size_t ** out_key_lens, size_t * out_count) {
-  (void)ctx;
-  (void)tenant;
-  (void)tenant_len;
-  (void)prefix;
-  (void)prefix_len;
-  *out_keys = NULL;
-  *out_key_lens = NULL;
-  *out_count = 0;
-  return GDEFSTOR_OK;
-}
-
-GDEFSTOR_Store * OpenStore(Mem * mem) {
-  GDEFSTOR_Backend backend;
+/* The in-memory store: the writes below put one record, which the abort of
+ * the port write must leave unwritten. */
+GDEFSTOR_Store * OpenStore() {
   GDEFSTOR_Store * store = NULL;
-  memset(&backend, 0, sizeof backend);
-  memset(mem, 0, sizeof *mem);
-  backend.ctx = mem;
-  backend.destroy = MemDestroy;
-  backend.put = MemPut;
-  backend.get = MemGet;
-  backend.remove = MemRemove;
-  backend.list = MemList;
-  EXPECT_EQ(gdefstor_store_create(&backend, NULL, NULL, &store), GDEFSTOR_OK);
+  EXPECT_EQ(gdefsmemory_store_create(NULL, NULL, &store), GDEFSMEMORY_OK);
   return store;
+}
+
+GDEFSTOR_Result PutOne(GDEFSTOR_Write * write, const char * key,
+    const uint8_t * bytes, size_t len) {
+  return gdefstor_record_put(write, "core.test", 9, key, strlen(key), bytes,
+      len);
 }
 
 struct FairState {
@@ -349,7 +226,7 @@ extern "C" GDEFCORE_Turn WriteBody(GDEFCORE_Request * request, void * user) {
     state->rc = GDEFCORE_ERR_INTERNAL;
     return GDEFCORE_TURN_DONE;
   }
-  if (gdefstor_blob_put(write, "h", 1, bytes, sizeof bytes) != GDEFSTOR_OK) {
+  if (PutOne(write, "h", bytes, sizeof bytes) != GDEFSTOR_OK) {
     gdefstor_write_abort(write);
     state->rc = GDEFCORE_ERR_INTERNAL;
     return GDEFCORE_TURN_DONE;
@@ -379,7 +256,7 @@ extern "C" GDEFCORE_Turn YieldApiBody(
     state->rc = GDEFCORE_ERR_INTERNAL;
     return GDEFCORE_TURN_DONE;
   }
-  if (gdefstor_blob_put(write, "y", 1, bytes, sizeof bytes) != GDEFSTOR_OK) {
+  if (PutOne(write, "y", bytes, sizeof bytes) != GDEFSTOR_OK) {
     gdefstor_write_abort(write);
     state->rc = GDEFCORE_ERR_INTERNAL;
     return GDEFCORE_TURN_DONE;
@@ -400,7 +277,7 @@ extern "C" GDEFCORE_Turn YieldTurnBody(
     state->rc = GDEFCORE_ERR_INTERNAL;
     return GDEFCORE_TURN_DONE;
   }
-  if (gdefstor_blob_put(write, "t", 1, bytes, sizeof bytes) != GDEFSTOR_OK) {
+  if (PutOne(write, "t", bytes, sizeof bytes) != GDEFSTOR_OK) {
     gdefstor_write_abort(write);
     state->rc = GDEFCORE_ERR_INTERNAL;
     return GDEFCORE_TURN_DONE;
@@ -576,12 +453,11 @@ TEST(Write, OtherWaitAbortsThePortWrite) {
   GDEFCORE_Sched * sched = NULL;
   GDEFCORE_Request * request = NULL;
   GDEFSTOR_Store * store = NULL;
-  Mem mem;
   uint8_t * got = NULL;
   size_t got_len = 0;
   WriteState state;
   memset(&state, 0, sizeof state);
-  store = OpenStore(&mem);
+  store = OpenStore();
   ASSERT_NE(store, nullptr);
   ASSERT_EQ(gdefcore_sched_create(NULL, 1, 0, &sched), GDEFCORE_OK);
   state.sched = sched;
@@ -597,9 +473,11 @@ TEST(Write, OtherWaitAbortsThePortWrite) {
   EXPECT_EQ(state.offload_ran, 0);
   EXPECT_EQ(gdefcore_request_status(request), GDEFCORE_ERR_INVALID);
   EXPECT_EQ(gdefcore_request_write(request), nullptr);
-  EXPECT_EQ(gdefstor_blob_get(store, tenant, strlen(tenant), "h", 1, &got,
-                &got_len),
-      GDEFSTOR_ERR_INVALID);
+  int found = 1;
+  EXPECT_EQ(gdefstor_record_get(store, tenant, strlen(tenant), "core.test", 9,
+                "h", 1, &found, &got, &got_len),
+      GDEFSTOR_OK);
+  EXPECT_EQ(found, 0);
   EXPECT_EQ(got, nullptr);
   {
     GDEFSTOR_Write * again = NULL;
@@ -618,11 +496,10 @@ TEST(Write, YieldWhileHoldingAbortsThePortWrite) {
   GDEFCORE_Sched * sched = NULL;
   GDEFCORE_Request * request = NULL;
   GDEFSTOR_Store * store = NULL;
-  Mem mem;
   GDEFSTOR_Write * again = NULL;
   YieldState state;
   memset(&state, 0, sizeof state);
-  store = OpenStore(&mem);
+  store = OpenStore();
   ASSERT_NE(store, nullptr);
   ASSERT_EQ(gdefcore_sched_create(NULL, 1, 0, &sched), GDEFCORE_OK);
   state.sched = sched;
@@ -651,11 +528,10 @@ TEST(Write, TurnAgainWhileHoldingAbortsThePortWrite) {
   GDEFCORE_Sched * sched = NULL;
   GDEFCORE_Request * request = NULL;
   GDEFSTOR_Store * store = NULL;
-  Mem mem;
   GDEFSTOR_Write * again = NULL;
   YieldState state;
   memset(&state, 0, sizeof state);
-  store = OpenStore(&mem);
+  store = OpenStore();
   ASSERT_NE(store, nullptr);
   ASSERT_EQ(gdefcore_sched_create(NULL, 1, 0, &sched), GDEFCORE_OK);
   state.sched = sched;
