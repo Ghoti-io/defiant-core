@@ -45,6 +45,7 @@
 #include <ghoti.io/archive/zip.h>
 #include <ghoti.io/cutil/allocator.h>
 #include <ghoti.io/defiant-core/access.h>
+#include <ghoti.io/defiant-core/module.h>
 #include <ghoti.io/defiant-core/render.h>
 #include <ghoti.io/defiant-storage/core.h>
 #include <ghoti.io/defiant-storage/model.h>
@@ -56,6 +57,7 @@
 #include <ghoti.io/security/random.h>
 #include <ghoti.io/security/secret.h>
 
+#include <stdarg.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -1508,6 +1510,170 @@ static void json_u64(Buf * b, uint64_t v) {
   }
 }
 
+/* One value of a draft tree that names the subject, written as an entry of
+ * the export's "drafts". */
+static GDEFCORE_Result draft_value(GDEFCORE_Subjects * subjects,
+    const char * sid, const uint8_t raw[kKey], const char * pid,
+    size_t pid_len, const char * type, size_t type_len, const char * lang,
+    size_t lang_len, uint64_t base, uint64_t item, const char * path,
+    size_t path_len, const char * sealed, size_t sealed_len, int * first,
+    Buf * buf) {
+  char * plain = NULL;
+  size_t plain_len = 0;
+  GDEFCORE_Result rc = decrypt_text(subjects, sid, raw, path, path_len,
+      sealed, sealed_len, &plain, &plain_len);
+  if (rc == GDEFCORE_OK && !utf8_ok((const uint8_t *)plain, plain_len)) {
+    rc = GDEFCORE_ERR_INVALID;
+  }
+  if (rc == GDEFCORE_OK) {
+    if (!*first) {
+      buf_add(buf, ",", 1);
+    }
+    *first = 0;
+    buf_add(buf, "{\"entity\":", 10);
+    json_escape(buf, pid, pid_len);
+    buf_add(buf, ",\"type\":", 8);
+    json_escape(buf, type, type_len);
+    buf_add(buf, ",\"field\":", 9);
+    json_escape(buf, path, path_len);
+    buf_add(buf, ",\"lang\":", 8);
+    json_escape(buf, lang, lang_len);
+    buf_add(buf, ",\"item\":", 8);
+    json_u64(buf, item);
+    buf_add(buf, ",\"base\":", 8);
+    json_u64(buf, base);
+    buf_add(buf, ",\"text\":", 8);
+    json_escape(buf, plain, plain_len);
+    buf_add(buf, "}", 1);
+  }
+  if (plain != NULL) {
+    wipe(plain, plain_len);
+    gdefcore_subject_free(subjects, plain);
+  }
+  return rc;
+}
+
+/* The values naming the subject in one language of one draft: the draft's
+ * own tree in that language (gdefcore_entity_tree(), the draft view), every
+ * value at every depth whose stored subject is this one. */
+static GDEFCORE_Result draft_language(GDEFCORE_Subjects * subjects,
+    GDEFCORE_Catalog * catalog, const char * sid, const uint8_t raw[kKey],
+    const char * pid, size_t pid_len, const char * type, size_t type_len,
+    uint64_t base, const char * lang, size_t lang_len, int * first,
+    Buf * buf) {
+  GDEFCORE_Tree * tree = NULL;
+  size_t n;
+  size_t i;
+  GDEFCORE_Result rc = gdefcore_entity_tree(catalog, NULL,
+      GDEFCORE_VIEW_DRAFT, pid, pid_len, lang, lang_len, &tree);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  n = gdefcore_tree_item_count(tree);
+  for (i = 0; rc == GDEFCORE_OK && i < n; i++) {
+    GDEFCORE_TreeItem it;
+    size_t k;
+    memset(&it, 0, sizeof it);
+    it.size = sizeof it;
+    rc = gdefcore_tree_item(tree, i, &it);
+    for (k = 0; rc == GDEFCORE_OK && k < it.value_count; k++) {
+      const char * f = NULL;
+      size_t fn = 0;
+      const char * text = NULL;
+      size_t text_len = 0;
+      const char * sub = NULL;
+      size_t sub_len = 0;
+      char path[512];
+      size_t path_len;
+      rc = gdefcore_tree_value(tree, i, k, &f, &fn, &text, &text_len);
+      if (rc == GDEFCORE_OK) {
+        rc = gdefcore_tree_value_subject(tree, i, k, &sub, &sub_len);
+      }
+      if (rc != GDEFCORE_OK ||
+          !span_eq(sub, sub_len, sid, GDEFCORE_PUBLIC_ID_LEN)) {
+        continue;
+      }
+      /* The value's field path: the item's own value is its field's; any
+       * other is that path and the value's field. */
+      if (fn == 0) {
+        path_len = it.path_len;
+      } else if (it.path_len == 0) {
+        path_len = fn;
+      } else {
+        path_len = it.path_len + 1 + fn;
+      }
+      if (path_len >= sizeof path) {
+        rc = GDEFCORE_ERR_LIMIT;
+        break;
+      }
+      if (fn == 0) {
+        memcpy(path, it.path, it.path_len);
+      } else if (it.path_len == 0) {
+        memcpy(path, f, fn);
+      } else {
+        memcpy(path, it.path, it.path_len);
+        path[it.path_len] = '.';
+        memcpy(path + it.path_len + 1, f, fn);
+      }
+      path[path_len] = '\0';
+      rc = draft_value(subjects, sid, raw, pid, pid_len, type, type_len, lang,
+          lang_len, base, it.id, path, path_len, text, text_len, first, buf);
+    }
+  }
+  gdefcore_tree_free(tree);
+  return rc;
+}
+
+/* "Everything about this person" in drafts (story S8): a draft is JSON
+ * outside the revision tables, so the subject lookup cannot see it. Every
+ * draft of the tenant is read, in each language it holds. */
+static GDEFCORE_Result export_drafts(GDEFCORE_Subjects * subjects,
+    GDEFCORE_Catalog * catalog, const char * sid, const uint8_t raw[kKey],
+    Buf * buf) {
+  GDEFSTOR_DraftList * list = NULL;
+  int first = 1;
+  size_t i;
+  GDEFCORE_Result rc = from_stor(gdefstor_draft_list(subjects->data,
+      (const char *)subjects->tenant, subjects->tenant_len, &list));
+  buf_add(buf, ",\"drafts\":[", 11);
+  for (i = 0; rc == GDEFCORE_OK && i < gdefstor_draft_list_count(list); i++) {
+    const char * pid = NULL;
+    size_t pid_len = 0;
+    const char * type = NULL;
+    size_t type_len = 0;
+    GDEFSTOR_Draft * d = NULL;
+    GDEFSTOR_DraftInfo info;
+    size_t li;
+    rc = from_stor(gdefstor_draft_list_item(list, i, &pid, &pid_len, &type,
+        &type_len));
+    if (rc == GDEFCORE_OK) {
+      rc = from_stor(gdefstor_draft_get(subjects->data,
+          (const char *)subjects->tenant, subjects->tenant_len, pid, pid_len,
+          &d));
+    }
+    memset(&info, 0, sizeof info);
+    info.size = sizeof info;
+    if (rc == GDEFCORE_OK) {
+      rc = from_stor(gdefstor_draft_info(d, &info));
+    }
+    for (li = 0; rc == GDEFCORE_OK && li < info.language_count; li++) {
+      GDEFSTOR_DraftTree dt;
+      memset(&dt, 0, sizeof dt);
+      dt.size = sizeof dt;
+      rc = from_stor(gdefstor_draft_tree(d, li, &dt));
+      if (rc == GDEFCORE_OK) {
+        rc = draft_language(subjects, catalog, sid, raw, pid, pid_len, type,
+            type_len, info.base_revision, dt.language, dt.language_len,
+            &first, buf);
+      }
+    }
+    gdefstor_draft_free(d);
+  }
+  gdefstor_draft_list_free(list);
+  buf_add(buf, "]", 1);
+  return rc;
+}
+
 GDEFCORE_Result gdefcore_subject_export(GDEFCORE_Subjects * subjects,
     GDEFCORE_Catalog * catalog, const char * subject, size_t subject_len,
     char ** out_json, size_t * out_len) {
@@ -1611,9 +1777,13 @@ GDEFCORE_Result gdefcore_subject_export(GDEFCORE_Subjects * subjects,
     }
     gdefstor_tree_free(tree);
   }
-  wipe(raw, sizeof raw);
   gdefstor_subject_hits_free(hits);
-  buf_add(&buf, "]}", 2);
+  buf_add(&buf, "]", 1);
+  if (rc == GDEFCORE_OK) {
+    rc = export_drafts(subjects, catalog, sid, raw, &buf);
+  }
+  wipe(raw, sizeof raw);
+  buf_add(&buf, "}", 1);
   if (rc != GDEFCORE_OK) {
     if (buf.p != NULL) {
       wipe(buf.p, buf.n);
@@ -2000,22 +2170,118 @@ static GDEFCORE_Result replay_ledger(GDEFCORE_Subjects * subjects,
   return rc;
 }
 
+/* ---- what a data set says the tenant needs (AD-23, story S8) ------------- */
+
+enum { kModulesMax = 64 };
+
+/* One module: its name and the stored-data schema version its data is at. */
+typedef struct ModRec {
+  char name[GDEFSTOR_SNAPSHOT_MODULE_NAME_MAX + 1];
+  size_t len;
+  uint32_t schema;
+} ModRec;
+
+/* A positive decimal without leading zeros that fits in 32 bits. */
+static int schema_text(const char * p, size_t n, uint32_t * out) {
+  uint64_t v = 0;
+  size_t i;
+  if (p == NULL || n == 0 || n > 10 || p[0] == '0') {
+    return 0;
+  }
+  for (i = 0; i < n; i++) {
+    if (p[i] < '0' || p[i] > '9') {
+      return 0;
+    }
+    v = v * 10u + (uint64_t)(p[i] - '0');
+  }
+  if (v > UINT32_MAX) {
+    return 0;
+  }
+  *out = (uint32_t)v;
+  return 1;
+}
+
+/* The tenant's enabled modules, from its own records, in key order: what the
+ * data set it is in says, so the manifest and the records agree. */
+static GDEFCORE_Result enabled_modules(GDEFCORE_Subjects * subjects,
+    GDEFSTOR_Store * store, ModRec * out, size_t * out_n) {
+  static const char ns[] = GDEFCORE_MODULE_ENABLED_TYPE;
+  uint64_t offset = 0;
+  *out_n = 0;
+  for (;;) {
+    GDEFSTOR_RecordList * list = NULL;
+    size_t count;
+    size_t i;
+    GDEFCORE_Result rc = from_stor(gdefstor_record_list(store,
+        (const char *)subjects->tenant, subjects->tenant_len, ns,
+        sizeof ns - 1, "", 0, offset, GDEFSTOR_RECORD_MAX_PAGE, &list));
+    if (rc != GDEFCORE_OK) {
+      return rc;
+    }
+    count = gdefstor_record_list_count(list);
+    for (i = 0; rc == GDEFCORE_OK && i < count; i++) {
+      const char * key = NULL;
+      size_t key_len = 0;
+      const uint8_t * bytes = NULL;
+      size_t blen = 0;
+      rc = from_stor(gdefstor_record_list_item(list, i, &key, &key_len,
+          &bytes, &blen));
+      if (rc == GDEFCORE_OK && *out_n >= kModulesMax) {
+        rc = GDEFCORE_ERR_LIMIT;
+      }
+      if (rc == GDEFCORE_OK &&
+          (key_len == 0 || key_len > GDEFSTOR_SNAPSHOT_MODULE_NAME_MAX ||
+              !schema_text((const char *)bytes, blen, &out[*out_n].schema))) {
+        rc = GDEFCORE_ERR_CORRUPT;
+      }
+      if (rc == GDEFCORE_OK) {
+        memcpy(out[*out_n].name, key, key_len);
+        out[*out_n].name[key_len] = '\0';
+        out[*out_n].len = key_len;
+        *out_n += 1;
+      }
+    }
+    gdefstor_record_list_free(list);
+    if (rc != GDEFCORE_OK || count < GDEFSTOR_RECORD_MAX_PAGE) {
+      return rc;
+    }
+    offset += count;
+  }
+}
+
 GDEFCORE_Result gdefcore_subject_snapshot(GDEFCORE_Subjects * subjects,
-    GDEFSTOR_Store * tenant_store, uint8_t ** out_bytes, size_t * out_len) {
+    GDEFSTOR_Store * tenant_store, const char * edition, size_t edition_len,
+    uint8_t ** out_bytes, size_t * out_len) {
+  ModRec mods[kModulesMax];
+  GDEFSTOR_SnapshotModule list[kModulesMax];
+  size_t n = 0;
+  size_t i;
   int64_t taken;
+  GDEFCORE_Result rc;
   if (subjects == NULL || tenant_store == NULL || out_bytes == NULL ||
-      out_len == NULL) {
+      out_len == NULL || (edition == NULL && edition_len != 0)) {
     return GDEFCORE_ERR_INVALID;
+  }
+  rc = enabled_modules(subjects, tenant_store, mods, &n);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  for (i = 0; i < n; i++) {
+    list[i].name = mods[i].name;
+    list[i].name_len = mods[i].len;
+    list[i].schema = mods[i].schema;
   }
   taken = now_ms();
   if (taken < 0) {
     return GDEFCORE_ERR_IO;
   }
-  /* The data set: the tenant's rows and when they were taken. No key, no
-   * keyring wrap and no ledger: those are the key set's. */
-  return from_stor(gdefstor_snapshot_export_at(tenant_store,
+  /* The data set: the tenant's rows, when they were taken, and what the
+   * tenant needs to come back up (its edition, its modules and the schema
+   * each one's data is at). No key, no keyring wrap and no ledger: those are
+   * the key set's. */
+  return from_stor(gdefstor_snapshot_export_tenant(tenant_store,
       (const char *)subjects->tenant, subjects->tenant_len, NULL, taken,
-      out_bytes, out_len));
+      edition, edition_len, list, n, out_bytes, out_len));
 }
 
 GDEFCORE_Result gdefcore_subject_keyset(GDEFCORE_Subjects * subjects,
@@ -2162,8 +2428,57 @@ static GDEFCORE_Result from_garc(GARC_Result gr) {
   return GDEFCORE_ERR_CORRUPT;
 }
 
+/* What the walk of a data set saw that a restore checks before it writes:
+ * the modules its records enable, at the schema their records hold. */
+typedef struct Walk {
+  ModRec mods[kModulesMax];
+  size_t n;
+  int bad; /* a module record that is not a name and a schema version */
+} Walk;
+
+static const char kRecordsMember[] = "model/records.json";
+
+/* The records member's module records (formats.md:
+ * `{"records":[{"namespace":…,"key":…,"text":…|"hex":…}]}`). Anything else
+ * in it is the storage import's to judge. */
+static void walk_records(const GTEXT_JSON_Value * root, Walk * walk) {
+  static const char ns[] = GDEFCORE_MODULE_ENABLED_TYPE;
+  const GTEXT_JSON_Value * arr = gtext_json_object_get(root, "records", 7);
+  size_t i;
+  for (i = 0; i < gtext_json_array_size(arr); i++) {
+    const GTEXT_JSON_Value * r = gtext_json_array_get(arr, i);
+    const char * s = NULL;
+    size_t sn = 0;
+    const char * key = NULL;
+    size_t key_len = 0;
+    const char * text = NULL;
+    size_t text_len = 0;
+    uint32_t schema = 0;
+    if (gtext_json_get_string(gtext_json_object_get(r, "namespace", 9), &s,
+            &sn) != GTEXT_JSON_OK ||
+        !span_eq(s, sn, ns, sizeof ns - 1)) {
+      continue;
+    }
+    if (gtext_json_get_string(gtext_json_object_get(r, "key", 3), &key,
+            &key_len) != GTEXT_JSON_OK ||
+        key_len == 0 || key_len > GDEFSTOR_SNAPSHOT_MODULE_NAME_MAX ||
+        gtext_json_get_string(gtext_json_object_get(r, "text", 4), &text,
+            &text_len) != GTEXT_JSON_OK ||
+        !schema_text(text, text_len, &schema) || walk->n >= kModulesMax) {
+      walk->bad = 1;
+      continue;
+    }
+    memcpy(walk->mods[walk->n].name, key, key_len);
+    walk->mods[walk->n].name[key_len] = '\0';
+    walk->mods[walk->n].len = key_len;
+    walk->mods[walk->n].schema = schema;
+    walk->n += 1;
+  }
+}
+
 static GDEFCORE_Result judge_member(const GDEFCORE_Allocator * alloc,
-    const uint8_t * body, size_t n) {
+    const char * name, size_t name_len, const uint8_t * body, size_t n,
+    Walk * walk) {
   GTEXT_JSON_Parse_Options opt;
   GTEXT_JSON_Error err;
   GTEXT_JSON_Value * root;
@@ -2187,6 +2502,10 @@ static GDEFCORE_Result judge_member(const GDEFCORE_Allocator * alloc,
     return GDEFCORE_ERR_CORRUPT;
   }
   rc = judge_object(root);
+  if (rc == GDEFCORE_OK && walk != NULL &&
+      span_eq(name, name_len, kRecordsMember, sizeof kRecordsMember - 1)) {
+    walk_records(root, walk);
+  }
   gtext_json_free(root);
   return rc;
 }
@@ -2195,7 +2514,7 @@ static GDEFCORE_Result judge_member(const GDEFCORE_Allocator * alloc,
  * named tenant, an internal id, an installation-scope type or a mistyped
  * public id refuses the import. */
 static GDEFCORE_Result archive_refuse(const GDEFCORE_Allocator * alloc,
-    const uint8_t * bytes, size_t len) {
+    const uint8_t * bytes, size_t len, Walk * walk) {
   GARC_Stream * stream = NULL;
   GARC_Archive * archive = NULL;
   GARC_Limits alimits;
@@ -2264,7 +2583,8 @@ static GDEFCORE_Result archive_refuse(const GDEFCORE_Allocator * alloc,
       got_total += got;
     }
     if (rc == GDEFCORE_OK) {
-      rc = judge_member(alloc, body, (size_t)member->size);
+      rc = judge_member(alloc, member->name, member->name_length, body,
+          (size_t)member->size, walk);
     }
     gcu_allocator_free(alloc, body);
     if (rc != GDEFCORE_OK) {
@@ -2304,19 +2624,369 @@ static GDEFCORE_Result keyset_check(GDEFCORE_Subjects * subjects,
   return rc;
 }
 
-GDEFCORE_Result gdefcore_subject_restore(GDEFCORE_Subjects * subjects,
+/* ---- the restore's report (story S8) ------------------------------------ */
+
+typedef struct RestoreHeld {
+  char * role;
+  size_t role_len;
+  char * permission;
+  size_t permission_len;
+  int risk;
+  char * confirmation;
+  size_t confirmation_len;
+  char * sentence;
+  size_t sentence_len;
+} RestoreHeld;
+
+struct GDEFCORE_Restore {
+  const GDEFCORE_Allocator * alloc;
+  char * reason;
+  size_t reason_len;
+  char edition[48];
+  size_t edition_len;
+  RestoreHeld * held;
+  size_t nheld;
+  size_t cap;
+  size_t migrated;
+};
+
+static GDEFCORE_Restore * report_new(const GDEFCORE_Allocator * alloc) {
+  GDEFCORE_Restore * r = (GDEFCORE_Restore *)mem(alloc, sizeof *r);
+  if (r != NULL) {
+    memset(r, 0, sizeof *r);
+    r->alloc = alloc;
+  }
+  return r;
+}
+
+/* The first reason given is the one kept: it names what stopped the
+ * restore. */
+#if defined(__GNUC__) || defined(__clang__)
+static void report_why(GDEFCORE_Restore * r, const char * fmt, ...)
+    __attribute__((format(printf, 2, 3)));
+#endif
+
+static void report_why(GDEFCORE_Restore * r, const char * fmt, ...) {
+  char text[768];
+  va_list ap;
+  int n;
+  if (r == NULL || r->reason != NULL) {
+    return;
+  }
+  va_start(ap, fmt);
+  n = vsnprintf(text, sizeof text, fmt, ap);
+  va_end(ap);
+  if (n <= 0) {
+    return;
+  }
+  if ((size_t)n >= sizeof text) {
+    n = (int)sizeof text - 1;
+  }
+  r->reason = dup_n(r->alloc, text, (size_t)n);
+  r->reason_len = r->reason == NULL ? 0 : (size_t)n;
+}
+
+/* A module name or a text from the archive, for a sentence: printable ASCII,
+ * at most 64 bytes, as it is; anything else as '?'. */
+static void shown(char * out, size_t cap, const char * s, size_t n) {
+  size_t i;
+  size_t at = 0;
+  for (i = 0; i < n && at + 1 < cap; i++) {
+    unsigned char c = (unsigned char)s[i];
+    out[at++] = c >= 0x20 && c < 0x7f && c != '"' ? (char)c : '?';
+  }
+  out[at] = '\0';
+}
+
+const char * gdefcore_restore_reason(const GDEFCORE_Restore * report,
+    size_t * out_len) {
+  if (out_len != NULL) {
+    *out_len = report == NULL ? 0 : report->reason_len;
+  }
+  return report == NULL ? NULL : report->reason;
+}
+
+const char * gdefcore_restore_edition(const GDEFCORE_Restore * report,
+    size_t * out_len) {
+  if (out_len != NULL) {
+    *out_len = report == NULL ? 0 : report->edition_len;
+  }
+  return report == NULL ? "" : report->edition;
+}
+
+size_t gdefcore_restore_held_count(const GDEFCORE_Restore * report) {
+  return report == NULL ? 0 : report->nheld;
+}
+
+GDEFCORE_Result gdefcore_restore_held(const GDEFCORE_Restore * report,
+    size_t index, GDEFCORE_Restore_Held * out) {
+  const RestoreHeld * h;
+  if (report == NULL || out == NULL || out->size != sizeof *out ||
+      index >= report->nheld) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  h = &report->held[index];
+  out->role = h->role;
+  out->role_len = h->role_len;
+  out->permission = h->permission;
+  out->permission_len = h->permission_len;
+  out->risk = h->risk;
+  out->confirmation = h->confirmation;
+  out->confirmation_len = h->confirmation_len;
+  out->sentence = h->sentence;
+  out->sentence_len = h->sentence_len;
+  return GDEFCORE_OK;
+}
+
+size_t gdefcore_restore_migrated_count(const GDEFCORE_Restore * report) {
+  return report == NULL ? 0 : report->migrated;
+}
+
+void gdefcore_restore_free(GDEFCORE_Restore * report) {
+  size_t i;
+  if (report == NULL) {
+    return;
+  }
+  for (i = 0; i < report->nheld; i++) {
+    gcu_allocator_free(report->alloc, report->held[i].role);
+    gcu_allocator_free(report->alloc, report->held[i].permission);
+    gcu_allocator_free(report->alloc, report->held[i].confirmation);
+    gcu_allocator_free(report->alloc, report->held[i].sentence);
+  }
+  gcu_allocator_free(report->alloc, report->held);
+  gcu_allocator_free(report->alloc, report->reason);
+  gcu_allocator_free(report->alloc, report);
+}
+
+/* ---- the restore's steps ---------------------------------------------------- */
+
+/* The modules the data set needs, against what is installed here (AD-23):
+ * the manifest and the records it carries agree, every module is installed,
+ * and none of its data is at a schema newer than the installed one. Nothing
+ * is written. */
+static GDEFCORE_Result check_modules(struct GDEFCORE_Host * host,
+    const GDEFSTOR_SnapshotAbout * about, const Walk * walk,
+    GDEFCORE_Restore * report) {
+  size_t n = gdefstor_snapshot_about_module_count(about);
+  size_t i;
+  if (walk->bad) {
+    report_why(report, "The snapshot holds a record of an enabled module that "
+                       "is not a module name and a stored-data schema "
+                       "version, so nothing was restored.");
+    return GDEFCORE_ERR_CORRUPT;
+  }
+  if (n != walk->n) {
+    report_why(report, "The snapshot's manifest names %lu enabled modules and "
+                       "its records enable %lu, so it does not say what the "
+                       "tenant needs and nothing was restored.",
+        (unsigned long)n, (unsigned long)walk->n);
+    return GDEFCORE_ERR_CORRUPT;
+  }
+  for (i = 0; i < n; i++) {
+    GDEFSTOR_SnapshotModule m;
+    char name[GDEFSTOR_SNAPSHOT_MODULE_NAME_MAX + 1];
+    uint32_t here = 0;
+    GDEFCORE_Result rc = from_stor(gdefstor_snapshot_about_module(about, i,
+        &m));
+    if (rc != GDEFCORE_OK) {
+      return rc;
+    }
+    shown(name, sizeof name, m.name, m.name_len);
+    if (!span_eq(m.name, m.name_len, walk->mods[i].name, walk->mods[i].len) ||
+        m.schema != walk->mods[i].schema) {
+      report_why(report, "The snapshot's manifest says module %s's data is at "
+                         "stored-data schema version %lu, and its records do "
+                         "not enable it at that version, so nothing was "
+                         "restored.",
+          name, (unsigned long)m.schema);
+      return GDEFCORE_ERR_CORRUPT;
+    }
+    if (gdefcore_module_schema(host, m.name, m.name_len, &here) !=
+        GDEFCORE_OK) {
+      report_why(report, "The snapshot's tenant has module %s enabled, with "
+                         "its data at stored-data schema version %lu, and "
+                         "module %s is not installed here, so nothing was "
+                         "restored. Install it first.",
+          name, (unsigned long)m.schema, name);
+      return GDEFCORE_ERR_UNSUPPORTED;
+    }
+    if (m.schema > here) {
+      report_why(report, "The snapshot holds module %s's data at stored-data "
+                         "schema version %lu, newer than version %lu of module "
+                         "%s installed here, so nothing was restored. Install "
+                         "module %s at version %lu or later first.",
+          name, (unsigned long)m.schema, (unsigned long)here, name, name,
+          (unsigned long)m.schema);
+      return GDEFCORE_ERR_UNSUPPORTED;
+    }
+  }
+  return GDEFCORE_OK;
+}
+
+/* One grant to a state, held back: kept in the report with a sentence. */
+static GDEFCORE_Result on_held(void * ctx, const GDEFCORE_Access_Held * h) {
+  GDEFCORE_Restore * r = (GDEFCORE_Restore * )ctx;
+  RestoreHeld * slot;
+  char label[96];
+  char role[32];
+  char action[72];
+  char type[96];
+  char field[72];
+  char text[768];
+  int n;
+  if (r == NULL) {
+    return GDEFCORE_OK; /* held all the same; nobody asked to be told */
+  }
+  if (r->nheld == r->cap) {
+    size_t cap = r->cap == 0 ? 4 : r->cap * 2;
+    RestoreHeld * next = (RestoreHeld *)gcu_allocator_realloc(r->alloc,
+        r->held, cap * sizeof *next);
+    if (next == NULL) {
+      return GDEFCORE_ERR_OOM;
+    }
+    r->held = next;
+    r->cap = cap;
+  }
+  shown(label, sizeof label, h->label, h->label_len);
+  shown(role, sizeof role, h->role, h->role_len);
+  shown(action, sizeof action, h->action, h->action_len);
+  shown(type, sizeof type, h->type_name, h->type_name_len);
+  shown(field, sizeof field, h->field, h->field_len);
+  n = snprintf(text, sizeof text,
+      "The snapshot grants \"%s\" (%s on %s%s%s, %s risk) to %s, and it was not "
+      "applied: granting anything to %s needs a typed confirmation. To apply "
+      "it, grant it to %s again with the confirmation \"%.*s\".",
+      label, action, type, field[0] != '\0' ? ", field " : "", field,
+      gdefcore_access_risk_name(h->risk), role, role, role,
+      (int)h->confirmation_len, h->confirmation);
+  if (n <= 0) {
+    return GDEFCORE_ERR_INTERNAL;
+  }
+  if ((size_t)n >= sizeof text) {
+    n = (int)sizeof text - 1;
+  }
+  slot = &r->held[r->nheld];
+  memset(slot, 0, sizeof *slot);
+  slot->role = dup_n(r->alloc, h->role, h->role_len);
+  slot->permission = dup_n(r->alloc, h->permission, h->permission_len);
+  slot->confirmation = dup_n(r->alloc, h->confirmation, h->confirmation_len);
+  slot->sentence = dup_n(r->alloc, text, (size_t)n);
+  if (slot->role == NULL || slot->permission == NULL ||
+      slot->confirmation == NULL || slot->sentence == NULL) {
+    gcu_allocator_free(r->alloc, slot->role);
+    gcu_allocator_free(r->alloc, slot->permission);
+    gcu_allocator_free(r->alloc, slot->confirmation);
+    gcu_allocator_free(r->alloc, slot->sentence);
+    return GDEFCORE_ERR_OOM;
+  }
+  slot->role_len = h->role_len;
+  slot->permission_len = h->permission_len;
+  slot->risk = h->risk;
+  slot->confirmation_len = h->confirmation_len;
+  slot->sentence_len = (size_t)n;
+  r->nheld += 1;
+  return GDEFCORE_OK;
+}
+
+/* Step 2: the data set into the empty tenant, and every grant it gives a
+ * state held back for its confirmation (AD-11, AD-37): imported data passes
+ * the rating the admin edit does, and what that edit would ask to confirm is
+ * not applied by a restore nobody is watching. */
+static GDEFCORE_Result import_data(GDEFCORE_Subjects * subjects,
     GDEFSTOR_Store * tenant_store, const uint8_t * data, size_t data_len,
-    const uint8_t * keys, size_t keys_len) {
+    GDEFCORE_Restore * report) {
+  GDEFCORE_Catalog * catalog = NULL;
+  char * why = NULL;
+  size_t why_len = 0;
+  GDEFCORE_Result rc = from_stor(gdefstor_snapshot_import_explain(tenant_store,
+      (const char *)subjects->tenant, subjects->tenant_len, data, data_len,
+      NULL, &why, &why_len));
+  if (rc != GDEFCORE_OK) {
+    if (why != NULL) {
+      report_why(report, "The data set was not imported: %.*s.",
+          (int)(why_len > 600 ? 600 : why_len), why);
+    }
+    gdefstor_bytes_free(NULL, why);
+    return rc;
+  }
+  rc = gdefcore_catalog_open(tenant_store, subjects->tenant,
+      subjects->tenant_len, NULL, subjects->alloc, &catalog);
+  if (rc == GDEFCORE_OK) {
+    rc = gdefcore_access_hold_for_confirmation(catalog, on_held, report);
+  }
+  gdefcore_catalog_destroy(catalog);
+  return rc;
+}
+
+/* Step 3, the forward migrations: a module whose data the set holds at an
+ * older stored-data schema than the one installed is recorded at the
+ * installed one, as enabling it records it. Its rows keep their shape and are
+ * read through its upcasters (AD-15), so none is rewritten. */
+static GDEFCORE_Result forward_migrations(GDEFCORE_Subjects * subjects,
+    struct GDEFCORE_Host * host, GDEFSTOR_Store * tenant_store,
+    const GDEFSTOR_SnapshotAbout * about, GDEFCORE_Restore * report) {
+  static const char ns[] = GDEFCORE_MODULE_ENABLED_TYPE;
+  GDEFSTOR_Write * write = NULL;
+  size_t moved = 0;
+  size_t i;
+  GDEFCORE_Result rc = GDEFCORE_OK;
+  for (i = 0; rc == GDEFCORE_OK &&
+              i < gdefstor_snapshot_about_module_count(about);
+       i++) {
+    GDEFSTOR_SnapshotModule m;
+    uint32_t here = 0;
+    char text[16];
+    int n;
+    rc = from_stor(gdefstor_snapshot_about_module(about, i, &m));
+    if (rc == GDEFCORE_OK) {
+      rc = gdefcore_module_schema(host, m.name, m.name_len, &here);
+    }
+    if (rc != GDEFCORE_OK || m.schema >= here) {
+      continue;
+    }
+    if (write == NULL) {
+      rc = from_stor(gdefstor_write_begin(tenant_store,
+          (const char *)subjects->tenant, subjects->tenant_len, NULL, &write));
+      if (rc != GDEFCORE_OK) {
+        break;
+      }
+    }
+    n = snprintf(text, sizeof text, "%lu", (unsigned long)here);
+    rc = n > 0 && (size_t)n < sizeof text
+             ? from_stor(gdefstor_record_put(write, ns, sizeof ns - 1, m.name,
+                   m.name_len, (const uint8_t *)text, (size_t)n))
+             : GDEFCORE_ERR_INTERNAL;
+    moved += 1;
+  }
+  if (write != NULL) {
+    if (rc == GDEFCORE_OK) {
+      rc = from_stor(gdefstor_write_commit(write));
+    } else {
+      gdefstor_write_abort(write);
+    }
+  }
+  if (rc == GDEFCORE_OK && report != NULL) {
+    report->migrated = moved;
+  }
+  return rc;
+}
+
+/* Everything a restore checks before it writes: the archive as untrusted
+ * input, that it is a data set, its key set, and the modules it needs. */
+static GDEFCORE_Result restore_checks(GDEFCORE_Subjects * subjects,
+    struct GDEFCORE_Host * host, GDEFSTOR_Store * tenant_store,
+    const uint8_t * data, size_t data_len, const uint8_t * keys,
+    size_t keys_len, Walk * walk, GDEFSTOR_SnapshotAbout ** out_about,
+    GDEFCORE_Restore * report) {
   int found = 0;
   int64_t data_taken = 0;
   int64_t keys_taken = 0;
-  GDEFCORE_Result rc;
-  if (subjects == NULL || tenant_store == NULL ||
-      (data == NULL && data_len != 0) || (keys == NULL && keys_len != 0)) {
-    return GDEFCORE_ERR_INVALID;
-  }
-  rc = archive_refuse(subjects->alloc, data, data_len);
+  GDEFCORE_Result rc = archive_refuse(subjects->alloc, data, data_len, walk);
   if (rc != GDEFCORE_OK) {
+    report_why(report, "The data set was refused as it was read, before "
+                       "anything was written: a member name, a limit, a "
+                       "tenant, an internal id, an installation-scope type or "
+                       "a public id in it is not what a snapshot may hold.");
     return rc;
   }
   rc = from_stor(gdefstor_snapshot_taken(tenant_store, data, data_len, NULL,
@@ -2325,7 +2995,25 @@ GDEFCORE_Result gdefcore_subject_restore(GDEFCORE_Subjects * subjects,
     rc = GDEFCORE_ERR_FORMAT; /* not a data set: it says when it was taken */
   }
   if (rc == GDEFCORE_OK) {
+    rc = from_stor(gdefstor_snapshot_about(tenant_store, data, data_len, NULL,
+        out_about));
+    if (rc == GDEFCORE_OK && !gdefstor_snapshot_about_found(*out_about)) {
+      rc = GDEFCORE_ERR_FORMAT; /* nor what the tenant needs */
+    }
+  }
+  if (rc == GDEFCORE_ERR_FORMAT) {
+    report_why(report, "This is not the data set of a backup pair: it does "
+                       "not say when it was taken, or what the tenant needs "
+                       "(its edition and its modules), so nothing was "
+                       "restored.");
+  }
+  if (rc == GDEFCORE_OK) {
     rc = keyset_check(subjects, keys, keys_len, &keys_taken);
+    if (rc != GDEFCORE_OK) {
+      report_why(report, "The key set is not one this tenant can take (it is "
+                         "not a key set, or its keyring is another tenant's), "
+                         "so nothing was restored.");
+    }
   }
   if (rc != GDEFCORE_OK) {
     return rc;
@@ -2335,14 +3023,65 @@ GDEFCORE_Result gdefcore_subject_restore(GDEFCORE_Subjects * subjects,
   if (keys_taken < data_taken) {
     return GDEFCORE_ERR_STALE;
   }
-  /* The keys first: a merge that brings no key back for a subject either
+  return check_modules(host, *out_about, walk, report);
+}
+
+GDEFCORE_Result gdefcore_subject_restore(GDEFCORE_Subjects * subjects,
+    struct GDEFCORE_Host * host, GDEFSTOR_Store * tenant_store,
+    const uint8_t * data, size_t data_len, const uint8_t * keys,
+    size_t keys_len, GDEFCORE_Restore ** out_report) {
+  Walk * walk = NULL;
+  GDEFSTOR_SnapshotAbout * about = NULL;
+  GDEFCORE_Restore * report = NULL;
+  GDEFCORE_Result rc;
+  if (out_report != NULL) {
+    *out_report = NULL;
+  }
+  if (subjects == NULL || tenant_store == NULL ||
+      (data == NULL && data_len != 0) || (keys == NULL && keys_len != 0)) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  if (out_report != NULL) {
+    report = report_new(subjects->alloc);
+  }
+  walk = (Walk *)mem(subjects->alloc, sizeof *walk);
+  if (walk == NULL) {
+    rc = GDEFCORE_ERR_OOM;
+    goto done;
+  }
+  memset(walk, 0, sizeof *walk);
+  rc = restore_checks(subjects, host, tenant_store, data, data_len, keys,
+      keys_len, walk, &about, report);
+  if (rc == GDEFCORE_ERR_STALE) {
+    report_why(report, "The key set was taken before the data set it pairs "
+                       "with, so it could bring back a person erased in "
+                       "between, and nothing was restored. Restore with a "
+                       "key set taken after the data set.");
+  }
+  if (rc != GDEFCORE_OK) {
+    goto done;
+  }
+  if (report != NULL) {
+    const char * e = NULL;
+    size_t en = 0;
+    gdefstor_snapshot_about_edition(about, &e, &en);
+    if (en < sizeof report->edition) {
+      memcpy(report->edition, e, en);
+      report->edition[en] = '\0';
+      report->edition_len = en;
+    }
+  }
+  /* 1. The keys first: a merge that brings no key back for a subject either
    * ledger names, and that a retry repeats as a no-op. */
   rc = from_stor(gdefstor_keystore_import(subjects->keys,
       (const char *)subjects->tenant, subjects->tenant_len, keys, keys_len));
   if (rc == GDEFCORE_OK) {
-    rc = from_stor(gdefstor_snapshot_import(tenant_store,
-        (const char *)subjects->tenant, subjects->tenant_len, data, data_len,
-        NULL));
+    /* 2. The data set, its grants to a state held back. */
+    rc = import_data(subjects, tenant_store, data, data_len, report);
+  }
+  if (rc == GDEFCORE_OK) {
+    /* 3. The forward migrations. */
+    rc = forward_migrations(subjects, host, tenant_store, about, report);
   }
   if (rc == GDEFCORE_OK) {
     /* Then the ledger, the live one and the set's together now, before
@@ -2358,6 +3097,19 @@ GDEFCORE_Result gdefcore_subject_restore(GDEFCORE_Subjects * subjects,
     /* Last, the derived data a data set leaves out (AD-23): the blind index,
      * from the values that can still be decrypted. */
     rc = gdefcore_subject_reindex(subjects, tenant_store, NULL);
+  }
+  if (rc != GDEFCORE_OK) {
+    report_why(report, "The restore stopped after it had begun writing (%s); "
+                       "the tenant is not ready to be served.",
+        gdefcore_result_string(rc));
+  }
+done:
+  gcu_allocator_free(subjects->alloc, walk);
+  gdefstor_snapshot_about_free(about);
+  if (out_report != NULL) {
+    *out_report = report;
+  } else {
+    gdefcore_restore_free(report);
   }
   return rc;
 }

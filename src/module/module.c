@@ -67,7 +67,7 @@ static const char kCoreToken[] = TOKEN_STR(GHOTIIO_DEFCORE_NAME);
 static const char kEntrySymbol[] = "gdefcore_module_manifest";
 static const char kInstallTenant[] = "\x01";
 static const char kInstallType[] = "core.module.install";
-static const char kEnabledType[] = "core.module.enabled";
+static const char kEnabledType[] = GDEFCORE_MODULE_ENABLED_TYPE;
 
 typedef struct Name {
   char text[kNameMax + 1];
@@ -139,6 +139,7 @@ typedef struct Mod {
   Perm perms[kPermMax];
   size_t nperms;
   Decl * decl;
+  uint32_t schema; /* stored-data schema version (AD-15), 1 or more */
 } Mod;
 
 typedef struct ChainNode {
@@ -553,6 +554,15 @@ static GDEFCORE_Result put_install_row(GDEFSTOR_Write * write, const Mod * mod,
   if (mod->native) {
     rec_put(&b, "path", mod->path, mod->path_len);
   }
+  {
+    char schema[16];
+    int n = snprintf(schema, sizeof schema, "%lu",
+        (unsigned long)(mod->schema == 0 ? 1u : mod->schema));
+    if (n <= 0 || (size_t)n >= sizeof schema) {
+      return GDEFCORE_ERR_INTERNAL;
+    }
+    rec_put(&b, "schema", schema, (size_t)n);
+  }
   if (b.full) {
     return GDEFCORE_ERR_LIMIT;
   }
@@ -660,6 +670,8 @@ static GDEFCORE_Result copy_manifest(GDEFCORE_Host * host, Mod * mod,
     set_error(host, "Module core token is missing.");
     return GDEFCORE_ERR_INVALID;
   }
+  /* A manifest from before the member, and one that leaves it 0, is at 1. */
+  mod->schema = man.schema_version == 0 ? 1u : man.schema_version;
   if (man.nrels > kRelMax || man.nsubs > kSubMax || man.nservices > kSvcMax) {
     return GDEFCORE_ERR_LIMIT;
   }
@@ -966,6 +978,32 @@ static GDEFCORE_Result reload_one(GDEFCORE_Host * host, const Name * name) {
     mod.native = 1;
     rc = rec_copy(bytes, blen, "path", 4, mod.path, sizeof mod.path,
         &mod.path_len, 1);
+  }
+  if (rc == GDEFCORE_OK) {
+    /* What the install recorded, for a module that is not called again
+     * (quarantined); a record from before the line is at 1. */
+    char schema[16];
+    size_t schema_len = 0;
+    rc = rec_copy(bytes, blen, "schema", 6, schema, sizeof schema, &schema_len,
+        0);
+    mod.schema = 1;
+    if (rc == GDEFCORE_OK && schema_len > 0) {
+      uint64_t v = 0;
+      size_t i;
+      for (i = 0; i < schema_len; i++) {
+        if (schema[i] < '0' || schema[i] > '9' || v > UINT32_MAX / 10u) {
+          rc = GDEFCORE_ERR_CORRUPT;
+          break;
+        }
+        v = v * 10u + (uint64_t)(schema[i] - '0');
+      }
+      if (rc == GDEFCORE_OK && (v == 0 || v > UINT32_MAX)) {
+        rc = GDEFCORE_ERR_CORRUPT;
+      }
+      if (rc == GDEFCORE_OK) {
+        mod.schema = (uint32_t)v;
+      }
+    }
   }
   gdefstor_bytes_free(NULL, bytes);
   if (rc != GDEFCORE_OK) {
@@ -1439,6 +1477,26 @@ static GDEFCORE_Result enabled_names(GDEFCORE_Host * host, const uint8_t * tenan
   }
   return load_names(host, (const char *)tenant, tenant_len, kEnabledType, names,
       kModMax, out_n);
+}
+
+GDEFCORE_Result gdefcore_module_schema(const GDEFCORE_Host * host,
+    const char * name, size_t name_len, uint32_t * out_version) {
+  size_t i;
+  if (out_version == NULL || name == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  if (host == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  for (i = 0; i < host->nmods; i++) {
+    const Mod * mod = &host->mods[i];
+    if (mod->used && mod->name_len == name_len &&
+        memcmp(mod->name, name, name_len) == 0) {
+      *out_version = mod->schema == 0 ? 1u : mod->schema;
+      return GDEFCORE_OK;
+    }
+  }
+  return GDEFCORE_ERR_INVALID;
 }
 
 GDEFCORE_Result gdefcore_module_enabled(GDEFCORE_Host * host,
@@ -2648,9 +2706,18 @@ GDEFCORE_Result gdefcore_module_write_enables(GDEFCORE_Host * host,
       }
     }
   }
+  /* Each record holds the stored-data schema version the tenant's data for
+   * the module is written in from now on: the installed one (AD-15). */
   for (i = 0; i < nnames; i++) {
+    const Mod * mod = find_mod(host, names[i].text, names[i].len);
+    char schema[16];
+    int n = snprintf(schema, sizeof schema, "%lu",
+        (unsigned long)(mod == NULL || mod->schema == 0 ? 1u : mod->schema));
+    if (n <= 0 || (size_t)n >= sizeof schema) {
+      return GDEFCORE_ERR_INTERNAL;
+    }
     rc = map_stor(gdefstor_record_put(write, kEnabledType, strlen(kEnabledType),
-        names[i].text, names[i].len, (const uint8_t *)"1", 1));
+        names[i].text, names[i].len, (const uint8_t *)schema, (size_t)n));
     if (rc != GDEFCORE_OK) {
       return rc;
     }

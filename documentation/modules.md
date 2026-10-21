@@ -189,6 +189,24 @@ with `(related "blog.group-editor" (principal field.group))` (conditions.md).
   (`GDEFCORE_MODULE_RELATIONS_MAX`), four columns each. A manifest built before
   relations existed declares none.
 
+## Stored-data schema version
+
+A manifest says the version of the module's stored-data schema
+(`schema_version`, appended after relations; AD-15): what a tenant's data for
+the module is written in. 0, and a manifest built before the member, is 1.
+Until the suite's first release every module is at 1 (AD-34). Enabling a
+module writes the tenant's record of it (`core.module.enabled`, keyed by the
+module's name) with the installed version as its text, and every enable
+changeset writes the records of every module in the resulting set the same
+way. The install record keeps the version too, so a quarantined module, which
+is not called, still answers it (`gdefcore_module_schema`).
+
+A tenant's data set carries the records and names each enabled module with its
+version in its manifest (subjects.md, "Backups"). A restore refuses a data set
+whose data for a module is newer than the module installed here, or for a
+module not installed here, naming the module and both versions, and records a
+module whose data is older at the installed version.
+
 ## Hooks
 
 A hook is an event, an alter, or a decision.

@@ -520,7 +520,7 @@ TESTFLAGS := `PKG_CONFIG_PATH=$(PKG_CONFIG_LOOKUP_PATH) pkg-config --libs --cfla
 # coverage target does, because --coverage links the gcov runtime, whose
 # mangle_path check-symbols is right to reject in a shipping library and
 # wrong to reject in an instrumented one. Spelled as text's TEST_GATES is.
-TEST_GATES ?= check-symbols check-aliasing check-seams check-prefix check-labels check-access check-account check-inst check-subject check-keystore check-keystores check-form check-render check-erasure check-oracle check-readpaths check-routes check-tenant check-renderkey check-wait check-contexts check-bus check-defects check-safeout check-templates check-tpermission check-manifest check-conditions check-grants check-can check-revisions check-paths check-listplan check-relations check-groups check-personal
+TEST_GATES ?= check-symbols check-aliasing check-seams check-prefix check-labels check-access check-account check-inst check-subject check-keystore check-keystores check-form check-render check-erasure check-oracle check-readpaths check-routes check-tenant check-renderkey check-wait check-contexts check-bus check-defects check-safeout check-templates check-tpermission check-manifest check-conditions check-grants check-can check-revisions check-paths check-listplan check-relations check-groups check-personal check-restore
 
 # Valgrind flags (exclude "still reachable" as it's not a leak)
 # --suppressions: see tests/valgrind.supp. It holds allocations that are
@@ -1640,7 +1640,7 @@ $(FUZZ_FLAGS_STAMP): force-flags
 	@printf '%s\n' '$(FUZZ_CC) $(FUZZ_CXX) $(FUZZ_SAN) $(FUZZ_LIB_FLAGS) $(FUZZ_BIN_FLAGS) $(INCLUDE) $(STOR_LIBS) $(CUTIL_LIBS) $(SEC_LIBS) $(TEXT_LIBS) $(REGEX_LIBS) $(LTANG_LIBS) $(ARC_LIBS) $(MEM_LIBS) $(SQL_LIBS)' > $@.new
 	@cmp -s $@.new $@ 2>/dev/null && rm -f $@.new || mv -f $@.new $@
 
-.PHONY: check-seams check-prefix check-labels check-access check-account check-inst check-subject check-keystore check-keystores check-form check-render check-erasure check-oracle check-readpaths check-routes check-tenant check-renderkey check-wait check-contexts check-bus check-defects check-safeout check-templates check-tpermission check-manifest check-conditions check-grants check-can check-revisions check-paths check-listplan check-relations check-groups check-personal
+.PHONY: check-seams check-prefix check-labels check-access check-account check-inst check-subject check-keystore check-keystores check-form check-render check-erasure check-oracle check-readpaths check-routes check-tenant check-renderkey check-wait check-contexts check-bus check-defects check-safeout check-templates check-tpermission check-manifest check-conditions check-grants check-can check-revisions check-paths check-listplan check-relations check-groups check-personal check-restore
 check-seams: ## Fail if a subsystem includes another's private header
 	@tools/check-seams.sh .
 check-prefix: ## Fail if a derived Defiant prefix collides or a dependency is out of order
@@ -1710,6 +1710,16 @@ ifeq ($(strip $(PG_LIBS)),)
 else
 	@GDEFCORE_TEST_LISTPLAN=postgres LD_LIBRARY_PATH="$(TEST_LD_PATH)" $(APP_DIR)/testListplan$(EXE_EXTENSION) --gtest_brief=1
 endif
+# The restore through core on Postgres (story S8): a tenant taken on memory
+# restored into the Postgres entity port. A server again, so the same derived
+# image and tools/pg-test.sh as above.
+.PHONY: test-restore-postgres
+test-restore-postgres: $(APP_DIR)/testRestore$(EXE_EXTENSION) ## The restore through core into Postgres (a server: defiant-storage-postgres's tools/pg-test.sh)
+ifeq ($(strip $(PG_LIBS)),)
+	@printf '%s\n' "test-restore-postgres: ghoti.io-defiant-storage-postgres was not found by pkg-config. It builds only in its derived image (ghoti-build:gcc16 plus libpq-dev, from defiant-storage-postgres's Containerfile): install it into PREFIX there and run this target through that library's tools/pg-test.sh." >&2; exit 1
+else
+	@GDEFCORE_TEST_RESTORE=postgres LD_LIBRARY_PATH="$(TEST_LD_PATH)" $(APP_DIR)/testRestore$(EXE_EXTENSION) --gtest_brief=1
+endif
 check-form: $(APP_DIR)/testForm$(EXE_EXTENSION) ## A signed submit stores a draft, with a plant
 	@LD_LIBRARY_PATH="$(TEST_LD_PATH)" tools/check-form.sh "$(APP_DIR)/testForm$(EXE_EXTENSION)"
 check-render: $(APP_DIR)/testRender$(EXE_EXTENSION) ## A tiny scope returns a prefix, with a plant
@@ -1738,3 +1748,5 @@ check-groups: $(APP_DIR)/testGroups$(EXE_EXTENSION) ## Nested groups, multiples 
 	@tools/check-groups.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX))
 check-personal: $(APP_DIR)/testPersonal$(EXE_EXTENSION) ## Personal data names its subject and decrypts in the read path (story S7); real-source plants
 	@tools/check-personal.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX))
+check-restore: $(APP_DIR)/testRestore$(EXE_EXTENSION) $(APP_DIR)/testPersonal$(EXE_EXTENSION) ## A backup pair restored through core in AD-23's order, across backends (story S8); real-source plants
+	@tools/check-restore.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX))

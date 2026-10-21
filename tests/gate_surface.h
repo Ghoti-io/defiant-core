@@ -89,6 +89,7 @@ static const Surface kSurface[] = {
     {"gdefcore_access_grant_risk_on", "P"},
     {"gdefcore_access_grant_changes_own_field", "P"},
     {"gdefcore_access_risk_name", "P"},
+    {"gdefcore_access_hold_for_confirmation", "W"},
     {"gdefcore_access_revision_values", "RF"},
     {"gdefcore_access_matrix", "RF"},
     {"gdefcore_access_matrix_free", "P"},
@@ -320,6 +321,7 @@ static const Surface kSurface[] = {
     {"gdefcore_module_error", "P"},
     {"gdefcore_module_mark_entered", "W"},
     {"gdefcore_module_service", "RF"},
+    {"gdefcore_module_schema", "P"},
     {"gdefcore_module_text_free", "P"},
     {"gdefcore_hook_fire", "RF"},
     {"gdefcore_hook_skipped", "P"},
@@ -453,6 +455,12 @@ static const Surface kSurface[] = {
     {"gdefcore_subject_snapshot", "RA"},
     {"gdefcore_subject_keyset", "RA"},
     {"gdefcore_subject_restore", "W"},
+    {"gdefcore_restore_reason", "P"},
+    {"gdefcore_restore_edition", "P"},
+    {"gdefcore_restore_held_count", "P"},
+    {"gdefcore_restore_held", "P"},
+    {"gdefcore_restore_migrated_count", "P"},
+    {"gdefcore_restore_free", "P"},
     {"gdefcore_subject_key", "RA"},
 };
 

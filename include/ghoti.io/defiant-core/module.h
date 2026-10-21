@@ -482,6 +482,14 @@ typedef struct GDEFCORE_Module_Variable {
  * @ref core_token is the namespace token the module was built against. The
  * host refuses a token that is not the running core's, and the error names
  * both.
+ *
+ * @ref schema_version is the version of the module's stored-data schema
+ * (AD-15): what a tenant's data for the module is written in. 0, and a
+ * manifest from before the member (a smaller @ref size), read as 1. A tenant's
+ * record of an enabled module holds the version its data is at
+ * (::GDEFCORE_MODULE_ENABLED_TYPE), a snapshot carries it (AD-23), and a
+ * restore refuses data at a version newer than the one installed
+ * (gdefcore_subject_restore()).
  */
 typedef struct GDEFCORE_Module_Manifest {
   size_t size;                              ///< Prefix the module filled.
@@ -511,7 +519,16 @@ typedef struct GDEFCORE_Module_Manifest {
   size_t ngrants;                           ///< How many grants.
   const GDEFCORE_Module_Relation * relations; ///< Declared relations. May be NULL.
   size_t nrelations;                        ///< How many relations.
+  uint32_t schema_version;                  ///< Stored-data schema version; 0 is 1.
 } GDEFCORE_Module_Manifest;
+
+/**
+ * The record namespace of a tenant's enabled modules (story S6b): one record
+ * per module, keyed by its name, whose text is the stored-data schema version
+ * the tenant's data for it is at, in decimal (story S8). A snapshot carries
+ * them with the rest of the tenant's records (AD-23).
+ */
+#define GDEFCORE_MODULE_ENABLED_TYPE "core.module.enabled"
 
 /** The entry a native module exports and a guest hands to the host. */
 typedef const GDEFCORE_Module_Manifest * (*GDEFCORE_Module_Entry)(void);
@@ -587,6 +604,17 @@ GDEFCORE_API GDEFCORE_Result gdefcore_module_enable(GDEFCORE_Host * host,
  */
 GDEFCORE_API GDEFCORE_Result gdefcore_module_disable(GDEFCORE_Host * host,
     GDEFCORE_Changeset * changeset, const char * name, size_t name_len);
+
+/**
+ * @brief The stored-data schema version of installed module @p name: its
+ * manifest's ::GDEFCORE_Module_Manifest::schema_version, 1 when it says 0.
+ *
+ * A quarantined native module answers the version its install recorded.
+ * @return ::GDEFCORE_OK, or ::GDEFCORE_ERR_INVALID when no module of that
+ *   name is installed (a NULL @p host has none).
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_module_schema(const GDEFCORE_Host * host,
+    const char * name, size_t name_len, uint32_t * out_version);
 
 /**
  * @brief Whether @p name is enabled for the request's tenant.

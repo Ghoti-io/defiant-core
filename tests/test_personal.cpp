@@ -1183,6 +1183,92 @@ TEST_F(Personal, EverythingAboutThisPersonListsEveryValueAcrossTypesGroupsAndHis
   }());
 }
 
+/* "Everything about this person" lists a draft's values too (story S8): a
+ * draft is JSON outside the revision tables, so the subject lookup does not
+ * see it. The draft of a published member and the draft that reserves a case
+ * never saved are both listed, at every depth, with the draft's base; another
+ * person's value in the same draft is not, and is in theirs (the control). */
+TEST_F(Personal, EverythingAboutThisPersonListsEveryDraftsValues) {
+  std::string sa;
+  std::string a = Member(&sa);
+  ASSERT_EQ(GDEFCORE_OK, Say(a, "name", "Ann"));
+  std::string other = NewSubject();
+  {
+    GDEFCORE_Changeset * cs = NULL;
+    GDEFCORE_Value v;
+    std::string sealed = Seal(sa, "name", "Annie-draft");
+    const char * texts[1] = {sealed.c_str()};
+    size_t lens[1] = {sealed.size()};
+    memset(&v, 0, sizeof v);
+    v.size = sizeof v;
+    v.field = "name";
+    v.field_len = 4;
+    v.texts = texts;
+    v.text_lens = lens;
+    v.count = 1;
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_accept_sealed(cs));
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_entity_save_draft(cs, a.data(), a.size(), "en", 2, &v, 1));
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, NULL, 0));
+    gdefcore_changeset_destroy(cs);
+  }
+  std::string c = NewCase();
+  {
+    GDEFCORE_Tree * t = NULL;
+    GDEFCORE_Changeset * cs = NULL;
+    std::string note = Seal(sa, "note", "drafted case note");
+    std::string mine = Seal(sa, "contacts.note", "drafted phone");
+    std::string theirs = Seal(other, "contacts.note", "theirs-drafted");
+    size_t item = 0;
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_tree_create(catalog_, &t));
+    EXPECT_EQ(GDEFCORE_OK, gdefcore_tree_set(t, 0, "title", 5, "case", 4));
+    EXPECT_EQ(GDEFCORE_OK, gdefcore_tree_set(t, 0, "who", 3, sa.data(),
+        sa.size()));
+    EXPECT_EQ(GDEFCORE_OK, gdefcore_tree_set(t, 0, "note", 4, note.data(),
+        note.size()));
+    EXPECT_EQ(GDEFCORE_OK, gdefcore_tree_add(t, 0, "contacts", 8, 0, &item));
+    EXPECT_EQ(GDEFCORE_OK, gdefcore_tree_set(t, item, "who", 3, sa.data(),
+        sa.size()));
+    EXPECT_EQ(GDEFCORE_OK, gdefcore_tree_set(t, item, "note", 4, mine.data(),
+        mine.size()));
+    EXPECT_EQ(GDEFCORE_OK, gdefcore_tree_add(t, 0, "contacts", 8, 0, &item));
+    EXPECT_EQ(GDEFCORE_OK, gdefcore_tree_set(t, item, "who", 3,
+        other.data(), other.size()));
+    EXPECT_EQ(GDEFCORE_OK, gdefcore_tree_set(t, item, "note", 4,
+        theirs.data(), theirs.size()));
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_accept_sealed(cs));
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_tree_save_draft(cs, c.data(), c.size(), "en", 2, t));
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, NULL, 0));
+    gdefcore_changeset_destroy(cs);
+    gdefcore_tree_free(t);
+  }
+  std::string doc = Export(sa);
+  size_t at = doc.find("\"drafts\":[");
+  ASSERT_NE(std::string::npos, at) << doc;
+  std::string values = doc.substr(0, at);
+  std::string drafts = doc.substr(at);
+  EXPECT_NE(std::string::npos, values.find("\"text\":\"Ann\"")) << doc;
+  EXPECT_EQ(std::string::npos, values.find("Annie-draft"))
+      << "a draft holds no version";
+  for (const char * want : {"\"text\":\"Annie-draft\"",
+           "\"text\":\"drafted case note\"", "\"text\":\"drafted phone\"",
+           "\"field\":\"contacts.note\"", "\"type\":\"site.case\"",
+           "\"type\":\"site.member\"", "\"base\":0", "\"lang\":\"en\""}) {
+    EXPECT_NE(std::string::npos, drafts.find(want)) << want << " in " << doc;
+  }
+  EXPECT_NE(std::string::npos, drafts.find("\"entity\":\"" + a + "\""));
+  EXPECT_NE(std::string::npos, drafts.find("\"entity\":\"" + c + "\""));
+  EXPECT_EQ(std::string::npos, doc.find("theirs-drafted"))
+      << "another person's value";
+  std::string theirs = Export(other);
+  EXPECT_NE(std::string::npos, theirs.find("\"text\":\"theirs-drafted\""))
+      << theirs;
+  EXPECT_EQ(std::string::npos, theirs.find("drafted phone"));
+}
+
 /* ---- no plaintext in any stored row ---------------------------------------- */
 
 /* AD-19: the database never holds a plaintext. A canary goes through every

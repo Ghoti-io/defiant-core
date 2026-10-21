@@ -469,6 +469,58 @@ GDEFCORE_API int gdefcore_access_grant_changes_own_field(const char * action,
 GDEFCORE_API const char * gdefcore_access_risk_name(int risk);
 
 /**
+ * @brief One grant gdefcore_access_hold_for_confirmation() took back, as the role
+ * held it. Begins with @ref size. The texts are borrowed for the call.
+ */
+typedef struct GDEFCORE_Access_Held {
+  size_t size;                  ///< `sizeof(GDEFCORE_Access_Held)`.
+  const char * role;            ///< `anonymous` or `authenticated`.
+  size_t role_len;              ///< Length of @ref role.
+  const char * permission;      ///< The permission as the role held it: what
+                                ///< gdefcore_access_grant() grants again.
+  size_t permission_len;        ///< Length of @ref permission.
+  const char * label;           ///< Its label as declared, as the matrix shows it.
+  size_t label_len;             ///< Length of @ref label.
+  const char * action;          ///< Its action.
+  size_t action_len;            ///< Length of @ref action.
+  const char * type_name;       ///< Its entity type.
+  size_t type_name_len;         ///< Length of @ref type_name.
+  const char * field;           ///< Its field, or "".
+  size_t field_len;             ///< Length of @ref field.
+  const char * condition;       ///< Its condition, canonical (condition.h).
+  size_t condition_len;         ///< Length of @ref condition.
+  int risk;                     ///< As the matrix rates it: ::GDEFCORE_ACCESS_RISK_LOW, _MEDIUM or _HIGH.
+  const char * confirmation;    ///< The typed confirmation granting it asks
+                                ///< for (::GDEFCORE_ACCESS_CONFIRM_ANONYMOUS or
+                                ///< ::GDEFCORE_ACCESS_CONFIRM_AUTHENTICATED).
+  size_t confirmation_len;      ///< Length of @ref confirmation.
+} GDEFCORE_Access_Held;
+
+/** Told of each grant gdefcore_access_hold_for_confirmation() took back. A
+ * failure stops the call and is returned. */
+typedef GDEFCORE_Result (*GDEFCORE_Access_Held_Fn)(void * ctx,
+    const GDEFCORE_Access_Held * held);
+
+/**
+ * @brief Take back, as the system, every grant that a role which is a state
+ * (`anonymous`, `authenticated`) holds, telling @p fn what each was (AD-11,
+ * AD-37; story S8).
+ *
+ * For data that came in without the admin edit (a restored snapshot,
+ * gdefcore_subject_restore()): a grant to a state is what that edit asks a
+ * typed confirmation for (gdefcore_access_grant()), so imported data never
+ * applies one unconfirmed. Each is rated as the matrix rates it
+ * (gdefcore_access_grant_risk_on()) and given to @p fn with the confirmation
+ * that applies it again, through gdefcore_access_grant() with
+ * GDEFCORE_Access_Held::permission. Every role entity named for a state is
+ * visited, not only the first. A role with grants gets one new revision that
+ * holds none, written before @p fn hears of them; its history keeps them.
+ * Grants to any other role are left as they are.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_access_hold_for_confirmation(
+    GDEFCORE_Catalog * catalog, GDEFCORE_Access_Held_Fn fn, void * ctx);
+
+/**
  * @brief Every effective grant: role grants and the grants of enabled modules.
  *
  * Rows are sorted by source, permission, type, field and condition, bytewise,

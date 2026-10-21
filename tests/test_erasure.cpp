@@ -596,7 +596,7 @@ class Erasure : public ::testing::Test {
     AddZip(out, "site storage snapshot " + stage,
         StorageExport(site_, storage_, sizeof storage_), true);
     ASSERT_EQ(GDEFCORE_OK,
-        gdefcore_subject_snapshot(subjects_, site_, &zip, &zip_len));
+        gdefcore_subject_snapshot(subjects_, site_, NULL, 0, &zip, &zip_len));
     AddZip(out, "library subject snapshot " + stage, B(zip, zip_len), true);
     gdefstor_bytes_free(NULL, zip);
     AddText(out, "tenant store rows " + stage, Rows(site_));
@@ -1438,7 +1438,7 @@ TEST_F(Erasure, SnapshotCarriesNoKey) {
 
   /* The pair, taken while the subject is alive: the data set, then the key
    * set. */
-  ASSERT_EQ(GDEFCORE_OK, gdefcore_subject_snapshot(subjects_, site_, &zip, &zip_len));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_subject_snapshot(subjects_, site_, NULL, 0, &zip, &zip_len));
   taken = B(zip, zip_len);
   gdefstor_bytes_free(NULL, zip);
   zip = NULL;
@@ -1479,9 +1479,9 @@ TEST_F(Erasure, SnapshotCarriesNoKey) {
   Erase(a_);
   ASSERT_EQ(GDEFSMEMORY_OK, gdefsmemory_store_create(NULL, NULL, &empty));
   ASSERT_EQ(GDEFCORE_OK,
-      gdefcore_subject_restore(subjects_, empty,
+      gdefcore_subject_restore(subjects_, NULL, empty,
           reinterpret_cast<const uint8_t *>(taken.data()), taken.size(),
-          reinterpret_cast<const uint8_t *>(keys.data()), keys.size()));
+          reinterpret_cast<const uint8_t *>(keys.data()), keys.size(), NULL));
   ASSERT_EQ(GDEFCORE_OK,
       gdefcore_catalog_open(empty, storage_, sizeof storage_, NULL, NULL,
           &restored));
@@ -1511,7 +1511,7 @@ TEST_F(Erasure, SnapshotCarriesNoKey) {
   AddText(&after, "restored tenant store rows", Rows(empty));
   AddText(&after, "live tenant store rows after restore", Rows(site_));
   AddKeyset(&after, "key set after restore");
-  ASSERT_EQ(GDEFCORE_OK, gdefcore_subject_snapshot(subjects_, empty, &zip, &zip_len));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_subject_snapshot(subjects_, empty, NULL, 0, &zip, &zip_len));
   AddZip(&after, "library subject snapshot after restore", B(zip, zip_len), true);
   gdefstor_bytes_free(NULL, zip);
   leaks = Sweep(after, needles);

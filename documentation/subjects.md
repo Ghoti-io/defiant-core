@@ -176,25 +176,55 @@ A backup is a pair (AD-19, AD-23):
 
 - the **data set**, `gdefcore_subject_snapshot`: the tenant store's logical
   export, personal values as ciphertext, with the time it was taken in its
-  manifest. It holds no key, no keyring wrap and no ledger.
+  manifest and what the tenant needs to come back up (AD-23, story S8): its
+  edition, as the caller passes it from the installation's directory, and
+  every module it has enabled with the stored-data schema version its data is
+  at, read from the tenant's own records (`core.module.enabled`, one per
+  module, whose text is that version; an enable writes the installed
+  module's `schema_version`). It holds no key, no keyring wrap and no ledger.
 - the **key set**, `gdefcore_subject_keyset`: the key store's export
   (`defiant-keyset/1`): the wrapped subject keys, the keyring's wrap and the
   ledger, with the time it was taken. It is a key backup, kept and retained
   apart from the data set.
 
 Take the key set after the data set it pairs with. `gdefcore_subject_restore`
-refuses a pair whose key set is older than its data set with
-`GDEFCORE_ERR_STALE` and writes nothing, since such a key set may hold a key
-erased between the two. Otherwise it merges the key set into the key store
-(its ledger replayed as erasures; no key comes back for a subject the live
-ledger or the set's names), imports the data set into an empty tenant,
-replays the ledger, now the union of the two, over the restored tenant and
-over the subjects' own data store, and then rebuilds the restored tenant's
-blind index, which a data set does not carry, from the values that can still
-be decrypted (`gdefcore_subject_reindex`: every version the subject lookup
-names for a subject with a key, its row put back with `gdefstor_blind_put`;
-an erased subject has no key and gets no row). Only then does it return. An
-erasure newer than the data set still reads `[erased]`.
+checks everything before it writes: the archive as untrusted input (AD-37),
+that it is a data set, that the key set is this tenant's and not older than
+the data set (`GDEFCORE_ERR_STALE` otherwise, since such a key set may hold a
+key erased between the two), and that every module the data set needs is
+installed here (the host it is given) at a stored-data schema version no older
+than the data's (`GDEFCORE_ERR_UNSUPPORTED` otherwise, the report naming the
+module and both versions), with the manifest and the records it carries
+agreeing (`GDEFCORE_ERR_CORRUPT` otherwise). Then, in AD-23's order:
+
+1. it merges the key set into the key store (its ledger replayed as erasures;
+   no key comes back for a subject the live ledger or the set's names);
+2. it imports the data set into an empty tenant (the storage import's refusal,
+   in words, is the report's reason) and holds back every grant the data gives
+   the anonymous or authenticated state (`gdefcore_access_hold_for_confirmation`):
+   granting one is what the admin edit asks a typed confirmation for, so a
+   restore nobody watches never applies one. Each is rated as the matrix rates
+   it and reported in words (`gdefcore_restore_held`); the role gets one new
+   revision that holds none. The caller applies one with
+   `gdefcore_access_grant` and the same typed confirmation. Grants to other
+   roles are restored as they were;
+3. it runs the forward migrations: a module whose data is at an older schema
+   version than the one installed is recorded at the installed one, as an
+   enable records it. A module's rows keep their shape and are read through
+   its upcasters (AD-15), so none is rewritten;
+4. it replays the ledger, now the union of the two, over the restored tenant
+   and over the subjects' own data store, and purges the bound fragment cache
+   of every subject it names;
+5. it rebuilds the restored tenant's blind index, which a data set does not
+   carry, from the values that can still be decrypted
+   (`gdefcore_subject_reindex`: every version the subject lookup names for a
+   subject with a key, its row put back with `gdefstor_blind_put`; an erased
+   subject has no key and gets no row). The import rebuilt the current tables.
+
+Only then does it return, and the tenant may be served. An erasure newer than
+the data set still reads `[erased]`. The report (`GDEFCORE_Restore`) also
+gives the edition the data set names, for the operator to pin at the
+destination: a restore never touches the installation scope.
 
 A data set records nothing of the ledger; the ledger copy a backup carries is
 the key set's. A restore into an empty key store imports the key set into it
@@ -206,8 +236,12 @@ plaintext values, returned to the caller: every value version the subject
 lookup finds for the subject, across types, groups and history (story S7),
 published or not, each with its entity, type, field path, language, item, and
 the revisions it was written in (`from`) and replaced in (`to`, null for a
-current value). A draft holds no version and is not in it. It is not written
-into the tenant store. After erasure the document says erased and does not
+current value). A draft holds no version, so its values are listed apart,
+under `drafts` (story S8): every value naming the subject in every draft of
+the tenant (`gdefstor_draft_list`), a draft that reserves an id included, in
+each language it holds, with its entity, type, field path, language, the
+draft tree's item id and the revision the draft was made from (`base`). It is
+not written into the tenant store. After erasure the document says erased and does not
 contain the plaintext.
 
 ## The read path (story S7)

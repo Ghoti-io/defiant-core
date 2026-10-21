@@ -121,6 +121,8 @@
 #define gdefcore_access_grant_changes_own_field \
   GHOTIIO_DEFCORE(gdefcore_access_grant_changes_own_field)
 #define gdefcore_access_risk_name GHOTIIO_DEFCORE(gdefcore_access_risk_name)
+#define gdefcore_access_hold_for_confirmation \
+  GHOTIIO_DEFCORE(gdefcore_access_hold_for_confirmation)
 #define gdefcore_access_revision_values \
   GHOTIIO_DEFCORE(gdefcore_access_revision_values)
 #define gdefcore_access_can_field GHOTIIO_DEFCORE(gdefcore_access_can_field)
@@ -346,6 +348,7 @@
 #define gdefcore_module_grants GHOTIIO_DEFCORE(gdefcore_module_grants)
 #define gdefcore_module_relations GHOTIIO_DEFCORE(gdefcore_module_relations)
 #define gdefcore_module_variables GHOTIIO_DEFCORE(gdefcore_module_variables)
+#define gdefcore_module_schema GHOTIIO_DEFCORE(gdefcore_module_schema)
 #define gdefcore_module_service GHOTIIO_DEFCORE(gdefcore_module_service)
 #define gdefcore_module_text_free GHOTIIO_DEFCORE(gdefcore_module_text_free)
 #define gdefcore_module_vet GHOTIIO_DEFCORE(gdefcore_module_vet)
@@ -471,6 +474,13 @@
 #define gdefcore_subject_read GHOTIIO_DEFCORE(gdefcore_subject_read)
 #define gdefcore_subject_reindex GHOTIIO_DEFCORE(gdefcore_subject_reindex)
 #define gdefcore_subject_restore GHOTIIO_DEFCORE(gdefcore_subject_restore)
+#define gdefcore_restore_reason GHOTIIO_DEFCORE(gdefcore_restore_reason)
+#define gdefcore_restore_edition GHOTIIO_DEFCORE(gdefcore_restore_edition)
+#define gdefcore_restore_held_count GHOTIIO_DEFCORE(gdefcore_restore_held_count)
+#define gdefcore_restore_held GHOTIIO_DEFCORE(gdefcore_restore_held)
+#define gdefcore_restore_migrated_count \
+  GHOTIIO_DEFCORE(gdefcore_restore_migrated_count)
+#define gdefcore_restore_free GHOTIIO_DEFCORE(gdefcore_restore_free)
 #define gdefcore_subject_revision_marker \
   GHOTIIO_DEFCORE(gdefcore_subject_revision_marker)
 #define gdefcore_subject_save GHOTIIO_DEFCORE(gdefcore_subject_save)

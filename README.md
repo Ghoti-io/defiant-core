@@ -54,6 +54,10 @@ sh ../defiant-storage-postgres/tools/pg-test.sh -- \
 Without a server it fails naming the fix, or with `GDEFSPG_TEST_SKIP_SERVER=1`
 prints `SKIPPED: postgres` and is not counted as passed.
 
+The restore tests (`testRestore`, `check-restore`) restore a tenant taken on
+memory into memory and SQLite; `make test-restore-postgres` restores it into
+Postgres, through the same `tools/pg-test.sh`, and fails without a server.
+
 ## API
 
 `gdefcore_request_create` copies the tenant bytes onto an opaque handle.

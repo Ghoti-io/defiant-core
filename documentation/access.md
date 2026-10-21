@@ -316,6 +316,23 @@ A grant is always for one type, and a condition that reads the entity's data
 bounds it, so a condition that names no type but reads a field is not high on
 that ground.
 
+## Grants that came in without the admin edit
+
+A grant to `anonymous` or `authenticated` is what the admin edit asks a typed
+confirmation for (`GDEFCORE_ACCESS_CONFIRM_ANONYMOUS`,
+`GDEFCORE_ACCESS_CONFIRM_AUTHENTICATED`). Data that arrives without that edit,
+a restored snapshot (AD-37), passes the same rule:
+`gdefcore_access_hold_for_confirmation()` takes back, as the system, every grant
+any role entity named for a state holds (every such entity, since an imported
+one is untrusted), rates each as the matrix does, and says what each was and
+which confirmation applies it again. The role gets one new revision that
+grants nothing, so its history keeps what the snapshot said. A held grant is
+applied with `gdefcore_access_grant()`, its stored label and the typed
+confirmation, as any other grant to a state is. Grants to every other role are
+restored as they were: the admin edit asks nothing of those beyond the role
+change itself. A restore calls it after its import, before it returns
+(subjects.md, "Backups").
+
 ## One can()
 
 `gdefcore_access_can(catalog, request, permission, type, entity_id, &allowed)`

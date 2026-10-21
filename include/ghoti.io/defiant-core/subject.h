@@ -67,11 +67,15 @@
  * (gdefcore_subject_reindex()) skips one, its key being gone.
  *
  * Backups are two sets (AD-19, AD-23): the data set, gdefcore_subject_snapshot()
- * (the tenant store's logical export, no key and no ledger), and the key set,
- * gdefcore_subject_keyset() (the key store's export: wrapped keys, the
- * keyring's wrap and the ledger). Each records when it was taken.
- * gdefcore_subject_restore() refuses a key set older than its data set and
- * replays the ledger before it returns.
+ * (the tenant store's logical export, no key and no ledger, with the tenant's
+ * edition and its enabled modules at their stored-data schema versions), and
+ * the key set, gdefcore_subject_keyset() (the key store's export: wrapped
+ * keys, the keyring's wrap and the ledger). Each records when it was taken.
+ * gdefcore_subject_restore() refuses a key set older than its data set and a
+ * module's data newer than the module installed, and then, in AD-23's order,
+ * merges the key set, imports the data set (holding back each grant to a
+ * state for its confirmation), runs the forward migrations, replays the
+ * merged ledger and rebuilds the blind index, all before it returns.
  */
 
 #ifndef GHOTI_IO_GDEFCORE_SUBJECT_H
@@ -122,6 +126,9 @@ typedef struct GDEFCORE_Subjects GDEFCORE_Subjects;
 
 /* Defined in render.h. */
 struct GDEFCORE_FragmentCache;
+
+/* Defined in module.h. */
+struct GDEFCORE_Host;
 
 /**
  * @brief The cipher a key store that seals in process is given
@@ -424,12 +431,19 @@ GDEFCORE_API GDEFCORE_Result gdefcore_subject_erase(GDEFCORE_Subjects * subjects
  * finds for the subject (the subject columns, story S6c), across types,
  * groups and history (story S7), published or not, each opened with the
  * subject's key: `{"values":[{"entity":…,"type":…,"field":…,"lang":…,
- * "item":…,"from":…,"to":…,"text":…},…]}`, where `field` is the field's path,
- * `from` the revision the version was written in and `to` the one that
- * replaced it, or null for a current value. A draft holds no version and is
- * not in it. The bytes are returned to the caller. Nothing is written into
- * @p catalog. After erasure the document says erased and does not contain the
- * plaintext. Free @p out_json with gdefcore_subject_free().
+ * "item":…,"from":…,"to":…,"text":…},…],"drafts":[…]}`, where `field` is the
+ * field's path, `from` the revision the version was written in and `to` the
+ * one that replaced it, or null for a current value. A draft holds no version,
+ * so a draft's values are listed apart (story S8): every value naming the
+ * subject in every draft of the tenant (gdefstor_draft_list()), a draft that
+ * reserves an id included, in each language the draft holds,
+ * `{"entity":…,"type":…,"field":…,"lang":…,"item":…,"base":…,"text":…}`,
+ * by entity, language and the draft tree's order, `item` being the draft
+ * tree's item id (0 for an item it adds) and `base` the revision the draft was
+ * made from (0 for an entity not made yet). The bytes are returned to the
+ * caller. Nothing is written into @p catalog. After erasure the document says
+ * erased and does not contain the plaintext. Free @p out_json with
+ * gdefcore_subject_free().
  */
 GDEFCORE_API GDEFCORE_Result gdefcore_subject_export(
     GDEFCORE_Subjects * subjects, GDEFCORE_Catalog * catalog,
@@ -438,16 +452,28 @@ GDEFCORE_API GDEFCORE_Result gdefcore_subject_export(
 
 /**
  * @brief The data set of a backup pair: a snapshot of @p tenant_store that
- * records when it was taken (gdefstor_snapshot_export_at()).
+ * records when it was taken and what the tenant needs to come back up
+ * (gdefstor_snapshot_export_tenant(), AD-23).
  *
  * It holds the tenant's rows, personal values as ciphertext, and nothing of
  * the key store: no key, no keyring wrap, no ledger. It holds no blind-index
- * row either (AD-23): gdefcore_subject_restore() rebuilds them. Free
+ * row either (AD-23): gdefcore_subject_restore() rebuilds them. Its manifest
+ * names @p edition and every module the tenant has enabled with the
+ * stored-data schema version its data is at, read from the tenant's records
+ * (::GDEFCORE_MODULE_ENABLED_TYPE), which travel in the same snapshot. Free
  * @p out_bytes with gdefstor_bytes_free() and the store allocator.
+ *
+ * @param edition The tenant's edition as its installation pins it
+ *   (gdefcore_inst_resolve()), `defiant-edition/<n>`; NULL with
+ *   @p edition_len 0 for a tenant that pins none.
+ * @return ::GDEFCORE_OK, ::GDEFCORE_ERR_INVALID (an edition that is not
+ *   `defiant-edition/<n>`), ::GDEFCORE_ERR_CORRUPT (an enabled module's record
+ *   that does not hold a schema version), or the store's error.
  */
 GDEFCORE_API GDEFCORE_Result gdefcore_subject_snapshot(
     GDEFCORE_Subjects * subjects, GDEFSTOR_Store * tenant_store,
-    uint8_t ** out_bytes, size_t * out_len);
+    const char * edition, size_t edition_len, uint8_t ** out_bytes,
+    size_t * out_len);
 
 /**
  * @brief The key set of a backup pair: the key store's export for the
@@ -463,33 +489,114 @@ GDEFCORE_API GDEFCORE_Result gdefcore_subject_snapshot(
 GDEFCORE_API GDEFCORE_Result gdefcore_subject_keyset(
     GDEFCORE_Subjects * subjects, uint8_t ** out_bytes, size_t * out_len);
 
+/** What a restore did, and why it refused when it did. Opaque. */
+typedef struct GDEFCORE_Restore GDEFCORE_Restore;
+
+/** One grant a restore held back for its confirmation. Begins with
+ * @ref size. Texts are borrowed until the report is freed. */
+typedef struct GDEFCORE_Restore_Held {
+  size_t size;                ///< `sizeof(GDEFCORE_Restore_Held)`.
+  const char * role;          ///< `anonymous` or `authenticated`.
+  size_t role_len;            ///< Length of @ref role.
+  const char * permission;    ///< As the snapshot granted it: the label
+                              ///< gdefcore_access_grant() takes.
+  size_t permission_len;      ///< Length of @ref permission.
+  int risk;                   ///< As the matrix rates it (access.h).
+  const char * confirmation;  ///< The typed confirmation granting it asks for.
+  size_t confirmation_len;    ///< Length of @ref confirmation.
+  const char * sentence;      ///< In plain words: what was held and how to apply it.
+  size_t sentence_len;        ///< Length of @ref sentence.
+} GDEFCORE_Restore_Held;
+
 /**
- * @brief Restore a backup pair into an empty tenant, replaying the ledger
- * before it returns.
+ * @brief Restore a backup pair into an empty tenant, in AD-23's order, all
+ * before it returns (story S8).
  *
- * A key set older than the data set is ::GDEFCORE_ERR_STALE, and nothing is
- * written: it could bring back a key erased after it was taken. A data set
- * that records no time (a plain storage snapshot) is ::GDEFCORE_ERR_FORMAT.
- * Otherwise the key set is merged into the key store (its ledger rows replayed
- * as erasures, and no key brought back for a subject the live ledger or the
- * set's names), the data set is imported into @p tenant_store, and the
- * ledger, now the union of the live one and the set's, is replayed: the
- * blind-index rows of every subject it names are deleted, in @p tenant_store
- * and in this subjects' own data store. So an erasure newer than either set
- * still reads ::GDEFCORE_SUBJECT_ERASED afterwards. Then the blind index of
- * @p tenant_store, which a data set does not carry, is rebuilt from the
- * values that can be decrypted (gdefcore_subject_reindex()). A key set
- * whose keyring wrap is not this tenant's is ::GDEFCORE_ERR_INVALID before
- * anything is imported.
+ * Everything below is checked before anything is written. The data set is
+ * walked as untrusted input (AD-37): a bad member name, a defeated limit, a
+ * named tenant, an internal or mistyped id, or an installation-scope type
+ * refuses it. A data set that records no time, or not what the tenant needs
+ * (a plain storage snapshot), is ::GDEFCORE_ERR_FORMAT. A key set older than
+ * the data set is ::GDEFCORE_ERR_STALE: it could bring back a key erased after
+ * it was taken. A key set whose keyring wrap is not this tenant's is
+ * ::GDEFCORE_ERR_INVALID. A module the data set's manifest names that its
+ * records do not enable at that version, or the other way about, is
+ * ::GDEFCORE_ERR_CORRUPT. A module the data set needs that @p host does not
+ * have installed, or whose stored data is at a schema version newer than the
+ * installed one (gdefcore_module_schema()), is ::GDEFCORE_ERR_UNSUPPORTED,
+ * and the report says, naming the module and both versions.
+ *
+ * Then, in this order: (1) the key set is merged into the key store (its
+ * ledger rows replayed as erasures, and no key brought back for a subject the
+ * live ledger or the set's names); (2) the data set is imported into
+ * @p tenant_store (gdefstor_snapshot_import(); its refusal is the report's
+ * reason), and every grant it gives a state (anonymous, authenticated) is
+ * held back (gdefcore_access_hold_for_confirmation()): rated, reported in words,
+ * and not applied, because granting it is what the admin edit asks a typed
+ * confirmation for; the caller applies one with that confirmation through
+ * gdefcore_access_grant(); (3) the forward migrations: a module whose data is
+ * at an older schema version than the installed one is recorded at the
+ * installed one, as an enable records it (::GDEFCORE_MODULE_ENABLED_TYPE;
+ * AD-15: a module's stored data keeps its shape and is read through its
+ * upcasters, so no row is rewritten); (4) the ledger, now the union of the
+ * live one and the set's, is replayed: the blind-index rows of every subject
+ * it names are deleted, in @p tenant_store and in this subjects' own data
+ * store, and the bound fragment cache purged of them; (5) the derived data a
+ * data set does not carry is rebuilt from the values that can be decrypted
+ * (the blind index, gdefcore_subject_reindex(); the import rebuilt the
+ * current tables). Only then does it return, and the tenant may be served. An
+ * erasure newer than either set still reads ::GDEFCORE_SUBJECT_ERASED
+ * afterwards.
  *
  * To restore into an empty key store, import the key set into it first
  * (gdefstor_keystore_import()), then open the subjects on it, which adopts the
  * keyring from it, and then call this.
+ *
+ * @param host The destination's modules (borrowed): the installed versions a
+ *   data set's modules are checked against. NULL is an installation with no
+ *   module installed.
+ * @param out_report May be NULL. Receives the report, on success and on a
+ *   refusal alike (a refusal's reason is gdefcore_restore_reason()), unless
+ *   memory ran out for it. Free it with gdefcore_restore_free().
  */
 GDEFCORE_API GDEFCORE_Result gdefcore_subject_restore(
-    GDEFCORE_Subjects * subjects, GDEFSTOR_Store * tenant_store,
-    const uint8_t * data, size_t data_len, const uint8_t * keys,
-    size_t keys_len);
+    GDEFCORE_Subjects * subjects, struct GDEFCORE_Host * host,
+    GDEFSTOR_Store * tenant_store, const uint8_t * data, size_t data_len,
+    const uint8_t * keys, size_t keys_len, GDEFCORE_Restore ** out_report);
+
+/**
+ * @brief Why the restore refused, in plain words, NUL-terminated; NULL when
+ * it did not (or when no sentence could be made).
+ */
+GDEFCORE_API const char * gdefcore_restore_reason(
+    const GDEFCORE_Restore * report, size_t * out_len);
+
+/**
+ * @brief The edition the data set says the tenant pins, `defiant-edition/<n>`,
+ * or "" for none: for the operator to pin at the destination (a restore never
+ * touches the installation scope, AD-23).
+ */
+GDEFCORE_API const char * gdefcore_restore_edition(
+    const GDEFCORE_Restore * report, size_t * out_len);
+
+/** @return How many grants the restore held back for confirmation. */
+GDEFCORE_API size_t gdefcore_restore_held_count(
+    const GDEFCORE_Restore * report);
+
+/**
+ * @brief Held grant @p index, in the order the restore found them.
+ * @param out Its @ref GDEFCORE_Restore_Held::size is set by the caller.
+ * @return ::GDEFCORE_OK, or ::GDEFCORE_ERR_INVALID past the end.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_restore_held(
+    const GDEFCORE_Restore * report, size_t index, GDEFCORE_Restore_Held * out);
+
+/** @return How many modules the restore's forward migrations moved on. */
+GDEFCORE_API size_t gdefcore_restore_migrated_count(
+    const GDEFCORE_Restore * report);
+
+/** @brief Release a report. NULL is ignored. */
+GDEFCORE_API void gdefcore_restore_free(GDEFCORE_Restore * report);
 
 /**
  * @brief Copy the raw subject key.

@@ -241,9 +241,9 @@ plant keeps-key src/subject/subject.c Erasure.Sweep \
 #    taken with the tenant keyring's wrap filed in the tenant store first, as
 #    a record of its own, so import still works and only the key travels.
 plant snapshot-key src/subject/subject.c Erasure.SnapshotCarriesNoKey \
-  '  return from_stor(gdefstor_snapshot_export_at(tenant_store,
+  '  return from_stor(gdefstor_snapshot_export_tenant(tenant_store,
       (const char *)subjects->tenant, subjects->tenant_len, NULL, taken,
-      out_bytes, out_len));' \
+      edition, edition_len, list, n, out_bytes, out_len));' \
   '  {
     uint8_t wrap[kWrap];
     int found = 0;
@@ -260,9 +260,9 @@ plant snapshot-key src/subject/subject.c Erasure.SnapshotCarriesNoKey \
       }
     }
   }
-  return from_stor(gdefstor_snapshot_export_at(tenant_store,
+  return from_stor(gdefstor_snapshot_export_tenant(tenant_store,
       (const char *)subjects->tenant, subjects->tenant_len, NULL, taken,
-      out_bytes, out_len));'
+      edition, edition_len, list, n, out_bytes, out_len));'
 
 # AD-19 on the form route. Every plant below edits the real source of the
 # library, and the named test must go red BY NAME.

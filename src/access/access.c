@@ -5315,6 +5315,139 @@ GDEFCORE_Result gdefcore_access_matrix(GDEFCORE_Catalog * catalog,
   return GDEFCORE_OK;
 }
 
+/* ---- grants a restore brought in (AD-37) -------------------------------- */
+
+/* One grant of a state's role, as it is taken back. */
+typedef struct HeldGrant {
+  Grant grant;
+  char * cond; /* its condition, canonical; alloc_default() */
+  size_t cond_len;
+  int risk;
+} HeldGrant;
+
+/* Take back every grant of one role that is a state, then say what each was.
+ * The role is written first: a report that fails leaves nothing applied. */
+static GDEFCORE_Result hold_role(GDEFCORE_Catalog * catalog, Eval * ev,
+    const char * role_id, const char * name, size_t name_len,
+    GDEFCORE_Access_Held_Fn fn, void * ctx) {
+  Grant grants[kGrantMax];
+  HeldGrant * held = NULL;
+  size_t ngrants = 0;
+  size_t i;
+  int anonymous = same(name, name_len, kAnonymous, strlen(kAnonymous));
+  const char * confirmation = anonymous
+                                  ? GDEFCORE_ACCESS_CONFIRM_ANONYMOUS
+                                  : GDEFCORE_ACCESS_CONFIRM_AUTHENTICATED;
+  GDEFCORE_Result rc = load_role_grants(catalog, role_id, grants, kGrantMax,
+      &ngrants);
+  if (rc != GDEFCORE_OK || ngrants == 0) {
+    return rc;
+  }
+  held = (HeldGrant *)gcu_allocator_calloc(alloc_default(), ngrants,
+      sizeof *held);
+  if (held == NULL) {
+    return GDEFCORE_ERR_OOM;
+  }
+  /* Each rated as the matrix rates it (AD-11, AD-37): the same function,
+   * with the grant's canonical condition and whether the anonymous state
+   * holds it. */
+  for (i = 0; rc == GDEFCORE_OK && i < ngrants; i++) {
+    held[i].grant = grants[i];
+    if (grants[i].condition == kCondExpr) {
+      ExprSlot * slot = expr_slot(ev, &grants[i]);
+      rc = slot == NULL || slot->bad
+               ? GDEFCORE_ERR_CORRUPT
+               : gdefcore_condition_canonical(slot->cond, &held[i].cond,
+                     &held[i].cond_len);
+    } else {
+      rc = gdefcore_condition_builtin(
+          grants[i].condition == GDEFCORE_ACCESS_ANY
+              ? GDEFCORE_CONDITION_BUILTIN_ANY
+              : GDEFCORE_CONDITION_BUILTIN_OWN,
+          grants[i].type_name, grants[i].type_len, &held[i].cond,
+          &held[i].cond_len);
+    }
+    if (rc == GDEFCORE_OK) {
+      held[i].risk = gdefcore_access_grant_risk_on(grants[i].action,
+          grants[i].action_len, grants[i].field, grants[i].field_len,
+          held[i].cond, held[i].cond_len, anonymous);
+    }
+  }
+  if (rc == GDEFCORE_OK) {
+    /* None of them is applied: the role keeps its history, and its newest
+     * revision grants nothing. */
+    rc = write_grants(catalog, role_id, NULL, 0);
+  }
+  for (i = 0; rc == GDEFCORE_OK && i < ngrants; i++) {
+    GDEFCORE_Access_Held out;
+    const Grant * g = &held[i].grant;
+    memset(&out, 0, sizeof out);
+    out.size = sizeof out;
+    out.role = name;
+    out.role_len = name_len;
+    out.permission = g->label;
+    out.permission_len = g->label_len;
+    out.label = g->label;
+    out.label_len = shown_label_len(g->label, g->label_len);
+    out.action = g->action;
+    out.action_len = g->action_len;
+    out.type_name = g->type_name;
+    out.type_name_len = g->type_len;
+    out.field = g->field;
+    out.field_len = g->field_len;
+    out.condition = held[i].cond;
+    out.condition_len = held[i].cond_len;
+    out.risk = held[i].risk;
+    out.confirmation = confirmation;
+    out.confirmation_len = strlen(confirmation);
+    rc = fn(ctx, &out);
+  }
+  for (i = 0; i < ngrants; i++) {
+    gdefcore_condition_text_free(held[i].cond);
+  }
+  gcu_allocator_free(alloc_default(), held);
+  return rc;
+}
+
+GDEFCORE_Result gdefcore_access_hold_for_confirmation(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Access_Held_Fn fn, void * ctx) {
+  Eval ev;
+  char ** ids = NULL;
+  size_t count = 0;
+  size_t i;
+  GDEFCORE_Result rc;
+  if (catalog == NULL || fn == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  /* Not seeded here: a tenant with no role entity holds no grant, and this
+   * writes nothing a restore did not bring in. */
+  eval_init(&ev, catalog, NULL, NULL, 0);
+  /* Every role entity named for a state, not only the first: a snapshot is
+   * untrusted, and two roles of one state's name would both be the state. */
+  rc = gdefcore_entity_ids(catalog, kRoleType, strlen(kRoleType), &ids, &count);
+  for (i = 0; rc == GDEFCORE_OK && i < count; i++) {
+    char ** names = NULL;
+    size_t * name_lens = NULL;
+    size_t nnames = 0;
+    int retired = 1;
+    rc = retired_state(catalog, ids[i], &retired);
+    if (rc != GDEFCORE_OK || retired) {
+      continue;
+    }
+    rc = read_values(catalog, ids[i], "name", &names, &name_lens, &nnames);
+    if (rc == GDEFCORE_OK && nnames > 0 &&
+        (same(names[0], name_lens[0], kAnonymous, strlen(kAnonymous)) ||
+            same(names[0], name_lens[0], kAuthenticated,
+                strlen(kAuthenticated)))) {
+      rc = hold_role(catalog, &ev, ids[i], names[0], name_lens[0], fn, ctx);
+    }
+    gdefcore_values_free(catalog, names, name_lens, nnames);
+  }
+  gdefcore_ids_free(catalog, ids, count);
+  eval_done(&ev);
+  return rc;
+}
+
 /* ---- one can() --------------------------------------------------------- */
 
 /* The memo key: who asks (and for whom), what, of which entity at which

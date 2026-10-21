@@ -264,7 +264,7 @@ class Subject : public ::testing::Test {
     uint8_t * zip = NULL;
     size_t zip_len = 0;
     EXPECT_EQ(GDEFCORE_OK,
-        gdefcore_subject_snapshot(subjects_, site_, &zip, &zip_len));
+        gdefcore_subject_snapshot(subjects_, site_, NULL, 0, &zip, &zip_len));
     Bytes out(reinterpret_cast<const char *>(zip), zip == NULL ? 0 : zip_len);
     gdefstor_bytes_free(NULL, zip);
     return out;
@@ -286,8 +286,8 @@ class Subject : public ::testing::Test {
 
   GDEFCORE_Result Restore(GDEFSTOR_Store * into, const Bytes & data,
       const Bytes & keys) {
-    return gdefcore_subject_restore(subjects_, into, U(data), data.size(),
-        U(keys), keys.size());
+    return gdefcore_subject_restore(subjects_, NULL, into, U(data), data.size(),
+        U(keys), keys.size(), NULL);
   }
 
   /* Until the clock has moved on by a millisecond or more: a set taken after
@@ -1130,8 +1130,8 @@ TEST_F(Subject, ARestoreRefusesAnOlderKeySet) {
     ASSERT_EQ(GDEFSTOR_OK, gdefstor_snapshot_export(site_, (const char *)storage_,
         sizeof storage_, NULL, &zip, &n));
     ASSERT_EQ(GDEFSMEMORY_OK, gdefsmemory_store_create(NULL, NULL, &other));
-    EXPECT_EQ(GDEFCORE_ERR_FORMAT, gdefcore_subject_restore(subjects_, other,
-        zip, n, U(keys), keys.size()));
+    EXPECT_EQ(GDEFCORE_ERR_FORMAT, gdefcore_subject_restore(subjects_, NULL,
+        other, zip, n, U(keys), keys.size(), NULL));
     gdefstor_bytes_free(NULL, zip);
     gdefstor_store_destroy(other);
   }
