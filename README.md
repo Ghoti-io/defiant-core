@@ -58,6 +58,14 @@ The restore tests (`testRestore`, `check-restore`) restore a tenant taken on
 memory into memory and SQLite; `make test-restore-postgres` restores it into
 Postgres, through the same `tools/pg-test.sh`, and fails without a server.
 
+The scale test (`testScale`, `check-scale`) holds a list, a count and a create
+at 10,000 entities of one type to what they cost at 1,000, on SQLite by
+SQLite's step counters; `make test-scale-postgres` does the same on Postgres by
+the rows the server's own plans read, and plants a dropped index there. The
+purchase-order fixture (`testGroups`, `check-groups`) runs on memory and
+SQLite; `make test-groups-postgres` runs it, with its plants, on Postgres. Both
+go through the same `tools/pg-test.sh` and fail without a server.
+
 ## API
 
 `gdefcore_request_create` copies the tenant bytes onto an opaque handle.

@@ -29,6 +29,11 @@
  * with the access filter applied in every item. Each rule is counted on the
  * port's own rows (gdefstor_model_dump()), not taken from core's word. Run by
  * tools/check-groups.sh, which plants a defect for each named rule.
+ *
+ * The purchase order runs on memory (GroupsPo) and SQLite (GroupsPoSqlite),
+ * and on Postgres (GroupsPoPostgres, with the render as GroupsRenderPostgres)
+ * when GDEFCORE_TEST_GROUPS=postgres: make test-groups-postgres, through
+ * defiant-storage-postgres's tools/pg-test.sh (story S10).
  */
 
 #include <ghoti.io/defiant-core/macros.h>
@@ -37,6 +42,10 @@
 #include <ghoti.io/defiant-storage/query.h>
 #include <ghoti.io/defiant-storage-memory/memory.h>
 #include <ghoti.io/defiant-storage-sqlite/model.h>
+#ifdef GDEFCORE_TEST_HAVE_PG
+#include <ghoti.io/defiant-storage-postgres/model.h>
+#include <unistd.h>
+#endif
 
 #include <gtest/gtest.h>
 
@@ -383,7 +392,57 @@ size_t NewRows(const std::string & before, const std::string & after,
 
 /* ---- the site ----------------------------------------------------------- */
 
-enum Backend { kMemory = 0, kSqlite = 1 };
+enum Backend { kMemory = 0, kSqlite = 1, kPostgres = 2 };
+
+/* The Postgres arm is chosen by GDEFCORE_TEST_GROUPS=postgres; it needs a
+ * server, so it is a target of its own. */
+bool PostgresArm() {
+  const char * v = getenv("GDEFCORE_TEST_GROUPS");
+  return v != NULL && strcmp(v, "postgres") == 0;
+}
+
+/* A store on @p backend: memory, SQLite in a scratch directory (set in
+ * @p dir, removed by the caller), or Postgres in schemas of its own. */
+GDEFSTOR_Store * OpenStore(int backend, std::string * dir) {
+  GDEFSTOR_Store * store = NULL;
+  if (backend == kPostgres) {
+#ifdef GDEFCORE_TEST_HAVE_PG
+    static unsigned n = 0;
+    char prefix[32];
+    const char * ci = getenv("GDEFSPG_TEST_CONNINFO");
+    EXPECT_TRUE(ci != NULL && ci[0] != '\0');
+    snprintf(prefix, sizeof prefix, "gr%x_%u_", (unsigned)getpid() & 0xfffffu,
+        ++n);
+    GDEFSPG_Options o;
+    gdefspg_options_default(&o);
+    o.conninfo = ci;
+    o.schema_prefix = prefix;
+    EXPECT_EQ(GDEFSPG_OK, gdefspg_model_store_create(&o, NULL, NULL, &store));
+#else
+    ADD_FAILURE() << "the Postgres arm needs defiant-storage-postgres";
+#endif
+  } else if (backend == kSqlite) {
+    std::error_code ec;
+    std::filesystem::path base = std::filesystem::temp_directory_path(ec);
+    std::random_device entropy;
+    for (int i = 0; i < 100 && dir->empty(); i++) {
+      std::filesystem::path p =
+          base / ("gdefcore-groups-" + std::to_string(entropy()));
+      if (std::filesystem::create_directory(p, ec) && !ec) {
+        *dir = p.string();
+      }
+    }
+    EXPECT_FALSE(dir->empty());
+    GDEFSSQLITE_ModelOptions o;
+    gdefssqlite_model_options_default(&o);
+    o.synchronous = GDEFSSQLITE_SYNC_OFF; /* many stores; not about the disk */
+    EXPECT_EQ(GDEFSSQLITE_OK,
+        gdefssqlite_model_store_create(dir->c_str(), &o, NULL, NULL, &store));
+  } else {
+    EXPECT_EQ(GDEFSMEMORY_OK, gdefsmemory_store_create(NULL, NULL, &store));
+  }
+  return store;
+}
 
 class Site {
  public:
@@ -392,26 +451,7 @@ class Site {
   std::string dir;
 
   explicit Site(int backend) {
-    if (backend == kSqlite) {
-      std::error_code ec;
-      std::filesystem::path base = std::filesystem::temp_directory_path(ec);
-      std::random_device entropy;
-      for (int i = 0; i < 100 && dir.empty(); i++) {
-        std::filesystem::path p =
-            base / ("gdefcore-groups-" + std::to_string(entropy()));
-        if (std::filesystem::create_directory(p, ec) && !ec) {
-          dir = p.string();
-        }
-      }
-      EXPECT_FALSE(dir.empty());
-      GDEFSSQLITE_ModelOptions o;
-      gdefssqlite_model_options_default(&o);
-      o.synchronous = GDEFSSQLITE_SYNC_OFF; /* many stores; not about the disk */
-      EXPECT_EQ(GDEFSSQLITE_OK,
-          gdefssqlite_model_store_create(dir.c_str(), &o, NULL, NULL, &store));
-    } else {
-      EXPECT_EQ(GDEFSMEMORY_OK, gdefsmemory_store_create(NULL, NULL, &store));
-    }
+    store = OpenStore(backend, &dir);
     EXPECT_EQ(GDEFCORE_OK,
         gdefcore_catalog_open(store, (const uint8_t *)kTenant, 1, NULL, NULL,
             &catalog));
@@ -708,7 +748,8 @@ TEST(GroupsDeclare, AGroupOrAFieldInOneThatIsWrongIsRefused) {
 /* ---- the purchase order through core ------------------------------------ */
 
 /* Every test of the purchase order runs on the memory backend and on SQLite,
- * as two suites with plain names, so a plant can name the one it turns red. */
+ * as two suites with plain names, so a plant can name the one it turns red,
+ * and on Postgres as a third when GDEFCORE_TEST_GROUPS=postgres. */
 class PoBase : public ::testing::Test {
  public:
   std::unique_ptr<Site> s;
@@ -736,10 +777,22 @@ class GroupsPoSqlite : public PoBase {
   void SetUp() override { Open(kSqlite); }
 };
 
+class GroupsPoPostgres : public PoBase {
+ protected:
+  void SetUp() override {
+    if (!PostgresArm()) {
+      GTEST_SKIP() << "the Postgres arm is make test-groups-postgres "
+                      "(GDEFCORE_TEST_GROUPS=postgres)";
+    }
+    Open(kPostgres);
+  }
+};
+
 #define PO_TEST(name)                                  \
   template <class Fx> static void name##Body(Fx * self); \
   TEST_F(GroupsPo, name) { name##Body(this); }           \
   TEST_F(GroupsPoSqlite, name) { name##Body(this); }     \
+  TEST_F(GroupsPoPostgres, name) { name##Body(this); }   \
   template <class Fx> static void name##Body(Fx * self)
 
 #define PO_LOCALS                                      \
@@ -1349,8 +1402,16 @@ TEST_F(GroupsPersonal, AValueInsideAGroupNamesTheSubjectItsItemNames) {
 
 /* ---- the render context ------------------------------------------------- */
 
-class GroupsRender : public ::testing::Test {
+/* The render on memory (GroupsRender) and, when GDEFCORE_TEST_GROUPS=postgres,
+ * on Postgres (GroupsRenderPostgres): one body per test, two suites. */
+class GroupsRenderBase : public ::testing::Test {
  protected:
+  virtual int Backend() const { return kMemory; }
+  void ATemplateIteratesTheLinesAndTheirTaxesBody();
+  void AFieldTheReaderMayNotSeeIsAbsentInEveryItemBody();
+  void AnOrderTheReaderMayNotSeeIsNotThereBody();
+
+  std::string dir_;
   GDEFSTOR_Store * store_ = NULL;
   GDEFCORE_Host * host_ = NULL;
   GDEFCORE_Catalog * catalog_ = NULL;
@@ -1426,7 +1487,8 @@ class GroupsRender : public ::testing::Test {
   }
 
   void SetUp() override {
-    ASSERT_EQ(GDEFSMEMORY_OK, gdefsmemory_store_create(NULL, NULL, &store_));
+    store_ = OpenStore(Backend(), &dir_);
+    ASSERT_NE(nullptr, store_);
     ASSERT_EQ(GDEFCORE_OK, gdefcore_host_open(store_, NULL, &host_));
     ASSERT_EQ(GDEFCORE_OK, gdefcore_catalog_open(store_,
         (const uint8_t *)kTenant, 1, NULL, NULL, &catalog_));
@@ -1503,6 +1565,10 @@ class GroupsRender : public ::testing::Test {
     gdefcore_catalog_destroy(catalog_);
     gdefcore_host_destroy(host_);
     gdefstor_store_destroy(store_);
+    if (!dir_.empty()) {
+      std::error_code ec;
+      std::filesystem::remove_all(dir_, ec);
+    }
   }
 
   std::string Render(GDEFCORE_Request * req, GDEFCORE_Result * out_rc = NULL) {
@@ -1535,13 +1601,32 @@ class GroupsRender : public ::testing::Test {
   }
 };
 
-TEST_F(GroupsRender, ATemplateIteratesTheLinesAndTheirTaxes) {
+class GroupsRender : public GroupsRenderBase {};
+
+class GroupsRenderPostgres : public GroupsRenderBase {
+ protected:
+  int Backend() const override { return kPostgres; }
+  void SetUp() override {
+    if (!PostgresArm()) {
+      GTEST_SKIP() << "the Postgres arm is make test-groups-postgres "
+                      "(GDEFCORE_TEST_GROUPS=postgres)";
+    }
+    GroupsRenderBase::SetUp();
+  }
+};
+
+#define RENDER_TEST(name)                                   \
+  TEST_F(GroupsRender, name) { name##Body(); }              \
+  TEST_F(GroupsRenderPostgres, name) { name##Body(); }      \
+  void GroupsRenderBase::name##Body()
+
+RENDER_TEST(ATemplateIteratesTheLinesAndTheirTaxes) {
   EXPECT_EQ("#PO-7|A-1 x2 @12.50[vat 5.00]|B-2 x1 @9.99[vat 5.00]"
             ";fragile;call first",
       Render(Req(buyer_)));
 }
 
-TEST_F(GroupsRender, AFieldTheReaderMayNotSeeIsAbsentInEveryItem) {
+RENDER_TEST(AFieldTheReaderMayNotSeeIsAbsentInEveryItem) {
   /* The control: a buyer sees every line's price and every tax's amount. */
   Node all = Tree(Req(buyer_));
   ASSERT_EQ(2u, all.Count("lines"));
@@ -1568,7 +1653,7 @@ TEST_F(GroupsRender, AFieldTheReaderMayNotSeeIsAbsentInEveryItem) {
   EXPECT_EQ(std::string::npos, page.find("9.99"));
 }
 
-TEST_F(GroupsRender, AnOrderTheReaderMayNotSeeIsNotThere) {
+RENDER_TEST(AnOrderTheReaderMayNotSeeIsNotThere) {
   char stranger[GDEFCORE_PUBLIC_ID_LEN + 1];
   ASSERT_EQ(GDEFCORE_OK, gdefcore_access_principal_create(catalog_, stranger));
   GDEFCORE_Result hidden = GDEFCORE_OK;
@@ -1591,7 +1676,26 @@ TEST_F(GroupsRender, AnOrderTheReaderMayNotSeeIsNotThere) {
 
 }  // namespace
 
+/* The Postgres arm needs the library and a server; without either it fails
+ * naming the fix, never passes. */
 int main(int argc, char ** argv) {
   ::testing::InitGoogleTest(&argc, argv);
+  if (PostgresArm()) {
+#ifndef GDEFCORE_TEST_HAVE_PG
+    fprintf(stderr, "the Postgres arm of the purchase order needs "
+                    "defiant-storage-postgres, which builds in its derived "
+                    "image (libpq): run make test-groups-postgres there, "
+                    "through that library's tools/pg-test.sh\n");
+    return 1;
+#else
+    const char * ci = getenv("GDEFSPG_TEST_CONNINFO");
+    if (ci == NULL || ci[0] == '\0') {
+      fprintf(stderr, "GDEFSPG_TEST_CONNINFO is not set: the Postgres arm of "
+                      "the purchase order needs a server; run it through "
+                      "defiant-storage-postgres's tools/pg-test.sh\n");
+      return 1;
+    }
+#endif
+  }
   return RUN_ALL_TESTS();
 }

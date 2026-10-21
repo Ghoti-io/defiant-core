@@ -495,6 +495,17 @@ PG_CFLAGS := $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_LOOKUP_PATH) pkg-config --cfla
 PG_LIBS := $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_LOOKUP_PATH) pkg-config --libs $(PG_PC) 2>/dev/null)
 ifneq ($(strip $(PG_LIBS)),)
 INCLUDE += $(PG_CFLAGS) -DGDEFCORE_TEST_HAVE_PG
+# The scale test's Postgres arm reads the server's own plans on a connection
+# of its own (story S10), so it also needs libpq's headers, which the derived
+# image has and a developer host does not (a host may hold the backend in its
+# prefix and only libpq's runtime). Found, the tests link libpq; not found,
+# that arm says what it needs.
+PQ_CFLAGS := $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_LOOKUP_PATH) pkg-config --cflags libpq 2>/dev/null)
+PQ_LIBS := $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_LOOKUP_PATH) pkg-config --libs libpq 2>/dev/null)
+ifneq ($(strip $(PQ_LIBS)),)
+PG_LIBS += $(PQ_LIBS)
+INCLUDE += $(PQ_CFLAGS) -DGDEFCORE_TEST_HAVE_PQ
+endif
 endif
 
 # A private PREFIX does not hold cutil, defiant-storage or security. Test
@@ -520,7 +531,7 @@ TESTFLAGS := `PKG_CONFIG_PATH=$(PKG_CONFIG_LOOKUP_PATH) pkg-config --libs --cfla
 # coverage target does, because --coverage links the gcov runtime, whose
 # mangle_path check-symbols is right to reject in a shipping library and
 # wrong to reject in an instrumented one. Spelled as text's TEST_GATES is.
-TEST_GATES ?= check-symbols check-aliasing check-seams check-prefix check-labels check-access check-account check-inst check-subject check-keystore check-keystores check-form check-render check-erasure check-oracle check-readpaths check-routes check-tenant check-renderkey check-wait check-contexts check-bus check-defects check-safeout check-templates check-tpermission check-manifest check-conditions check-grants check-can check-revisions check-paths check-listplan check-relations check-groups check-personal check-restore
+TEST_GATES ?= check-symbols check-aliasing check-seams check-prefix check-labels check-access check-account check-inst check-subject check-keystore check-keystores check-form check-render check-erasure check-oracle check-readpaths check-routes check-tenant check-renderkey check-wait check-contexts check-bus check-defects check-safeout check-templates check-tpermission check-manifest check-conditions check-grants check-can check-revisions check-paths check-listplan check-relations check-groups check-personal check-restore check-scale
 
 # Valgrind flags (exclude "still reachable" as it's not a leak)
 # --suppressions: see tests/valgrind.supp. It holds allocations that are
@@ -1640,7 +1651,7 @@ $(FUZZ_FLAGS_STAMP): force-flags
 	@printf '%s\n' '$(FUZZ_CC) $(FUZZ_CXX) $(FUZZ_SAN) $(FUZZ_LIB_FLAGS) $(FUZZ_BIN_FLAGS) $(INCLUDE) $(STOR_LIBS) $(CUTIL_LIBS) $(SEC_LIBS) $(TEXT_LIBS) $(REGEX_LIBS) $(LTANG_LIBS) $(ARC_LIBS) $(MEM_LIBS) $(SQL_LIBS)' > $@.new
 	@cmp -s $@.new $@ 2>/dev/null && rm -f $@.new || mv -f $@.new $@
 
-.PHONY: check-seams check-prefix check-labels check-access check-account check-inst check-subject check-keystore check-keystores check-form check-render check-erasure check-oracle check-readpaths check-routes check-tenant check-renderkey check-wait check-contexts check-bus check-defects check-safeout check-templates check-tpermission check-manifest check-conditions check-grants check-can check-revisions check-paths check-listplan check-relations check-groups check-personal check-restore
+.PHONY: check-seams check-prefix check-labels check-access check-account check-inst check-subject check-keystore check-keystores check-form check-render check-erasure check-oracle check-readpaths check-routes check-tenant check-renderkey check-wait check-contexts check-bus check-defects check-safeout check-templates check-tpermission check-manifest check-conditions check-grants check-can check-revisions check-paths check-listplan check-relations check-groups check-personal check-restore check-scale
 check-seams: ## Fail if a subsystem includes another's private header
 	@tools/check-seams.sh .
 check-prefix: ## Fail if a derived Defiant prefix collides or a dependency is out of order
@@ -1710,6 +1721,29 @@ ifeq ($(strip $(PG_LIBS)),)
 else
 	@GDEFCORE_TEST_LISTPLAN=postgres LD_LIBRARY_PATH="$(TEST_LD_PATH)" $(APP_DIR)/testListplan$(EXE_EXTENSION) --gtest_brief=1
 endif
+# The scale test on Postgres (story S10, CAP-S7): list, count and create at
+# 10,000 entities against 1,000, by the rows the server's plans read, then the
+# dropped-index plant seen red there (tools/check-scale.sh). A server again.
+.PHONY: test-scale-postgres
+test-scale-postgres: $(APP_DIR)/testScale$(EXE_EXTENSION) ## The scale test and its plant with the store on Postgres (a server: defiant-storage-postgres's tools/pg-test.sh)
+ifeq ($(strip $(PG_LIBS)),)
+	@printf '%s\n' "test-scale-postgres: ghoti.io-defiant-storage-postgres was not found by pkg-config. It builds only in its derived image (ghoti-build:gcc16 plus libpq-dev, from defiant-storage-postgres's Containerfile): install it into PREFIX there and run this target through that library's tools/pg-test.sh." >&2; exit 1
+else
+	@GDEFCORE_TEST_SCALE=postgres LD_LIBRARY_PATH="$(TEST_LD_PATH)" $(APP_DIR)/testScale$(EXE_EXTENSION) --gtest_brief=1 --gtest_filter='ScalePostgres.*'
+	@GDEFCORE_TEST_SCALE=postgres tools/check-scale.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX))
+endif
+# The purchase-order fixture through core on Postgres (story S10, CAP-S3):
+# the GroupsPo and GroupsRender suites with the store on Postgres, then the
+# purchase order's plants seen red there (tools/check-groups.sh). A server
+# again.
+.PHONY: test-groups-postgres
+test-groups-postgres: $(APP_DIR)/testGroups$(EXE_EXTENSION) ## The purchase order through core and its plants with the store on Postgres (a server: defiant-storage-postgres's tools/pg-test.sh)
+ifeq ($(strip $(PG_LIBS)),)
+	@printf '%s\n' "test-groups-postgres: ghoti.io-defiant-storage-postgres was not found by pkg-config. It builds only in its derived image (ghoti-build:gcc16 plus libpq-dev, from defiant-storage-postgres's Containerfile): install it into PREFIX there and run this target through that library's tools/pg-test.sh." >&2; exit 1
+else
+	@GDEFCORE_TEST_GROUPS=postgres LD_LIBRARY_PATH="$(TEST_LD_PATH)" $(APP_DIR)/testGroups$(EXE_EXTENSION) --gtest_brief=1 --gtest_filter='GroupsPoPostgres.*:GroupsRenderPostgres.*'
+	@GDEFCORE_TEST_GROUPS=postgres tools/check-groups.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX))
+endif
 # The restore through core on Postgres (story S8): a tenant taken on memory
 # restored into the Postgres entity port. A server again, so the same derived
 # image and tools/pg-test.sh as above.
@@ -1750,3 +1784,5 @@ check-personal: $(APP_DIR)/testPersonal$(EXE_EXTENSION) ## Personal data names i
 	@tools/check-personal.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX))
 check-restore: $(APP_DIR)/testRestore$(EXE_EXTENSION) $(APP_DIR)/testPersonal$(EXE_EXTENSION) ## A backup pair restored through core in AD-23's order, across backends (story S8); real-source plants
 	@tools/check-restore.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX))
+check-scale: $(APP_DIR)/testScale$(EXE_EXTENSION) ## List, count and create at 10,000 entities on SQLite cost what they did at 1,000 (CAP-S7); real-source plant
+	@tools/check-scale.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX))
