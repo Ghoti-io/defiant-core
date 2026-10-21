@@ -609,8 +609,15 @@ struct CondGen {
       return out + "))";
     }
     static const char * ops[] = {"=", "!=", "<", "<=", ">", ">="};
-    return std::string("(") + ops[rng.below(6)] + " " + Operand() + " " +
-           (rng.chance(60) ? Constant() : Operand()) + ")";
+    /* One draw per statement: the order of a call's arguments, the operands
+     * of an overloaded +, is the compiler's, and GCC's differs between
+     * targets (x86-64 draws the last first; s390x and SPARC64 the first), so
+     * a big-endian host swept other conditions (story S10). Drawn in
+     * x86-64's order, right to left. */
+    std::string right = rng.chance(60) ? Constant() : Operand();
+    std::string left = Operand();
+    const char * op = ops[rng.below(6)];
+    return std::string("(") + op + " " + left + " " + right + ")";
   }
 };
 
@@ -728,6 +735,9 @@ TEST(ListPlan, ConditionsAgreeWithTheEvaluator) {
   }
   /* The bounds are for two backends; one (Postgres alone) has half. */
   const size_t nb = Backends().size();
+  /* Printed, so a run on another target can be held to this one's sweep. */
+  printf("condition sweep: %zu compared, %zu nonempty, %zu partial, %zu with "
+         "a failure\n", compared, nonempty, partial, with_failure);
   EXPECT_GE(compared, 350u * nb);
   /* The sweep is not trivial: many conditions select some and not all, and
    * some reach a failure. */

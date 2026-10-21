@@ -112,7 +112,26 @@ void TrespasserEntry(void * arg) {
   gltang_buffer_free(bytes);
 }
 
+/* Where cutil has no fibers (GCU_FIBER_SUPPORTED is 0: every target but
+ * x86-64 and arm64 ELF, and Windows) a render runs on its caller's stack and
+ * no fiber holds a context, so the tests of fibers skip there, once the
+ * platform is seen to refuse one. suite/tools/xarch's first run (story S10)
+ * met it on s390x and SPARC64. */
+#if GCU_FIBER_SUPPORTED
+#define GDEFCORE_TEST_NEEDS_FIBERS() (void)0
+#else
+void NoEntry(void *) {}
+#define GDEFCORE_TEST_NEEDS_FIBERS()                                         \
+  do {                                                                        \
+    GCU_Fiber * none = NULL;                                                  \
+    ASSERT_EQ(GCU_FIBER_ERR_UNSUPPORTED, gcu_fiber_create(&none, NoEntry,     \
+        NULL, GCU_FIBER_DEFAULT_STACK_SIZE, NULL));                           \
+    GTEST_SKIP() << "cutil has no fibers on this target";                    \
+  } while (0)
+#endif
+
 TEST(Contexts, OneFiberAtATime) {
+  GDEFCORE_TEST_NEEDS_FIBERS();
   Held held;
   GCU_Fiber * holder = NULL;
   GCU_Fiber * other = NULL;
@@ -334,6 +353,7 @@ int Overflow(int depth) {
 void OverflowEntry(void *) { gSink = (char)Overflow(0); }
 
 TEST(Contexts, HarnessSeesACrash) {
+  GDEFCORE_TEST_NEEDS_FIBERS();
   Verdict v = {false, -1, 0};
   int status = 0;
   pid_t pid;
@@ -365,6 +385,7 @@ TEST(Contexts, HarnessSeesACrash) {
 
 TEST(Contexts, DeepNestOnMinimumFiber) {
   Verdict v;
+  GDEFCORE_TEST_NEEDS_FIBERS();
   /* 1500 nested blocks faulted the process on the scheduler's own 256 KiB
    * fiber before the render ran on a stack of its own. */
   v = InChild(Case{Nested(1500), 1000000}, GDEFCORE_OK, "OK");
@@ -381,6 +402,7 @@ TEST(Contexts, DeepNestOnMinimumFiber) {
 
 TEST(Contexts, DeepRecursionOnMinimumFiber) {
   Verdict v;
+  GDEFCORE_TEST_NEEDS_FIBERS();
   /* The control: a recursion well inside the budget still renders. */
   v = InChild(Case{Recursion(100), 1000000000ull}, GDEFCORE_OK, "100OK");
   EXPECT_TRUE(v.exited && v.code == 0) << "depth 100: " << Describe(v);
