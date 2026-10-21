@@ -943,17 +943,15 @@ GDEFCORE_API void gdefcore_catalog_limits(const GDEFCORE_Catalog * catalog,
  * cleared, matching a storage query, in the query's order, with the total.
  *
  * This is the unfiltered index with a predicate: the port's entity query
- * (query.h, "Over entities") over the type's current tables, read as the
+ * (query.h) over the type's current tables, read as the
  * system, knowing nothing of a principal. A caller that serves a principal
  * puts that principal's access filter into the query's tree
  * (gdefcore_access_list() does, through plan.h). Rows are the entities whose
  * newest revision exists and that are not deleted, whether or not they are
  * published; a tree that reads META PUBLISHED decides that. The query binds
- * one language (GDEFSTOR_Query::language; NULL reads `en`). Its select list
- * must be empty and it takes no `entity_numeric`. The order ends in creation
- * order, which is the order of gdefcore_entity_ids(). Free @p out_ids with
- * gdefcore_ids_free(). This replaces the projection form of story A2, whose
- * `a:` and `s` rows are no longer written.
+ * one language (GDEFSTOR_Query::language; NULL reads `en`). The order ends
+ * in creation order, which is the order of gdefcore_entity_ids(). Free
+ * @p out_ids with gdefcore_ids_free().
  *
  * @param query A query over the type's fields and facts.
  * @param out_total Receives the matches before the offset and the limit. May

@@ -31,7 +31,6 @@
 #include <ghoti.io/cutil/fiber.h>
 #include <ghoti.io/defiant-core/defiant-core.h>
 #include <ghoti.io/defiant-storage/model.h>
-#include <ghoti.io/defiant-storage/revision.h>
 #include <ghoti.io/defiant-storage-memory/memory.h>
 
 #include <gtest/gtest.h>

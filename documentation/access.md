@@ -118,7 +118,7 @@ the condition hold. Each grant is its base (`any` is true, `own` is "the
 record's creator is the principal", an expression is `plan.h` compiling it)
 and, for an agent, one of the acting principal's grants for the same permission
 with its base. Since story S6b this is the port's query over the type's
-current tables (defiant-storage `query.h`, "Over entities"), in the list's
+current tables (defiant-storage `query.h`), in the list's
 language: a field is a typed operand of the entity's newest revision;
 `creator`, the published fact and `revision.creator` (the newest revision's
 author) are the entity record's; a relation is an EXISTS over its rows; `now`

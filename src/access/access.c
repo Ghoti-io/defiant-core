@@ -2750,7 +2750,7 @@ static int cmp_bytes(const char * a, size_t an, const char * b, size_t bn) {
 
 /* One key of two rows, in the field's type: a text or reference by bytes,
  * with no value as the empty text; any other type by value, with no value
- * before every value. As the port sorts a key (query.h "Over entities"). */
+ * before every value. As the port sorts a key (query.h "Order and pages"). */
 static int key_compare(const char * a, size_t an, const char * b, size_t bn,
     int type, int scale) {
   GDEFSTOR_Value x;

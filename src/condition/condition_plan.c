@@ -22,7 +22,7 @@
  * @file
  *
  * A condition compiled into the storage port's query form over entities
- * (plan.h, defiant-storage query.h "Over entities"). The evaluator in
+ * (plan.h, defiant-storage query.h). The evaluator in
  * condition_eval.c is the reference: the compiled predicate must select the
  * entities it holds on. Field operands are typed: condition_internal.h says
  * how both read a comparison, and the port's flags (EMPTY_IF_NONE, AS_TEXT)

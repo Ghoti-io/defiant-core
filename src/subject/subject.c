@@ -46,7 +46,6 @@
 #include <ghoti.io/cutil/allocator.h>
 #include <ghoti.io/defiant-core/access.h>
 #include <ghoti.io/defiant-storage/core.h>
-#include <ghoti.io/defiant-storage/projection.h>
 #include <ghoti.io/defiant-storage/model.h>
 #include <ghoti.io/defiant-storage/query.h>
 #include <ghoti.io/defiant-storage/snapshot.h>

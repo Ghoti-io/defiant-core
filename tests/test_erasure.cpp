@@ -52,7 +52,6 @@
 #include <ghoti.io/defiant-storage-memory/memory.h>
 #include <ghoti.io/defiant-storage/model.h>
 #include <ghoti.io/defiant-storage/query.h>
-#include <ghoti.io/defiant-storage/revision.h>
 #include <ghoti.io/defiant-storage/snapshot.h>
 #include <ghoti.io/defiant-storage/store.h>
 #include <ghoti.io/security/hmac.h>

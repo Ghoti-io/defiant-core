@@ -5976,7 +5976,7 @@ GDEFCORE_Result gdefcore_entity_query_current(GDEFCORE_Catalog * catalog,
   size_t n;
   size_t i;
   if (catalog == NULL || type_name == NULL || type_name_len == 0 ||
-      query == NULL || query->size != sizeof q || query->select_count != 0 ||
+      query == NULL || query->size != sizeof q ||
       out_ids == NULL || out_count == NULL) {
     return GDEFCORE_ERR_INVALID;
   }

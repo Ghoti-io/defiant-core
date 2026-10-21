@@ -34,7 +34,6 @@
 #include <ghoti.io/defiant-core/defiant-core.h>
 #include <ghoti.io/defiant-storage-memory/memory.h>
 #include <ghoti.io/defiant-storage/model.h>
-#include <ghoti.io/defiant-storage/projection.h>
 #include <ghoti.io/defiant-storage/snapshot.h>
 #include <ghoti.io/defiant-storage/store.h>
 
