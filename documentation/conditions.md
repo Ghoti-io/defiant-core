@@ -1,7 +1,7 @@
 # Conditions
 
 A condition is a small boolean expression, stored as text, that says which
-entities a grant covers. Its format is `defiant-condition/3` (AD-34; see "Editions" below for what changed from `/1` and `/2`). The same
+entities a grant covers. Its format is `defiant-condition/1` (AD-34; see "Editions" below). The same
 text is parsed, checked against the catalog, written in one canonical form,
 explained in English, and evaluated on one entity. Everything is in
 `condition.h`.
@@ -280,38 +280,21 @@ Not here yet: callbacks.
 
 ## Editions
 
-`defiant-condition/3` adds `related` and changes nothing else, so a condition
-stored at `/1` or `/2` means what it meant and `gdefcore_condition_upcast()`
-copies it whole from edition 2 or 3 (a `related` clause included). A condition
-written at `/3` is refused by nothing earlier than `/3`'s own parser, which is
-the only parser: the editions share one, and the stored text does not say which
-it is.
+The format is `defiant-condition/1`. Nothing is released, so until the
+suite's first release a change to the grammar replaces it in place and stays
+at `/1` (AD-34, amended 2026-10-20): there is no reader of an earlier shape
+and no upcaster. A later change to what stored text means is a new version
+then, with a reader for every past one.
 
-`defiant-condition/2` is the first edition that is not `/1`. Nothing is
-released, but the stored form is versioned data (AD-15, AD-34), so the one
-change is made the way a later one would be:
-
-- Edition 1 had the operand `actor`: "who wrote the entity's published
-  revision". It could not tell the entity's author from the last editor, so
-  `own` followed whoever saved last.
-- Edition 2 splits it. `creator` is the entity's, set at its first revision
-  and never changed, and is what `own` means. `revision.creator` is the old
-  `actor`: the creator of the revision that is now current (the newest).
-- A person writing `actor` now is refused, with a message that names the new
-  spellings. Silently reading it as one of the two would pick a meaning for
-  them.
-
-`gdefcore_condition_upcast(text, len, 1, ...)` is the upcaster: it renames the
-operand `actor` to `revision.creator` (what `actor` read) outside text constants,
-and nothing else. From edition 2 it copies. Text that is already in edition 2
-has no bare `actor`, so upcasting it changes nothing and a stored condition need
-not say which edition it is in. `gdefcore_condition_parse_stored()` is the
-upcast followed by the parse; it is what reads a stored grant, a module's
-declared grant and a stored text being rated or explained. `gdefcore_condition_parse()`
-is for text being written. The upcaster is a rename and is as trivial as it
-looks; `Cond.EditionOneActorIsUpcastAndNotWrittenAnyMore` and
-`CondAccess.AStoredEditionOneGrantStillMeansWhatItMeant` pin it, and
-tools/check-conditions.sh plants the three ways it can go wrong.
+There is no operand `actor`. It once named "who wrote the entity's published
+revision", which could not tell the entity's author from its last editor, so
+`own` followed whoever saved last. `creator` is the entity's, set at its first
+revision and never changed, and is what `own` means; `revision.creator` is the
+creator of the revision that is now current (the newest). A condition that
+says `actor` is refused, with a message that names both, at the word: silently
+reading it as one of the two would pick a meaning for its author.
+`Cond.ActorIsRefusedNamingTheWordsThatSayEachMeaning` pins it, and
+tools/check-conditions.sh plants a parser that takes `actor` again.
 
 ## Compiled into a list (plan.h)
 

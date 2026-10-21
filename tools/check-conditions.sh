@@ -26,9 +26,7 @@
 #   list-skips-the-flag        CondAccess.ReadAndListHonorTheExpression
 #   condition-reads-head       Cond.TheNewestRevisionIsWhatIsRead
 #   condition-reads-published  Cond.TheNewestRevisionIsWhatIsRead
-#   actor-still-written        Cond.EditionOneActorIsUpcastAndNotWrittenAnyMore
-#   upcast-does-nothing        Cond.EditionOneActorIsUpcastAndNotWrittenAnyMore, CondAccess.AStoredEditionOneGrantStillMeansWhatItMeant
-#   upcast-rewrites-constants  Cond.EditionOneActorIsUpcastAndNotWrittenAnyMore
+#   actor-still-written        Cond.ActorIsRefusedNamingTheWordsThatSayEachMeaning
 #
 # Every test has a control (the condition that matches DOES grant, the same
 # input with no failure DOES hold, a valid sibling of every refused text is
@@ -248,30 +246,11 @@ plant condition-reads-published $EVAL testCondition 'Cond.TheNewestRevisionIsWha
   '  rc = gdefcore_entity_values(ctx->catalog, NULL, GDEFCORE_VIEW_CURRENT,' \
   '  rc = gdefcore_entity_values(ctx->catalog, NULL, GDEFCORE_VIEW_PUBLISHED,'
 
-# Plant 17: the parser still takes the edition 1 `actor`, as the new operand,
-# from a person writing a condition.
-plant actor-still-written $PARSE testCondition 'Cond.EditionOneActorIsUpcastAndNotWrittenAnyMore' \
+# Plant 17: the parser takes `actor`, as `revision.creator`.
+plant actor-still-written $PARSE testCondition 'Cond.ActorIsRefusedNamingTheWordsThatSayEachMeaning' \
   '    return fail(p, start, kMsgRenamed);' \
   '    (void)kMsgRenamed;
     return new_node(p, kRevCreator, start);'
 
-# Plant 18: the upcaster leaves an edition 1 `actor` as it found it, so a
-# stored grant stops meaning what it meant.
-plant upcast-does-nothing $PARSE testCondition 'Cond.EditionOneActorIsUpcastAndNotWrittenAnyMore CondAccess.AStoredEditionOneGrantStillMeansWhatItMeant' \
-  '      if (from_edition == 1 && j - i == sizeof kOld - 1 &&' \
-  '      if (0 && from_edition == 1 && j - i == sizeof kOld - 1 &&'
-
-# Plant 19: the upcaster rewrites inside a text constant too.
-plant upcast-rewrites-constants $PARSE testCondition 'Cond.EditionOneActorIsUpcastAndNotWrittenAnyMore' \
-  '      buf_add(&b, text + i, j - i);
-      i = j;
-    } else if (is_delim(ch)) {' \
-  '      if (j - i == 7 && memcmp(text + i, "\"actor\"", 7) == 0) {
-        buf_add(&b, "\"revision.creator\"", 18);
-      } else {
-        buf_add(&b, text + i, j - i);
-      }
-      i = j;
-    } else if (is_delim(ch)) {'
 
 plant_finish

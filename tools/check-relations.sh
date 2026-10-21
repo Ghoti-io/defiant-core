@@ -141,21 +141,6 @@ plant rows-readable-by-a-call include/ghoti.io/defiant-core/relation.h testRelat
 /**
  * @brief The version of a relation:'
 
-# 11. The upcaster drops `related`.
-plant upcaster-drops-related src/condition/condition.c testRelations \
-  'Relations.StoredEditionsStillParseAndMeanWhatTheyMeant' \
-  '      } else {
-        buf_add(&b, text + i, j - i);
-      }
-      i = j;' \
-  '      } else if (j - i == 7 && memcmp(text + i, "related", 7) == 0) {
-        i = j;
-        continue;
-      } else {
-        buf_add(&b, text + i, j - i);
-      }
-      i = j;'
-
 # 12. The note about who may add rows left off a relation grant: the rating
 # stays low where it should not.
 plant relation-grant-rated-low $ACCESS testRelations \

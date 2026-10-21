@@ -152,10 +152,6 @@
   GHOTIIO_DEFCORE(gdefcore_condition_hash)
 #define gdefcore_condition_builtin \
   GHOTIIO_DEFCORE(gdefcore_condition_builtin)
-#define gdefcore_condition_upcast \
-  GHOTIIO_DEFCORE(gdefcore_condition_upcast)
-#define gdefcore_condition_parse_stored \
-  GHOTIIO_DEFCORE(gdefcore_condition_parse_stored)
 #define gdefcore_condition_uses \
   GHOTIIO_DEFCORE(gdefcore_condition_uses)
 #define gdefcore_condition_constrains_type                                     \

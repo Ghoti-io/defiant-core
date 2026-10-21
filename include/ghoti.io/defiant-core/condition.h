@@ -24,7 +24,7 @@
  * @stability free
  *
  * A condition is a small boolean expression stored as text
- * (`defiant-condition/3`, AD-34). A grant carries one. The text is an
+ * (`defiant-condition/1`, AD-34). A grant carries one. The text is an
  * s-expression; documentation/conditions.md gives the grammar. In short:
  *
  *     (and (= type "site.blog") (in field.group ("a" "b")))
@@ -32,8 +32,8 @@
  * Operands: `type`, `state`, `creator`, `revision.creator`, `principal`,
  * `now`, `field.<name>`, text constants and integer constants. `creator` is
  * who created the entity (immutable, and what `own` means);
- * `revision.creator` is who wrote its newest revision. Edition 1 called the
- * second `actor`; see gdefcore_condition_upcast(). Operators: `=`, `!=`, `<`,
+ * `revision.creator` is who wrote its newest revision; the word `actor` is
+ * refused with a message naming the two. Operators: `=`, `!=`, `<`,
  * `<=`, `>`, `>=`, `in`, `and`, `or`, `not`, and the words `true` and `false`.
  *
  * Fields are typed (entity.h). A text or reference field compares by bytes,
@@ -72,11 +72,7 @@ extern "C" {
 #endif
 
 /** The registered format name and version (AD-34). */
-#define GDEFCORE_CONDITION_FORMAT "defiant-condition/3"
-/** The editions before it, whose stored text gdefcore_condition_upcast() reads. */
-#define GDEFCORE_CONDITION_FORMAT_PREVIOUS "defiant-condition/2"
-/** The edition before that one. */
-#define GDEFCORE_CONDITION_FORMAT_FIRST "defiant-condition/1"
+#define GDEFCORE_CONDITION_FORMAT "defiant-condition/1"
 /** Most relations one condition may name. */
 #define GDEFCORE_CONDITION_MAX_RELATIONS 4
 /** Most operands one `related` takes (a relation's columns). */
@@ -214,38 +210,6 @@ GDEFCORE_API GDEFCORE_Result gdefcore_condition_canonical(
 
 /** @brief Free text from this header. NULL is ignored. */
 GDEFCORE_API void gdefcore_condition_text_free(char * text);
-
-/**
- * @brief Read condition text written in an earlier edition as the current one.
- *
- * Edition 1 named the operand for who wrote the entity's content `actor`.
- * Edition 2 splits it: `creator` (the entity's, immutable) and
- * `revision.creator` (the newest revision's). A stored `actor` meant the
- * second, so from edition 1 this renames that one operand to
- * `revision.creator`, leaving text constants alone. From edition 2 it copies.
- * Text already in edition 2 has no bare `actor`, so upcasting it is the
- * identity and a stored condition need not say which edition it is in.
- * Free @p out_text with gdefcore_condition_text_free().
- *
- * Edition 3 added `related` and changed nothing else, so from edition 2 or 3
- * the text is copied, `related` clauses and all.
- *
- * @param from_edition 1, 2 or 3; anything else is ::GDEFCORE_ERR_INVALID.
- */
-GDEFCORE_API GDEFCORE_Result gdefcore_condition_upcast(const char * text,
-    size_t len, int from_edition, char ** out_text, size_t * out_len);
-
-/**
- * @brief gdefcore_condition_parse() for text read from storage: upcast from
- * edition 1 first.
- *
- * Text a person writes now goes to gdefcore_condition_parse(), which refuses
- * `actor`; text read back from a stored grant or a module's manifest goes
- * here.
- */
-GDEFCORE_API GDEFCORE_Result gdefcore_condition_parse_stored(const char * text,
-    size_t len, GDEFCORE_Condition ** out_condition,
-    GDEFCORE_Condition_Error * out_error);
 
 /**
  * @brief SHA-256 of the canonical text of @p text, in lowercase hex.

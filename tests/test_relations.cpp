@@ -445,42 +445,6 @@ TEST_F(Relations, CanonicalTextExplainAndHash) {
   gdefcore_condition_free(c);
 }
 
-TEST_F(Relations, StoredEditionsStillParseAndMeanWhatTheyMeant) {
-  /* Edition 1 spelled revision.creator `actor`; editions 2 and 3 do not. */
-  char * out = NULL;
-  size_t n = 0;
-  const std::string one = "(and (= actor principal) (related \"t.editor\" (actor _)))";
-  ASSERT_EQ(GDEFCORE_OK, gdefcore_condition_upcast(one.data(), one.size(), 1, &out, &n));
-  EXPECT_EQ("(and (= revision.creator principal) (related \"t.editor\" (revision.creator _)))",
-      std::string(out, n));
-  gdefcore_condition_text_free(out);
-  /* Editions 2 and 3 are copied whole, a related clause and all. */
-  const std::string three = "(or (related \"t.editor\" (principal field.group)) (= state \"draft\"))";
-  for (int edition : {2, 3}) {
-    ASSERT_EQ(GDEFCORE_OK,
-        gdefcore_condition_upcast(three.data(), three.size(), edition, &out, &n));
-    EXPECT_EQ(three, std::string(out, n)) << "edition " << edition;
-    gdefcore_condition_text_free(out);
-  }
-  EXPECT_EQ(GDEFCORE_ERR_INVALID, gdefcore_condition_upcast(three.data(), three.size(), 4, &out, &n));
-  EXPECT_EQ(GDEFCORE_ERR_INVALID, gdefcore_condition_upcast(three.data(), three.size(), 0, &out, &n));
-  /* A stored condition is read through the upcaster and parses. */
-  GDEFCORE_Condition * c = NULL;
-  ASSERT_EQ(GDEFCORE_OK,
-      gdefcore_condition_parse_stored(three.data(), three.size(), &c, NULL));
-  const char * name = NULL;
-  ASSERT_EQ(1, gdefcore_condition_relation_at(c, 0, &name, &n));
-  EXPECT_EQ("t.editor", std::string(name, n));
-  gdefcore_condition_free(c);
-  /* A stored edition 2 condition (no related) means what it always did. */
-  const std::string two = "(and (= type \"site.post\") (= creator principal))";
-  ASSERT_EQ(GDEFCORE_OK, gdefcore_condition_parse_stored(two.data(), two.size(), &c, NULL));
-  gdefcore_condition_free(c);
-  EXPECT_STREQ("defiant-condition/3", GDEFCORE_CONDITION_FORMAT);
-  EXPECT_STREQ("defiant-condition/2", GDEFCORE_CONDITION_FORMAT_PREVIOUS);
-  EXPECT_STREQ("defiant-condition/1", GDEFCORE_CONDITION_FORMAT_FIRST);
-}
-
 /* ---- membership ---------------------------------------------------------- */
 
 TEST_F(Relations, MembershipGrantsAndOnlyForTheRowsOwner) {

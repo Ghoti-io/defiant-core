@@ -949,7 +949,7 @@ static ExprSlot * expr_slot(Eval * ev, const Grant * grant) {
     slot->expr = grant->expr;
     slot->expr_len = grant->expr_len;
     if (grant->expr != NULL &&
-        gdefcore_condition_parse_stored(grant->expr, grant->expr_len, &slot->cond,
+        gdefcore_condition_parse(grant->expr, grant->expr_len, &slot->cond,
             NULL) == GDEFCORE_OK) {
       slot->bad = 0;
     }
@@ -962,7 +962,7 @@ static ExprSlot * expr_slot(Eval * ev, const Grant * grant) {
   if (read_values(ev->catalog, id, "condition", &texts, &lens, &n) ==
           GDEFCORE_OK &&
       n == 1) {
-    if (gdefcore_condition_parse_stored(texts[0], lens[0], &slot->cond, NULL) ==
+    if (gdefcore_condition_parse(texts[0], lens[0], &slot->cond, NULL) ==
         GDEFCORE_OK) {
       slot->bad = 0;
     }
@@ -4378,7 +4378,7 @@ static int risk_base(const char * action, size_t action_len, int has_field,
   int own_like;
   int related;
   if (condition_text == NULL ||
-      gdefcore_condition_parse_stored(condition_text, condition_len, &cond,
+      gdefcore_condition_parse(condition_text, condition_len, &cond,
           NULL) != GDEFCORE_OK) {
     /* A condition that cannot be read has a breadth nobody can state. */
     return GDEFCORE_ACCESS_RISK_HIGH;
@@ -4438,7 +4438,7 @@ int gdefcore_access_grant_changes_own_field(const char * action,
   int self = 0;
   GDEFCORE_Condition * cond = NULL;
   if (condition_text == NULL ||
-      gdefcore_condition_parse_stored(condition_text, condition_len, &cond,
+      gdefcore_condition_parse(condition_text, condition_len, &cond,
           NULL) != GDEFCORE_OK) {
     return 0;
   }
@@ -4714,7 +4714,7 @@ static GDEFCORE_Result mx_add(MatrixBuild * b, const char * source,
   row->size = sizeof *row;
   row->from_module = from_module;
   rc = GDEFCORE_OK;
-  if (gdefcore_condition_parse_stored(cond, cond_len, &parsed, NULL) ==
+  if (gdefcore_condition_parse(cond, cond_len, &parsed, NULL) ==
       GDEFCORE_OK) {
     rc = gdefcore_condition_explain(parsed, &explain, &explain_len);
     rel_note_len = relation_note(parsed, rel_note, sizeof rel_note);
@@ -4977,7 +4977,7 @@ GDEFCORE_Result gdefcore_access_matrix(GDEFCORE_Catalog * catalog,
       action = info.action;
       action_len = info.action_len;
     }
-    if (gdefcore_condition_parse_stored(item->condition, item->condition_len,
+    if (gdefcore_condition_parse(item->condition, item->condition_len,
             &parsed, NULL) == GDEFCORE_OK) {
       anonymous = (gdefcore_condition_uses(parsed) &
                       GDEFCORE_CONDITION_USES_PRINCIPAL) == 0;
