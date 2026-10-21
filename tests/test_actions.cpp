@@ -84,10 +84,10 @@ class Actions : public GrantsFixture {
   GDEFCORE_Result Write(const std::string & actor, const std::string & id,
       const char * title, const char * group, bool draft, bool sealed = false) {
     GDEFCORE_Changeset * cs = NULL;
-    GDEFCORE_Value values[3];
-    const char * texts[3] = {title, group, kSealed};
-    size_t lens[3] = {strlen(title), strlen(group), strlen(kSealed)};
-    const char * names[3] = {"title", "group", "ssn"};
+    GDEFCORE_Value values[4];
+    const char * texts[4] = {title, group, kSealed, ""};
+    size_t lens[4] = {strlen(title), strlen(group), strlen(kSealed), 0};
+    const char * names[4] = {"title", "group", "ssn", "who"};
     uint8_t mac[GDEFCORE_SUBJECT_MAC_LEN];
     GDEFCORE_Result rc;
     if (sealed) {
@@ -100,12 +100,15 @@ class Actions : public GrantsFixture {
       gdefcore_subject_free(subjects_, text);
       texts[2] = sealed_.c_str();
       lens[2] = sealed_.size();
+      /* Whose it is: the `who` reference its declaration names (story S7). */
+      texts[3] = subject_;
+      lens[3] = strlen(subject_);
     }
     EXPECT_EQ(GDEFCORE_OK,
         gdefcore_changeset_prepare(catalog_,
             actor.empty() ? NULL : actor.data(), actor.size(), &cs));
     memset(values, 0, sizeof values);
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < 4; i++) {
       values[i].size = sizeof values[i];
       values[i].field = names[i];
       values[i].field_len = strlen(names[i]);
@@ -119,7 +122,7 @@ class Actions : public GrantsFixture {
           sealed_.data(), sealed_.size(), subject_, strlen(subject_), mac));
     }
     rc = (draft ? gdefcore_entity_save_draft : gdefcore_entity_save)(
-        cs, id.data(), id.size(), "en", 2, values, sealed ? 3 : 2);
+        cs, id.data(), id.size(), "en", 2, values, sealed ? 4 : 2);
     if (rc == GDEFCORE_OK) {
       rc = gdefcore_changeset_apply(cs, NULL, 0);
     }
@@ -451,8 +454,10 @@ TEST_F(Actions, RevisionViewNeverShowsAPersonalFieldAsStored) {
     EXPECT_EQ(sealed_, std::string(texts[0], lens[0]));
     gdefcore_values_free(catalog_, texts, lens, count);
   }
+  /* The view opens it for a reader the filter allows (story S7): the
+   * plaintext, never the ciphertext. */
   std::string view = View(Req(historian), post, 1, "ssn");
-  EXPECT_EQ("personal", view);
+  EXPECT_EQ("shown:123-45-6789", view);
   EXPECT_EQ(std::string::npos, view.find("s1:"));
   /* The control: an ordinary field of the same revision is shown. */
   EXPECT_EQ("shown:t", View(Req(historian), post, 1, "title"));

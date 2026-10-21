@@ -188,7 +188,7 @@ PY
 plant revision-blind src/subject/subject.c Erasure.Sweep \
   '  texts[0] = stored;
   lens[0] = stored_len;
-  memset(&value, 0, sizeof value);' \
+  memset(values, 0, sizeof values);' \
   '  {
     char * ixhex = NULL;
     size_t ixn = 0;
@@ -207,7 +207,7 @@ plant revision-blind src/subject/subject.c Erasure.Sweep \
   }
   texts[0] = stored;
   lens[0] = stored_len;
-  memset(&value, 0, sizeof value);' \
+  memset(values, 0, sizeof values);' \
   '  GDEFCORE_Result rc;
   if (text_len < 3 || memcmp(text, "s1:", 3) != 0 ||' \
   '  GDEFCORE_Result rc;
@@ -270,21 +270,28 @@ plant snapshot-key src/subject/subject.c Erasure.SnapshotCarriesNoKey \
 # The entity layer refuses a plaintext for a personal field on its own, and so
 # does the form layer; the plants that lift one layer lift both, or the other
 # refuses and the plant would show nothing. ENTITY_GATE is the entity layer's
-# refusal, the first test in personal_value_ok(). Since story S6c a personal
-# value on the port also needs its subject, which a plaintext no note names
-# does not have; SUBJECT_GATE lifts that refusal (seal_value()) by naming a
-# made-up subject, so that a form plant can still store the plaintext.
+# refusal, the first test in personal_value_ok(). Since story S7 a save opens
+# every new personal value under the key of the subject its declaration names
+# (for its MAC, and to decide on the plaintext whether it changed), which a
+# plaintext does not survive; SUBJECT_GATE lifts that refusal (seal_value())
+# by taking the value without a MAC, so that a form plant can still store the
+# plaintext.
 ENTITY_GATE_OLD='  if (!decl->personal || value->count == 0) {
     return 1;
   }'
 ENTITY_GATE_NEW='  if (1 || !decl->personal || value->count == 0) {
     return 1;
   }'
-SUBJECT_GATE_OLD='    /* A sealed text from nowhere: nothing says whose it is (AD-19). */
-    seals->unknown = 1;
-    return GDEFCORE_ERR_INVALID;'
-SUBJECT_GATE_NEW='    memcpy(subject, "0000000000000000000000000000",
-        GDEFCORE_PUBLIC_ID_LEN + 1);'
+SUBJECT_GATE_OLD='    if (rc == GDEFCORE_ERR_INVALID) {
+      /* It does not open under the key of the subject the declaration
+       * names, for this field: not that person'"'"'s value (AD-19). */
+      seals->unknown = 1;
+      return GDEFCORE_ERR_INVALID;
+    }'
+SUBJECT_GATE_NEW='    if (rc == GDEFCORE_ERR_INVALID) {
+      *out_has_mac = 0;
+      return GDEFCORE_OK;
+    }'
 
 # 5. The subject route of a form stores the caller's plaintext (the sealed text
 #    is built and then not used). The entity layer's refusal is lifted too, so

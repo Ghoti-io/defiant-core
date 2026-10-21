@@ -567,14 +567,10 @@ static GDEFCORE_Result doc_set_field(const GDEFCORE_Allocator * alloc,
       return GDEFCORE_ERR_OOM;
     }
   }
-  for (i = 0; i < slot->nvals; i++) {
-    text_clear(alloc, &slot->vals[i]);
-  }
-  gcu_allocator_free(alloc, slot->vals);
   /* Values set by the flat API are matched by position (story S6d keeps
-   * that for flat callers); only a tree names items by id. */
-  gcu_allocator_free(alloc, slot->ids);
-  slot->ids = NULL;
+   * that for flat callers); only a tree names items by id. Whose a personal
+   * value is, is its declaration's to say (story S7), not the read's. */
+  gdefcore_ent_vals_clear(alloc, slot);
   slot->vals = vals;
   slot->nvals = count;
   return GDEFCORE_OK;
@@ -982,6 +978,27 @@ static GDEFCORE_Result load_type(GDEFCORE_Catalog * cat, const char * name,
   return GDEFCORE_OK;
 }
 
+/* Whether a stored type's entities are subjects (story S7). A built-in name
+ * has no record and keeps none. */
+static GDEFCORE_Result type_subjects_of(GDEFCORE_Catalog * cat,
+    const char * name, size_t name_len, int * out) {
+  GDEFCORE_EntType t;
+  GDEFCORE_Result rc;
+  *out = 0;
+  if (builtin_name(name, name_len)) {
+    return GDEFCORE_OK;
+  }
+  if (!machine_ok(name, name_len)) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  rc = gdefcore_ent_type_load(cat, name, name_len, &t);
+  if (rc == GDEFCORE_OK) {
+    *out = t.subjects;
+    gdefcore_ent_type_free(cat->alloc, &t);
+  }
+  return rc;
+}
+
 static int field_personal(const GDEFCORE_Field * field) {
   if (field->size < offsetof(GDEFCORE_Field, personal) + sizeof(int)) {
     return 0;
@@ -1100,9 +1117,10 @@ static size_t field_subject(const GDEFCORE_Field * field, const char ** out) {
 }
 
 /* One group's fields (the root group's at @p depth 0), and every group below
- * them (story S6d). @p total counts the fields at every depth. */
+ * them (story S6d). @p total counts the fields at every depth. @p subjects:
+ * the type's entities are subjects (::GDEFCORE_TYPE_SUBJECTS). */
 static GDEFCORE_Result check_level(const GDEFCORE_Field * fields, size_t count,
-    const GDEFCORE_Limits * limits, int depth, size_t * total) {
+    const GDEFCORE_Limits * limits, int depth, size_t * total, int subjects) {
   size_t i;
   size_t j;
   if (fields == NULL && count != 0) {
@@ -1150,7 +1168,7 @@ static GDEFCORE_Result check_level(const GDEFCORE_Field * fields, size_t count,
       if (depth + 1 > GDEFSTOR_MODEL_MAX_DEPTH) {
         return GDEFCORE_ERR_LIMIT;
       }
-      gr = check_level(kids, nkids, limits, depth + 1, total);
+      gr = check_level(kids, nkids, limits, depth + 1, total, subjects);
       if (gr != GDEFCORE_OK) {
         return gr;
       }
@@ -1183,6 +1201,12 @@ static GDEFCORE_Result check_level(const GDEFCORE_Field * fields, size_t count,
        * S6d): a group's item is not the entity, and nothing else says whose
        * the value is. */
       return GDEFCORE_ERR_INVALID;
+    } else if (field_personal(&fields[i]) && !subjects) {
+      /* A personal field of the root that names no reference takes the
+       * entity's own subject (AD-19, story S7), which only a type whose
+       * entities are subjects has: with neither, whose the value is would
+       * be nobody's to say. */
+      return GDEFCORE_ERR_INVALID;
     }
     if (field_covers(&fields[i],
             offsetof(GDEFCORE_Field, pattern_len) + sizeof(size_t)) &&
@@ -1210,13 +1234,21 @@ static GDEFCORE_Result check_level(const GDEFCORE_Field * fields, size_t count,
 }
 
 static GDEFCORE_Result check_fields(const GDEFCORE_Field * fields,
-    size_t count, const GDEFCORE_Limits * limits) {
+    size_t count, const GDEFCORE_Limits * limits, int subjects) {
   size_t total = 0;
   if (count > limits->max_fields || (fields == NULL && count != 0)) {
     return count > limits->max_fields ? GDEFCORE_ERR_LIMIT
                                       : GDEFCORE_ERR_INVALID;
   }
-  return check_level(fields, count, limits, 0, &total);
+  return check_level(fields, count, limits, 0, &total, subjects);
+}
+
+/* The kind a definition names, without ::GDEFCORE_TYPE_SUBJECTS; 0 when it
+ * names none of the kinds. */
+static int kind_of(int kind) {
+  int base = kind & ~GDEFCORE_TYPE_SUBJECTS;
+  return base == GDEFCORE_TYPE_CONTENT || base == GDEFCORE_TYPE_CONFIG ? base
+                                                                        : 0;
 }
 
 /* Fields at every depth: what fields_to_decls() makes. */
@@ -1409,12 +1441,14 @@ static int64_t now_ms(const GDEFCORE_Changeset * cs) {
 /* A type written, new or again: its record and its port declaration. A new
  * type gets a public id; every definition moves its version. */
 static GDEFCORE_Result write_type(GDEFCORE_Catalog * cat, GDEFSTOR_Write * write,
-    const char * name, size_t name_len, int kind, const GDEFCORE_Decl * decls,
-    size_t ndecls, const char * existing_id, uint64_t existing_version) {
+    const char * name, size_t name_len, int kind, int subjects,
+    const GDEFCORE_Decl * decls, size_t ndecls, const char * existing_id,
+    uint64_t existing_version) {
   GDEFCORE_EntType t;
   GDEFCORE_Result rc;
   memset(&t, 0, sizeof t);
   t.kind = kind;
+  t.subjects = subjects ? 1 : 0;
   if (existing_id != NULL) {
     memcpy(t.id, existing_id, GDEFCORE_PUBLIC_ID_LEN);
     t.id[GDEFCORE_PUBLIC_ID_LEN] = '\0';
@@ -1441,12 +1475,12 @@ GDEFCORE_Result gdefcore_type_define(GDEFCORE_Catalog * catalog,
   size_t ndecls = 0;
   GDEFCORE_Result rc;
   int existing = 0;
-  if (catalog == NULL || !machine_ok(name, name_len) ||
-      (kind != GDEFCORE_TYPE_CONTENT && kind != GDEFCORE_TYPE_CONFIG) ||
+  if (catalog == NULL || !machine_ok(name, name_len) || kind_of(kind) == 0 ||
       builtin_name(name, name_len)) {
     return GDEFCORE_ERR_INVALID;
   }
-  rc = check_fields(fields, field_count, &catalog->limits);
+  rc = check_fields(fields, field_count, &catalog->limits,
+      (kind & GDEFCORE_TYPE_SUBJECTS) != 0);
   if (rc != GDEFCORE_OK) {
     return rc;
   }
@@ -1468,7 +1502,8 @@ GDEFCORE_Result gdefcore_type_define(GDEFCORE_Catalog * catalog,
     decls_free(catalog->alloc, decls, ndecls);
     return rc;
   }
-  rc = write_type(catalog, write, name, name_len, kind, decls, ndecls, NULL, 0);
+  rc = write_type(catalog, write, name, name_len, kind_of(kind),
+      (kind & GDEFCORE_TYPE_SUBJECTS) != 0, decls, ndecls, NULL, 0);
   decls_free(catalog->alloc, decls, ndecls);
   if (rc != GDEFCORE_OK) {
     gdefstor_write_abort(write);
@@ -1507,20 +1542,38 @@ GDEFCORE_Result gdefcore_entity_create(GDEFCORE_Catalog * catalog,
     const char * type_name, size_t type_len,
     char out_id[GDEFCORE_PUBLIC_ID_LEN + 1], uint64_t * out_row) {
   int kind = 0;
+  int subjects = 0;
   GDEFSTOR_Write * write = NULL;
   char id[GDEFCORE_PUBLIC_ID_LEN + 1];
+  char sid[GDEFCORE_PUBLIC_ID_LEN + 1];
   GDEFCORE_Result rc;
   if (catalog == NULL || out_id == NULL || builtin_name(type_name, type_len)) {
     return GDEFCORE_ERR_INVALID;
   }
   rc = load_type(catalog, type_name, type_len, &kind, NULL, NULL, NULL, NULL,
       NULL);
+  if (rc == GDEFCORE_OK) {
+    rc = type_subjects_of(catalog, type_name, type_len, &subjects);
+  }
   if (rc != GDEFCORE_OK) {
     return rc;
+  }
+  if (subjects && catalog->subjects == NULL) {
+    /* The entity's own subject is made with it, and needs the keys. */
+    return GDEFCORE_ERR_INVALID;
   }
   rc = gdefcore_id_generate(id);
   if (rc != GDEFCORE_OK) {
     return rc;
+  }
+  if (subjects) {
+    /* Story S7: a type whose entities are subjects gets one per entity, its
+     * key made in the key store now (a subject's creation is one of the
+     * writes the key store takes, AD-19), kept with the entity below. */
+    rc = gdefcore_subject_create(catalog->subjects, sid);
+    if (rc != GDEFCORE_OK) {
+      return rc;
+    }
   }
   rc = map_stor(gdefstor_write_begin(catalog->store,
       (const char *)catalog->tenant, catalog->tenant_len, NULL, &write));
@@ -1531,6 +1584,11 @@ GDEFCORE_Result gdefcore_entity_create(GDEFCORE_Catalog * catalog,
    * creator, is made at its first save (story S6b). */
   rc = map_stor(gdefstor_draft_put(write, type_name, type_len, id,
       GDEFCORE_PUBLIC_ID_LEN, 0, NULL, 0));
+  if (rc == GDEFCORE_OK && subjects) {
+    rc = map_stor(gdefstor_record_put(write, GDEFCORE_ENT_SUBJECT_NS,
+        sizeof GDEFCORE_ENT_SUBJECT_NS - 1, id, GDEFCORE_PUBLIC_ID_LEN,
+        (const uint8_t *)sid, GDEFCORE_PUBLIC_ID_LEN));
+  }
   if (rc != GDEFCORE_OK) {
     gdefstor_write_abort(write);
     return rc;
@@ -1551,6 +1609,37 @@ void gdefcore_catalog_bind_subjects(GDEFCORE_Catalog * catalog,
   if (catalog != NULL) {
     catalog->subjects = subjects;
   }
+}
+
+struct GDEFCORE_Subjects * gdefcore_catalog_subjects(
+    const GDEFCORE_Catalog * catalog) {
+  return catalog == NULL ? NULL : catalog->subjects;
+}
+
+GDEFCORE_Result gdefcore_entity_subject(GDEFCORE_Catalog * catalog,
+    const char * id, size_t id_len,
+    char out_subject[GDEFCORE_PUBLIC_ID_LEN + 1]) {
+  char canon[GDEFCORE_PUBLIC_ID_LEN + 1];
+  char sid[GDEFCORE_PUBLIC_ID_LEN + 1];
+  GDEFCORE_EntLook look;
+  int found = 0;
+  GDEFCORE_Result rc;
+  if (catalog == NULL || out_subject == NULL ||
+      gdefcore_id_canonical(id, id_len, canon) != GDEFCORE_OK) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  rc = gdefcore_ent_lookup(catalog, canon, &look);
+  if (rc == GDEFCORE_OK) {
+    rc = gdefcore_ent_own_subject(catalog, canon, sid, &found);
+  }
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  if (!found) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  memcpy(out_subject, sid, GDEFCORE_PUBLIC_ID_LEN + 1);
+  return GDEFCORE_OK;
 }
 
 void gdefcore_catalog_destroy(GDEFCORE_Catalog * catalog) {
@@ -1575,6 +1664,23 @@ GDEFCORE_Result gdefcore_type_kind(GDEFCORE_Catalog * catalog, const char * name
   }
   return load_type(catalog, name, name_len, out_kind, NULL, NULL, NULL, NULL,
       NULL);
+}
+
+GDEFCORE_Result gdefcore_type_subjects(GDEFCORE_Catalog * catalog,
+    const char * name, size_t name_len, int * out_subjects) {
+  int subjects = 0;
+  GDEFCORE_Result rc;
+  if (catalog == NULL || out_subjects == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  rc = load_type(catalog, name, name_len, NULL, NULL, NULL, NULL, NULL, NULL);
+  if (rc == GDEFCORE_OK) {
+    rc = type_subjects_of(catalog, name, name_len, &subjects);
+  }
+  if (rc == GDEFCORE_OK) {
+    *out_subjects = subjects;
+  }
+  return rc;
 }
 
 GDEFCORE_Result gdefcore_type_field_count(GDEFCORE_Catalog * catalog,
@@ -1818,10 +1924,11 @@ GDEFCORE_Result gdefcore_changeset_define(GDEFCORE_Changeset * changeset,
   int have = 0;
   if (changeset == NULL || changeset->applied ||
       !machine_ok(name, name_len) || builtin_name(name, name_len) ||
-      (kind != GDEFCORE_TYPE_CONTENT && kind != GDEFCORE_TYPE_CONFIG)) {
+      kind_of(kind) == 0) {
     return GDEFCORE_ERR_INVALID;
   }
-  rc = check_fields(fields, field_count, &changeset->catalog->limits);
+  rc = check_fields(fields, field_count, &changeset->catalog->limits,
+      (kind & GDEFCORE_TYPE_SUBJECTS) != 0);
   if (rc != GDEFCORE_OK) {
     return rc;
   }
@@ -1831,7 +1938,19 @@ GDEFCORE_Result gdefcore_changeset_define(GDEFCORE_Changeset * changeset,
   rc = load_type(changeset->catalog, name, name_len, NULL, NULL, NULL,
       &existing_id, &existing_id_len, &version);
   if (rc == GDEFCORE_OK) {
+    int stored = 0;
     have = 1;
+    /* Whether its entities are subjects is part of what a type is: each
+     * one's subject was made with it, or was not (story S7). */
+    rc = type_subjects_of(changeset->catalog, name, name_len, &stored);
+    if (rc == GDEFCORE_OK &&
+        stored != ((kind & GDEFCORE_TYPE_SUBJECTS) != 0)) {
+      rc = GDEFCORE_ERR_INVALID;
+    }
+    if (rc != GDEFCORE_OK) {
+      gcu_allocator_free(changeset->catalog->alloc, existing_id);
+      return rc;
+    }
   } else if (rc != GDEFCORE_ERR_INVALID) {
     return rc;
   }
@@ -1848,7 +1967,8 @@ GDEFCORE_Result gdefcore_changeset_define(GDEFCORE_Changeset * changeset,
     return rc;
   }
   op->kind = GDEFCORE_OP_DEFINE;
-  op->type_kind = kind;
+  op->type_kind = kind_of(kind);
+  op->type_subjects = (kind & GDEFCORE_TYPE_SUBJECTS) != 0;
   op->decls = decls;
   op->ndecls = ndecls;
   if (text_set(changeset->catalog->alloc, &op->machine, name, name_len) !=
@@ -2459,7 +2579,8 @@ static GDEFCORE_Result tree_to_lang(GDEFCORE_Catalog * cat, int accept_personal,
         }
         rc = canon_one(cat, accept_personal, d, text, len, &canon);
         if (rc == GDEFCORE_OK) {
-          rc = gdefcore_ent_lang_add(cat->alloc, l, f, fn, &canon, 0, 0);
+          rc = gdefcore_ent_lang_add(cat->alloc, l, f, fn, &canon, 0, 0,
+              NULL, 0);
           if (rc != GDEFCORE_OK) {
             text_clear(cat->alloc, &canon);
           }
@@ -2499,7 +2620,7 @@ static GDEFCORE_Result tree_to_lang(GDEFCORE_Catalog * cat, int accept_personal,
           break;
         }
         rc = gdefcore_ent_lang_add(cat->alloc, l, it.field, it.field_len,
-            &canon, 1, it.id);
+            &canon, 1, it.id, NULL, 0);
         if (rc != GDEFCORE_OK) {
           text_clear(cat->alloc, &canon);
         }
@@ -2574,13 +2695,8 @@ static GDEFCORE_Result tree_to_lang(GDEFCORE_Catalog * cat, int accept_personal,
 /* Free what one language holds and empty it, leaving the struct itself. */
 static void lang_clear(const GDEFCORE_Allocator * alloc, GDEFCORE_Lang * l) {
   size_t j;
-  size_t k;
   for (j = 0; j < l->nfields; j++) {
-    for (k = 0; k < l->fields[j].nvals; k++) {
-      text_clear(alloc, &l->fields[j].vals[k]);
-    }
-    gcu_allocator_free(alloc, l->fields[j].vals);
-    gcu_allocator_free(alloc, l->fields[j].ids);
+    gdefcore_ent_vals_clear(alloc, &l->fields[j]);
     text_clear(alloc, &l->fields[j].name);
   }
   gcu_allocator_free(alloc, l->fields);
@@ -2712,16 +2828,20 @@ static GDEFCORE_Result lang_to_tree(GDEFCORE_Catalog * cat,
     int items = f->ids != NULL || (d != NULL ? d->many : f->nvals != 1);
     for (k = 0; rc == GDEFCORE_OK && k < f->nvals; k++) {
       size_t item = 0;
+      /* A personal value read from storage keeps the subject stored with
+       * it (story S7), for the read path to open it with. */
+      const char * sub = f->subjects != NULL ? f->subjects[k].p : NULL;
+      size_t sub_len = f->subjects != NULL ? f->subjects[k].n : 0;
       if (items) {
         rc = gdefcore_tree_add(t, 0, f->name.p, f->name.n,
             f->ids != NULL ? f->ids[k] : 0, &item);
         if (rc == GDEFCORE_OK) {
           rc = gdefcore_ent_tree_put(t, item, NULL, 0, f->vals[k].p,
-              f->vals[k].n, NULL, 0);
+              f->vals[k].n, sub, sub_len);
         }
       } else {
         rc = gdefcore_ent_tree_put(t, 0, f->name.p, f->name.n, f->vals[k].p,
-            f->vals[k].n, NULL, 0);
+            f->vals[k].n, sub, sub_len);
       }
     }
   }
@@ -2749,7 +2869,10 @@ static GDEFCORE_Result lang_to_tree(GDEFCORE_Catalog * cat,
       size_t len = 0;
       rc = gdefcore_tree_value(l->groups, j, k, &f, &fn, &text, &len);
       if (rc == GDEFCORE_OK) {
-        rc = gdefcore_ent_tree_put(t, item, f, fn, text, len, NULL, 0);
+        size_t sub_len = 0;
+        const char * sub = gdefcore_ent_tree_value_subject(l->groups, j, k,
+            &sub_len);
+        rc = gdefcore_ent_tree_put(t, item, f, fn, text, len, sub, sub_len);
       }
     }
   }
@@ -3981,15 +4104,23 @@ static GDEFCORE_Result drop_draft_author(GDEFSTOR_Write * write,
       sizeof GDEFCORE_ENT_DRAFT_NS - 1, op->id.p, op->id.n, NULL));
 }
 
-/* Where the trees of an op find their subjects and MACs (GDEFCORE_Seals). */
-static void seals_for(const GDEFCORE_Changeset * cs, int index, int with_draft,
-    GDEFCORE_Seals * out) {
+/* Where the trees of an op find their subjects and MACs (GDEFCORE_Seals):
+ * the notes, the keys, and the entity's own subject, kept with it (story
+ * S7), for a personal field that names no subject reference. */
+static GDEFCORE_Result seals_for(const GDEFCORE_Changeset * cs,
+    const GDEFCORE_Op * op, int index, GDEFCORE_Seals * out) {
+  int found = 0;
+  GDEFCORE_Result rc;
   memset(out, 0, sizeof *out);
   out->notes = cs->notes;
   out->nnotes = cs->nnotes;
   out->subjects = cs->subjects != NULL ? cs->subjects : cs->catalog->subjects;
   out->index = index;
-  out->with_draft = with_draft;
+  rc = gdefcore_ent_own_subject(cs->catalog, op->id.p, out->own, &found);
+  if (rc == GDEFCORE_OK && !found) {
+    out->own[0] = '\0';
+  }
+  return rc;
 }
 
 /* Say in words why the trees were refused, when it was a personal value. */
@@ -4164,11 +4295,20 @@ static GDEFCORE_Result apply_op(GDEFCORE_Changeset * cs, GDEFSTOR_Write * write,
     rc = load_type(cat, op->machine.p, op->machine.n, NULL, NULL, NULL,
         &existing_id, &existing_id_len, &existing_version);
     if (rc == GDEFCORE_OK) {
+      int stored = 0;
       is_new = 0;
       if (op->have_row && existing_version != op->base_seq) {
         gcu_allocator_free(cat->alloc, existing_id);
         *conflict = 1;
         return GDEFCORE_OK;
+      }
+      rc = type_subjects_of(cat, op->machine.p, op->machine.n, &stored);
+      if (rc == GDEFCORE_OK && stored != op->type_subjects) {
+        rc = GDEFCORE_ERR_INVALID; /* a type defined since, the other way */
+      }
+      if (rc != GDEFCORE_OK) {
+        gcu_allocator_free(cat->alloc, existing_id);
+        return rc;
       }
     } else if (rc != GDEFCORE_ERR_INVALID) {
       return rc;
@@ -4177,7 +4317,8 @@ static GDEFCORE_Result apply_op(GDEFCORE_Changeset * cs, GDEFSTOR_Write * write,
       return GDEFCORE_OK;
     }
     rc = write_type(cat, write, op->machine.p, op->machine.n, op->type_kind,
-        op->decls, op->ndecls, is_new ? NULL : existing_id, existing_version);
+        op->type_subjects, op->decls, op->ndecls, is_new ? NULL : existing_id,
+        existing_version);
     gcu_allocator_free(cat->alloc, existing_id);
     return rc;
   }
@@ -4198,7 +4339,10 @@ static GDEFCORE_Result apply_op(GDEFCORE_Changeset * cs, GDEFSTOR_Write * write,
   switch (op->kind) {
   case GDEFCORE_OP_SAVE: {
     GDEFCORE_Seals seals;
-    seals_for(cs, 1, look.has_draft, &seals);
+    rc = seals_for(cs, op, 1, &seals);
+    if (rc != GDEFCORE_OK) {
+      return rc;
+    }
     if (!look.exists) {
       /* The first save of an entity its draft reserves: the reservation
        * gives way to the entity, made with the actor as its creator, and
@@ -4247,7 +4391,10 @@ static GDEFCORE_Result apply_op(GDEFCORE_Changeset * cs, GDEFSTOR_Write * write,
   }
   case GDEFCORE_OP_DRAFT: {
     GDEFCORE_Seals seals;
-    seals_for(cs, 0, look.has_draft, &seals);
+    rc = seals_for(cs, op, 0, &seals);
+    if (rc != GDEFCORE_OK) {
+      return rc;
+    }
     /* A draft is not a revision (AD-14): the values go in the draft, which
      * records the revision it is made from, and nothing else is written. */
     if (look.has_draft && look.draft_base != op->draft_base) {
@@ -4294,6 +4441,7 @@ static GDEFCORE_Result apply_op(GDEFCORE_Changeset * cs, GDEFSTOR_Write * write,
         size_t who_len = 0;
         GDEFSTOR_RevisionMeta authored = meta;
         GDEFCORE_Seals seals;
+        memset(&seals, 0, sizeof seals);
         rc = draft_author(cat, op, who, sizeof who, &who_len);
         if (rc != GDEFCORE_OK) {
           return rc;
@@ -4306,7 +4454,9 @@ static GDEFCORE_Result apply_op(GDEFCORE_Changeset * cs, GDEFSTOR_Write * write,
          * draft apply takes none, story S6c), and refuses one of an erased
          * subject. */
         rc = draft_fits(cs, op);
-        seals_for(cs, 1, 1, &seals);
+        if (rc == GDEFCORE_OK) {
+          rc = seals_for(cs, op, 1, &seals);
+        }
         if (rc == GDEFCORE_OK && !look.exists) {
           rc = map_stor(gdefstor_draft_delete(write, op->id.p, op->id.n));
           if (rc == GDEFCORE_OK) {
@@ -5004,8 +5154,13 @@ GDEFCORE_Result gdefcore_changeset_serialize(const GDEFCORE_Changeset * changese
       }
     }
     if (op->kind == GDEFCORE_OP_DEFINE) {
-      const char * kind = op->type_kind == GDEFCORE_TYPE_CONFIG ? "config"
-                                                                : "content";
+      /* `content` or `config`, and ` subjects` for a type whose entities
+       * are subjects (story S7). */
+      const char * kind = op->type_kind == GDEFCORE_TYPE_CONFIG
+                              ? (op->type_subjects ? "config subjects"
+                                                   : "config")
+                              : (op->type_subjects ? "content subjects"
+                                                   : "content");
       size_t f;
       kn = snprintf(path, sizeof path, "type/%.*s/kind", (int)op->machine.n,
           op->machine.p);
@@ -5020,21 +5175,31 @@ GDEFCORE_Result gdefcore_changeset_serialize(const GDEFCORE_Changeset * changese
                                                      : "required one")
                                 : (op->decls[f].many ? "optional many"
                                                      : "optional one");
-        char flag[64];
+        char flag[160];
+        char personal[80];
         char scale[8];
         char * suffix = NULL;
         size_t suffix_len = 0;
         const char * tw = type_word(op->decls[f].type);
         int fn;
         /* The logical type, its scale and the index hint follow the shape
-         * (story S6b): `optional one decimal 2 indexed`. */
+         * (story S6b): `optional one decimal 2 indexed`. A personal field
+         * that takes its subject from a reference names it (story S7):
+         * `optional one personal:who`. */
         scale[0] = '\0';
         if (op->decls[f].type == GDEFSTOR_FIELD_DECIMAL) {
           snprintf(scale, sizeof scale, " %d", op->decls[f].scale);
         }
-        fn = snprintf(flag, sizeof flag, "%s%s%s%s%s%s", word,
-            op->decls[f].personal ? " personal" : "", tw != NULL ? " " : "",
-            tw != NULL ? tw : "", scale, op->decls[f].indexed ? " indexed" : "");
+        personal[0] = '\0';
+        if (op->decls[f].personal && op->decls[f].subject.n > 0) {
+          snprintf(personal, sizeof personal, " personal:%.*s",
+              (int)op->decls[f].subject.n, op->decls[f].subject.p);
+        } else if (op->decls[f].personal) {
+          snprintf(personal, sizeof personal, " personal");
+        }
+        fn = snprintf(flag, sizeof flag, "%s%s%s%s%s%s", word, personal,
+            tw != NULL ? " " : "", tw != NULL ? tw : "", scale,
+            op->decls[f].indexed ? " indexed" : "");
         if (fn <= 0 || (size_t)fn >= sizeof flag) {
           rc = GDEFCORE_ERR_LIMIT;
           break;
@@ -5624,6 +5789,7 @@ GDEFCORE_Result gdefcore_changeset_parse(GDEFCORE_Catalog * catalog,
       int kind;
       GDEFCORE_Field stack[64];
       size_t nfields = 0;
+      size_t nsubjects = 0;
       size_t f;
       GDEFCORE_Op * op;
       if (!machine_ok(name, name_len)) {
@@ -5635,6 +5801,12 @@ GDEFCORE_Result gdefcore_changeset_parse(GDEFCORE_Catalog * catalog,
       } else if (span_eq((const char *)files[i].bytes, files[i].len, "config",
                      6)) {
         kind = GDEFCORE_TYPE_CONFIG;
+      } else if (span_eq((const char *)files[i].bytes, files[i].len,
+                     "content subjects", 16)) {
+        kind = GDEFCORE_TYPE_CONTENT | GDEFCORE_TYPE_SUBJECTS;
+      } else if (span_eq((const char *)files[i].bytes, files[i].len,
+                     "config subjects", 15)) {
+        kind = GDEFCORE_TYPE_CONFIG | GDEFCORE_TYPE_SUBJECTS;
       } else {
         gdefcore_changeset_destroy(cs);
         return GDEFCORE_ERR_CORRUPT;
@@ -5657,6 +5829,8 @@ GDEFCORE_Result gdefcore_changeset_parse(GDEFCORE_Catalog * catalog,
           int indexed = 0;
           int ftype = 0;
           int fscale = 0;
+          const char * subject_at = NULL;
+          size_t subject_len = 0;
           const uint8_t * body = files[f].bytes;
           size_t body_len = files[f].len;
           const uint8_t * pipe = NULL;
@@ -5715,6 +5889,30 @@ GDEFCORE_Result gdefcore_changeset_parse(GDEFCORE_Catalog * catalog,
           if (body_len >= 9 && memcmp(body + body_len - 9, " personal", 9) == 0) {
             personal = 1;
             body_len -= 9;
+          } else {
+            /* ` personal:<reference>` (story S7): the subject source. */
+            size_t at = body_len;
+            while (at > 0 && body[at - 1] != ' ') {
+              at -= 1;
+            }
+            if (at > 0 && body_len - at > 9 &&
+                memcmp(body + at, "personal:", 9) == 0) {
+              if (!field_name_ok((const char *)body + at + 9,
+                      body_len - at - 9) ||
+                  nsubjects >= 64) {
+                size_t z;
+                text_clear(catalog->alloc, &extra.pattern);
+                for (z = 0; z < nfields; z++) {
+                  gcu_allocator_free(catalog->alloc, (void *)stack[z].pattern);
+                }
+                gdefcore_changeset_destroy(cs);
+                return GDEFCORE_ERR_CORRUPT;
+              }
+              personal = 1;
+              subject_at = (const char *)body + at + 9;
+              subject_len = body_len - at - 9;
+              body_len = at - 1;
+            }
           }
           if (span_eq((const char *)body, body_len, "required one", 12)) {
             required = 1;
@@ -5752,6 +5950,12 @@ GDEFCORE_Result gdefcore_changeset_parse(GDEFCORE_Catalog * catalog,
           stack[nfields].type = ftype;
           stack[nfields].scale = fscale;
           stack[nfields].indexed = indexed;
+          if (subject_at != NULL) {
+            /* Borrowed from the patch file, which outlives the define. */
+            stack[nfields].subject = subject_at;
+            stack[nfields].subject_len = subject_len;
+            nsubjects += 1;
+          }
           nfields += 1;
         }
       }

@@ -34,8 +34,9 @@
  * gdefcore_form_submit_subject(), binds the form to one subject and seals the
  * personal values under that subject's key as gdefcore_subject_save() does.
  * Every value in a form's tree is plaintext as the caller supplies it, so
- * an edit form for a personal field is filled from gdefcore_subject_read(),
- * not from gdefcore_form_tree(), which returns what is stored: ciphertext.
+ * an edit form for a personal field is filled from gdefcore_form_tree_for(),
+ * which decrypts a personal value the principal may read (story S7), not
+ * from gdefcore_form_tree(), which returns what is stored: ciphertext.
  * The token carries the values, sealed by the `form` key, and is returned to
  * the caller; the library keeps no copy.
  */
@@ -104,6 +105,28 @@ GDEFCORE_API GDEFCORE_Result gdefcore_form_field(const GDEFCORE_Form * form,
  */
 GDEFCORE_API GDEFCORE_Result gdefcore_form_tree(GDEFCORE_Catalog * catalog,
     const char * type_name, size_t type_len, const char * id, size_t id_len,
+    const char * lang, size_t lang_len, GDEFCORE_Form ** out);
+
+/**
+ * @brief The tree of entity @p id as the request's principal may edit it
+ * (story S7): gdefcore_form_tree()'s fields of its type, with the values of
+ * the draft over the newest revision, filtered.
+ *
+ * An entity the principal may not update (gdefcore_access_can(),
+ * ::GDEFCORE_ACTION_UPDATE) answers as one that is not there,
+ * ::GDEFCORE_ERR_INVALID, and @p out is not written. A field the principal
+ * may not read (its field-read grants, gdefcore_access_can_field()) is in the
+ * tree with no value. A personal value of a field the principal may read is
+ * decrypted after that check, with the catalog's subjects
+ * (gdefcore_catalog_bind_subjects()): its plaintext, or
+ * ::GDEFCORE_SUBJECT_ERASED, never its ciphertext; a catalog with no subjects
+ * gives it no value. Each subject decrypted is recorded on @p request
+ * (gdefcore_request_record_subject()). The values feed
+ * gdefcore_form_sign_subject() as they are. Free @p out with
+ * gdefcore_form_destroy(), which wipes them.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_form_tree_for(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Request * request, const char * id, size_t id_len,
     const char * lang, size_t lang_len, GDEFCORE_Form ** out);
 
 /**
@@ -249,9 +272,12 @@ GDEFCORE_API GDEFCORE_Result gdefcore_form_submit_authorized(
  * the draft is applied. Non-personal fields behave as in the plain route.
  * A personal field must be single-valued; a many field is refused.
  *
- * A subject that is unknown or erased, a token with no subject that holds a
- * personal value, or any failure before the draft is applied writes nothing
- * and never falls back to plaintext. The draft and the blind-index row are
+ * The token's subject must be the one each personal field's declaration names
+ * (story S7): the entity's own subject, or the value its reference holds in
+ * the draft (the form may set it); a value sealed for another is refused when
+ * the draft is applied. A subject that is unknown or erased, a token with no
+ * subject that holds a personal value, or any failure before the draft is
+ * applied writes nothing and never falls back to plaintext. The draft and the blind-index row are
  * two commits in two stores, as in gdefcore_subject_save(): a failure of the
  * second leaves the sealed draft without its row, the error is returned, and
  * erasure still makes the draft unreadable. The row reflects the draft, so

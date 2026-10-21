@@ -265,11 +265,17 @@ typedef struct GDEFCORE_Access_List {
  * revision of the entity and an id that is not an id are one answer,
  * ::GDEFCORE_ERR_INVALID. A field the principal may not read, and a field with
  * no value in that revision, are @p out_status ::GDEFCORE_REVISION_ABSENT with
- * no texts; they cannot be told apart. A personal field is
- * ::GDEFCORE_REVISION_PERSONAL with no texts: the stored text is ciphertext
- * and is never shown (gdefcore_subject_revision_values() recovers an erased
- * subject's marker). Otherwise ::GDEFCORE_REVISION_SHOWN and the texts, to be
- * freed with gdefcore_values_free().
+ * no texts; they cannot be told apart. A personal field's stored ciphertext is
+ * never shown (story S7): once the field filter allowed it, its value of that
+ * revision is decrypted with the catalog's subjects
+ * (gdefcore_catalog_bind_subjects()), ::GDEFCORE_REVISION_SHOWN and the
+ * plaintext, or ::GDEFCORE_REVISION_ERASED and ::GDEFCORE_SUBJECT_ERASED for
+ * an erased subject, and the subject is recorded on @p request
+ * (gdefcore_request_record_subject()); with no subjects bound it is
+ * ::GDEFCORE_REVISION_PERSONAL with no texts
+ * (gdefcore_subject_revision_marker() recovers an erased subject's marker).
+ * Otherwise ::GDEFCORE_REVISION_SHOWN and the texts, to be freed with
+ * gdefcore_values_free().
  *
  * @param seq A recorded revision sequence of the entity.
  * @param lang The language, e.g. `en`. Required.
@@ -528,7 +534,13 @@ GDEFCORE_API GDEFCORE_Result gdefcore_access_principal_roles(
  * An id the principal may not see is ::GDEFCORE_ERR_INVALID, the same as an
  * id that was never created, and no field value is written. A field the
  * principal may not read is absent: success with a count of 0, not an empty
- * string. Free texts with gdefcore_values_free().
+ * string. A personal field the principal may read is decrypted then, and only
+ * then (AD-19, story S7): each value's plaintext, or ::GDEFCORE_SUBJECT_ERASED
+ * for an erased subject, opened with the catalog's subjects
+ * (gdefcore_catalog_bind_subjects()) and its subject recorded on @p request
+ * (gdefcore_request_record_subject()); never the ciphertext, and with no
+ * subjects bound no value (a count of 0). Free texts with
+ * gdefcore_values_free(), and wipe a personal one first.
  */
 GDEFCORE_API GDEFCORE_Result gdefcore_access_read(GDEFCORE_Catalog * catalog,
     GDEFCORE_Request * request, const char * id, size_t id_len,
@@ -546,8 +558,10 @@ GDEFCORE_API GDEFCORE_Result gdefcore_access_read(GDEFCORE_Catalog * catalog,
  * is absent from the root and from every group item, and a group field the
  * principal may not read is absent with all its items. A field-read
  * permission names a field inside a group by its path (`lines.price`). A
- * personal value is the sealed text it is stored as, as from
- * gdefcore_access_read(). An entity with no content in @p lang is
+ * personal value of a field the principal may read, at any depth, is
+ * decrypted after that check, as by gdefcore_access_read(): its plaintext, or
+ * ::GDEFCORE_SUBJECT_ERASED, never the stored text (story S7). An entity with
+ * no content in @p lang is
  * ::GDEFCORE_ERR_INVALID. Free @p out_tree with gdefcore_tree_free().
  */
 GDEFCORE_API GDEFCORE_Result gdefcore_access_tree(GDEFCORE_Catalog * catalog,

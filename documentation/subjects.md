@@ -8,9 +8,38 @@ does not touch the password ciphertext.
 ## Personal and secret
 
 `personal` is a property of the field definition. A personal value is
-encrypted with that subject's key. The text stored on the entity is
-ciphertext. `gdefcore_entity_values` returns that stored text. It does
-not decrypt.
+encrypted with its subject's key. The text stored on the entity is
+ciphertext. `gdefcore_entity_values`, `gdefcore_entity_tree` and the other
+unfiltered reads return that stored text: they do not decrypt (story S7).
+
+## Whose a value is (story S7)
+
+Every personal field names where its values' subject comes from (AD-19), on
+its definition (`GDEFCORE_Field::subject`):
+
+- a sibling reference: a single, non-personal `REFERENCE` field in the same
+  group, whose value in the same item is the subject (a group's personal
+  field must name one, story S6d); or
+- nothing, which means the entity's own subject. Only a type declared with
+  `GDEFCORE_TYPE_SUBJECTS` ORed into its kind has one: its entities are
+  subjects. Core makes each entity's subject when its id is made
+  (`gdefcore_entity_create`, which then needs the subjects bound with
+  `gdefcore_catalog_bind_subjects`: making a subject is a key-store write) and
+  keeps it with the entity, as the record `core.subject/<public id>`, in the
+  reservation's own write. `gdefcore_entity_subject` reads it.
+
+A personal field with neither is refused when it is declared. Whether a
+type's entities are subjects cannot change once the type is stored, and a
+field cannot become personal, or stop being, in place (a new field and a
+conversion, AD-15). The patch form carries both (`content subjects` in a
+type's `kind` file, `personal:<reference>` in a field's).
+
+A save names every personal value's subject from the declaration, never from
+the caller: a value sealed for anyone else (a note,
+`gdefcore_changeset_note_sealed`, that names another, or a text that does not
+open under the named subject's key for its field) is refused. When a
+reference moves to another person, the value beside it must be sealed for
+them again.
 
 Two routes store one: `gdefcore_subject_save`, and a form signed and
 submitted with `gdefcore_form_sign_subject` and
@@ -29,13 +58,24 @@ seal returned).
 A personal field is a `PERSONAL` field of the port's declaration (AD-14): each
 value is stored as its sealed text with its subject's public id in the column
 beside it, and "everything about this person" is the port's subject lookup
-(`gdefstor_subject_lookup`), which `gdefcore_subject_export` reads. The
-subject of a value comes from the note a changeset was given, else from the
-entity's current tree or its draft (which record it with the text), else from
-opening the text with the key of a subject the field holds (the seal binds
-subject and field). A sealed text none of these names is refused, with a
-refusal (`gdefcore_changeset_refusal`). A patch carries the subject of each
-personal value beside it (`entity/<id>/subject/<lang>/<field>/<index>`).
+(`gdefstor_subject_lookup`), which `gdefcore_subject_export` reads. A value
+whose subject the declaration cannot name is refused, with a refusal
+(`gdefcore_changeset_refusal`). A patch carries the subject of each personal
+value beside it (`entity/<id>/subject/<lang>/<field>/<index>`).
+
+`gdefcore_subject_save` names the subject itself: a field that takes the
+entity's own subject stores under it; a field that names a reference stores
+under that reference's value, and a first save, with the reference unset,
+sets it to the subject the caller gives. A subject given that is not the one
+the declaration names is refused.
+
+**Unchanged is decided on the plaintext** (AD-19). Encryption is randomized,
+so the same value sealed again is another ciphertext. A save that finds, at a
+value's place, a stored value of the same subject compares the two by their
+blind-index MACs under the tenant's key (a function of the plaintext): equal,
+the stored ciphertext is kept, and the port sees no change, so the value
+writes no item version, no revision and no blind row. Only a save does this:
+a draft keeps the ciphertext it was given, and its publish is a save.
 
 Every new version of a personal value that a save writes, a draft's publish
 included, gets its blind-index row in the port's blind table, in the same
@@ -50,10 +90,11 @@ field changed) is not a new value, and the port carries its row. Blind
 equality is `gdefcore_subject_find`; `gdefcore_subject_mac` is the value a
 lookup asks with.
 
-A field that became personal after it was declared keeps its port column as
-text (changing a column in place is a new field and a conversion, AD-15): its
-values are sealed, with no subject column and no blind row. A personal field
-does not stop being personal in place: the redefinition is refused.
+A field cannot become personal after it was declared, nor stop being: the
+redefinition is refused (AD-15), since a plain column has no subject beside
+its values. A store written by something other than core can still hold a
+plaintext in a personal field's history; a revert or a publish that would
+carry it into a new revision refuses it.
 
 A `secret` field is different. The password hash stays a secret under
 the tenant `secret` key. Subject erasure does not unwrap it, replace it,
@@ -111,13 +152,16 @@ A matching id runs three steps, in this order:
    nothing else. From here every value of the subject reads `[erased]`.
 2. The subject's blind-index rows are deleted from the tenant's data store,
    every type's, through the port (`gdefstor_blind_delete_subject`).
-3. Caches are purged. Core keeps no cache of a subject's values or key yet,
-   so there is nothing to purge; a cache that holds one purges here.
+3. Caches are purged: every fragment of the bound fragment cache
+   (`gdefcore_subject_bind_cache`, render.md) that decrypted a value of the
+   subject. A render records each subject it decrypted on its request
+   (`gdefcore_request_record_subject`), and the cache keeps that with the
+   fragment; a fragment that decrypted nothing of theirs is kept.
 
 A failure of step 1 is returned and nothing else runs. Steps 2 and 3 are
 idempotent, and every `gdefcore_subject_open` and every restore replays the
-ledger through them, so an erasure cut short after step 1 (a crash, a failed
-data store) is finished then. Erasing an erased subject runs them again and
+ledger through them, as binding a cache does through step 3, so an erasure
+cut short after step 1 (a crash, a failed data store) is finished then. Erasing an erased subject runs them again and
 writes no second ledger row. Revisions stay, so the stored ciphertext stays.
 
 What an engine keeps of a destroyed key is its own: SQLite's key store clears
@@ -157,22 +201,48 @@ the key set's. A restore into an empty key store imports the key set into it
 first (`gdefstor_keystore_import`), opens the subjects on it (which adopts the
 keyring from it), and then restores.
 
-Export is one JSON document of the plaintext values, returned to the
-caller: every current value the subject lookup finds for the subject,
-published or not. It is not written into the tenant store. After erasure the
-document says erased and does not contain the plaintext.
+Export, "everything about this person", is one JSON document of the
+plaintext values, returned to the caller: every value version the subject
+lookup finds for the subject, across types, groups and history (story S7),
+published or not, each with its entity, type, field path, language, item, and
+the revisions it was written in (`from`) and replaced in (`to`, null for a
+current value). A draft holds no version and is not in it. It is not written
+into the tenant store. After erasure the document says erased and does not
+contain the plaintext.
+
+## The read path (story S7)
+
+A personal value is decrypted only in the application's read path, after the
+access filter has allowed its field to the reader (AD-19): a read
+(`gdefcore_access_read`), a tree (`gdefcore_access_tree`) and every render
+made from one, a revision view (`gdefcore_access_revision_values`) and the
+editor's form (`gdefcore_form_tree_for`). Each opens the value with the
+subject stored beside it, through `gdefcore_subject_open_value`, and records
+the subject on the request. A field the reader may not read is absent and is
+never decrypted (`gdefcore_subject_open_count` is the instrument the gate
+reads). An erased subject's value reads `[erased]` (a revision view says
+`GDEFCORE_REVISION_ERASED`). A catalog with no subjects bound shows no
+personal value at all, never its ciphertext. The opening is eager: a tree
+read opens every personal value the reader may see, whether or not a
+template then prints it, so a render of an entity depends on the subjects of
+all of them.
+
+`gdefcore_subject_read` is the system's read, no principal asked, of a field
+at any depth (`contacts.note`): the first value of that path in the
+published tree that is stored for the subject.
 
 ## Revision views
 
 A revision view (`gdefcore_access_revision_values()`, access.md) is an output
-too. It never shows a personal value, whether or not the person is erased: the
-answer for a personal field is `GDEFCORE_REVISION_PERSONAL` and no text, and the
-stored ciphertext is never returned. `gdefcore_subject_revision_marker()` turns
-that answer into `GDEFCORE_REVISION_ERASED` and the eight bytes `[erased]` when
-the ledger names the person the caller says the value belongs to, so the history
-of an erased person says so in the same word a read does. It does not decrypt, and
-it asks no principal; the permission and the field filter were the access
-layer's.
+too. It never shows the stored ciphertext of a personal field: for a reader
+the filter allows it opens the value of that revision (above). With no
+subjects bound it answers `GDEFCORE_REVISION_PERSONAL` and no text, and
+`gdefcore_subject_revision_marker()` turns that answer into
+`GDEFCORE_REVISION_ERASED` and the eight bytes `[erased]` when the ledger
+names the person the caller says the value belongs to, so the history of an
+erased person says so in the same word a read does. The marker does not
+decrypt, and it asks no principal; the permission and the field filter were
+the access layer's.
 
 Reverting to an old revision of an erased person
 (`gdefcore_changeset_revert_to()`, a new revision that copies it; there is no

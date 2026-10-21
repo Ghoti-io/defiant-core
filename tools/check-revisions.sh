@@ -278,7 +278,8 @@ plant record-outside-its-write $ENT testEntity \
             (const char *)changeset->catalog->tenant,
             changeset->catalog->tenant_len, NULL, &own) == GDEFSTOR_OK) {
       if (write_type(changeset->catalog, own, dop->machine.p, dop->machine.n,
-              dop->type_kind, dop->decls, dop->ndecls, NULL, 0) == GDEFCORE_OK) {
+              dop->type_kind, dop->type_subjects, dop->decls, dop->ndecls,
+              NULL, 0) == GDEFCORE_OK) {
         (void)gdefstor_write_commit(own);
       } else {
         gdefstor_write_abort(own);

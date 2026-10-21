@@ -45,6 +45,7 @@
 #include <ghoti.io/archive/zip.h>
 #include <ghoti.io/cutil/allocator.h>
 #include <ghoti.io/defiant-core/access.h>
+#include <ghoti.io/defiant-core/render.h>
 #include <ghoti.io/defiant-storage/core.h>
 #include <ghoti.io/defiant-storage/model.h>
 #include <ghoti.io/defiant-storage/query.h>
@@ -55,6 +56,7 @@
 #include <ghoti.io/security/random.h>
 #include <ghoti.io/security/secret.h>
 
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -87,6 +89,8 @@ struct GDEFCORE_Subjects {
   size_t tenant_len;
   uint8_t root[GDEFCORE_ACCOUNT_ROOT_LEN];
   GDEFCORE_Keyring * keyring;
+  struct GDEFCORE_FragmentCache * cache; /* erasure's step 3 purges it */
+  atomic_uint_fast64_t opened;           /* values decrypted, by any call */
 };
 
 typedef struct Buf {
@@ -423,6 +427,7 @@ GDEFCORE_Result gdefcore_subject_open(GDEFSTOR_KeyStore * keys,
     return GDEFCORE_ERR_OOM;
   }
   memset(subjects, 0, sizeof *subjects);
+  atomic_init(&subjects->opened, 0);
   subjects->alloc = alloc;
   subjects->keys = keys;
   subjects->data = data;
@@ -613,41 +618,6 @@ static GDEFCORE_Result open_key(GDEFCORE_Subjects * subjects,
   return rc;
 }
 
-static GDEFCORE_Result field_personal(GDEFCORE_Catalog * catalog,
-    const char * type, size_t type_len, const char * field, size_t field_len,
-    int * out) {
-  size_t n = 0;
-  size_t i;
-  GDEFCORE_Result rc = gdefcore_type_field_count(catalog, type, type_len, &n);
-  if (rc != GDEFCORE_OK) {
-    return rc;
-  }
-  for (i = 0; i < n; i++) {
-    char * name = NULL;
-    size_t name_len = 0;
-    int required = 0;
-    int many = 0;
-    int personal = 0;
-    rc = gdefcore_type_field(catalog, type, type_len, i, &name, &name_len,
-        &required, &many);
-    if (rc != GDEFCORE_OK) {
-      return rc;
-    }
-    rc = gdefcore_type_field_personal(catalog, type, type_len, i, &personal);
-    if (rc != GDEFCORE_OK) {
-      gdefcore_text_free(catalog, name);
-      return rc;
-    }
-    if (span_eq(name, name_len, field, field_len)) {
-      gdefcore_text_free(catalog, name);
-      *out = personal;
-      return GDEFCORE_OK;
-    }
-    gdefcore_text_free(catalog, name);
-  }
-  return GDEFCORE_ERR_INVALID;
-}
-
 static GDEFCORE_Result encrypt_value(GDEFCORE_Subjects * subjects,
     const char * subject, const char * field, size_t field_len,
     const void * plain, size_t plain_len, char ** out, size_t * out_len) {
@@ -745,6 +715,8 @@ static GDEFCORE_Result decrypt_text(GDEFCORE_Subjects * subjects,
   if (text_len < 3 || memcmp(text, "s1:", 3) != 0 || ((text_len - 3) % 2) != 0) {
     return GDEFCORE_ERR_INVALID;
   }
+  /* Counted whatever comes of it: a decryption was asked for. */
+  atomic_fetch_add_explicit(&subjects->opened, 1, memory_order_relaxed);
   packed_len = (text_len - 3) / 2;
   if (packed_len < kNonce + kTag) {
     return GDEFCORE_ERR_INVALID;
@@ -904,37 +876,86 @@ static GDEFCORE_Result not_erased(GDEFCORE_Subjects * subjects, const char * sid
   return erased ? GDEFCORE_ERR_INVALID : GDEFCORE_OK;
 }
 
+/* The declaration of field @p path of @p type, at any depth: ::GDEFCORE_ERR_INVALID
+ * when the type has no such field. */
+static GDEFCORE_Result field_info(GDEFCORE_Catalog * catalog, const char * type,
+    size_t type_len, const char * path, size_t path_len,
+    GDEFCORE_FieldInfo * out) {
+  size_t n = 0;
+  size_t i;
+  GDEFCORE_Result rc = gdefcore_type_tree_field_count(catalog, type, type_len,
+      &n);
+  for (i = 0; rc == GDEFCORE_OK && i < n; i++) {
+    memset(out, 0, sizeof *out);
+    out->size = sizeof *out;
+    rc = gdefcore_type_tree_field(catalog, type, type_len, i, out);
+    if (rc == GDEFCORE_OK && span_eq(out->path, out->path_len, path, path_len)) {
+      return GDEFCORE_OK;
+    }
+  }
+  return rc == GDEFCORE_OK ? GDEFCORE_ERR_INVALID : rc;
+}
+
+/* The one value of root field @p field of entity @p eid in @p lang, as a save
+ * staged now builds on it (the draft made from the newest revision, else the
+ * newest revision), copied to @p out; @p *out_found 0 when it has none. */
+static GDEFCORE_Result root_text(GDEFCORE_Catalog * catalog, const char * eid,
+    const char * field, size_t field_len, const char * lang, size_t lang_len,
+    char out[GDEFCORE_PUBLIC_ID_LEN + 1], int * out_found) {
+  char ** texts = NULL;
+  size_t * lens = NULL;
+  size_t count = 0;
+  GDEFCORE_Result rc = gdefcore_entity_values(catalog, NULL, GDEFCORE_VIEW_DRAFT,
+      eid, GDEFCORE_PUBLIC_ID_LEN, lang, lang_len, field, field_len, &texts,
+      &lens, &count);
+  *out_found = 0;
+  if (rc == GDEFCORE_ERR_INVALID) {
+    return GDEFCORE_OK; /* nothing there yet */
+  }
+  if (rc == GDEFCORE_OK && count == 1 && lens[0] == GDEFCORE_PUBLIC_ID_LEN) {
+    memcpy(out, texts[0], GDEFCORE_PUBLIC_ID_LEN);
+    out[GDEFCORE_PUBLIC_ID_LEN] = '\0';
+    *out_found = 1;
+  } else if (rc == GDEFCORE_OK && count > 0) {
+    rc = GDEFCORE_ERR_CORRUPT;
+  }
+  gdefcore_values_free(catalog, texts, lens, count);
+  return rc;
+}
+
 GDEFCORE_Result gdefcore_subject_save(GDEFCORE_Subjects * subjects,
     GDEFCORE_Catalog * catalog, const char * subject, size_t subject_len,
     const char * entity, size_t entity_len, const char * field, size_t field_len,
     const char * lang, size_t lang_len, const void * plain, size_t plain_len) {
   char sid[GDEFCORE_PUBLIC_ID_LEN + 1];
+  char named[GDEFCORE_PUBLIC_ID_LEN + 1];
   char eid[GDEFCORE_PUBLIC_ID_LEN + 1];
   char * type = NULL;
   size_t type_len = 0;
   char * stored = NULL;
   size_t stored_len = 0;
-  int personal = 0;
   int kind = 0;
+  int given = subject != NULL && subject_len > 0;
+  int set_reference = 0;
+  int found = 0;
   uint8_t mac[kMac];
-  const char * texts[1];
-  size_t lens[1];
-  GDEFCORE_Value value;
+  const char * texts[2];
+  size_t lens[2];
+  GDEFCORE_Value values[2];
+  GDEFCORE_FieldInfo info;
   GDEFCORE_Changeset * changeset = NULL;
   GDEFCORE_Result rc;
   if (subjects == NULL || catalog == NULL || field == NULL ||
       (plain == NULL && plain_len != 0) || lang == NULL) {
     return GDEFCORE_ERR_INVALID;
   }
-  rc = canon_id(subject, subject_len, sid);
-  if (rc != GDEFCORE_OK) {
-    return rc;
+  if (given) {
+    rc = canon_id(subject, subject_len, sid);
+    if (rc != GDEFCORE_OK) {
+      return rc;
+    }
   }
   rc = canon_id(entity, entity_len, eid);
-  if (rc != GDEFCORE_OK) {
-    return rc;
-  }
-  rc = not_erased(subjects, sid);
   if (rc != GDEFCORE_OK) {
     return rc;
   }
@@ -943,17 +964,42 @@ GDEFCORE_Result gdefcore_subject_save(GDEFCORE_Subjects * subjects,
   if (rc != GDEFCORE_OK) {
     return rc;
   }
-  rc = field_personal(catalog, type, type_len, field, field_len, &personal);
-  if (rc != GDEFCORE_OK || !personal) {
-    gdefcore_text_free(catalog, type);
-    return rc == GDEFCORE_OK ? GDEFCORE_ERR_INVALID : rc;
+  rc = field_info(catalog, type, type_len, field, field_len, &info);
+  if (rc == GDEFCORE_OK && (!info.personal || info.depth != 0)) {
+    rc = GDEFCORE_ERR_INVALID;
   }
-  rc = gdefcore_type_kind(catalog, type, type_len, &kind);
+  if (rc == GDEFCORE_OK) {
+    rc = gdefcore_type_kind(catalog, type, type_len, &kind);
+  }
+  /* Whose the value is: the declaration's to say (AD-19, story S7). */
+  if (rc == GDEFCORE_OK && info.subject_len > 0) {
+    rc = root_text(catalog, eid, info.subject, info.subject_len, lang,
+        lang_len, named, &found);
+    if (rc == GDEFCORE_OK && !found) {
+      /* The reference is unset: the caller names the person, and this save
+       * sets it. */
+      if (!given) {
+        rc = GDEFCORE_ERR_INVALID;
+      } else {
+        memcpy(named, sid, sizeof named);
+        set_reference = 1;
+      }
+    }
+  } else if (rc == GDEFCORE_OK) {
+    rc = gdefcore_entity_subject(catalog, eid, GDEFCORE_PUBLIC_ID_LEN, named);
+  }
+  if (rc == GDEFCORE_OK && given &&
+      memcmp(named, sid, GDEFCORE_PUBLIC_ID_LEN) != 0) {
+    rc = GDEFCORE_ERR_INVALID; /* not the person the declaration names */
+  }
+  if (rc == GDEFCORE_OK) {
+    rc = not_erased(subjects, named);
+  }
   if (rc != GDEFCORE_OK) {
     gdefcore_text_free(catalog, type);
     return rc;
   }
-  rc = gdefcore_subject_seal(subjects, sid, GDEFCORE_PUBLIC_ID_LEN, field,
+  rc = gdefcore_subject_seal(subjects, named, GDEFCORE_PUBLIC_ID_LEN, field,
       field_len, plain, plain_len, &stored, &stored_len, mac);
   if (rc != GDEFCORE_OK) {
     gdefcore_text_free(catalog, type);
@@ -972,20 +1018,30 @@ GDEFCORE_Result gdefcore_subject_save(GDEFCORE_Subjects * subjects,
   }
   texts[0] = stored;
   lens[0] = stored_len;
-  memset(&value, 0, sizeof value);
-  value.size = sizeof value;
-  value.field = field;
-  value.field_len = field_len;
-  value.texts = texts;
-  value.text_lens = lens;
-  value.count = 1;
+  memset(values, 0, sizeof values);
+  values[0].size = sizeof values[0];
+  values[0].field = field;
+  values[0].field_len = field_len;
+  values[0].texts = &texts[0];
+  values[0].text_lens = &lens[0];
+  values[0].count = 1;
+  if (set_reference) {
+    texts[1] = named;
+    lens[1] = GDEFCORE_PUBLIC_ID_LEN;
+    values[1].size = sizeof values[1];
+    values[1].field = info.subject;
+    values[1].field_len = info.subject_len;
+    values[1].texts = &texts[1];
+    values[1].text_lens = &lens[1];
+    values[1].count = 1;
+  }
   /* Whose value it is, and its blind-index value, which the save writes in
    * the port's blind table in the revision's own write (story S6c). */
   rc = gdefcore_changeset_note_sealed(changeset, subjects, stored, stored_len,
-      sid, GDEFCORE_PUBLIC_ID_LEN, mac);
+      named, GDEFCORE_PUBLIC_ID_LEN, mac);
   if (rc == GDEFCORE_OK) {
     rc = gdefcore_entity_save(changeset, eid, GDEFCORE_PUBLIC_ID_LEN, lang,
-        lang_len, &value, 1);
+        lang_len, values, set_reference ? 2 : 1);
   }
   if (rc == GDEFCORE_OK) {
     if (kind == GDEFCORE_TYPE_CONFIG) {
@@ -996,6 +1052,7 @@ GDEFCORE_Result gdefcore_subject_save(GDEFCORE_Subjects * subjects,
   }
   gdefcore_changeset_destroy(changeset);
   gdefcore_text_free(catalog, type);
+  wipe(mac, sizeof mac);
   gcu_allocator_free(subjects->alloc, stored);
   return rc;
 }
@@ -1056,21 +1113,71 @@ GDEFCORE_Result gdefcore_subject_erased(GDEFCORE_Subjects * subjects,
   return subject_state(subjects, sid, out_erased, &known);
 }
 
+/* Whether value @p f of an item whose field is at @p ip is the field @p path. */
+static int value_at_path(const char * ip, size_t ipn, const char * f,
+    size_t fn, const char * path, size_t path_len) {
+  if (fn == 0) {
+    return span_eq(ip, ipn, path, path_len);
+  }
+  if (ipn == 0) {
+    return span_eq(f, fn, path, path_len);
+  }
+  return path_len == ipn + 1 + fn && memcmp(path, ip, ipn) == 0 &&
+         path[ipn] == '.' && memcmp(path + ipn + 1, f, fn) == 0;
+}
+
+/* The first value of the field at @p path in @p tree, at any depth, stored
+ * for subject @p sid: borrowed from @p tree. 0 when there is none. */
+static int tree_value_of(const GDEFCORE_Tree * tree, const char * path,
+    size_t path_len, const char * sid, const char ** out_text,
+    size_t * out_len) {
+  size_t n = gdefcore_tree_item_count(tree);
+  size_t i;
+  for (i = 0; i < n; i++) {
+    GDEFCORE_TreeItem it;
+    size_t k;
+    memset(&it, 0, sizeof it);
+    it.size = sizeof it;
+    if (gdefcore_tree_item(tree, i, &it) != GDEFCORE_OK) {
+      return 0;
+    }
+    for (k = 0; k < it.value_count; k++) {
+      const char * f = NULL;
+      size_t fn = 0;
+      const char * t = NULL;
+      size_t tn = 0;
+      const char * sub = NULL;
+      size_t sub_len = 0;
+      if (gdefcore_tree_value(tree, i, k, &f, &fn, &t, &tn) != GDEFCORE_OK ||
+          !value_at_path(it.path, it.path_len, f, fn, path, path_len) ||
+          gdefcore_tree_value_subject(tree, i, k, &sub, &sub_len) !=
+              GDEFCORE_OK ||
+          !span_eq(sub, sub_len, sid, GDEFCORE_PUBLIC_ID_LEN)) {
+        continue;
+      }
+      *out_text = t;
+      *out_len = tn;
+      return 1;
+    }
+  }
+  return 0;
+}
+
 GDEFCORE_Result gdefcore_subject_read(GDEFCORE_Subjects * subjects,
     GDEFCORE_Catalog * catalog, const char * subject, size_t subject_len,
     const char * entity, size_t entity_len, const char * field, size_t field_len,
     const char * lang, size_t lang_len, char ** out_text, size_t * out_len) {
   char sid[GDEFCORE_PUBLIC_ID_LEN + 1];
   char eid[GDEFCORE_PUBLIC_ID_LEN + 1];
-  char ** texts = NULL;
-  size_t * lens = NULL;
-  size_t count = 0;
+  GDEFCORE_Tree * tree = NULL;
+  const char * sealed = NULL;
+  size_t sealed_len = 0;
   uint8_t wrapped[kWrap];
   int erased = 0;
   uint8_t raw[kKey];
   GDEFCORE_Result rc;
   if (subjects == NULL || catalog == NULL || out_text == NULL ||
-      out_len == NULL) {
+      out_len == NULL || field == NULL || lang == NULL) {
     return GDEFCORE_ERR_INVALID;
   }
   rc = canon_id(subject, subject_len, sid);
@@ -1096,19 +1203,71 @@ GDEFCORE_Result gdefcore_subject_read(GDEFCORE_Subjects * subjects,
     wipe(raw, sizeof raw);
     return rc;
   }
-  rc = gdefcore_entity_values(catalog, NULL, GDEFCORE_VIEW_PUBLISHED, eid,
-      GDEFCORE_PUBLIC_ID_LEN, lang, lang_len, field, field_len, &texts, &lens,
-      &count);
-  if (rc != GDEFCORE_OK || count != 1 || texts == NULL || texts[0] == NULL) {
-    wipe(raw, sizeof raw);
-    gdefcore_values_free(catalog, texts, lens, count);
-    return rc == GDEFCORE_OK ? GDEFCORE_ERR_INVALID : rc;
+  /* The field at its path, at any depth (story S7): a root field, or one
+   * inside a group, whose stored subject is this one. */
+  rc = gdefcore_entity_tree(catalog, NULL, GDEFCORE_VIEW_PUBLISHED, eid,
+      GDEFCORE_PUBLIC_ID_LEN, lang, lang_len, &tree);
+  if (rc == GDEFCORE_OK &&
+      !tree_value_of(tree, field, field_len, sid, &sealed, &sealed_len)) {
+    rc = GDEFCORE_ERR_INVALID;
   }
-  rc = decrypt_text(subjects, sid, raw, field, field_len, texts[0], lens[0],
-      out_text, out_len);
+  if (rc == GDEFCORE_OK) {
+    rc = decrypt_text(subjects, sid, raw, field, field_len, sealed, sealed_len,
+        out_text, out_len);
+  }
   wipe(raw, sizeof raw);
-  gdefcore_values_free(catalog, texts, lens, count);
+  gdefcore_tree_free(tree);
   return rc;
+}
+
+GDEFCORE_Result gdefcore_subject_open_value(GDEFCORE_Subjects * subjects,
+    const char * subject, size_t subject_len, const char * field,
+    size_t field_len, const char * sealed, size_t sealed_len, char ** out_text,
+    size_t * out_len, int * out_erased) {
+  char sid[GDEFCORE_PUBLIC_ID_LEN + 1];
+  uint8_t wrapped[kWrap];
+  uint8_t raw[kKey];
+  int erased = 0;
+  GDEFCORE_Result rc;
+  if (subjects == NULL || field == NULL || field_len == 0 || sealed == NULL ||
+      out_text == NULL || out_len == NULL || out_erased == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  rc = canon_id(subject, subject_len, sid);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  rc = key_load(subjects, sid, &erased, wrapped);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  if (erased) {
+    /* The key is gone: the value is gone with it (AD-19). */
+    rc = erased_text(subjects, out_text, out_len);
+    if (rc == GDEFCORE_OK) {
+      *out_erased = 1;
+    }
+    return rc;
+  }
+  rc = open_key(subjects, wrapped, raw);
+  wipe(wrapped, sizeof wrapped);
+  if (rc == GDEFCORE_OK) {
+    rc = decrypt_text(subjects, sid, raw, field, field_len, sealed, sealed_len,
+        out_text, out_len);
+  }
+  wipe(raw, sizeof raw);
+  if (rc == GDEFCORE_OK) {
+    *out_erased = 0;
+  }
+  return rc;
+}
+
+uint64_t gdefcore_subject_open_count(const GDEFCORE_Subjects * subjects) {
+  if (subjects == NULL) {
+    return 0;
+  }
+  return (uint64_t)atomic_load_explicit(
+      &((GDEFCORE_Subjects *)subjects)->opened, memory_order_relaxed);
 }
 
 GDEFCORE_Result gdefcore_subject_revision_marker(GDEFCORE_Subjects * subjects,
@@ -1170,6 +1329,17 @@ static GDEFCORE_Result forget_blinds(GDEFCORE_Subjects * subjects,
   return rc;
 }
 
+/* Erasure's third step, and the ledger replay's into a bound cache: every
+ * fragment that depends on the subject goes. Idempotent. */
+static GDEFCORE_Result purge_fragments(GDEFCORE_Subjects * subjects,
+    const char * sid) {
+  if (subjects->cache == NULL) {
+    return GDEFCORE_OK;
+  }
+  return gdefcore_fragment_purge_subject(subjects->cache, sid,
+      GDEFCORE_PUBLIC_ID_LEN, NULL);
+}
+
 GDEFCORE_Result gdefcore_subject_erase(GDEFCORE_Subjects * subjects,
     const char * subject, size_t subject_len, const char * confirmation,
     size_t confirmation_len) {
@@ -1213,8 +1383,12 @@ GDEFCORE_Result gdefcore_subject_erase(GDEFCORE_Subjects * subjects,
   }
   /* 2. Then the blind-index rows, in the data store. */
   rc = forget_blinds(subjects, subjects->data, sid);
-  /* 3. Then caches: core keeps no cache of a subject's values or key, so
-   *    there is nothing to purge yet. A cache that holds one purges here. */
+  /* 3. Then caches: every cached fragment that decrypted the subject
+   *    (story S7). A render records each subject it decrypted, and the
+   *    cache keeps that with the fragment. */
+  if (rc == GDEFCORE_OK) {
+    rc = purge_fragments(subjects, sid);
+  }
   return rc;
 }
 
@@ -1279,167 +1453,59 @@ static void json_escape(Buf * b, const char * s, size_t n) {
   buf_add(b, "\"", 1);
 }
 
-/* The values of field @p field of entity @p eid in @p lang, as the entity is
- * now, published or not, each opened with the subject's key @p raw and added
- * to @p buf. A value that does not open under it is another subject's (a
- * multiple can hold several people's) and is left out. */
-/* Whether value @p f of an item whose field is at @p ip is the field @p path. */
-static int value_at_path(const char * ip, size_t ipn, const char * f,
-    size_t fn, const char * path, size_t path_len) {
-  if (fn == 0) {
-    return span_eq(ip, ipn, path, path_len);
-  }
-  if (ipn == 0) {
-    return span_eq(f, fn, path, path_len);
-  }
-  return path_len == ipn + 1 + fn && memcmp(path, ip, ipn) == 0 &&
-         path[ipn] == '.' && memcmp(path + ipn + 1, f, fn) == 0;
-}
-
-/* The current texts of a field inside a group (story S6d), at any depth: the
- * flat read gdefcore_entity_values() sees the root's fields only. The texts
- * are borrowed from @p *out_tree, which the caller frees. */
-static GDEFCORE_Result nested_texts(GDEFCORE_Subjects * subjects,
-    GDEFCORE_Catalog * catalog, const char * eid, const char * field,
-    size_t field_len, const char * lang, size_t lang_len,
-    GDEFCORE_Tree ** out_tree, const char *** out_texts, size_t ** out_lens,
-    size_t * out_count) {
-  GDEFCORE_Tree * tree = NULL;
+/* The stored value of one version the subject lookup names: the item @p h
+ * names in the tree as it was when the version began, at the field's leaf
+ * (its own value, for an item of a multiple field). Borrowed from
+ * @p *out_tree, which the caller frees. */
+static GDEFCORE_Result hit_value(GDEFCORE_Subjects * subjects,
+    const GDEFSTOR_SubjectHit * h, GDEFSTOR_Tree ** out_tree,
+    GDEFSTOR_Value * out) {
+  const char * leaf = h->field;
+  size_t leaf_len = h->field_len;
   size_t n;
-  size_t i;
-  size_t count = 0;
-  const char ** texts = NULL;
-  size_t * lens = NULL;
-  GDEFCORE_Result rc = gdefcore_entity_tree(catalog, NULL,
-      GDEFCORE_VIEW_CURRENT, eid, GDEFCORE_PUBLIC_ID_LEN, lang, lang_len,
-      &tree);
+  size_t k;
+  int found = 0;
+  GDEFCORE_Result rc;
+  memset(out, 0, sizeof *out);
   *out_tree = NULL;
-  *out_texts = NULL;
-  *out_lens = NULL;
-  *out_count = 0;
-  if (rc != GDEFCORE_OK) {
-    return rc;
+  for (k = h->field_len; k > 0; k--) {
+    if (h->field[k - 1] == '.') {
+      leaf = h->field + k;
+      leaf_len = h->field_len - k;
+      break;
+    }
   }
-  n = gdefcore_tree_item_count(tree);
-  for (i = 0; rc == GDEFCORE_OK && i < n; i++) {
-    GDEFCORE_TreeItem it;
-    size_t k;
+  rc = from_stor(gdefstor_entity_tree(subjects->data,
+      (const char *)subjects->tenant, subjects->tenant_len, h->public_id,
+      h->public_id_len, h->language, h->language_len, h->valid_from,
+      out_tree));
+  n = rc == GDEFCORE_OK ? gdefstor_tree_item_count(*out_tree) : 0;
+  for (k = 0; rc == GDEFCORE_OK && k < n && !found; k++) {
+    GDEFSTOR_TreeItem it;
     memset(&it, 0, sizeof it);
     it.size = sizeof it;
-    if (gdefcore_tree_item(tree, i, &it) != GDEFCORE_OK) {
+    if (gdefstor_tree_item(*out_tree, k, &it) != GDEFSTOR_OK) {
       rc = GDEFCORE_ERR_CORRUPT;
-      break;
-    }
-    for (k = 0; rc == GDEFCORE_OK && k < it.value_count; k++) {
-      const char * f = NULL;
-      size_t fn = 0;
-      const char * t = NULL;
-      size_t tn = 0;
-      if (gdefcore_tree_value(tree, i, k, &f, &fn, &t, &tn) != GDEFCORE_OK) {
-        rc = GDEFCORE_ERR_CORRUPT;
-        break;
-      }
-      if (!value_at_path(it.path, it.path_len, f, fn, field, field_len)) {
-        continue;
-      }
-      {
-        const char ** nt = (const char **)gcu_allocator_realloc(subjects->alloc,
-            (void *)texts, (count + 1) * sizeof *nt);
-        size_t * nl;
-        if (nt == NULL) {
-          rc = GDEFCORE_ERR_OOM;
-          break;
-        }
-        texts = nt;
-        nl = (size_t *)gcu_allocator_realloc(subjects->alloc, lens,
-            (count + 1) * sizeof *nl);
-        if (nl == NULL) {
-          rc = GDEFCORE_ERR_OOM;
-          break;
-        }
-        lens = nl;
-        texts[count] = t;
-        lens[count] = tn;
-        count += 1;
-      }
+    } else if (it.id == h->item) {
+      found = 1;
+      rc = from_stor(gdefstor_tree_get(*out_tree, k,
+          span_eq(it.field, it.field_len, leaf, leaf_len) ? NULL : leaf,
+          span_eq(it.field, it.field_len, leaf, leaf_len) ? 0 : leaf_len,
+          out));
     }
   }
-  if (rc != GDEFCORE_OK) {
-    gcu_allocator_free(subjects->alloc, (void *)texts);
-    gcu_allocator_free(subjects->alloc, lens);
-    gdefcore_tree_free(tree);
-    return rc;
-  }
-  *out_tree = tree;
-  *out_texts = texts;
-  *out_lens = lens;
-  *out_count = count;
-  return GDEFCORE_OK;
-}
-
-static GDEFCORE_Result export_values(GDEFCORE_Subjects * subjects,
-    GDEFCORE_Catalog * catalog, const char * sid, const uint8_t raw[kKey],
-    const char * eid, const char * field, size_t field_len, const char * lang,
-    size_t lang_len, Buf * buf, int * first) {
-  char ** texts = NULL;
-  size_t * lens = NULL;
-  size_t count = 0;
-  size_t i;
-  GDEFCORE_Tree * nested = NULL;
-  GDEFCORE_Result rc;
-  if (memchr(field, '.', field_len) != NULL) {
-    /* A field inside a group (story S6d): its values in every item. */
-    rc = nested_texts(subjects, catalog, eid, field, field_len, lang,
-        lang_len, &nested, (const char ***)&texts, &lens, &count);
-  } else {
-    rc = gdefcore_entity_values(catalog, NULL, GDEFCORE_VIEW_CURRENT, eid,
-        GDEFCORE_PUBLIC_ID_LEN, lang, lang_len, field, field_len, &texts,
-        &lens, &count);
-  }
-  if (rc == GDEFCORE_ERR_INVALID) {
-    /* Nothing there now (a cleared entity reads as one with no content). */
-    return GDEFCORE_OK;
-  }
-  for (i = 0; rc == GDEFCORE_OK && i < count; i++) {
-    char * plain = NULL;
-    size_t plain_len = 0;
-    GDEFCORE_Result open_rc = decrypt_text(subjects, sid, raw, field, field_len,
-        texts[i], lens[i], &plain, &plain_len);
-    if (open_rc == GDEFCORE_ERR_OOM) {
-      rc = open_rc;
-      break;
-    }
-    if (open_rc != GDEFCORE_OK) {
-      continue;
-    }
-    if (!utf8_ok((const uint8_t *)plain, plain_len)) {
-      rc = GDEFCORE_ERR_INVALID;
-    } else {
-      if (!*first) {
-        buf_add(buf, ",", 1);
-      }
-      *first = 0;
-      buf_add(buf, "{\"entity\":", 10);
-      json_escape(buf, eid, GDEFCORE_PUBLIC_ID_LEN);
-      buf_add(buf, ",\"field\":", 9);
-      json_escape(buf, field, field_len);
-      buf_add(buf, ",\"lang\":", 8);
-      json_escape(buf, lang, lang_len);
-      buf_add(buf, ",\"text\":", 8);
-      json_escape(buf, plain, plain_len);
-      buf_add(buf, "}", 1);
-    }
-    wipe(plain, plain_len);
-    gdefcore_subject_free(subjects, plain);
-  }
-  if (nested != NULL || memchr(field, '.', field_len) != NULL) {
-    gcu_allocator_free(subjects->alloc, (void *)texts);
-    gcu_allocator_free(subjects->alloc, lens);
-    gdefcore_tree_free(nested);
-  } else {
-    gdefcore_values_free(catalog, texts, lens, count);
+  if (rc == GDEFCORE_OK && (!found || out->type == 0 || out->bytes == NULL)) {
+    rc = GDEFCORE_ERR_CORRUPT; /* the lookup named a version that is not there */
   }
   return rc;
+}
+
+static void json_u64(Buf * b, uint64_t v) {
+  char text[32];
+  int n = snprintf(text, sizeof text, "%llu", (unsigned long long)v);
+  if (n > 0) {
+    buf_add(b, text, (size_t)n);
+  }
 }
 
 GDEFCORE_Result gdefcore_subject_export(GDEFCORE_Subjects * subjects,
@@ -1483,9 +1549,9 @@ GDEFCORE_Result gdefcore_subject_export(GDEFCORE_Subjects * subjects,
     wipe(raw, sizeof raw);
     return rc;
   }
-  /* "Everything about this person": every value naming them, by the subject
-   * column beside each ciphertext (AD-19), of which the current ones are
-   * read. */
+  /* "Everything about this person": every value version naming them, by the
+   * subject column beside each ciphertext (AD-19), across types, groups and
+   * history (story S7), each opened as it was stored. */
   rc = from_stor(gdefstor_subject_lookup(subjects->data,
       (const char *)subjects->tenant, subjects->tenant_len, sid,
       GDEFCORE_PUBLIC_ID_LEN, &hits));
@@ -1493,45 +1559,72 @@ GDEFCORE_Result gdefcore_subject_export(GDEFCORE_Subjects * subjects,
   buf.alloc = subjects->alloc;
   buf_add(&buf, "{\"values\":[", 11);
   for (i = 0; rc == GDEFCORE_OK && i < gdefstor_subject_hits_count(hits); i++) {
-    GDEFSTOR_SubjectHit h;
-    size_t k;
-    int seen = 0;
-    memset(&h, 0, sizeof h);
-    h.size = sizeof h;
-    rc = from_stor(gdefstor_subject_hit(hits, i, &h));
-    if (rc != GDEFCORE_OK || h.valid_to != 0 ||
-        h.public_id_len != GDEFCORE_PUBLIC_ID_LEN) {
-      continue;
+    GDEFSTOR_SubjectHit hit;
+    GDEFSTOR_Tree * tree = NULL;
+    GDEFSTOR_Value v;
+    char * plain = NULL;
+    size_t plain_len = 0;
+    memset(&hit, 0, sizeof hit);
+    hit.size = sizeof hit;
+    rc = from_stor(gdefstor_subject_hit(hits, i, &hit));
+    if (rc == GDEFCORE_OK) {
+      rc = hit_value(subjects, &hit, &tree, &v);
     }
-    /* One entry per entity, field and language: the field's items are read
-     * together. */
-    for (k = 0; k < i && !seen; k++) {
-      GDEFSTOR_SubjectHit e;
-      memset(&e, 0, sizeof e);
-      e.size = sizeof e;
-      seen = gdefstor_subject_hit(hits, k, &e) == GDEFSTOR_OK &&
-             e.valid_to == 0 &&
-             span_eq(e.public_id, e.public_id_len, h.public_id,
-                 h.public_id_len) &&
-             span_eq(e.field, e.field_len, h.field, h.field_len) &&
-             span_eq(e.language, e.language_len, h.language, h.language_len);
+    if (rc == GDEFCORE_OK) {
+      rc = decrypt_text(subjects, sid, raw, hit.field, hit.field_len,
+          (const char *)v.bytes, v.len, &plain, &plain_len);
     }
-    if (!seen) {
-      char eid[GDEFCORE_PUBLIC_ID_LEN + 1];
-      memcpy(eid, h.public_id, GDEFCORE_PUBLIC_ID_LEN);
-      eid[GDEFCORE_PUBLIC_ID_LEN] = '\0';
-      rc = export_values(subjects, catalog, sid, raw, eid, h.field, h.field_len,
-          h.language, h.language_len, &buf, &first);
+    if (rc == GDEFCORE_OK &&
+        !utf8_ok((const uint8_t *)plain, plain_len)) {
+      rc = GDEFCORE_ERR_INVALID;
     }
+    if (rc == GDEFCORE_OK) {
+      if (!first) {
+        buf_add(&buf, ",", 1);
+      }
+      first = 0;
+      buf_add(&buf, "{\"entity\":", 10);
+      json_escape(&buf, hit.public_id, hit.public_id_len);
+      buf_add(&buf, ",\"type\":", 8);
+      json_escape(&buf, hit.type, hit.type_len);
+      buf_add(&buf, ",\"field\":", 9);
+      json_escape(&buf, hit.field, hit.field_len);
+      buf_add(&buf, ",\"lang\":", 8);
+      json_escape(&buf, hit.language, hit.language_len);
+      buf_add(&buf, ",\"item\":", 8);
+      json_u64(&buf, hit.item);
+      buf_add(&buf, ",\"from\":", 8);
+      json_u64(&buf, hit.valid_from);
+      buf_add(&buf, ",\"to\":", 6);
+      if (hit.valid_to == 0) {
+        buf_add(&buf, "null", 4);
+      } else {
+        json_u64(&buf, hit.valid_to);
+      }
+      buf_add(&buf, ",\"text\":", 8);
+      json_escape(&buf, plain, plain_len);
+      buf_add(&buf, "}", 1);
+    }
+    if (plain != NULL) {
+      wipe(plain, plain_len);
+      gdefcore_subject_free(subjects, plain);
+    }
+    gdefstor_tree_free(tree);
   }
   wipe(raw, sizeof raw);
   gdefstor_subject_hits_free(hits);
   buf_add(&buf, "]}", 2);
   if (rc != GDEFCORE_OK) {
+    if (buf.p != NULL) {
+      wipe(buf.p, buf.n);
+    }
     buf_free(&buf);
     return rc;
   }
   if (buf.oom || buf.p == NULL) {
+    if (buf.p != NULL) {
+      wipe(buf.p, buf.n);
+    }
     buf_free(&buf);
     return GDEFCORE_ERR_OOM;
   }
@@ -1847,6 +1940,36 @@ GDEFCORE_Result gdefcore_subject_reindex(GDEFCORE_Subjects * subjects,
   return rc;
 }
 
+GDEFCORE_Result gdefcore_subject_bind_cache(GDEFCORE_Subjects * subjects,
+    struct GDEFCORE_FragmentCache * cache) {
+  GDEFSTOR_Ledger * ledger = NULL;
+  size_t i;
+  GDEFCORE_Result rc;
+  if (subjects == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  subjects->cache = cache;
+  if (cache == NULL) {
+    return GDEFCORE_OK;
+  }
+  /* Erasure's third step for every subject the ledger names: a fragment
+   * cached before an erasure that was cut short goes now. */
+  rc = from_stor(gdefstor_keystore_ledger(subjects->keys,
+      (const char *)subjects->tenant, subjects->tenant_len, &ledger));
+  for (i = 0; rc == GDEFCORE_OK && i < gdefstor_ledger_count(ledger); i++) {
+    const char * id = NULL;
+    size_t id_len = 0;
+    int64_t when = 0;
+    char sid[GDEFCORE_PUBLIC_ID_LEN + 1];
+    rc = from_stor(gdefstor_ledger_row(ledger, i, &id, &id_len, &when));
+    if (rc == GDEFCORE_OK && canon_id(id, id_len, sid) == GDEFCORE_OK) {
+      rc = purge_fragments(subjects, sid);
+    }
+  }
+  gdefstor_ledger_free(ledger);
+  return rc;
+}
+
 /* The ledger replay: erasure's second step again for every subject the key
  * store's ledger names. Each is a no-op once done, so this writes only what
  * an interrupted erasure left. */
@@ -1868,6 +1991,9 @@ static GDEFCORE_Result replay_ledger(GDEFCORE_Subjects * subjects,
     if (rc == GDEFCORE_OK && canon_id(id, id_len, sid) == GDEFCORE_OK) {
       /* A row that is not a public id is not one of ours to replay. */
       rc = forget_blinds(subjects, store, sid);
+      if (rc == GDEFCORE_OK) {
+        rc = purge_fragments(subjects, sid);
+      }
     }
   }
   gdefstor_ledger_free(ledger);

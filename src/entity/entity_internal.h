@@ -63,6 +63,9 @@ typedef struct GDEFCORE_Vals {
   GDEFCORE_Text * vals;
   size_t nvals;
   uint64_t * ids;
+  /* A read's personal values: the subject the port keeps beside each one
+   * (story S7), one per value; NULL when none was read with one. */
+  GDEFCORE_Text * subjects;
 } GDEFCORE_Vals;
 
 struct GDEFCORE_Tree;
@@ -140,10 +143,18 @@ GDEFCORE_Result gdefcore_ent_tree_put(struct GDEFCORE_Tree * t, size_t item,
     const char * field, size_t field_len, const char * text, size_t len,
     const char * subject, size_t subject_len);
 /* Append @p value (taken over on success) to field @p name of @p l; with
- * @p has_id, as the item @p id of a multiple field. */
+ * @p has_id, as the item @p id of a multiple field; with @p subject (may be
+ * NULL), the subject a personal value was read with. */
 GDEFCORE_Result gdefcore_ent_lang_add(const GDEFCORE_Allocator * alloc,
     GDEFCORE_Lang * l, const char * name, size_t name_len,
-    const GDEFCORE_Text * value, int has_id, uint64_t id);
+    const GDEFCORE_Text * value, int has_id, uint64_t id,
+    const char * subject, size_t subject_len);
+/* Free a field's values, ids and subjects (not its name). */
+void gdefcore_ent_vals_clear(const GDEFCORE_Allocator * alloc,
+    GDEFCORE_Vals * f);
+/* The subject of value @p k of item @p item of @p t, or NULL. */
+const char * gdefcore_ent_tree_value_subject(const struct GDEFCORE_Tree * t,
+    size_t item, size_t k, size_t * out_len);
 /* The path of a value of item @p item: @p field under the item's path. */
 GDEFCORE_Result gdefcore_ent_tree_value_path(const struct GDEFCORE_Tree * t,
     size_t item, const char * field, size_t field_len, GDEFCORE_Text * out);
@@ -156,6 +167,7 @@ typedef struct GDEFCORE_Op {
   int reserved;        /* the entity has no port entity: its draft reserves it */
   GDEFCORE_Text type_name;
   int type_kind;
+  int type_subjects;   /* DEFINE: the type's entities are subjects (story S7) */
   GDEFCORE_Text machine;
   GDEFCORE_Doc staged;
   GDEFCORE_Doc base;
@@ -221,10 +233,18 @@ struct GDEFCORE_Changeset {
 /* Who wrote an entity's draft, keyed by public id: the author of the revision
  * a publish applies it as (defect 1.5.3: the publisher is not the author). */
 #define GDEFCORE_ENT_DRAFT_NS "core.draft"
+/* An entity's own subject (story S7), keyed by its public id: the subject's
+ * public id, for an entity of a type whose entities are subjects. */
+#define GDEFCORE_ENT_SUBJECT_NS "core.subject"
+
+/* The entity's own subject, copied to @p out; *out_found 0 when it has none. */
+GDEFCORE_Result gdefcore_ent_own_subject(GDEFCORE_Catalog * cat,
+    const char * canon, char out[GDEFCORE_PUBLIC_ID_LEN + 1], int * out_found);
 
 /* What a stored type says (a record, beside its port declaration). */
 typedef struct GDEFCORE_EntType {
   int kind;
+  int subjects; /* its entities are subjects (story S7) */
   char id[GDEFCORE_PUBLIC_ID_LEN + 1];
   uint64_t version;
   GDEFCORE_Decl * decls;
@@ -291,23 +311,28 @@ GDEFCORE_Result gdefcore_ent_read_doc(GDEFCORE_Catalog * cat,
 
 /*
  * Where the trees of a save or a draft find each personal value's subject,
- * and how a save gives a changed one its blind-index MAC (story S6c). A
+ * and how a save gives a changed one its blind-index MAC (stories S6c, S7). A
  * personal value is a sealed text in a doc; on the port it is that text and
- * its subject. The subject of a value is the one the current tree gives the
- * same text, else the one a note gives it, else the one the entity's stored
- * draft gives it; a value none of them names is refused (@ref unknown). A
- * save (@ref index) gives every personal value that is not the current
- * value of its place a MAC: the note's, else one computed from the value
- * with @ref subjects. Neither is given for a subject that is erased, and the
- * save is refused (@ref erased): an erased subject's key is gone, and with
- * it every new value of theirs (AD-19). A draft gets no MAC (AD-14).
+ * its subject. The subject of a value is the one its field's declaration
+ * names (AD-19): the field's subject reference in the same item, else the
+ * entity's own subject (@ref own); a value with neither is refused
+ * (@ref unknown), and so is one a note says was sealed for someone else. A
+ * save (@ref index) decides whether a value changed by its plaintext: a value
+ * whose sealed text differs from the current one at its place but opens to
+ * the same plaintext for the same subject keeps the stored ciphertext, so it
+ * writes no item version and no blind row (AD-19: encryption is randomized).
+ * Every personal value that does change gets a MAC: the note's, else one
+ * computed from the value with @ref subjects. Neither is given for a subject
+ * that is erased, and the save is refused (@ref erased): an erased subject's
+ * key is gone, and with it every new value of theirs (AD-19). A draft gets
+ * no MAC (AD-14).
  */
 typedef struct GDEFCORE_Seals {
   const GDEFCORE_SealNote * notes;
   size_t nnotes;
   struct GDEFCORE_Subjects * subjects;
   int index;
-  int with_draft; /* the entity's stored draft names subjects too */
+  char own[GDEFCORE_PUBLIC_ID_LEN + 1]; /* the entity's own subject, or "" */
   int erased;     /* out */
   int unknown;    /* out */
 } GDEFCORE_Seals;

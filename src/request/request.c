@@ -109,6 +109,7 @@ void gdefcore_request_destroy(GDEFCORE_Request * request) {
   memo_clear(request);
   gcu_allocator_free(allocator, request->memo);
   gcu_allocator_free(allocator, request->reads);
+  gcu_allocator_free(allocator, request->subjects);
   gcu_allocator_free(allocator, request->principal);
   gcu_allocator_free(allocator, request->acting);
   gcu_allocator_free(allocator, request->tenant);
@@ -540,6 +541,63 @@ int gdefcore_request_dependency_at(const GDEFCORE_Request * request, size_t inde
 
 int gdefcore_request_dependencies_overflowed(const GDEFCORE_Request * request) {
   return request != NULL && request->reads_overflowed != 0;
+}
+
+GDEFCORE_Result gdefcore_request_record_subject(GDEFCORE_Request * request,
+    const char * subject, size_t subject_len) {
+  size_t i;
+  char canon[GDEFCORE_PUBLIC_ID_LEN + 1];
+  if (request == NULL || subject == NULL ||
+      gdefcore_id_canonical(subject, subject_len, canon) != GDEFCORE_OK) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  for (i = 0; i < request->nsubjects; i++) {
+    if (memcmp(request->subjects[i], canon, sizeof canon) == 0) {
+      return GDEFCORE_OK;
+    }
+  }
+  if (request->nsubjects >= GDEFCORE_REQUEST_SUBJECTS_MAX) {
+    request->subjects_overflowed = 1;
+    return GDEFCORE_OK;
+  }
+  if (request->nsubjects == request->cap_subjects) {
+    size_t cap = request->cap_subjects == 0 ? 8 : request->cap_subjects * 2;
+    char (*next)[GDEFCORE_PUBLIC_ID_LEN + 1] =
+        (char (*)[GDEFCORE_PUBLIC_ID_LEN + 1])gcu_allocator_realloc(
+            request->allocator, request->subjects, cap * sizeof *next);
+    if (next == NULL) {
+      /* Not knowing a dependency is not knowing all of them. */
+      request->subjects_overflowed = 1;
+      return GDEFCORE_ERR_OOM;
+    }
+    request->subjects = next;
+    request->cap_subjects = cap;
+  }
+  memcpy(request->subjects[request->nsubjects], canon, sizeof canon);
+  request->nsubjects += 1;
+  return GDEFCORE_OK;
+}
+
+size_t gdefcore_request_subject_count(const GDEFCORE_Request * request) {
+  return request == NULL ? 0 : request->nsubjects;
+}
+
+int gdefcore_request_subject_at(const GDEFCORE_Request * request, size_t index,
+    const char ** out_subject, size_t * out_len) {
+  if (request == NULL || index >= request->nsubjects) {
+    return 0;
+  }
+  if (out_subject != NULL) {
+    *out_subject = request->subjects[index];
+  }
+  if (out_len != NULL) {
+    *out_len = GDEFCORE_PUBLIC_ID_LEN;
+  }
+  return 1;
+}
+
+int gdefcore_request_subjects_overflowed(const GDEFCORE_Request * request) {
+  return request != NULL && request->subjects_overflowed != 0;
 }
 
 GDEFCORE_Result gdefcore_request_set_fuel(GDEFCORE_Request * request,

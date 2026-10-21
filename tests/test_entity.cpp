@@ -357,9 +357,15 @@ TEST_F(Entity, PersonalChangeset) {
   int personal = 0;
   field.personal = 1;
   ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &changeset));
-  ASSERT_EQ(GDEFCORE_OK,
+  /* A personal field with no subject reference takes the entity's own
+   * subject, which only a type whose entities are subjects has (story S7):
+   * declared so, and carried through the patch form. */
+  EXPECT_EQ(GDEFCORE_ERR_INVALID,
       gdefcore_changeset_define(changeset, "site.person", 11, GDEFCORE_TYPE_CONTENT,
           &field, 1));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_changeset_define(changeset, "site.person", 11,
+          GDEFCORE_TYPE_CONTENT | GDEFCORE_TYPE_SUBJECTS, &field, 1));
   ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_serialize(changeset, &files, &count));
   ASSERT_EQ(GDEFCORE_OK,
       gdefcore_changeset_parse(catalog_, files, count, NULL, &parsed));
@@ -370,6 +376,15 @@ TEST_F(Entity, PersonalChangeset) {
   ASSERT_EQ(GDEFCORE_OK,
       gdefcore_type_field_personal(catalog_, "site.person", 11, 0, &personal));
   EXPECT_EQ(1, personal);
+  {
+    int subjects = 0;
+    int kind = 0;
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_type_subjects(catalog_, "site.person", 11, &subjects));
+    EXPECT_EQ(1, subjects);
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_type_kind(catalog_, "site.person", 11, &kind));
+    EXPECT_EQ(GDEFCORE_TYPE_CONTENT, kind);
+  }
 }
 
 TEST_F(Entity, Define) {

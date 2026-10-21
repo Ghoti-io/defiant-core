@@ -55,6 +55,9 @@ namespace {
 
 const char kPlain[] = "platypus-secret";
 const char kField[] = "name";
+/* The reference that names whose a person's `name` is (story S7: every
+ * personal field names its subject source). */
+const char kWho[] = "person";
 
 typedef std::string Bytes;
 
@@ -189,18 +192,26 @@ class Subject : public ::testing::Test {
     inst_ = NULL;
   }
 
+  /* A person's `name`, whose subject is the `person` reference beside it,
+   * which gdefcore_subject_save() sets on a first save (story S7). */
   void DefinePerson() {
-    GDEFCORE_Field field;
+    GDEFCORE_Field fields[2];
     int personal = 0;
-    memset(&field, 0, sizeof field);
-    field.size = sizeof field;
-    field.name = kField;
-    field.name_len = strlen(kField);
-    field.required = 1;
-    field.personal = 1;
+    memset(fields, 0, sizeof fields);
+    fields[0].size = sizeof fields[0];
+    fields[0].name = kField;
+    fields[0].name_len = strlen(kField);
+    fields[0].required = 1;
+    fields[0].personal = 1;
+    fields[0].subject = kWho;
+    fields[0].subject_len = strlen(kWho);
+    fields[1].size = sizeof fields[1];
+    fields[1].name = kWho;
+    fields[1].name_len = strlen(kWho);
+    fields[1].type = GDEFSTOR_FIELD_REFERENCE;
     ASSERT_EQ(GDEFCORE_OK,
         gdefcore_type_define(catalog_, "site.person", 11, GDEFCORE_TYPE_CONTENT,
-            &field, 1));
+            fields, 2));
     ASSERT_EQ(GDEFCORE_OK,
         gdefcore_type_field_personal(catalog_, "site.person", 11, 0, &personal));
     EXPECT_EQ(1, personal);
@@ -368,15 +379,17 @@ class Subject : public ::testing::Test {
   }
 
   /* Stage @p plain for @p subject in a changeset of the caller's, as the
-   * subject routes do: sealed, told whose it is, and saved or drafted. */
+   * subject routes do: sealed, told whose it is, and saved or drafted, with
+   * the `person` reference naming @p subject (story S7: the declaration says
+   * whose the value is). */
   GDEFCORE_Result Stage(GDEFCORE_Changeset * cs, const char * subject,
       const char * entity, const char * plain, bool draft, bool with_mac = true) {
     char * text = NULL;
     size_t text_len = 0;
     uint8_t mac[GDEFCORE_SUBJECT_MAC_LEN];
-    const char * texts[1];
-    size_t lens[1];
-    GDEFCORE_Value value;
+    const char * texts[2];
+    size_t lens[2];
+    GDEFCORE_Value value[2];
     GDEFCORE_Result rc = gdefcore_subject_seal(subjects_, subject,
         strlen(subject), kField, strlen(kField), plain, strlen(plain), &text,
         &text_len, mac);
@@ -390,15 +403,23 @@ class Subject : public ::testing::Test {
     if (rc == GDEFCORE_OK) {
       texts[0] = text;
       lens[0] = text_len;
-      memset(&value, 0, sizeof value);
-      value.size = sizeof value;
-      value.field = kField;
-      value.field_len = strlen(kField);
-      value.texts = texts;
-      value.text_lens = lens;
-      value.count = 1;
+      texts[1] = subject;
+      lens[1] = strlen(subject);
+      memset(value, 0, sizeof value);
+      value[0].size = sizeof value[0];
+      value[0].field = kField;
+      value[0].field_len = strlen(kField);
+      value[0].texts = &texts[0];
+      value[0].text_lens = &lens[0];
+      value[0].count = 1;
+      value[1].size = sizeof value[1];
+      value[1].field = kWho;
+      value[1].field_len = strlen(kWho);
+      value[1].texts = &texts[1];
+      value[1].text_lens = &lens[1];
+      value[1].count = 1;
       rc = (draft ? gdefcore_entity_save_draft : gdefcore_entity_save)(cs,
-          entity, strlen(entity), "en", 2, &value, 1);
+          entity, strlen(entity), "en", 2, value, 2);
     }
     gdefcore_subject_free(subjects_, text);
     return rc;
@@ -1232,7 +1253,7 @@ TEST_F(Subject, ABlindRowIsNeverWrittenForAnErasedSubject) {
  * subject's value as it is (another field changed) applies, and that value
  * still reads [erased]. */
 TEST_F(Subject, ADraftNamingAnErasedSubjectIsRefusedAndKept) {
-  GDEFCORE_Field fields[2];
+  GDEFCORE_Field fields[3];
   char subject[GDEFCORE_PUBLIC_ID_LEN + 1];
   char later[GDEFCORE_PUBLIC_ID_LEN + 1];
   char entity[GDEFCORE_PUBLIC_ID_LEN + 1];
@@ -1243,12 +1264,18 @@ TEST_F(Subject, ADraftNamingAnErasedSubjectIsRefusedAndKept) {
   fields[0].name = kField;
   fields[0].name_len = strlen(kField);
   fields[0].personal = 1;
+  fields[0].subject = kWho;
+  fields[0].subject_len = strlen(kWho);
   fields[1].size = sizeof fields[1];
   fields[1].name = "note";
   fields[1].name_len = 4;
+  fields[2].size = sizeof fields[2];
+  fields[2].name = kWho;
+  fields[2].name_len = strlen(kWho);
+  fields[2].type = GDEFSTOR_FIELD_REFERENCE;
   ASSERT_EQ(GDEFCORE_OK,
       gdefcore_type_define(catalog_, "site.person", 11, GDEFCORE_TYPE_CONTENT,
-          fields, 2));
+          fields, 3));
   ASSERT_EQ(GDEFCORE_OK, gdefcore_subject_create(subjects_, subject));
   ASSERT_EQ(GDEFCORE_OK, gdefcore_subject_create(subjects_, later));
   MakeEntity(entity);

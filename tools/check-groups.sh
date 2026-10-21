@@ -74,7 +74,7 @@ plant nested-personal-by-name $STO testGroups \
 # (the port closes what the tree leaves out).
 plant flat-save-drops-groups $STO testGroups \
   'GroupsPo.AFlatSaveOfANestedTypeKeepsItsGroupItems' \
-  '    rc = build_groups(cat, type, l, seals, now, byid, nbyid, draft, tree);' \
+  '    rc = build_groups(cat, type, l, seals, now, byid, nbyid, tree);' \
   '    rc = GDEFCORE_OK;'
 
 # A required field inside a group item, or a required group, is not checked.

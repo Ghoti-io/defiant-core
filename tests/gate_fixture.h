@@ -699,6 +699,61 @@ inline std::string RenderEntityLine(World & w, const std::string & who,
   return out + Diag(w, req);
 }
 
+/** The editor's form of the entity (story S7): its fields and the values the
+ * principal may read, personal ones decrypted. */
+inline std::string FormLine(World & w, const std::string & who,
+    const std::string & id) {
+  Fresh fresh(w, who);
+  GDEFCORE_Request * req = fresh.req;
+  GDEFCORE_Form * form = (GDEFCORE_Form *)0x1;
+  std::string out;
+  GDEFCORE_Result rc;
+  Note("gdefcore_form_tree_for");
+  rc = gdefcore_form_tree_for(w.site.catalog, req, id.data(), id.size(), "en",
+      2, &form);
+  out = "rc=" + Rc(rc);
+  if (form == (GDEFCORE_Form *)0x1) {
+    out += " untouched";
+  } else if (rc != GDEFCORE_OK) {
+    out += " WROTE-ON-FAILURE";
+  }
+  if (rc == GDEFCORE_OK) {
+    size_t n = gdefcore_form_field_count(form);
+    size_t i;
+    for (i = 0; i < n; i++) {
+      const char * name = NULL;
+      size_t name_len = 0;
+      int required = 0;
+      int many = 0;
+      int personal = 0;
+      size_t min_len = 0;
+      size_t max_len = 0;
+      int has_range = 0;
+      int64_t range_min = 0;
+      int64_t range_max = 0;
+      const char * pattern = NULL;
+      size_t pattern_len = 0;
+      const char * const * texts = NULL;
+      const size_t * lens = NULL;
+      size_t count = 0;
+      size_t k;
+      if (gdefcore_form_field(form, i, &name, &name_len, &required, &many,
+              &personal, &min_len, &max_len, &has_range, &range_min,
+              &range_max, &pattern, &pattern_len, &texts, &lens, &count) !=
+          GDEFCORE_OK) {
+        out += " BAD-FIELD";
+        break;
+      }
+      out += " " + std::string(name, name_len) + "=";
+      for (k = 0; k < count; k++) {
+        out += "[" + std::string(texts[k], lens[k]) + "]";
+      }
+    }
+    gdefcore_form_destroy(form);
+  }
+  return out + Diag(w, req);
+}
+
 /** One field of the first revision, as the revision view answers it. */
 inline std::string RevisionLine(World & w, const std::string & who,
     const std::string & id, uint64_t seq, const char * field) {
@@ -975,6 +1030,7 @@ inline Obs Observe(World & w, const std::string & who, const Ask & ask) {
     o.kv[pre + "read.secret"] = ReadLine(w, who, target, "secret");
     o.kv[pre + "read.nope"] = ReadLine(w, who, target, "nope");
     o.kv[pre + "tree"] = TreeLine(w, who, target);
+    o.kv[pre + "form"] = FormLine(w, who, target);
     o.kv[pre + "render-entity"] = RenderEntityLine(w, who, target, "entity");
     o.kv[pre + "revisions.title"] = RevisionLine(w, who, target, 1, "title");
     o.kv[pre + "revisions.secret"] = RevisionLine(w, who, target, 1, "secret");

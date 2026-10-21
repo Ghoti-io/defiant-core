@@ -317,12 +317,17 @@ class GrantsFixture : public ::testing::Test {
     return r;
   }
 
+  /* `ssn` is personal: its subject is the `who` reference beside it (story
+   * S7: every personal field names its subject source). */
   void DefinePost() {
-    GDEFCORE_Field f[4] = {Field("title"), Field("group"), Field("rank"),
-        Field("ssn", 1)};
+    GDEFCORE_Field f[5] = {Field("title"), Field("group"), Field("rank"),
+        Field("ssn", 1), Field("who")};
+    f[3].subject = "who";
+    f[3].subject_len = 3;
+    f[4].type = GDEFSTOR_FIELD_REFERENCE;
     ASSERT_EQ(GDEFCORE_OK,
         gdefcore_type_define(catalog_, kPost, strlen(kPost),
-            GDEFCORE_TYPE_CONTENT, f, 4));
+            GDEFCORE_TYPE_CONTENT, f, 5));
   }
 
   void Declare(const GDEFCORE_Permission & p) {

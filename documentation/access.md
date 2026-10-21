@@ -455,12 +455,22 @@ field the type lacks and a sequence that is no revision of the entity are one
 answer (`GDEFCORE_ERR_INVALID`). A field the principal may not read, and a field
 with no value in that revision, are `GDEFCORE_REVISION_ABSENT` with no text, and
 cannot be told apart. A **personal** field is never shown as the ciphertext it is
-stored as: the answer is `GDEFCORE_REVISION_PERSONAL` and no text.
+stored as. Allowed, its value of that revision is decrypted then, with the
+catalog's subjects (story S7): `GDEFCORE_REVISION_SHOWN` and the plaintext, or
+`GDEFCORE_REVISION_ERASED` and `[erased]` for an erased subject. With no subjects
+bound the answer is `GDEFCORE_REVISION_PERSONAL` and no text, and
 `gdefcore_subject_revision_marker()` turns that into `GDEFCORE_REVISION_ERASED`
 and the text `[erased]` when the subject ledger names the person the value belongs
-to (the caller names them, as for `gdefcore_subject_read()`); a revision view
-never decrypts. `gdefcore_entity_revision_values()` is the unfiltered preview
-that it is built on.
+to (the caller names them, as for `gdefcore_subject_read()`).
+`gdefcore_entity_revision_values()` is the unfiltered preview that it is built
+on, and shows the stored text.
+
+The same holds on every read surface (story S7, subjects.md): a personal value
+is decrypted only after the field filter allowed its field, by
+`gdefcore_access_read()`, `gdefcore_access_tree()` (and so every render) and the
+editor's form, `gdefcore_form_tree_for()`; a field the principal may not read is
+absent and is not decrypted; each subject decrypted is recorded on the request
+(`gdefcore_request_record_subject()`).
 
 ## The render key
 

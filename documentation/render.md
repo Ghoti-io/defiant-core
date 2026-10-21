@@ -131,9 +131,28 @@ field is a list in item order, a group's items are maps of the same shape at
 every depth and a multiple field's items are its values. It is
 `gdefcore_access_tree()` made into a value, so the access filter is applied
 per field in every item: a field the reader may not read is absent from every
-line that has it, as a field with no value is. A personal value is left out.
+line that has it, as a field with no value is. A personal value of a field the
+reader may read is its plaintext, decrypted by that read after the filter
+allowed it, or `[erased]` (story S7); a catalog with no subjects bound
+renders none.
 
 ```
 <% use entity; %><% for (line : entity.lines) { %><%= line.sku %>
 <% for (tax : line.taxes) { %><%= tax.name %><% } %><% } %>
 ```
+
+## The fragment cache (story S7)
+
+A render that decrypted a personal value records its subject on the request
+(`gdefcore_request_record_subject()`). `GDEFCORE_FragmentCache` keeps rendered
+fragments under a key (the render key, `gdefcore_access_render_key()`, which
+holds no personal value) with the subjects the request recorded
+(`gdefcore_fragment_put()`). Bound to the tenant's subjects
+(`gdefcore_subject_bind_cache()`), erasure's third step purges every fragment
+that depends on the erased subject, and keeps the rest; binding replays the
+ledger into the cache. A request whose subject set overflowed
+(`GDEFCORE_REQUEST_SUBJECTS_MAX`) is not cached. The cache is in this process,
+locked for several threads, first in, first out at its capacity; a cluster's
+other nodes purge their own (AD-26's bus, not built). A tree read opens every
+personal value the reader may see, so a fragment of an entity depends on the
+subjects of all of them, whether or not its template printed them.

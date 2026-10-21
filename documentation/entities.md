@@ -23,9 +23,12 @@ config epoch (`core.epoch`) and each entity's version (`core.v:<public id>`).
 The port's own declaration of the type is the fields' shape; a personal
 field is a `PERSONAL` text field: its value is the sealed text with its
 subject's public id beside it, and each version of it has a blind-index row
-(story S6c, subjects.md). A field made personal after it was declared keeps
-its text column (a conversion is AD-15's), and a personal field cannot stop
-being personal in place. A value is stored as its type's
+(story S6c, subjects.md). Every personal field names its subject source: a
+sibling reference, else the entity's own subject, which a type declared with
+`GDEFCORE_TYPE_SUBJECTS` keeps with each entity (the record
+`core.subject/<public id>`, and the type record's `subjects 1` line; story S7).
+A field cannot become personal, or stop being, in place (a conversion is
+AD-15's). A value is stored as its type's
 value and read back as its canonical text: an integer `7` however it was
 written, a decimal of scale 2 `1.50`, a boolean `true` or `false`, a date
 `2026-10-19`, a date-time `2026-10-19T08:30:00Z` (`.mmm` with milliseconds),
@@ -148,8 +151,8 @@ version the entity has since left is a conflict, whatever the epoch says.
 | `entity/<id>/target` | the decimal sequence a `revert` copies |
 | `entity/<id>/lang/<lang>/<field>/<index>` | one field value |
 | `entity/<id>/subject/<lang>/<field>/<index>` | the canonical public id of the subject of that value, for a personal field (story S6c; an addition to `/1`) |
-| `type/<machine>/kind` | `content` or `config` |
-| `type/<machine>/field/<name>` | `required one`, `required many`, `optional one`, or `optional many`, then ` personal` for a personal field, then the type word when it is not text (`integer`, `decimal <scale>`, `float`, `boolean`, `date`, `datetime`, `reference`), then ` indexed` for the index hint, then the constraints after a `|` |
+| `type/<machine>/kind` | `content` or `config`, then ` subjects` for a type whose entities are subjects (story S7) |
+| `type/<machine>/field/<name>` | `required one`, `required many`, `optional one`, or `optional many`, then ` personal` for a personal field that takes the entity's own subject or ` personal:<reference>` for one that names a reference (story S7), then the type word when it is not text (`integer`, `decimal <scale>`, `float`, `boolean`, `date`, `datetime`, `reference`), then ` indexed` for the index hint, then the constraints after a `|` |
 
 A field may be called `kind`: `type/core.template/field/kind` is that field,
 and not the kind of a type called `core.template/field`. The parser takes
@@ -232,14 +235,14 @@ names them by id.
 **Personal fields inside groups name their subject source**
 (`GDEFCORE_Field::subject`): a sibling field that is a single, non-personal
 reference, whose value in the same item is the subject of the value
-(AD-19). A field of the root may name one too, or leave it NULL and name each
-value's subject as it is sealed (story S6c). A value is sealed for its
-field's path (`gdefcore_subject_seal(..., "contacts.note", ...)`), and every
-place that opens one, the save's MAC, the probe that finds a subject by
-opening the text, the export and the re-index, opens it under that path.
+(AD-19). A field of the root may name one too, or leave it NULL for the
+entity's own subject, on a type whose entities are subjects (story S7). A
+value is sealed for its field's path (`gdefcore_subject_seal(...,
+"contacts.note", ...)`), and every place that opens one, the save's MAC and
+its plaintext comparison, the read path, the export and the re-index, opens it
+under that path.
 
 **Not yet:** the patch form (`defiant-changeset/1`) has no file for a group or
 its items, so `gdefcore_changeset_serialize()` refuses a changeset that
 defines a type with groups or stages group items (`GDEFCORE_ERR_UNSUPPORTED`),
-and forms for groups are the site-admin stories'. `gdefcore_subject_read()`
-reads a field of the root.
+and forms for groups are the site-admin stories'.

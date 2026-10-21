@@ -65,8 +65,8 @@ left empty, and every field that is not personal, go through as before.
 `gdefcore_entity_save` and `gdefcore_entity_save_draft` refuse a personal
 value in the same way, and so does a parsed patch, unless the value is
 already sealed. A revert or a publish that would put a personal value that
-is not sealed into a new revision (it was stored before the field became
-personal) is refused too.
+is not sealed into a new revision (one a store written by something other
+than core holds) is refused too.
 
 The subject route is the way to write one through a form.
 `gdefcore_form_sign_subject` takes the subject's public id and carries it
@@ -75,20 +75,26 @@ cannot be moved to another subject. `gdefcore_form_submit_subject` takes
 the subject store. It seals each personal value exactly as
 `gdefcore_subject_save` does (same key, same ciphertext, same blind-index
 row), stores the ciphertext in the draft, and records the blind-index row
-after the draft is applied. An unknown or erased subject, a many field,
-or any failure before the draft is applied writes nothing, and nothing
+after the draft is applied. The token's subject must be the one the
+field's declaration names (story S7): the entity's own subject, or the value
+of the field's reference, which the form may set in the same submit; another
+is refused when the draft is written. An unknown or erased subject, a many
+field, or any failure before the draft is applied writes nothing, and nothing
 falls back to plaintext. The draft and the index row are two commits in
 two stores, as in `gdefcore_subject_save`; a failure of the second leaves
 a sealed draft with no row, which erasure still makes unreadable. The row
 tracks the draft, so until publish the published text and the row can
 differ.
 
-To edit, open the form with the value `gdefcore_subject_read` returns for
-the subject, not with `gdefcore_form_tree`, which shows what is stored:
-ciphertext. Reading shows the published value; a draft that is not yet
-published is not shown. An unchanged value is sealed again under a fresh
-nonce. A value that is itself a sealed text, as the tree returns it, is
-refused at submit rather than sealed a second time.
+To edit, open the editor's form, `gdefcore_form_tree_for` (story S7): the
+fields of the entity's type with the values of its draft over its newest
+revision, for a principal who may update it, each field the principal may not
+read without a value, and each personal value decrypted after that check (its
+plaintext, or `[erased]`). `gdefcore_form_tree` shows what is stored:
+ciphertext. An unchanged value is sealed again under a fresh nonce, and
+publishing it writes nothing: unchanged is decided on the plaintext. A value
+that is itself a sealed text, as the unfiltered tree returns it, is refused at
+submit rather than sealed a second time.
 
 ## Draft and publish
 

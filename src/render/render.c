@@ -1654,55 +1654,6 @@ done:
 
 /* ---- an entity in the render context (story S6d) ------------------------ */
 
-/* Which paths of a type are personal: their sealed text is never rendered. */
-typedef struct Personal {
-  char (*paths)[GDEFCORE_FIELD_PATH_MAX + 1];
-  size_t n;
-} Personal;
-
-static GDEFCORE_Result personal_load(GDEFCORE_Catalog * catalog,
-    const char * type, size_t type_len, Personal * out) {
-  size_t n = 0;
-  size_t i;
-  GDEFCORE_Result rc;
-  memset(out, 0, sizeof *out);
-  rc = gdefcore_type_tree_field_count(catalog, type, type_len, &n);
-  if (rc != GDEFCORE_OK || n == 0) {
-    return rc;
-  }
-  out->paths = (char (*)[GDEFCORE_FIELD_PATH_MAX + 1])calloc(n,
-      sizeof *out->paths);
-  if (out->paths == NULL) {
-    return GDEFCORE_ERR_OOM;
-  }
-  for (i = 0; i < n; i++) {
-    GDEFCORE_FieldInfo f;
-    memset(&f, 0, sizeof f);
-    f.size = sizeof f;
-    rc = gdefcore_type_tree_field(catalog, type, type_len, i, &f);
-    if (rc != GDEFCORE_OK) {
-      free(out->paths);
-      memset(out, 0, sizeof *out);
-      return rc;
-    }
-    if (f.personal) {
-      memcpy(out->paths[out->n], f.path, f.path_len + 1);
-      out->n += 1;
-    }
-  }
-  return GDEFCORE_OK;
-}
-
-static int personal_at(const Personal * p, const char * path, size_t n) {
-  size_t i;
-  for (i = 0; i < p->n; i++) {
-    if (strlen(p->paths[i]) == n && memcmp(p->paths[i], path, n) == 0) {
-      return 1;
-    }
-  }
-  return 0;
-}
-
 typedef struct Kids {
   size_t * head;
   size_t * next;
@@ -1710,10 +1661,12 @@ typedef struct Kids {
 
 /* The item @p item of @p tree as a map: each single field a string, each
  * group and multiple field a list in item order, a group's items maps and a
- * multiple field's its values. A personal value is left out. */
+ * multiple field's its values. The tree is gdefcore_access_tree()'s, so a
+ * personal value in it is already the plaintext the reader may see, or the
+ * erased marker (story S7), and never a ciphertext. */
 static GLTANG_Result describe_item(GLTANG_ValueDescription * d,
-    const GDEFCORE_Tree * tree, const Kids * kids, const Personal * personal,
-    size_t item, GLTANG_ValueRef * out) {
+    const GDEFCORE_Tree * tree, const Kids * kids, size_t item,
+    GLTANG_ValueRef * out) {
   GDEFCORE_TreeItem it;
   GLTANG_ValueRef map;
   GLTANG_Result rc;
@@ -1730,20 +1683,10 @@ static GLTANG_Result describe_item(GLTANG_ValueDescription * d,
     size_t field_len = 0;
     const char * text = NULL;
     size_t len = 0;
-    char path[GDEFCORE_FIELD_PATH_MAX + 2];
-    size_t pn = it.path_len + (it.path_len > 0 ? 1 : 0);
     GLTANG_ValueRef v;
     if (gdefcore_tree_value(tree, item, k, &field, &field_len, &text, &len) !=
             GDEFCORE_OK ||
-        field_len == 0 || pn + field_len > GDEFCORE_FIELD_PATH_MAX) {
-      continue;
-    }
-    if (it.path_len > 0) {
-      memcpy(path, it.path, it.path_len);
-      path[it.path_len] = '.';
-    }
-    memcpy(path + pn, field, field_len);
-    if (personal_at(personal, path, pn + field_len)) {
+        field_len == 0) {
       continue;
     }
     rc = gltang_value_string(d, text, len,
@@ -1775,7 +1718,7 @@ static GLTANG_Result describe_item(GLTANG_ValueDescription * d,
              pi.field_len == ci.field_len &&
              memcmp(pi.field, ci.field, ci.field_len) == 0;
     }
-    if (seen || personal_at(personal, ci.path, ci.path_len)) {
+    if (seen) {
       continue;
     }
     rc = gltang_value_array(d, &list);
@@ -1803,7 +1746,7 @@ static GLTANG_Result describe_item(GLTANG_ValueDescription * d,
         rc = gltang_value_string(d, own, own_len,
             GLTANG_UNICODE_STRING_TYPE_HTML_ATTRIBUTE, &el);
       } else {
-        rc = describe_item(d, tree, kids, personal, e, &el);
+        rc = describe_item(d, tree, kids, e, &el);
       }
       if (rc == GLTANG_OK) {
         rc = gltang_value_array_push(d, list, el);
@@ -1816,23 +1759,17 @@ static GLTANG_Result describe_item(GLTANG_ValueDescription * d,
   return rc;
 }
 
-static GDEFCORE_Result describe_entity(GDEFCORE_Catalog * catalog,
-    const char * type, size_t type_len, const GDEFCORE_Tree * tree,
+static GDEFCORE_Result describe_entity(const GDEFCORE_Tree * tree,
     GLTANG_ValueDescription ** out) {
   GLTANG_ValueDescription * d = NULL;
-  Personal personal;
   Kids kids;
   size_t * tail = NULL;
   size_t n = gdefcore_tree_item_count(tree);
   size_t i;
   GLTANG_ValueRef root;
   GLTANG_Result lr;
-  GDEFCORE_Result rc;
+  GDEFCORE_Result rc = GDEFCORE_OK;
   *out = NULL;
-  rc = personal_load(catalog, type, type_len, &personal);
-  if (rc != GDEFCORE_OK) {
-    return rc;
-  }
   kids.head = (size_t *)malloc((n == 0 ? 1 : n) * sizeof *kids.head);
   kids.next = (size_t *)malloc((n == 0 ? 1 : n) * sizeof *kids.next);
   tail = (size_t *)malloc((n == 0 ? 1 : n) * sizeof *tail);
@@ -1865,7 +1802,7 @@ static GDEFCORE_Result describe_entity(GDEFCORE_Catalog * catalog,
     rc = GDEFCORE_ERR_OOM;
     goto done;
   }
-  lr = describe_item(d, tree, &kids, &personal, 0, &root);
+  lr = describe_item(d, tree, &kids, 0, &root);
   if (lr == GLTANG_OK) {
     lr = gltang_value_set_root(d, root);
   }
@@ -1880,7 +1817,6 @@ done:
   free(kids.head);
   free(kids.next);
   free(tail);
-  free(personal.paths);
   return rc;
 }
 
@@ -1892,8 +1828,6 @@ GDEFCORE_Result gdefcore_render_entity(GDEFCORE_Catalog * catalog,
   GDEFCORE_Tree * tree = NULL;
   GLTANG_ValueDescription * value = NULL;
   GDEFCORE_Contract * contract = NULL;
-  char * type = NULL;
-  size_t type_len = 0;
   char * body = NULL;
   char * kind = NULL;
   size_t body_len = 0;
@@ -1911,10 +1845,7 @@ GDEFCORE_Result gdefcore_render_entity(GDEFCORE_Catalog * catalog,
   rc = gdefcore_access_tree(catalog, request, id, id_len, lang, lang_len,
       &tree);
   if (rc == GDEFCORE_OK) {
-    rc = gdefcore_entity_type(catalog, id, id_len, &type, &type_len);
-  }
-  if (rc == GDEFCORE_OK) {
-    rc = describe_entity(catalog, type, type_len, tree, &value);
+    rc = describe_entity(tree, &value);
   }
   if (rc == GDEFCORE_OK) {
     rc = template_load(catalog, template_name, template_len, &body, &body_len,
@@ -1939,7 +1870,6 @@ GDEFCORE_Result gdefcore_render_entity(GDEFCORE_Catalog * catalog,
   gdefcore_template_contract_close(contract);
   gdefcore_text_free(catalog, body);
   gdefcore_text_free(catalog, kind);
-  gdefcore_text_free(catalog, type);
   gltang_value_description_release(value);
   gdefcore_tree_free(tree);
   return rc;

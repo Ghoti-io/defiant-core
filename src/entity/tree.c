@@ -238,6 +238,42 @@ GDEFCORE_Result gdefcore_tree_value(const GDEFCORE_Tree * tree, size_t item,
   return GDEFCORE_OK;
 }
 
+const char * gdefcore_ent_tree_value_subject(const GDEFCORE_Tree * t,
+    size_t item, size_t k, size_t * out_len) {
+  GDEFSTOR_Value v;
+  const char * f = NULL;
+  size_t fn = 0;
+  *out_len = 0;
+  if (t == NULL || item >= t->npaths) {
+    return NULL;
+  }
+  memset(&v, 0, sizeof v);
+  if (gdefstor_tree_value(t->t, item, k, &f, &fn, &v) != GDEFSTOR_OK ||
+      v.subject == NULL || v.subject_len == 0) {
+    return NULL;
+  }
+  *out_len = v.subject_len;
+  return (const char *)v.subject;
+}
+
+GDEFCORE_Result gdefcore_tree_value_subject(const GDEFCORE_Tree * tree,
+    size_t item, size_t k, const char ** out_subject, size_t * out_len) {
+  GDEFSTOR_Value v;
+  const char * f = NULL;
+  size_t fn = 0;
+  if (tree == NULL || out_subject == NULL || out_len == NULL ||
+      item >= tree->npaths) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  memset(&v, 0, sizeof v);
+  if (gdefstor_tree_value(tree->t, item, k, &f, &fn, &v) != GDEFSTOR_OK) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  *out_subject = v.subject_len > 0 ? (const char *)v.subject : NULL;
+  *out_len = v.subject_len;
+  return GDEFCORE_OK;
+}
+
 GDEFCORE_Result gdefcore_tree_get(const GDEFCORE_Tree * tree, size_t item,
     const char * field, size_t field_len, const char ** out_text,
     size_t * out_len) {

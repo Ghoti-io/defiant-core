@@ -54,6 +54,18 @@ extern "C" {
 #define GDEFCORE_TYPE_CONTENT 1
 /** The type holds configuration. */
 #define GDEFCORE_TYPE_CONFIG 2
+/**
+ * A flag ORed into the kind of gdefcore_type_define() and
+ * gdefcore_changeset_define(): the type's entities are subjects (AD-19, story
+ * S7). Core creates a subject (gdefcore_subject_create()) for each entity when
+ * its id is made (gdefcore_entity_create()), keeps it with the entity
+ * (gdefcore_entity_subject()), and a personal field of the type that names no
+ * subject reference stores every value under it. A type without the flag may
+ * not declare such a field. The flag is part of the declaration and cannot be
+ * changed once the type is stored. gdefcore_type_kind() reports the kind
+ * without it; gdefcore_type_subjects() reports it.
+ */
+#define GDEFCORE_TYPE_SUBJECTS 0x100
 
 /* The touch codes are bit flags, so a caller can test a set of them. */
 /** A touched entity gets a new revision, its newest, and is published. A
@@ -129,9 +141,17 @@ typedef struct GDEFCORE_Changeset GDEFCORE_Changeset;
  * date `2026-10-19`, a date-time `2026-10-19T08:30:00Z` (with `.mmm` when it
  * has milliseconds), a reference a canonical public id. A value that is not
  * one of its type is ::GDEFCORE_ERR_INVALID at staging. A personal field holds
- * the sealed text of its value whatever its type, until subjects reach the
- * port (story S7). `<`, `<=`, `>` and `>=` in a condition need a numeric or
- * temporal field (access SPEC decision 12).
+ * the sealed text of its value whatever its type, with its subject beside it
+ * on the port (AD-19). `<`, `<=`, `>` and `>=` in a condition need a numeric
+ * or temporal field (access SPEC decision 12).
+ *
+ * Every personal field names where its values' subject comes from (AD-19,
+ * story S7): @ref subject, a sibling reference, or, when that is NULL, the
+ * entity's own subject, which only a type declared with
+ * ::GDEFCORE_TYPE_SUBJECTS has. A personal field with neither is
+ * ::GDEFCORE_ERR_INVALID at declaration. A field stored as not personal cannot
+ * be made personal in place, nor the reverse (AD-15: that is a new field and a
+ * conversion): such a definition is ::GDEFCORE_ERR_INVALID.
  *
  * Nested groups (story S6d): a field of @ref type ::GDEFSTOR_FIELD_GROUP holds
  * items, each with the fields in @ref children, recursively, at most
@@ -177,10 +197,10 @@ typedef struct GDEFCORE_Field {
   size_t child_count;       ///< How many in @ref children.
   /** PERSONAL: where each value's subject comes from. The name of a sibling
    * field (in the same group) that is a single, non-personal REFERENCE: the
-   * subject is that field's value in the same item. NULL: each value names
-   * its subject as it is sealed (gdefcore_changeset_note_sealed()), which
-   * only a field of the root group may do. A personal field inside a group
-   * must name its subject source. */
+   * subject is that field's value in the same item. NULL: the entity's own
+   * subject (gdefcore_entity_subject()), which only a field of the root group
+   * of a ::GDEFCORE_TYPE_SUBJECTS type may name. A personal field inside a
+   * group must name a sibling reference. */
   const char * subject;
   size_t subject_len;       ///< Length of @ref subject.
 } GDEFCORE_Field;
@@ -273,7 +293,8 @@ GDEFCORE_API GDEFCORE_Result gdefcore_id_canonical(const char * text,
  * @param catalog The catalog.
  * @param name Machine name: `core.<name>`, `site.<name>`, or `<module>.<name>`.
  * @param name_len Its length.
- * @param kind ::GDEFCORE_TYPE_CONTENT or ::GDEFCORE_TYPE_CONFIG.
+ * @param kind ::GDEFCORE_TYPE_CONTENT or ::GDEFCORE_TYPE_CONFIG, with
+ *   ::GDEFCORE_TYPE_SUBJECTS ORed in for a type whose entities are subjects.
  * @param fields Field declarations. NULL only when @p field_count is 0.
  * @param field_count How many.
  * @return ::GDEFCORE_OK or an error. Nothing is written on failure.
@@ -293,6 +314,15 @@ GDEFCORE_API GDEFCORE_Result gdefcore_type_define(GDEFCORE_Catalog * catalog,
  */
 GDEFCORE_API GDEFCORE_Result gdefcore_type_kind(GDEFCORE_Catalog * catalog,
     const char * name, size_t name_len, int * out_kind);
+
+/**
+ * @brief Whether the type's entities are subjects (::GDEFCORE_TYPE_SUBJECTS).
+ *
+ * @p out_subjects receives 1 or 0. A type that is not there is
+ * ::GDEFCORE_ERR_INVALID and nothing is written.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_type_subjects(GDEFCORE_Catalog * catalog,
+    const char * name, size_t name_len, int * out_subjects);
 
 /**
  * @brief How many fields of the root group that hold values the type
@@ -348,6 +378,13 @@ GDEFCORE_API GDEFCORE_Result gdefcore_type_field_constraints(
  * list. @p out_row receives 0: an entity has no internal row before
  * it exists, and the row is the port's afterwards.
  *
+ * For a ::GDEFCORE_TYPE_SUBJECTS type the entity's own subject is made here
+ * too (story S7): a subject key in the key store (gdefcore_subject_create(),
+ * the subjects bound with gdefcore_catalog_bind_subjects(); without them this
+ * is ::GDEFCORE_ERR_INVALID), and a record of it beside the entity, in the
+ * reservation's own write. A write that fails after the key was made leaves
+ * a subject that names no value.
+ *
  * @param catalog The catalog.
  * @param type_name A type that is already readable.
  * @param type_len Its length.
@@ -358,6 +395,20 @@ GDEFCORE_API GDEFCORE_Result gdefcore_type_field_constraints(
 GDEFCORE_API GDEFCORE_Result gdefcore_entity_create(GDEFCORE_Catalog * catalog,
     const char * type_name, size_t type_len,
     char out_id[GDEFCORE_PUBLIC_ID_LEN + 1], uint64_t * out_row);
+
+/**
+ * @brief The entity's own subject (story S7): the subject every value of a
+ * personal field that names no subject reference is stored under, made with
+ * the entity of a ::GDEFCORE_TYPE_SUBJECTS type (gdefcore_entity_create()).
+ *
+ * @p out_subject receives its canonical public id and a NUL. An id that is no
+ * entity or reservation, or one whose type does not keep a subject, is
+ * ::GDEFCORE_ERR_INVALID and nothing is written. Erasing the subject
+ * (gdefcore_subject_erase()) leaves this answer as it is.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_entity_subject(GDEFCORE_Catalog * catalog,
+    const char * id, size_t id_len,
+    char out_subject[GDEFCORE_PUBLIC_ID_LEN + 1]);
 
 /** @brief The tenant config epoch (the store's counter `core.epoch`, AD-31).
  * An unseen epoch is 0. */
@@ -436,18 +487,19 @@ struct GDEFCORE_Subjects;
  *
  * On the storage port a personal value is its sealed text and its subject's
  * public id, and every new version of it gets a blind-index row (AD-14,
- * AD-19). A text the entity already holds names its own subject, and one a
- * draft holds names the subject the draft recorded; a text sealed for this
- * changeset names none, and is told here: @p subject, and @p mac, the
- * blind-index value gdefcore_subject_seal() returned with it (NULL for a
- * draft, which carries no MAC; a save then computes it). @p subjects are the
- * keys that made it: apply asks them, inside its write, whether the subject
- * is erased, and refuses the value of one that is. gdefcore_subject_save()
- * and the subject form route call this; it does not make the changeset
- * accept sealed values (gdefcore_changeset_accept_sealed()). A text that is
- * not shaped as a sealed one, a subject that is not a public id, another
- * @p subjects than an earlier note's, or an applied changeset is
- * ::GDEFCORE_ERR_INVALID.
+ * AD-19). Whose a value is, is the field's declaration's to say (story S7):
+ * its subject reference in the same item, else the entity's own subject. A
+ * note says whom the caller sealed @p text for, @p subject, and gives @p mac,
+ * the blind-index value gdefcore_subject_seal() returned with it (NULL for a
+ * draft, which carries no MAC; a save then computes it). A note whose subject
+ * is not the one the declaration names refuses the value: it was sealed for
+ * someone else. @p subjects are the keys that made it: apply asks them,
+ * inside its write, whether the subject is erased, and refuses the value of
+ * one that is. gdefcore_subject_save() and the subject form route call this;
+ * it does not make the changeset accept sealed values
+ * (gdefcore_changeset_accept_sealed()). A text that is not shaped as a sealed
+ * one, a subject that is not a public id, another @p subjects than an earlier
+ * note's, or an applied changeset is ::GDEFCORE_ERR_INVALID.
  */
 GDEFCORE_API GDEFCORE_Result gdefcore_changeset_note_sealed(
     GDEFCORE_Changeset * changeset, struct GDEFCORE_Subjects * subjects,
@@ -468,6 +520,16 @@ GDEFCORE_API GDEFCORE_Result gdefcore_changeset_note_sealed(
  */
 GDEFCORE_API void gdefcore_catalog_bind_subjects(GDEFCORE_Catalog * catalog,
     struct GDEFCORE_Subjects * subjects);
+
+/**
+ * @brief The subjects bound with gdefcore_catalog_bind_subjects(), or NULL.
+ *
+ * The read path opens a personal value with these, after the access filter
+ * has allowed its field (AD-19, story S7); a catalog with none shows no
+ * personal value.
+ */
+GDEFCORE_API struct GDEFCORE_Subjects * gdefcore_catalog_subjects(
+    const GDEFCORE_Catalog * catalog);
 
 /**
  * @brief Stage field values as the entity's draft (access SPEC decision 13).
@@ -1259,6 +1321,18 @@ GDEFCORE_API GDEFCORE_Result gdefcore_tree_item(const GDEFCORE_Tree * tree,
 GDEFCORE_API GDEFCORE_Result gdefcore_tree_value(const GDEFCORE_Tree * tree,
     size_t item, size_t k, const char ** out_field, size_t * out_field_len,
     const char ** out_text, size_t * out_len);
+
+/**
+ * @brief The subject the @p k th value of item @p item was stored with
+ * (story S7): a personal value of a tree read from storage
+ * (gdefcore_entity_tree(), gdefcore_entity_revision_tree()) carries the
+ * public id the port keeps beside its ciphertext. @p out_subject is NULL and
+ * @p out_len 0 for any other value, and for a value of a tree a caller built.
+ * Borrowed until the tree is freed or changed.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_tree_value_subject(
+    const GDEFCORE_Tree * tree, size_t item, size_t k,
+    const char ** out_subject, size_t * out_len);
 
 /**
  * @brief The value of @p field on item @p item, borrowed: @p out_text NULL

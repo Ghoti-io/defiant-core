@@ -77,6 +77,10 @@ struct GDEFCORE_Request {
   size_t nreads;
   size_t cap_reads;
   int reads_overflowed;
+  char (*subjects)[GDEFCORE_PUBLIC_ID_LEN + 1]; /* decrypted (story S7) */
+  size_t nsubjects;
+  size_t cap_subjects;
+  int subjects_overflowed;
   int has_fuel;
   uint64_t fuel;
   const GDEFCORE_Allocator * allocator;

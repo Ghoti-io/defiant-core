@@ -32,10 +32,12 @@
 #include <ghoti.io/defiant-core/module.h>
 #include <ghoti.io/defiant-core/plan.h>
 #include <ghoti.io/defiant-core/relation.h>
+#include <ghoti.io/defiant-core/subject.h>
 
 #include "access_internal.h"
 
 #include <ghoti.io/cutil/allocator.h>
+#include <ghoti.io/security/secret.h>
 #include <ghoti.io/security/sha256.h>
 
 #include <stdio.h>
@@ -2161,6 +2163,193 @@ GDEFCORE_Result gdefcore_access_principal_roles(GDEFCORE_Catalog * catalog,
   return GDEFCORE_OK;
 }
 
+/* ---- personal values in the read path (AD-19, story S7) ------------------ */
+
+static int field_is_personal(GDEFCORE_Catalog * catalog, const char * type,
+    size_t type_len, const char * field, size_t field_len);
+
+/*
+ * Open one stored personal value for the reader: called only once the field
+ * filter has allowed the field. @p out receives the plaintext, or the erased
+ * marker, in the catalog's allocation, and @p out_shown 1; a catalog with no
+ * subjects bound shows no personal value (never its ciphertext), and
+ * @p out_shown is 0. A subject decrypted is recorded on @p request, so a
+ * fragment rendered from it depends on that subject.
+ */
+static GDEFCORE_Result open_for_reader(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Request * request, const char * subject, size_t subject_len,
+    const char * path, size_t path_len, const char * sealed, size_t sealed_len,
+    char ** out, size_t * out_len, int * out_shown, int * out_erased) {
+  GDEFCORE_Subjects * subjects = gdefcore_catalog_subjects(catalog);
+  char * plain = NULL;
+  size_t plain_len = 0;
+  int erased = 0;
+  GDEFCORE_Result rc;
+  *out = NULL;
+  *out_len = 0;
+  *out_shown = 0;
+  *out_erased = 0;
+  if (subjects == NULL) {
+    return GDEFCORE_OK;
+  }
+  if (subject == NULL || subject_len == 0) {
+    return GDEFCORE_ERR_CORRUPT; /* a personal value is never stored without */
+  }
+  rc = gdefcore_subject_open_value(subjects, subject, subject_len, path,
+      path_len, sealed, sealed_len, &plain, &plain_len, &erased);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  rc = gdefcore_text_dup(catalog, plain, plain_len, out);
+  if (plain != NULL && plain_len > 0) {
+    gsec_wipe(plain, plain_len);
+  }
+  gdefcore_subject_free(subjects, plain);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  if (!erased) {
+    rc = gdefcore_request_record_subject(request, subject, subject_len);
+    if (rc != GDEFCORE_OK) {
+      gsec_wipe(*out, plain_len);
+      gdefcore_text_free(catalog, *out);
+      *out = NULL;
+      return rc;
+    }
+  }
+  *out_len = plain_len;
+  *out_shown = 1;
+  *out_erased = erased;
+  return GDEFCORE_OK;
+}
+
+/* Free what personal_texts() built before it hands it over: texts of the
+ * catalog's, wiped (they are plaintext), in arrays of the default allocator. */
+static void plain_texts_free(GDEFCORE_Catalog * catalog, char ** texts,
+    size_t * lens, size_t count) {
+  size_t i;
+  for (i = 0; texts != NULL && i < count; i++) {
+    if (texts[i] != NULL && lens != NULL && lens[i] > 0) {
+      gsec_wipe(texts[i], lens[i]);
+    }
+    gdefcore_text_free(catalog, texts[i]);
+  }
+  gcu_allocator_free(alloc_default(), texts);
+  gcu_allocator_free(alloc_default(), lens);
+}
+
+/*
+ * The values of personal field @p field of the root of @p tree (its own value
+ * or the items of a multiple field), each opened for the reader in order
+ * (open_for_reader()). No value is ::GDEFCORE_ERR_INVALID, as
+ * gdefcore_entity_values() answers a field with none; a catalog with no
+ * subjects is a count of 0.
+ */
+static GDEFCORE_Result personal_texts(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Request * request, const GDEFCORE_Tree * tree, const char * field,
+    size_t field_len, char *** out_texts, size_t ** out_lens,
+    size_t * out_count, int * out_all_erased) {
+  size_t n = gdefcore_tree_item_count(tree);
+  size_t cap = n + 1;
+  char ** texts = NULL;
+  size_t * lens = NULL;
+  size_t count = 0;
+  size_t seen = 0;
+  size_t erased = 0;
+  size_t i;
+  GDEFCORE_Result rc = GDEFCORE_OK;
+  texts = (char **)gcu_allocator_calloc(alloc_default(), cap, sizeof *texts);
+  lens = (size_t *)gcu_allocator_calloc(alloc_default(), cap, sizeof *lens);
+  if (texts == NULL || lens == NULL) {
+    gcu_allocator_free(alloc_default(), texts);
+    gcu_allocator_free(alloc_default(), lens);
+    return GDEFCORE_ERR_OOM;
+  }
+  for (i = 0; rc == GDEFCORE_OK && i < n; i++) {
+    GDEFCORE_TreeItem it;
+    size_t k;
+    memset(&it, 0, sizeof it);
+    it.size = sizeof it;
+    rc = gdefcore_tree_item(tree, i, &it);
+    if (rc != GDEFCORE_OK) {
+      break;
+    }
+    if (i > 0 && (it.parent != 0 || !same(it.field, it.field_len, field,
+                                          field_len))) {
+      continue;
+    }
+    for (k = 0; rc == GDEFCORE_OK && k < it.value_count; k++) {
+      const char * f = NULL;
+      size_t fn = 0;
+      const char * text = NULL;
+      size_t len = 0;
+      const char * sub = NULL;
+      size_t sub_len = 0;
+      int shown = 0;
+      int gone = 0;
+      rc = gdefcore_tree_value(tree, i, k, &f, &fn, &text, &len);
+      if (rc != GDEFCORE_OK) {
+        break;
+      }
+      if (i == 0 ? !same(f, fn, field, field_len) : fn != 0) {
+        continue;
+      }
+      rc = gdefcore_tree_value_subject(tree, i, k, &sub, &sub_len);
+      if (rc == GDEFCORE_OK) {
+        seen += 1;
+        rc = open_for_reader(catalog, request, sub, sub_len, field, field_len,
+            text, len, &texts[count], &lens[count], &shown, &gone);
+      }
+      if (rc == GDEFCORE_OK && shown) {
+        count += 1;
+        erased += gone ? 1u : 0u;
+      }
+    }
+  }
+  if (rc == GDEFCORE_OK && seen == 0) {
+    rc = GDEFCORE_ERR_INVALID;
+  }
+  if (rc != GDEFCORE_OK) {
+    plain_texts_free(catalog, texts, lens, count);
+    return rc;
+  }
+  /* The arrays are the default allocator's and the texts the catalog's:
+   * gdefcore_values_free() frees both with the catalog's, so the arrays are
+   * copied into the catalog's allocation (gdefcore_text_dup() is a copy of
+   * bytes in it, whatever they are). */
+  {
+    char * ct = NULL;
+    char * cl = NULL;
+    if (count > 0) {
+      rc = gdefcore_text_dup(catalog, (const char *)texts, count * sizeof *texts,
+          &ct);
+      if (rc == GDEFCORE_OK) {
+        rc = gdefcore_text_dup(catalog, (const char *)lens,
+            count * sizeof *lens, &cl);
+      }
+      if (rc != GDEFCORE_OK) {
+        gdefcore_text_free(catalog, ct);
+        for (i = 0; i < count; i++) {
+          gsec_wipe(texts[i], lens[i]);
+          gdefcore_text_free(catalog, texts[i]);
+        }
+        gcu_allocator_free(alloc_default(), texts);
+        gcu_allocator_free(alloc_default(), lens);
+        return rc;
+      }
+    }
+    gcu_allocator_free(alloc_default(), texts);
+    gcu_allocator_free(alloc_default(), lens);
+    *out_texts = (char **)(void *)ct;
+    *out_lens = (size_t *)(void *)cl;
+    *out_count = count;
+    if (out_all_erased != NULL) {
+      *out_all_erased = count > 0 && erased == count;
+    }
+  }
+  return GDEFCORE_OK;
+}
+
 GDEFCORE_Result gdefcore_access_read(GDEFCORE_Catalog * catalog,
     GDEFCORE_Request * request, const char * id, size_t id_len,
     const char * lang, size_t lang_len, const char * field, size_t field_len,
@@ -2180,6 +2369,7 @@ GDEFCORE_Result gdefcore_access_read(GDEFCORE_Catalog * catalog,
   Eval ev;
   int visible;
   int granted = 1;
+  int personal = 0;
   GDEFCORE_Result rc;
   if (catalog == NULL || request == NULL || out_texts == NULL ||
       out_lens == NULL || out_count == NULL || field == NULL) {
@@ -2245,8 +2435,23 @@ GDEFCORE_Result gdefcore_access_read(GDEFCORE_Catalog * catalog,
     *out_count = 0;
     return GDEFCORE_OK;
   }
-  gdefcore_text_free(catalog, type_name);
   gdefcore_text_free(catalog, actor);
+  personal = field_is_personal(catalog, type_name, type_len, field, field_len);
+  if (personal) {
+    /* Only now, the field allowed, is a personal value decrypted (AD-19,
+     * story S7): never its ciphertext. */
+    GDEFCORE_Tree * tree = NULL;
+    gdefcore_text_free(catalog, type_name);
+    rc = gdefcore_entity_tree(catalog, NULL, GDEFCORE_VIEW_PUBLISHED, canon,
+        GDEFCORE_PUBLIC_ID_LEN, lang, lang_len, &tree);
+    if (rc == GDEFCORE_OK) {
+      rc = personal_texts(catalog, request, tree, field, field_len, out_texts,
+          out_lens, out_count, NULL);
+    }
+    gdefcore_tree_free(tree);
+    return rc;
+  }
+  gdefcore_text_free(catalog, type_name);
   return gdefcore_entity_values(catalog, NULL, GDEFCORE_VIEW_PUBLISHED, canon,
       GDEFCORE_PUBLIC_ID_LEN, lang, lang_len, field, field_len, out_texts,
       out_lens, out_count);
@@ -2273,7 +2478,53 @@ typedef struct TreeFilter {
   size_t principal_len;
   PathSeen seen[64];
   size_t nseen;
+  /* Story S7: the reader's request, and the type's personal paths, whose
+   * values are opened once their field is allowed. */
+  GDEFCORE_Request * request;
+  char (*personal)[GDEFCORE_FIELD_PATH_MAX + 1];
+  size_t npersonal;
 } TreeFilter;
+
+/* The paths of the type's personal fields, at every depth, into @p f. */
+static GDEFCORE_Result personal_paths(GDEFCORE_Catalog * catalog,
+    const char * type, size_t type_len, TreeFilter * f) {
+  size_t n = 0;
+  size_t i;
+  GDEFCORE_Result rc = gdefcore_type_tree_field_count(catalog, type, type_len,
+      &n);
+  if (rc != GDEFCORE_OK || n == 0) {
+    return rc;
+  }
+  f->personal = (char (*)[GDEFCORE_FIELD_PATH_MAX + 1])gcu_allocator_calloc(
+      alloc_default(), n, sizeof *f->personal);
+  if (f->personal == NULL) {
+    return GDEFCORE_ERR_OOM;
+  }
+  for (i = 0; i < n; i++) {
+    GDEFCORE_FieldInfo info;
+    memset(&info, 0, sizeof info);
+    info.size = sizeof info;
+    rc = gdefcore_type_tree_field(catalog, type, type_len, i, &info);
+    if (rc != GDEFCORE_OK) {
+      return rc;
+    }
+    if (info.personal) {
+      memcpy(f->personal[f->npersonal], info.path, info.path_len + 1);
+      f->npersonal += 1;
+    }
+  }
+  return GDEFCORE_OK;
+}
+
+static int personal_path(const TreeFilter * f, const char * path, size_t n) {
+  size_t i;
+  for (i = 0; i < f->npersonal; i++) {
+    if (same(f->personal[i], strlen(f->personal[i]), path, n)) {
+      return 1;
+    }
+  }
+  return 0;
+}
 
 /* Whether the principal may read the field at @p path: the field-read grants
  * of that field, as gdefcore_access_read() applies them to a field of the
@@ -2380,6 +2631,29 @@ static GDEFCORE_Result filter_tree(GDEFCORE_Catalog * catalog, TreeFilter * f,
       if (field_len > 0 && !path_shown(f, path, pn)) {
         continue;
       }
+      if (personal_path(f, path, pn)) {
+        /* Allowed, so only now opened (AD-19, story S7): the plaintext, or
+         * the erased marker, never the ciphertext. */
+        const char * sub = NULL;
+        size_t sub_len = 0;
+        char * plain = NULL;
+        size_t plain_len = 0;
+        int shown = 0;
+        int gone = 0;
+        rc = gdefcore_tree_value_subject(in, i, k, &sub, &sub_len);
+        if (rc == GDEFCORE_OK) {
+          rc = open_for_reader(catalog, f->request, sub, sub_len, path, pn,
+              text, len, &plain, &plain_len, &shown, &gone);
+        }
+        if (rc == GDEFCORE_OK && shown) {
+          rc = gdefcore_tree_set(t, item, field, field_len, plain, plain_len);
+        }
+        if (plain != NULL) {
+          gsec_wipe(plain, plain_len);
+          gdefcore_text_free(catalog, plain);
+        }
+        continue;
+      }
       rc = gdefcore_tree_set(t, item, field, field_len, text, len);
     }
   }
@@ -2480,11 +2754,18 @@ GDEFCORE_Result gdefcore_access_tree(GDEFCORE_Catalog * catalog,
     filter->actor_len = actor_len;
     filter->principal = principal;
     filter->principal_len = principal_len;
-    rc = filter_tree(catalog, filter, full, out_tree);
+    filter->request = request;
+    rc = personal_paths(catalog, type_name, type_len, filter);
+    if (rc == GDEFCORE_OK) {
+      rc = filter_tree(catalog, filter, full, out_tree);
+    }
   }
   /* A condition that could not be decided has not granted: the field reads
    * as hidden, which is also what a missing one reads as. */
   eval_done(&ev);
+  if (filter != NULL) {
+    gcu_allocator_free(alloc_default(), filter->personal);
+  }
   gcu_allocator_free(alloc_default(), filter);
   gdefcore_tree_free(full);
   gdefcore_text_free(catalog, type_name);
@@ -2624,11 +2905,35 @@ GDEFCORE_Result gdefcore_access_revision_values(GDEFCORE_Catalog * catalog,
         out_lens, out_count);
   }
   if (field_is_personal(catalog, type_name, type_len, field, field_len)) {
-    /* Never the ciphertext it is stored as. Whether the value can be
-     * recovered is the subject store's to say (AD-19). */
+    /* Never the ciphertext it is stored as. The field allowed, the value of
+     * that revision is opened now (story S7): its plaintext, or the erased
+     * marker. With no subjects bound it cannot be, and says only that a
+     * personal value is there (gdefcore_subject_revision_marker()). */
+    GDEFCORE_Tree * tree = NULL;
+    int all_erased = 0;
     gdefcore_text_free(catalog, type_name);
-    return revision_answer(out_status, GDEFCORE_REVISION_PERSONAL, out_texts,
-        out_lens, out_count);
+    if (gdefcore_catalog_subjects(catalog) == NULL) {
+      return revision_answer(out_status, GDEFCORE_REVISION_PERSONAL, out_texts,
+          out_lens, out_count);
+    }
+    rc = gdefcore_entity_revision_tree(catalog, canon, GDEFCORE_PUBLIC_ID_LEN,
+        seq, lang, lang_len, &tree);
+    if (rc == GDEFCORE_OK) {
+      rc = personal_texts(catalog, request, tree, field, field_len, out_texts,
+          out_lens, out_count, &all_erased);
+    }
+    gdefcore_tree_free(tree);
+    if (rc == GDEFCORE_OK) {
+      *out_status = all_erased ? GDEFCORE_REVISION_ERASED
+                               : GDEFCORE_REVISION_SHOWN;
+      return GDEFCORE_OK;
+    }
+    if (rc == GDEFCORE_ERR_INVALID) {
+      /* No value in that revision: the absence a hidden field is. */
+      return revision_answer(out_status, GDEFCORE_REVISION_ABSENT, out_texts,
+          out_lens, out_count);
+    }
+    return rc;
   }
   gdefcore_text_free(catalog, type_name);
   rc = gdefcore_entity_revision_values(catalog, canon, GDEFCORE_PUBLIC_ID_LEN,

@@ -33,7 +33,20 @@
  * tenant's entity port as its sealed text and its subject's public id
  * (AD-14), and each version of it that a save writes has a blind-index row
  * in the port's blind table, in the same write (story S6c); "everything
- * about this person" is the port's subject lookup. Erasure has no undo.
+ * about this person" is the port's subject lookup (gdefcore_subject_export()).
+ * Erasure has no undo.
+ *
+ * Whose a value is, is its field's declaration's to say (AD-19, story S7):
+ * the field's subject reference, else the entity's own subject
+ * (::GDEFCORE_TYPE_SUBJECTS, gdefcore_entity_subject()). A value is decrypted
+ * only in the application's read path, after the access filter has allowed
+ * its field (gdefcore_access_read(), gdefcore_access_tree(),
+ * gdefcore_access_revision_values(), gdefcore_form_tree_for(), and the
+ * renders that read through them), with gdefcore_subject_open_value(); an
+ * erased subject's value reads ::GDEFCORE_SUBJECT_ERASED. Each subject a read
+ * decrypted is recorded on its request (gdefcore_request_record_subject()),
+ * and a fragment cached from that request depends on it
+ * (gdefcore_fragment_put()): erasing the subject purges it.
  *
  * Writes to the key store: creating a subject (its wrapped key), the first
  * open of a tenant (the keyring's wrap), erasure (the key destroyed and the
@@ -44,10 +57,11 @@
  * the ledger row, in one step, after which every value of the subject reads
  * ::GDEFCORE_SUBJECT_ERASED; (2) the subject's blind-index rows are deleted
  * from the tenant's data store (gdefstor_blind_delete_subject()); (3) caches
- * are purged (core holds no cache of a subject's values or key, so there is
- * nothing yet). Steps 2 and 3 are idempotent, and every gdefcore_subject_open()
- * and gdefcore_subject_restore() replays the ledger through them before
- * returning, so an erasure interrupted after step 1 is completed then. No
+ * are purged: every fragment of the bound fragment cache that decrypted the
+ * subject (gdefcore_subject_bind_cache()). Steps 2 and 3 are idempotent, and
+ * every gdefcore_subject_open() and gdefcore_subject_restore() replays the
+ * ledger through them before returning, as binding a cache does through
+ * step 3, so an erasure interrupted after step 1 is completed then. No
  * blind row is written for an erased subject: a save of a new value of one is
  * refused inside its write (gdefcore_changeset_note_sealed()), and a rebuild
  * (gdefcore_subject_reindex()) skips one, its key being gone.
@@ -105,6 +119,9 @@ extern "C" {
 
 /** One tenant's subjects: its key store and its data store. Opaque. */
 typedef struct GDEFCORE_Subjects GDEFCORE_Subjects;
+
+/* Defined in render.h. */
+struct GDEFCORE_FragmentCache;
 
 /**
  * @brief The cipher a key store that seals in process is given
@@ -173,14 +190,28 @@ GDEFCORE_API GDEFCORE_Result gdefcore_subject_create(
 /**
  * @brief Encrypt @p plain for @p subject and store it as the field text.
  *
- * The field must be personal. The stored revision text is ciphertext, with
- * the subject's public id beside it. Its blind-index row, HMAC-SHA-256 of
- * the plaintext under `blind-index:<field>`, goes in the port's blind table
- * in the same write as the revision (story S6c), so a failure writes neither.
- * The key store is only read: a save never writes it. This and the form
- * route (gdefcore_form_submit_subject()) are the only ways to store a value
- * in a personal field: gdefcore_entity_save() and the plain form route
- * refuse it. @p catalog must be opened over this subjects' data store.
+ * The field must be a personal field of the entity's root group. The stored
+ * revision text is ciphertext, with the subject's public id beside it. Its
+ * blind-index row, HMAC-SHA-256 of the plaintext under `blind-index:<field>`,
+ * goes in the port's blind table in the same write as the revision (story
+ * S6c), so a failure writes neither. The key store is only read: a save
+ * never writes it. This and the form route (gdefcore_form_submit_subject())
+ * are the only ways to store a value in a personal field:
+ * gdefcore_entity_save() and the plain form route refuse it. @p catalog must
+ * be opened over this subjects' data store.
+ *
+ * The subject is the one the field's declaration names (story S7). A field
+ * that takes the entity's own subject stores under it, and @p subject, when
+ * given, must be it. A field that names a subject reference stores under that
+ * reference's value in @p lang, and @p subject, when given, must be it; when
+ * the reference holds no value yet, @p subject is required and the same save
+ * sets the reference to it. @p subject NULL (or @p subject_len 0) is "the
+ * subject the declaration names". A subject the declaration does not name is
+ * ::GDEFCORE_ERR_INVALID and nothing is written.
+ *
+ * A value equal in plaintext to the one stored writes nothing: no item
+ * version, no revision and no blind row (AD-19), although its ciphertext
+ * would differ.
  */
 GDEFCORE_API GDEFCORE_Result gdefcore_subject_save(GDEFCORE_Subjects * subjects,
     GDEFCORE_Catalog * catalog, const char * subject, size_t subject_len,
@@ -291,8 +322,13 @@ GDEFCORE_API GDEFCORE_Result gdefcore_subject_reindex(
  *
  * The subject's wrapped key is read from the key store and unwrapped under
  * the keyring; an erased subject has none, and reads as erased at once. A
- * subject the key store does not know is an error. Free @p out_text with
- * gdefcore_subject_free().
+ * subject the key store does not know is an error. @p field is the field's
+ * path at any depth (story S7: `contacts.note` inside a group): the value
+ * read is the first, in the published tree's order, of that field that is
+ * stored for @p subject; an entity that is not published, or holds no such
+ * value, is ::GDEFCORE_ERR_INVALID. This is a system read and asks no
+ * principal: a reader's view is gdefcore_access_read() and its siblings.
+ * Free @p out_text with gdefcore_subject_free().
  */
 GDEFCORE_API GDEFCORE_Result gdefcore_subject_read(GDEFCORE_Subjects * subjects,
     GDEFCORE_Catalog * catalog, const char * subject, size_t subject_len,
@@ -303,6 +339,45 @@ GDEFCORE_API GDEFCORE_Result gdefcore_subject_read(GDEFCORE_Subjects * subjects,
 /** @brief Free bytes from this subsystem. NULL is ignored. */
 GDEFCORE_API void gdefcore_subject_free(GDEFCORE_Subjects * subjects,
     void * bytes);
+
+/**
+ * @brief Open one stored personal value (story S7): the read path's one
+ * decryption.
+ *
+ * @p sealed is a value of personal field @p field (its path) as stored, and
+ * @p subject the subject stored beside it (gdefcore_tree_value_subject()).
+ * The access layer calls this only after the access filter has allowed the
+ * field to the reader (AD-19); it asks no principal itself. @p out_text
+ * receives the plaintext and @p out_erased 0, or, for a subject whose key the
+ * key store destroyed, ::GDEFCORE_SUBJECT_ERASED and @p out_erased 1. A
+ * subject the key store does not know, and a value that does not open under
+ * its key for @p field, are ::GDEFCORE_ERR_INVALID. Free @p out_text with
+ * gdefcore_subject_free(); it is plaintext, so wipe it first.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_subject_open_value(
+    GDEFCORE_Subjects * subjects, const char * subject, size_t subject_len,
+    const char * field, size_t field_len, const char * sealed,
+    size_t sealed_len, char ** out_text, size_t * out_len, int * out_erased);
+
+/**
+ * @brief How many times these subjects have decrypted a value, by any call
+ * (a read, a seal check at write, an export, a rebuild), since they were
+ * opened. For checks: a read that must not decrypt leaves it as it was.
+ */
+GDEFCORE_API uint64_t gdefcore_subject_open_count(
+    const GDEFCORE_Subjects * subjects);
+
+/**
+ * @brief The fragment cache erasure purges (erasure's step 3, story S7).
+ * Borrowed; NULL unbinds.
+ *
+ * Binding replays the ledger into @p cache: every fragment that depends on a
+ * subject the ledger names is purged, so a cache filled before an erasure
+ * that was cut short is purged too. Afterwards gdefcore_subject_erase()
+ * purges every fragment that depends on the subject it erases.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_subject_bind_cache(
+    GDEFCORE_Subjects * subjects, struct GDEFCORE_FragmentCache * cache);
 
 /**
  * @brief Say what a revision view shows for an erased person.
@@ -329,8 +404,9 @@ GDEFCORE_API GDEFCORE_Result gdefcore_subject_revision_marker(
  * @p confirmation is the subject's public id, one line. A wrong id writes
  * nothing. Then, in this order: the key store destroys the key and appends
  * the ledger row (subject id and time, nothing personal) in one step; the
- * subject's blind-index rows are deleted from the data store; caches are
- * purged (none are kept yet). The revisions stay, as ciphertext. A failure
+ * subject's blind-index rows are deleted from the data store; every fragment
+ * of the bound cache that decrypted the subject is purged
+ * (gdefcore_subject_bind_cache()). The revisions stay, as ciphertext. A failure
  * of the first step is returned and nothing else runs. A failure after it
  * is returned too, and the subject already reads as erased; erasing it again,
  * or the next gdefcore_subject_open(), finishes the rest. Erasing an erased
@@ -341,14 +417,19 @@ GDEFCORE_API GDEFCORE_Result gdefcore_subject_erase(GDEFCORE_Subjects * subjects
     size_t confirmation_len);
 
 /**
- * @brief One JSON document of the plaintext values.
+ * @brief "Everything about this person" (AD-19): one JSON document of the
+ * plaintext of every value stored for the subject.
  *
- * The values are every current personal value the port's subject lookup
- * finds for the subject (story S6c: the subject columns, AD-19), published or
- * not, each opened with the subject's key. The bytes are returned to the
- * caller. Nothing is written into @p catalog. After erasure the document says
- * erased and does not contain the plaintext. Free @p out_json with
- * gdefcore_subject_free().
+ * The values are every personal value version the port's subject lookup
+ * finds for the subject (the subject columns, story S6c), across types,
+ * groups and history (story S7), published or not, each opened with the
+ * subject's key: `{"values":[{"entity":…,"type":…,"field":…,"lang":…,
+ * "item":…,"from":…,"to":…,"text":…},…]}`, where `field` is the field's path,
+ * `from` the revision the version was written in and `to` the one that
+ * replaced it, or null for a current value. A draft holds no version and is
+ * not in it. The bytes are returned to the caller. Nothing is written into
+ * @p catalog. After erasure the document says erased and does not contain the
+ * plaintext. Free @p out_json with gdefcore_subject_free().
  */
 GDEFCORE_API GDEFCORE_Result gdefcore_subject_export(
     GDEFCORE_Subjects * subjects, GDEFCORE_Catalog * catalog,

@@ -355,6 +355,41 @@ GDEFCORE_API int gdefcore_request_dependency_at(const GDEFCORE_Request * request
 GDEFCORE_API int gdefcore_request_dependencies_overflowed(
     const GDEFCORE_Request * request);
 
+/** Most subjects a request records as decrypted (story S7). */
+#define GDEFCORE_REQUEST_SUBJECTS_MAX 256
+
+/**
+ * @brief Record that what this request read or rendered decrypted a personal
+ * value of @p subject (AD-19, story S7).
+ *
+ * The read path calls this for every value it opens, after the access filter
+ * allowed its field. A fragment cached from the request depends on each
+ * subject recorded (gdefcore_fragment_put()), so erasing one purges it. A
+ * subject already recorded is not recorded twice. At most
+ * ::GDEFCORE_REQUEST_SUBJECTS_MAX are kept; past that the set is marked
+ * overflowed, and a fragment of the request is not cached. A value of an
+ * erased subject is not a dependency: it reads ::GDEFCORE_SUBJECT_ERASED
+ * whatever happens next.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_request_record_subject(
+    GDEFCORE_Request * request, const char * subject, size_t subject_len);
+
+/** @brief How many subjects the request has recorded as decrypted. */
+GDEFCORE_API size_t gdefcore_request_subject_count(
+    const GDEFCORE_Request * request);
+
+/**
+ * @brief One recorded subject, in the order recorded. @p out_subject is
+ * borrowed and not NUL-terminated by contract. Returns 1, or 0 for an index
+ * past the end.
+ */
+GDEFCORE_API int gdefcore_request_subject_at(const GDEFCORE_Request * request,
+    size_t index, const char ** out_subject, size_t * out_len);
+
+/** @brief Whether more subjects were decrypted than the set keeps. */
+GDEFCORE_API int gdefcore_request_subjects_overflowed(
+    const GDEFCORE_Request * request);
+
 /**
  * @brief Give the request a budget of fuel, in units. Replaces any budget.
  *

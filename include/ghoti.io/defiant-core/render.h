@@ -123,9 +123,14 @@ GDEFCORE_API GDEFCORE_Result gdefcore_render_sample(GDEFCORE_Catalog * catalog,
  * every item that has it, and so is a field with no value or a group with no
  * items (absent, not hidden: a template cannot tell them apart). Values are
  * texts bound for the strictest encoding, as every bound field is (render.md).
- * A personal value is left out: its sealed text is never rendered, and a
- * render that decrypts is story S7's. A kind that does not declare `entity`
- * binds nothing.
+ * A personal value of a field the principal may read is its plaintext,
+ * decrypted by gdefcore_access_tree() after the filter allowed the field, or
+ * ::GDEFCORE_SUBJECT_ERASED for an erased subject; its sealed text is never
+ * rendered, and a catalog with no subjects bound renders none (story S7).
+ * Each subject decrypted is recorded on @p request
+ * (gdefcore_request_record_subject()), so a fragment cached from it is
+ * purged when that subject is erased (gdefcore_fragment_put()). A kind that
+ * does not declare `entity` binds nothing.
  *
  * An entity the principal may not see, an unknown template, one with no kind
  * and a kind that does not exist are one answer, ::GDEFCORE_ERR_INVALID, and
@@ -147,6 +152,71 @@ GDEFCORE_API GDEFCORE_Result gdefcore_render_entity(GDEFCORE_Catalog * catalog,
  * everyone. Only a difference between two reads means anything.
  */
 GDEFCORE_API uint64_t gdefcore_render_shareable_count(void);
+
+/* ---- the fragment cache (story S7) -------------------------------------- */
+
+/**
+ * @brief Rendered fragments, keyed by the render key, each with the subjects
+ * whose personal values it decrypted (AD-19, AD-26). Opaque.
+ *
+ * A fragment that decrypted a subject is purged when that subject is erased:
+ * bind the cache to the tenant's subjects (gdefcore_subject_bind_cache()) and
+ * erasure's third step purges it, as does every ledger replay. A fragment that
+ * decrypted nothing is kept. The cache is in this process only, and safe to
+ * use from several threads; it holds plaintext of personal values, so it is
+ * never written anywhere, and a key holds none (it is a render key,
+ * gdefcore_access_render_key()). Eviction is first in, first out once it holds
+ * its capacity.
+ */
+typedef struct GDEFCORE_FragmentCache GDEFCORE_FragmentCache;
+
+/** @brief A cache of at most @p capacity fragments (0: 1024). */
+GDEFCORE_API GDEFCORE_Result gdefcore_fragment_cache_create(
+    const GDEFCORE_Allocator * allocator, size_t capacity,
+    GDEFCORE_FragmentCache ** out_cache);
+
+/** @brief Release a cache and every fragment in it. NULL is ignored. Unbind
+ * it from its subjects first (gdefcore_subject_bind_cache(), NULL). */
+GDEFCORE_API void gdefcore_fragment_cache_destroy(GDEFCORE_FragmentCache * cache);
+
+/**
+ * @brief Keep @p bytes under @p key, with the subjects @p request recorded as
+ * decrypted while it rendered them (gdefcore_request_subject_count()).
+ *
+ * A fragment already under @p key is replaced. A request whose subject set
+ * overflowed (gdefcore_request_subjects_overflowed()) is ::GDEFCORE_ERR_LIMIT
+ * and nothing is kept: a fragment whose dependencies are not all known could
+ * outlive an erasure. The bytes and the key are copied.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_fragment_put(
+    GDEFCORE_FragmentCache * cache, const GDEFCORE_Request * request,
+    const char * key, size_t key_len, const char * bytes, size_t len);
+
+/**
+ * @brief The fragment under @p key: a copy in @p out_bytes and @p out_found 1,
+ * or @p out_found 0 and nothing written. Free @p out_bytes with
+ * gdefcore_fragment_free().
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_fragment_get(
+    GDEFCORE_FragmentCache * cache, const char * key, size_t key_len,
+    char ** out_bytes, size_t * out_len, int * out_found);
+
+/** @brief Free bytes from gdefcore_fragment_get(). NULL is ignored. */
+GDEFCORE_API void gdefcore_fragment_free(GDEFCORE_FragmentCache * cache,
+    char * bytes);
+
+/**
+ * @brief Purge every fragment that decrypted a value of @p subject. Erasure
+ * calls this (gdefcore_subject_bind_cache()). @p out_purged (may be NULL)
+ * receives how many went. A subject that is no public id is
+ * ::GDEFCORE_ERR_INVALID.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_fragment_purge_subject(
+    GDEFCORE_FragmentCache * cache, const char * subject, size_t subject_len,
+    size_t * out_purged);
+
+/** @brief How many fragments the cache holds. */
+GDEFCORE_API size_t gdefcore_fragment_count(GDEFCORE_FragmentCache * cache);
 
 /**
  * @brief The Post starter kit as a tar archive.

@@ -79,6 +79,8 @@ const char kCanaryEdit[] = "zq-canary-7f3a91c4-form-edited-manatee";
 const char kSurvivor[] = "keep-me-survivor-55d0e2b8";
 const char kSurvivorEdit[] = "keep-me-survivor-edited-91ac44f0";
 const char kField[] = "name";
+/* Whose a person's `name` is: the reference beside it (story S7). */
+const char kWho[] = "person";
 const uint8_t kRegistryTenant[] = {0x02};
 
 typedef std::string Bytes;
@@ -477,17 +479,25 @@ class Erasure : public ::testing::Test {
             session_.data(), session_.size()));
   }
 
+  /* A person's `name`, whose subject is the `person` reference beside it
+   * (story S7), which gdefcore_subject_save() sets on a first save. */
   void DefinePerson() {
-    GDEFCORE_Field field;
-    memset(&field, 0, sizeof field);
-    field.size = sizeof field;
-    field.name = kField;
-    field.name_len = strlen(kField);
-    field.required = 1;
-    field.personal = 1;
+    GDEFCORE_Field fields[2];
+    memset(fields, 0, sizeof fields);
+    fields[0].size = sizeof fields[0];
+    fields[0].name = kField;
+    fields[0].name_len = strlen(kField);
+    fields[0].required = 1;
+    fields[0].personal = 1;
+    fields[0].subject = kWho;
+    fields[0].subject_len = strlen(kWho);
+    fields[1].size = sizeof fields[1];
+    fields[1].name = kWho;
+    fields[1].name_len = strlen(kWho);
+    fields[1].type = GDEFSTOR_FIELD_REFERENCE;
     ASSERT_EQ(GDEFCORE_OK,
         gdefcore_type_define(catalog_, "site.person", 11, GDEFCORE_TYPE_CONTENT,
-            &field, 1));
+            fields, 2));
   }
 
   void SaveValue(const char * subject, const char * entity, const char * lang,
@@ -812,6 +822,15 @@ class Erasure : public ::testing::Test {
     ASSERT_EQ(GDEFCORE_OK,
         gdefcore_access_grant(catalog_, "admin", 5, permission.label,
             permission.label_len, "core.role", 9));
+    /* And edit them: the editor's form (gdefcore_form_tree_for()). */
+    permission.label = "Edit people";
+    permission.label_len = strlen(permission.label);
+    permission.action = GDEFCORE_ACTION_UPDATE;
+    permission.action_len = strlen(GDEFCORE_ACTION_UPDATE);
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_access_declare(catalog_, &permission));
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_access_grant(catalog_, "admin", 5, permission.label,
+            permission.label_len, "core.role", 9));
   }
 
   /* What a revision view shows of the personal field of one revision, for the
@@ -853,6 +872,22 @@ class Erasure : public ::testing::Test {
                        : status == GDEFCORE_REVISION_ERASED   ? "erased"
                                                               : "?") +
            out;
+  }
+
+  /* RevisionView() through a catalog of the same tenant that has no
+   * subjects bound: no value can be opened, so the view says "personal",
+   * and the subject store turns that into the marker for an erased person. */
+  std::string UnboundRevisionView(const char * entity, uint64_t seq,
+      const char * subject) {
+    GDEFCORE_Catalog * bare = NULL;
+    EXPECT_EQ(GDEFCORE_OK,
+        gdefcore_inst_catalog_open(inst_, tenant_, strlen(tenant_), &bare));
+    GDEFCORE_Catalog * bound = catalog_;
+    catalog_ = bare;
+    std::string out = RevisionView(entity, seq, "en", subject);
+    catalog_ = bound;
+    gdefcore_catalog_destroy(bare);
+    return out;
   }
 
   /* The forms of a subject's data that must be gone after erasure. */
@@ -949,18 +984,21 @@ class Erasure : public ::testing::Test {
   }
 
   /* The subject route of a form: sign for a subject, submit with the store. */
+  /* The form names the person in its `person` field as well: the field's
+   * declaration says whose the value is (story S7). */
   GDEFCORE_Result SignFor(const char * subject, const char * entity,
       const char * text, std::string * token) {
-    GDEFCORE_Value value;
-    const char * slot = NULL;
-    size_t slot_len = 0;
+    GDEFCORE_Value values[2];
+    const char * slots[2] = {NULL, NULL};
+    size_t slot_lens[2] = {0, 0};
     char * out = NULL;
     size_t out_len = 0;
     GDEFCORE_Result rc;
-    OneValue(&value, kField, text, &slot, &slot_len);
+    OneValue(&values[0], kField, text, &slots[0], &slot_lens[0]);
+    OneValue(&values[1], kWho, subject, &slots[1], &slot_lens[1]);
     rc = gdefcore_form_sign_subject(catalog_, request_, Ring(), root_,
         sizeof root_, session_.data(), session_.size(), "edit", 4, entity,
-        strlen(entity), "en", 2, &value, 1, NULL, 0, subject, strlen(subject),
+        strlen(entity), "en", 2, values, 2, NULL, 0, subject, strlen(subject),
         &out, &out_len);
     if (rc == GDEFCORE_OK) {
       token->assign(out, out_len);
@@ -1539,7 +1577,7 @@ TEST_F(Erasure, FormPersonalField) {
 /* The plain form route keeps working for every field that is not personal,
  * on a type that has a personal field it leaves empty. */
 TEST_F(Erasure, FormPlainRouteOtherFields) {
-  GDEFCORE_Field fields[2];
+  GDEFCORE_Field fields[3];
   GDEFCORE_Value values[1];
   const char * slot = NULL;
   size_t slot_len = 0;
@@ -1556,9 +1594,15 @@ TEST_F(Erasure, FormPlainRouteOtherFields) {
   fields[1].name = "secret";
   fields[1].name_len = 6;
   fields[1].personal = 1;
+  fields[1].subject = kWho;
+  fields[1].subject_len = strlen(kWho);
+  fields[2].size = sizeof fields[2];
+  fields[2].name = kWho;
+  fields[2].name_len = strlen(kWho);
+  fields[2].type = GDEFSTOR_FIELD_REFERENCE;
   ASSERT_EQ(GDEFCORE_OK,
       gdefcore_type_define(catalog_, "site.mixed", 10, GDEFCORE_TYPE_CONTENT,
-          fields, 2));
+          fields, 3));
   Login();
   ASSERT_EQ(GDEFCORE_OK,
       gdefcore_entity_create(catalog_, "site.mixed", 10, entity, NULL));
@@ -1659,69 +1703,152 @@ TEST_F(Erasure, RevertKeepsCiphertext) {
   EXPECT_EQ(0u, Stored(ea_, GDEFCORE_VIEW_PUBLISHED).compare(0, 3, "s1:"));
 }
 
-/* A type can be redefined, after which a field that held plaintext is
- * personal. What was stored stays as it is (nothing here rewrites history),
- * but the paths that would carry it into a new revision refuse: a revert
- * does not restore plaintext into a personal field, and a draft that holds
- * plaintext for one is not published. */
+/* What something other than core could leave in a store (an archive written
+ * by a tool, a backend written directly): a revision, or a draft, whose
+ * personal value is plaintext beside its subject. Written through the port,
+ * as core never would. */
+static GDEFSTOR_Tree * PlainTree(const char * plain, const char * subject) {
+  GDEFSTOR_Tree * t = NULL;
+  GDEFSTOR_Value v;
+  EXPECT_EQ(GDEFSTOR_OK, gdefstor_tree_create(NULL, &t));
+  memset(&v, 0, sizeof v);
+  v.type = GDEFSTOR_FIELD_TEXT;
+  v.bytes = reinterpret_cast<const uint8_t *>(plain);
+  v.len = strlen(plain);
+  v.subject = reinterpret_cast<const uint8_t *>(subject);
+  v.subject_len = strlen(subject);
+  EXPECT_EQ(GDEFSTOR_OK, gdefstor_tree_set(t, 0, kField, strlen(kField), &v));
+  memset(&v, 0, sizeof v);
+  v.type = GDEFSTOR_FIELD_REFERENCE;
+  v.bytes = reinterpret_cast<const uint8_t *>(subject);
+  v.len = strlen(subject);
+  EXPECT_EQ(GDEFSTOR_OK, gdefstor_tree_set(t, 0, kWho, strlen(kWho), &v));
+  return t;
+}
+
+static void PlainRevision(GDEFSTOR_Store * store, const uint8_t * tenant,
+    size_t tenant_len, const char * entity, uint64_t base, const char * plain,
+    const char * subject) {
+  GDEFSTOR_Write * w = NULL;
+  GDEFSTOR_Tree * t = PlainTree(plain, subject);
+  GDEFSTOR_RevisionMeta meta;
+  uint64_t rev = 0;
+  memset(&meta, 0, sizeof meta);
+  meta.size = sizeof meta;
+  meta.who = "";
+  meta.why = "";
+  meta.when_ms = 1;
+  ASSERT_EQ(GDEFSTOR_OK, gdefstor_write_begin(store,
+      reinterpret_cast<const char *>(tenant), tenant_len, NULL, &w));
+  ASSERT_EQ(GDEFSTOR_OK, gdefstor_entity_save(w, entity, strlen(entity), base,
+      &meta, "en", 2, t, &rev));
+  ASSERT_EQ(GDEFSTOR_OK, gdefstor_write_commit(w));
+  EXPECT_EQ(base + 1, rev);
+  gdefstor_tree_free(t);
+}
+
+static void PlainDraft(GDEFSTOR_Store * store, const uint8_t * tenant,
+    size_t tenant_len, const char * entity, uint64_t base, const char * plain,
+    const char * subject) {
+  GDEFSTOR_Write * w = NULL;
+  GDEFSTOR_Type * type = NULL;
+  GDEFSTOR_Tree * t = PlainTree(plain, subject);
+  uint8_t * json = NULL;
+  size_t json_len = 0;
+  GDEFSTOR_DraftTree dt;
+  ASSERT_EQ(GDEFSTOR_OK, gdefstor_type_get(store,
+      reinterpret_cast<const char *>(tenant), tenant_len, "site.person", 11,
+      &type));
+  ASSERT_EQ(GDEFSTOR_OK, gdefstor_tree_to_json(type, t, &json, &json_len));
+  memset(&dt, 0, sizeof dt);
+  dt.size = sizeof dt;
+  dt.language = "en";
+  dt.language_len = 2;
+  dt.json = json;
+  dt.json_len = json_len;
+  ASSERT_EQ(GDEFSTOR_OK, gdefstor_write_begin(store,
+      reinterpret_cast<const char *>(tenant), tenant_len, NULL, &w));
+  ASSERT_EQ(GDEFSTOR_OK, gdefstor_draft_put(w, "site.person", 11, entity,
+      strlen(entity), base, &dt, 1));
+  ASSERT_EQ(GDEFSTOR_OK, gdefstor_write_commit(w));
+  gdefstor_bytes_free(NULL, json);
+  gdefstor_type_free(type);
+  gdefstor_tree_free(t);
+}
+
+/* A field stored as plain text cannot be made personal in place (AD-15: that
+ * is a new field and a conversion; story S7: no personal value is stored
+ * without its subject), so through core a personal field never holds
+ * plaintext history. A store can still hold some, written by something other
+ * than core; the paths that would carry it into a new revision refuse it: a
+ * revert does not restore a plaintext personal value, and a draft that holds
+ * one is not published. */
 TEST_F(Erasure, PlaintextHistoryIsNotRestored) {
-  GDEFCORE_Field field;
+  GDEFCORE_Field fields[2];
   GDEFCORE_Changeset * cs = NULL;
   GDEFCORE_Value value;
   const char * slot = NULL;
   size_t slot_len = 0;
+  char late[GDEFCORE_PUBLIC_ID_LEN + 1];
   char entity[GDEFCORE_PUBLIC_ID_LEN + 1];
   size_t revisions;
   std::string published;
-  memset(&field, 0, sizeof field);
-  field.size = sizeof field;
-  field.name = kField;
-  field.name_len = strlen(kField);
-  field.required = 1;
+  memset(fields, 0, sizeof fields);
+  fields[0].size = sizeof fields[0];
+  fields[0].name = kField;
+  fields[0].name_len = strlen(kField);
+  fields[0].required = 1;
+  fields[1].size = sizeof fields[1];
+  fields[1].name = kWho;
+  fields[1].name_len = strlen(kWho);
+  fields[1].type = GDEFSTOR_FIELD_REFERENCE;
   ASSERT_EQ(GDEFCORE_OK,
       gdefcore_type_define(catalog_, "site.late", 9, GDEFCORE_TYPE_CONTENT,
-          &field, 1));
+          fields, 2));
   ASSERT_EQ(GDEFCORE_OK,
-      gdefcore_entity_create(catalog_, "site.late", 9, entity, NULL));
-  /* Plaintext history: two published revisions and a draft. */
+      gdefcore_entity_create(catalog_, "site.late", 9, late, NULL));
   OneValue(&value, kField, "plain-one", &slot, &slot_len);
   ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
   ASSERT_EQ(GDEFCORE_OK,
-      gdefcore_entity_save(cs, entity, strlen(entity), "en", 2, &value, 1));
+      gdefcore_entity_save(cs, late, strlen(late), "en", 2, &value, 1));
   ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, NULL, 0));
   gdefcore_changeset_destroy(cs);
-  OneValue(&value, kField, "plain-two", &slot, &slot_len);
-  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
-  ASSERT_EQ(GDEFCORE_OK,
-      gdefcore_entity_save(cs, entity, strlen(entity), "en", 2, &value, 1));
-  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, NULL, 0));
-  gdefcore_changeset_destroy(cs);
-  OneValue(&value, kField, "plain-draft", &slot, &slot_len);
-  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
-  ASSERT_EQ(GDEFCORE_OK,
-      gdefcore_entity_save_draft(cs, entity, strlen(entity), "en", 2, &value, 1));
-  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, NULL, 0));
-  gdefcore_changeset_destroy(cs);
-
-  /* The field becomes personal. */
-  field.personal = 1;
+  /* The field cannot become personal in place: the definition is refused and
+   * the field stays as it was. */
+  fields[0].personal = 1;
+  fields[0].subject = kWho;
+  fields[0].subject_len = strlen(kWho);
   ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
   ASSERT_EQ(GDEFCORE_OK,
       gdefcore_changeset_define(cs, "site.late", 9, GDEFCORE_TYPE_CONTENT,
-          &field, 1));
-  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, "site.late", 9));
+          fields, 2));
+  EXPECT_NE(GDEFCORE_OK, gdefcore_changeset_apply(cs, "site.late", 9));
   gdefcore_changeset_destroy(cs);
   {
-    int personal = 0;
+    int personal = 1;
     ASSERT_EQ(GDEFCORE_OK,
         gdefcore_type_field_personal(catalog_, "site.late", 9, 0, &personal));
-    ASSERT_EQ(1, personal) << "the redefinition did not take";
+    EXPECT_EQ(0, personal) << "a field became personal in place";
   }
-  revisions = Revisions(entity);
-  published = Stored(entity, GDEFCORE_VIEW_PUBLISHED);
-  ASSERT_EQ("plain-two", published);
 
-  /* A revert would put "plain-one" back into a personal field. */
+  /* A personal field with plaintext in its history, as a store written by
+   * something else could hold it, and a draft of plaintext. */
+  DefinePerson();
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_subject_create(subjects_, a_));
+  NewPerson(entity);
+  ASSERT_FALSE(HasFatalFailure());
+  SaveValue(a_, entity, "en", kCanary);
+  PlainRevision(site_, storage_, sizeof storage_, entity, 1, "plain-two", a_);
+  ASSERT_FALSE(HasFatalFailure());
+  SaveValue(a_, entity, "en", kCanaryLater);
+  PlainDraft(site_, storage_, sizeof storage_, entity, 3, "plain-draft", a_);
+  ASSERT_FALSE(HasFatalFailure());
+  revisions = Revisions(entity);
+  ASSERT_EQ(3u, revisions);
+  published = Stored(entity, GDEFCORE_VIEW_PUBLISHED);
+  ASSERT_EQ(0u, published.compare(0, 3, "s1:"));
+
+  /* A revert would put "plain-two" back into a personal field. */
   cs = NULL;
   EXPECT_NE(GDEFCORE_OK,
       gdefcore_changeset_revert(catalog_, entity, strlen(entity), NULL, 0, &cs));
@@ -1734,63 +1861,39 @@ TEST_F(Erasure, PlaintextHistoryIsNotRestored) {
   EXPECT_EQ(published, Stored(entity, GDEFCORE_VIEW_PUBLISHED));
 }
 
-/* A revert to a revision from before the field was personal, which holds
- * plaintext, is refused: there is no other way to make an old revision the
- * content (access SPEC decision 13 retired `activate`, which this gate used to
- * hold to the same rule). */
+/* A revert to a revision whose personal value is plaintext (one a store
+ * written by something other than core holds, as above) is refused: there is
+ * no other way to make an old revision the content (access SPEC decision 13
+ * retired `activate`, which this gate used to hold to the same rule). The
+ * control: a revert to a revision core wrote is allowed. */
 TEST_F(Erasure, PlaintextRevisionCannotBecomeTheContentAgain) {
-  GDEFCORE_Field field;
   GDEFCORE_Changeset * cs = NULL;
-  GDEFCORE_Value value;
-  const char * slot = NULL;
-  size_t slot_len = 0;
   char entity[GDEFCORE_PUBLIC_ID_LEN + 1];
   size_t revisions;
   std::string stored;
-  memset(&field, 0, sizeof field);
-  field.size = sizeof field;
-  field.name = kField;
-  field.name_len = strlen(kField);
-  field.required = 1;
-  ASSERT_EQ(GDEFCORE_OK,
-      gdefcore_type_define(catalog_, "site.late", 9, GDEFCORE_TYPE_CONTENT,
-          &field, 1));
-  ASSERT_EQ(GDEFCORE_OK,
-      gdefcore_entity_create(catalog_, "site.late", 9, entity, NULL));
-  for (const char * text : {"plain-one", "plain-two"}) {
-    OneValue(&value, kField, text, &slot, &slot_len);
-    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
-    ASSERT_EQ(GDEFCORE_OK,
-        gdefcore_entity_save(cs, entity, strlen(entity), "en", 2, &value, 1));
-    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, NULL, 0));
-    gdefcore_changeset_destroy(cs);
-  }
-  /* control, before the field is personal: the revert is allowed */
+  DefinePerson();
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_subject_create(subjects_, a_));
+  NewPerson(entity);
+  ASSERT_FALSE(HasFatalFailure());
+  SaveValue(a_, entity, "en", kCanary);
+  PlainRevision(site_, storage_, sizeof storage_, entity, 1, "plain-one", a_);
+  ASSERT_FALSE(HasFatalFailure());
+  SaveValue(a_, entity, "en", kCanaryLater);
+  /* control: the revision core wrote can be the content again */
   cs = NULL;
   EXPECT_EQ(GDEFCORE_OK,
       gdefcore_changeset_revert_to(catalog_, entity, strlen(entity), 1, NULL, 0,
           &cs));
   gdefcore_changeset_destroy(cs);
-  /* The field becomes personal. */
-  field.personal = 1;
-  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
-  ASSERT_EQ(GDEFCORE_OK,
-      gdefcore_changeset_define(cs, "site.late", 9, GDEFCORE_TYPE_CONTENT,
-          &field, 1));
-  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, "site.late", 9));
-  gdefcore_changeset_destroy(cs);
   revisions = Revisions(entity);
   stored = Stored(entity, GDEFCORE_VIEW_PUBLISHED);
-  ASSERT_EQ("plain-two", stored);
-  /* neither plaintext revision can be restored */
-  for (uint64_t seq : {1u, 2u}) {
-    cs = NULL;
-    EXPECT_NE(GDEFCORE_OK,
-        gdefcore_changeset_revert_to(catalog_, entity, strlen(entity), seq, NULL,
-            0, &cs))
-        << seq;
-    gdefcore_changeset_destroy(cs);
-  }
+  ASSERT_EQ(0u, stored.compare(0, 3, "s1:"));
+  /* the plaintext revision cannot */
+  cs = NULL;
+  EXPECT_NE(GDEFCORE_OK,
+      gdefcore_changeset_revert_to(catalog_, entity, strlen(entity), 2, NULL, 0,
+          &cs));
+  gdefcore_changeset_destroy(cs);
   EXPECT_EQ(revisions, Revisions(entity));
   EXPECT_EQ(stored, Stored(entity, GDEFCORE_VIEW_PUBLISHED));
 }
@@ -1798,9 +1901,14 @@ TEST_F(Erasure, PlaintextRevisionCannotBecomeTheContentAgain) {
 /* A patch is untrusted input. Parsed under the same rule: its personal value
  * is accepted only when it is sealed, and a patch that carries plaintext for
  * a personal field is refused. */
-/* A revision view is an output like any other (story A5b task 8). Before the
- * person is erased it says a personal value is there and shows none of it; after
- * it says [erased]; the survivor's is not touched. Reverting to an old revision
+/* A revision view is an output like any other (story A5b task 8). It decrypts
+ * in the read path, after the access filter allowed the field (story S7):
+ * before the person is erased it shows the value of that revision to the
+ * administrator who may read it, never its ciphertext; after, it says [erased];
+ * the survivor's is not touched. With no subjects to open a value with (a
+ * catalog none are bound to), it says only that a personal value is there, and
+ * the subject store turns that into [erased] for an erased person
+ * (gdefcore_subject_revision_marker()). Reverting to an old revision
  * of the erased person (a new revision that copies it: there is no activate
  * since access SPEC decision 13) puts its ciphertext in front of readers and
  * nothing else: no output carries the value, the ciphertext, or a form of
@@ -1826,16 +1934,19 @@ TEST_F(Erasure, RevisionViewsAndARestoredOldRevisionOfAnErasedSubject) {
   Needles(a_, values, WrappedKey(a_), &needles_);
   ASSERT_FALSE(HasFatalFailure());
 
-  /* CONTROLS, before erasure. The view of the first revision says a personal
-   * value is there; it does not show it, and it is not the survivor's. */
+  /* CONTROLS, before erasure. The view of each revision shows that
+   * revision's value, opened for the reader; not the survivor's. */
   ASSERT_EQ(3u, Revisions(ea_));
-  EXPECT_EQ("personal", RevisionView(ea_, 1, "en", a_));
-  EXPECT_EQ("personal", RevisionView(ea_, 3, "fr", a_));
-  EXPECT_EQ("personal", RevisionView(eb_, 1, "en", b_));
+  EXPECT_EQ(std::string("shown:") + kCanary, RevisionView(ea_, 1, "en", a_));
+  EXPECT_EQ(std::string("shown:") + kCanaryLater,
+      RevisionView(ea_, 2, "en", a_));
+  EXPECT_EQ(std::string("shown:") + kCanaryFr, RevisionView(ea_, 3, "fr", a_));
+  EXPECT_EQ(std::string("shown:") + kSurvivor, RevisionView(eb_, 1, "en", b_));
   EXPECT_EQ("<denied>", RevisionView(ea_, 9, "en", a_));     /* no such revision */
+  EXPECT_EQ("personal", UnboundRevisionView(ea_, 1, a_));
   Collect(&pre, "before");
   ASSERT_FALSE(HasFatalFailure());
-  EXPECT_TRUE(FoundIn(pre, Bytes("personal"), "output: revision view of a"));
+  EXPECT_TRUE(FoundIn(pre, Bytes(kCanary), "output: revision view of a"));
   EXPECT_FALSE(FoundIn(pre, Bytes("erased"), "output: revision view of a"));
   EXPECT_FALSE(FoundIn(pre, Bytes("s1:"), "output: revision view of a"))
       << "a revision view showed the stored ciphertext";
@@ -1846,12 +1957,16 @@ TEST_F(Erasure, RevisionViewsAndARestoredOldRevisionOfAnErasedSubject) {
   /* After: the same view is the marker, for a, and only for a. */
   EXPECT_EQ("erased:[erased]", RevisionView(ea_, 1, "en", a_));
   EXPECT_EQ("erased:[erased]", RevisionView(ef_, 1, "en", a_));
-  EXPECT_EQ("personal", RevisionView(eb_, 1, "en", b_));
-  EXPECT_EQ("personal", RevisionView(ea_, 1, "en", NULL));   /* no subject named */
+  EXPECT_EQ(std::string("shown:") + kSurvivor, RevisionView(eb_, 1, "en", b_));
+  /* The subject is the one stored with the value: naming none is the same. */
+  EXPECT_EQ("erased:[erased]", RevisionView(ea_, 1, "en", NULL));
+  /* With no subjects bound, the subject store says it is erased. */
+  EXPECT_EQ("erased:[erased]", UnboundRevisionView(ea_, 1, a_));
+  EXPECT_EQ("personal", UnboundRevisionView(eb_, 1, b_));
   Collect(&post, "after");
   ASSERT_FALSE(HasFatalFailure());
   EXPECT_TRUE(FoundIn(post, Bytes("erased:[erased]"), "output: revision view of a"));
-  EXPECT_TRUE(FoundIn(post, Bytes("personal"), "output: revision view of b"));
+  EXPECT_TRUE(FoundIn(post, Bytes(kSurvivor), "output: revision view of b"));
   EXPECT_FALSE(FoundIn(post, Bytes("s1:"), "output: revision view"));
   leaks = Sweep(post, needles_);
   EXPECT_TRUE(leaks.empty()) << Joined(leaks);
@@ -1966,8 +2081,11 @@ TEST_F(Erasure, ParsePersonalPatch) {
   GDEFCORE_Patch * files = NULL;
   size_t nfiles = 0;
   GDEFCORE_Value value;
+  GDEFCORE_Value who[2];
   const char * slot = NULL;
   size_t slot_len = 0;
+  const char * who_slot = NULL;
+  size_t who_len = 0;
   char * sealed = NULL;
   size_t sealed_len = 0;
   uint8_t mac[GDEFCORE_SUBJECT_MAC_LEN];
@@ -1982,6 +2100,9 @@ TEST_F(Erasure, ParsePersonalPatch) {
           kCanary, strlen(kCanary), &sealed, &sealed_len, mac));
   OneValue(&value, kField, sealed, &slot, &slot_len);
   value.text_lens = &sealed_len;
+  /* The value and the reference that says whose it is (story S7). */
+  who[0] = value;
+  OneValue(&who[1], kWho, a_, &who_slot, &who_len);
   ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
   ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_accept_sealed(cs));
   /* Whose the value is travels with it (story S6c). */
@@ -1989,7 +2110,7 @@ TEST_F(Erasure, ParsePersonalPatch) {
       gdefcore_changeset_note_sealed(cs, subjects_, sealed, sealed_len, a_,
           strlen(a_), mac));
   ASSERT_EQ(GDEFCORE_OK,
-      gdefcore_entity_save(cs, ea_, strlen(ea_), "en", 2, &value, 1));
+      gdefcore_entity_save(cs, ea_, strlen(ea_), "en", 2, who, 2));
   ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_serialize(cs, &files, &nfiles));
   gdefcore_changeset_destroy(cs);
   cs = NULL;
@@ -2097,8 +2218,9 @@ TEST_F(Erasure, FormSubjectRoute) {
     EXPECT_TRUE(BlindRowHas(a_, expect));
   }
 
-  /* The editing round trip. The tree shows what is stored, which is
-   * ciphertext; the editor's current value comes from subject_read. */
+  /* The editing round trip. The unfiltered tree shows what is stored, which
+   * is ciphertext; the editor's tree (gdefcore_form_tree_for(), story S7)
+   * shows the plaintext, opened after the field filter allowed it. */
   {
     GDEFCORE_Form * form = NULL;
     const char * name = NULL;
@@ -2127,6 +2249,18 @@ TEST_F(Erasure, FormSubjectRoute) {
     ASSERT_EQ(1u, count);
     EXPECT_EQ(stored, std::string(texts[0], lens[0]));
     gdefcore_form_destroy(form);
+    form = NULL;
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_form_tree_for(catalog_, request_, ef_, strlen(ef_), "en", 2,
+            &form));
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_form_field(form, 0, &name, &name_len, &required, &many,
+            &personal, &min_len, &max_len, &has_range, &range_min, &range_max,
+            &pattern, &pattern_len, &texts, &lens, &count));
+    EXPECT_EQ(1, personal);
+    ASSERT_EQ(1u, count);
+    EXPECT_EQ(kCanaryForm, std::string(texts[0], lens[0]));
+    gdefcore_form_destroy(form);
   }
   revisions = Revisions(ef_);
   /* What the tree shows is ciphertext. Passed back as the value, it is
@@ -2137,15 +2271,18 @@ TEST_F(Erasure, FormSubjectRoute) {
   EXPECT_EQ(kCanaryForm, ReadAs(a_, ef_));
   ASSERT_EQ(GDEFCORE_OK, SignFor(a_, ef_, ReadAs(a_, ef_).c_str(), &token));
   {
-    /* An unchanged edit seals the plaintext again: new nonce, same value,
-     * so a new value version (whether a value changed is decided on the
-     * ciphertext until story S7), and with it a row of its own; the
-     * version it superseded keeps its row while the subject exists. */
+    /* An unchanged edit seals the plaintext again, with a new nonce: the
+     * draft holds another ciphertext of the same value. Whether a value
+     * changed is decided on the plaintext (story S7), so publishing it
+     * writes no value version, no revision and no blind row: the stored
+     * ciphertext stays. */
     ASSERT_EQ(GDEFCORE_OK, SubmitFor(token, &conflict));
+    EXPECT_NE(stored, Stored(ef_, GDEFCORE_VIEW_DRAFT));
     Publish(ef_);
-    EXPECT_NE(stored, Stored(ef_, GDEFCORE_VIEW_PUBLISHED));
+    EXPECT_EQ(stored, Stored(ef_, GDEFCORE_VIEW_PUBLISHED));
+    EXPECT_EQ(revisions, Revisions(ef_));
     EXPECT_EQ(kCanaryForm, ReadAs(a_, ef_));
-    EXPECT_EQ(blinds_before + 2, BlindCount(a_));
+    EXPECT_EQ(blinds_before + 1, BlindCount(a_));
   }
   ASSERT_EQ(GDEFCORE_OK, SignFor(a_, ef_, kCanaryEdit, &token));
   {
@@ -2168,7 +2305,7 @@ TEST_F(Erasure, FormSubjectRoute) {
   EXPECT_GT(Revisions(ef_), revisions);
   EXPECT_EQ(kCanaryEdit, ReadAs(a_, ef_));
   EXPECT_EQ("s1:", Stored(ef_, GDEFCORE_VIEW_PUBLISHED).substr(0, 3));
-  EXPECT_EQ(blinds_before + 3, BlindCount(a_));
+  EXPECT_EQ(blinds_before + 2, BlindCount(a_));
 
   /* The survivor edits through the same route and is only ever themself. */
   {
@@ -2350,9 +2487,17 @@ TEST_F(Erasure, FormSubjectBinding) {
   ASSERT_NE(std::string::npos, at) << "the subject is not in the token header";
   before = Revisions(entity);
 
-  /* Moved to the other subject. */
+  /* Moved to the other subject. The token itself no longer verifies: since
+   * story S7 a submit would refuse it a second time (its values say whose
+   * the value is, and that is not b), so the check is asked on its own. */
   moved = token;
   moved.replace(at, strlen(b_), b_);
+  EXPECT_NE(GDEFCORE_OK,
+      gdefcore_form_check(catalog_, request_, Ring(), root_, sizeof root_,
+          session_.data(), session_.size(), moved.data(), moved.size(), NULL));
+  EXPECT_EQ(GDEFCORE_OK,
+      gdefcore_form_check(catalog_, request_, Ring(), root_, sizeof root_,
+          session_.data(), session_.size(), token.data(), token.size(), NULL));
   EXPECT_EQ(GDEFCORE_ERR_INVALID, SubmitFor(moved, &conflict));
   /* Made to claim no subject. */
   moved = token;

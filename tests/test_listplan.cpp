@@ -175,10 +175,14 @@ struct Site {
               GDEFCORE_TYPE_CONTENT, f, 5));
     }
     {
-      GDEFCORE_Field f[2] = {Field("name"), Field("ssn", 0, 1)};
+      /* `ssn` names its subject source (story S7): the `who` beside it. */
+      GDEFCORE_Field f[3] = {Field("name"), Field("ssn", 0, 1),
+          Field("who", 0, 0, GDEFSTOR_FIELD_REFERENCE)};
+      f[1].subject = "who";
+      f[1].subject_len = 3;
       EXPECT_EQ(GDEFCORE_OK,
           gdefcore_type_define(catalog, kVault, strlen(kVault),
-              GDEFCORE_TYPE_CONTENT, f, 2));
+              GDEFCORE_TYPE_CONTENT, f, 3));
     }
   }
 

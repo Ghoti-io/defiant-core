@@ -181,21 +181,34 @@ static void buf_i64(Buf * b, int64_t v) {
 
 /* ---- docs and declarations ----------------------------------------------- */
 
+void gdefcore_ent_vals_clear(const GDEFCORE_Allocator * alloc,
+    GDEFCORE_Vals * f) {
+  size_t k;
+  for (k = 0; k < f->nvals; k++) {
+    text_clear(alloc, &f->vals[k]);
+    if (f->subjects != NULL) {
+      text_clear(alloc, &f->subjects[k]);
+    }
+  }
+  gcu_allocator_free(alloc, f->vals);
+  gcu_allocator_free(alloc, f->ids);
+  gcu_allocator_free(alloc, f->subjects);
+  f->vals = NULL;
+  f->ids = NULL;
+  f->subjects = NULL;
+  f->nvals = 0;
+}
+
 void gdefcore_ent_doc_free(const GDEFCORE_Allocator * alloc,
     GDEFCORE_Doc * doc) {
   size_t i;
   size_t j;
-  size_t k;
   if (doc == NULL) {
     return;
   }
   for (i = 0; i < doc->nlangs; i++) {
     for (j = 0; j < doc->langs[i].nfields; j++) {
-      for (k = 0; k < doc->langs[i].fields[j].nvals; k++) {
-        text_clear(alloc, &doc->langs[i].fields[j].vals[k]);
-      }
-      gcu_allocator_free(alloc, doc->langs[i].fields[j].vals);
-      gcu_allocator_free(alloc, doc->langs[i].fields[j].ids);
+      gdefcore_ent_vals_clear(alloc, &doc->langs[i].fields[j]);
       text_clear(alloc, &doc->langs[i].fields[j].name);
     }
     gcu_allocator_free(alloc, doc->langs[i].fields);
@@ -277,6 +290,23 @@ GDEFCORE_Result gdefcore_ent_doc_clone(const GDEFCORE_Allocator * alloc,
           return GDEFCORE_ERR_OOM;
         }
       }
+      if (src->fields[j].subjects != NULL) {
+        dst->fields[j].subjects = (GDEFCORE_Text *)gcu_allocator_calloc(alloc,
+            src->fields[j].nvals, sizeof *dst->fields[j].subjects);
+        if (dst->fields[j].subjects == NULL) {
+          gdefcore_ent_doc_free(alloc, out);
+          return GDEFCORE_ERR_OOM;
+        }
+        for (k = 0; k < src->fields[j].nvals; k++) {
+          if (src->fields[j].subjects[k].n > 0 &&
+              text_set(alloc, &dst->fields[j].subjects[k],
+                  src->fields[j].subjects[k].p,
+                  src->fields[j].subjects[k].n) != GDEFCORE_OK) {
+            gdefcore_ent_doc_free(alloc, out);
+            return GDEFCORE_ERR_OOM;
+          }
+        }
+      }
     }
   }
   return GDEFCORE_OK;
@@ -346,6 +376,7 @@ void gdefcore_ent_type_free(const GDEFCORE_Allocator * alloc,
  *
  *   defiant-core-type/1
  *   kind content
+ *   subjects 1          (story S7: only for a type whose entities are subjects)
  *   id <public id>
  *   version <n>
  *   field <name> <required> <many> <personal> <type> <scale> <indexed>
@@ -354,9 +385,11 @@ void gdefcore_ent_type_free(const GDEFCORE_Allocator * alloc,
  *
  * The port's declaration is the fields' shape; this is what only core reads.
  * A name is a field's path (story S6d: `lines.taxes.rate`), the fields in
- * pre-order, a group (type GROUP) before its fields. The last word, the
- * subject field of a personal field, is new with S6d; a line without it has
- * none.
+ * pre-order, a group (type GROUP) before its fields. The last word is the
+ * subject field of a personal field that names one (story S6d); a personal
+ * field without it takes the entity's own subject (story S7), which only a
+ * type with the `subjects` line has. The format stays `/1` (AD-34: replaced
+ * in place before the first release).
  */
 
 static const char kTypeFormat[] = "defiant-core-type/1";
@@ -377,6 +410,9 @@ static void type_text(Buf * b, const GDEFCORE_EntType * t) {
   buf_str(b, kTypeFormat);
   buf_str(b, "\nkind ");
   buf_str(b, t->kind == GDEFCORE_TYPE_CONFIG ? "config" : "content");
+  if (t->subjects) {
+    buf_str(b, "\nsubjects 1");
+  }
   buf_str(b, "\nid ");
   buf_str(b, t->id);
   buf_str(b, "\nversion ");
@@ -527,6 +563,11 @@ static GDEFCORE_Result type_parse(const GDEFCORE_Allocator * alloc,
         } else if (span_eq(w, wn, "config", 6)) {
           out->kind = GDEFCORE_TYPE_CONFIG;
         } else {
+          gdefcore_ent_type_free(alloc, out);
+          return GDEFCORE_ERR_CORRUPT;
+        }
+      } else if (span_eq(w, wn, "subjects", 8)) {
+        if (!word_flag(&q, eol, &out->subjects)) {
           gdefcore_ent_type_free(alloc, out);
           return GDEFCORE_ERR_CORRUPT;
         }
@@ -740,13 +781,11 @@ static GDEFCORE_Result build_specs(GDEFCORE_Catalog * cat,
         gdefstor_type_find(stored, d->name.p, d->name.n, &fi) == GDEFSTOR_OK &&
         gdefstor_type_field(stored, fi, &info) == GDEFSTOR_OK) {
       /* A port field keeps how it was first declared: making one personal
-       * or not in place is a new field and a conversion (AD-15). A field
-       * that became personal after it was declared stays a text column:
-       * its values are sealed, with no subject column and no blind row,
-       * until it is converted (story S7). One that was personal does not
-       * stop being so. */
+       * or not in place is a new field and a conversion (AD-15), so either
+       * is refused. A value of a personal field is never stored without its
+       * subject (story S7), which a field declared plain has no column for. */
       int was = (info.flags & GDEFSTOR_FIELD_PERSONAL) != 0;
-      if (was && !d->personal) {
+      if (was != (d->personal != 0)) {
         specs_free(cat->alloc, specs, n);
         return GDEFCORE_ERR_INVALID;
       }
@@ -1439,7 +1478,8 @@ static GDEFCORE_Lang * doc_lang(const GDEFCORE_Allocator * alloc,
  * of a multiple field, with id @p id. */
 GDEFCORE_Result gdefcore_ent_lang_add(const GDEFCORE_Allocator * alloc,
     GDEFCORE_Lang * l, const char * name, size_t name_len,
-    const GDEFCORE_Text * value, int has_id, uint64_t id) {
+    const GDEFCORE_Text * value, int has_id, uint64_t id,
+    const char * subject, size_t subject_len) {
   GDEFCORE_Vals * slot = NULL;
   GDEFCORE_Text * vals;
   size_t i;
@@ -1474,9 +1514,30 @@ GDEFCORE_Result gdefcore_ent_lang_add(const GDEFCORE_Allocator * alloc,
   } else if (slot->ids != NULL) {
     return GDEFCORE_ERR_CORRUPT; /* a single value among items */
   }
+  if (subject_len > 0 || slot->subjects != NULL) {
+    /* One subject per value, kept beside the values once one has any. */
+    GDEFCORE_Text * subs = (GDEFCORE_Text *)gcu_allocator_realloc(alloc,
+        slot->subjects, (slot->nvals + 1) * sizeof *subs);
+    if (subs == NULL) {
+      return GDEFCORE_ERR_OOM;
+    }
+    if (slot->subjects == NULL) {
+      memset(subs, 0, (slot->nvals + 1) * sizeof *subs);
+    }
+    slot->subjects = subs;
+    memset(&slot->subjects[slot->nvals], 0, sizeof *subs);
+    if (subject_len > 0 &&
+        text_set(alloc, &slot->subjects[slot->nvals], subject, subject_len) !=
+            GDEFCORE_OK) {
+      return GDEFCORE_ERR_OOM;
+    }
+  }
   vals = (GDEFCORE_Text *)gcu_allocator_realloc(alloc, slot->vals,
       (slot->nvals + 1) * sizeof *vals);
   if (vals == NULL) {
+    if (slot->subjects != NULL) {
+      text_clear(alloc, &slot->subjects[slot->nvals]);
+    }
     return GDEFCORE_ERR_OOM;
   }
   slot->vals = vals;
@@ -1686,12 +1747,13 @@ static GDEFCORE_Result tree_into(const GDEFCORE_Allocator * alloc,
       } else if (i > 0) {
         /* A multiple's item: its own value, under the field it sits in. */
         rc = gdefcore_ent_lang_add(alloc, l, it.field, it.field_len, &text, 1,
-            it.id);
+            it.id, (const char *)v.subject, v.subject_len);
         if (rc != GDEFCORE_OK) {
           text_clear(alloc, &text);
         }
       } else {
-        rc = gdefcore_ent_lang_add(alloc, l, field, field_len, &text, 0, 0);
+        rc = gdefcore_ent_lang_add(alloc, l, field, field_len, &text, 0, 0,
+            (const char *)v.subject, v.subject_len);
         if (rc != GDEFCORE_OK) {
           text_clear(alloc, &text);
         }
@@ -1715,16 +1777,11 @@ static GDEFCORE_Result doc_put_tree(const GDEFCORE_Allocator * alloc,
     size_t lang_len, const GDEFSTOR_Tree * tree) {
   GDEFCORE_Lang * l = doc_lang(alloc, doc, lang, lang_len, 1);
   size_t j;
-  size_t k;
   if (l == NULL) {
     return GDEFCORE_ERR_OOM;
   }
   for (j = 0; j < l->nfields; j++) {
-    for (k = 0; k < l->fields[j].nvals; k++) {
-      text_clear(alloc, &l->fields[j].vals[k]);
-    }
-    gcu_allocator_free(alloc, l->fields[j].vals);
-    gcu_allocator_free(alloc, l->fields[j].ids);
+    gdefcore_ent_vals_clear(alloc, &l->fields[j]);
     text_clear(alloc, &l->fields[j].name);
   }
   gcu_allocator_free(alloc, l->fields);
@@ -1814,7 +1871,7 @@ GDEFCORE_Result gdefcore_ent_read_doc(GDEFCORE_Catalog * cat,
   return rc;
 }
 
-/* ---- personal values on the port (story S6c) ----------------------------- */
+/* ---- personal values on the port (stories S6c, S7) ----------------------- */
 
 static const GDEFCORE_SealNote * find_note(const GDEFCORE_Seals * seals,
     const char * text, size_t len) {
@@ -1914,78 +1971,56 @@ static int tree_subject(const GDEFCORE_Allocator * alloc,
   return each_value_at(alloc, tree, path, path_len, subject_of, &a);
 }
 
-typedef struct ProbeAsk {
-  GDEFCORE_Seals * seals;
-  const char * path;
-  size_t path_len;
-  const char * text;
-  size_t len;
-  char * subject;
-  uint8_t * mac;
-} ProbeAsk;
-
-static int probe_one(const GDEFSTOR_Value * v, void * user) {
-  ProbeAsk * a = (ProbeAsk *)user;
-  if (v->type == 0 || v->subject_len != GDEFCORE_PUBLIC_ID_LEN) {
-    return 0;
+GDEFCORE_Result gdefcore_ent_own_subject(GDEFCORE_Catalog * cat,
+    const char * canon, char out[GDEFCORE_PUBLIC_ID_LEN + 1], int * out_found) {
+  int found = 0;
+  uint8_t * bytes = NULL;
+  size_t len = 0;
+  GDEFCORE_Result rc = gdefcore_ent_map(gdefstor_record_get(cat->store,
+      (const char *)cat->tenant, cat->tenant_len, GDEFCORE_ENT_SUBJECT_NS,
+      sizeof GDEFCORE_ENT_SUBJECT_NS - 1, canon, GDEFCORE_PUBLIC_ID_LEN, &found,
+      &bytes, &len));
+  *out_found = 0;
+  out[0] = '\0';
+  if (rc == GDEFCORE_OK && found) {
+    char canon_sid[GDEFCORE_PUBLIC_ID_LEN + 1];
+    if (len != GDEFCORE_PUBLIC_ID_LEN ||
+        gdefcore_id_canonical((const char *)bytes, len, canon_sid) !=
+            GDEFCORE_OK ||
+        memcmp(canon_sid, bytes, GDEFCORE_PUBLIC_ID_LEN) != 0) {
+      rc = GDEFCORE_ERR_CORRUPT;
+    } else {
+      memcpy(out, canon_sid, GDEFCORE_PUBLIC_ID_LEN + 1);
+      *out_found = 1;
+    }
   }
-  if (gdefcore_subject_mac_sealed(a->seals->subjects, (const char *)v->subject,
-          v->subject_len, a->path, a->path_len, a->text, a->len, a->mac) !=
-      GDEFCORE_OK) {
-    return 0;
-  }
-  memcpy(a->subject, v->subject, GDEFCORE_PUBLIC_ID_LEN);
-  a->subject[GDEFCORE_PUBLIC_ID_LEN] = '\0';
-  return 1;
-}
-
-/*
- * A sealed text no tree and no note names: whose it is, proven by opening it.
- * The seal binds the subject and the field (encrypt_value()'s associated
- * data), so a text that opens under the key of a subject the field holds now,
- * or in the draft, is that subject's value (a patch carries sealed texts and
- * no subjects). Its MAC comes with the opening. 0 when none opens it. The
- * field is its path, which is what a seal binds (story S6d: a field inside a
- * group is sealed as `group.field`, and its values are found at every depth).
- */
-static int probe_subject(GDEFCORE_Seals * seals, const GDEFCORE_Allocator * alloc,
-    const GDEFSTOR_Tree * tree, const char * path, size_t path_len,
-    const char * text, size_t len, char subject[GDEFCORE_PUBLIC_ID_LEN + 1],
-    uint8_t mac[GDEFSTOR_BLIND_MAC_BYTES]) {
-  ProbeAsk a;
-  if (seals->subjects == NULL) {
-    return 0;
-  }
-  a.seals = seals;
-  a.path = path;
-  a.path_len = path_len;
-  a.text = text;
-  a.len = len;
-  a.subject = subject;
-  a.mac = mac;
-  return each_value_at(alloc, tree, path, path_len, probe_one, &a);
+  gdefstor_bytes_free(NULL, bytes);
+  return rc;
 }
 
 /*
  * The subject of personal value @p text of the field at @p path, and for a
- * save its MAC (GDEFCORE_Seals says where each comes from). @p same_place: the
- * current tree holds this text at this place, so the value is unchanged and
- * the port carries its blind row, if it gets a new version at all.
- * @p source: the value of the field's declared subject field in the same item
- * (story S6d), which is then the subject; NULL when the field names its
- * subjects value by value.
+ * save its MAC (GDEFCORE_Seals says where each comes from). The declaration
+ * names the subject (AD-19, story S7): @p source, the value of the field's
+ * subject reference in the same item (NULL when the field names none), else
+ * the entity's own subject. @p was is the value the current tree holds at
+ * this place, if any: @p text that is the same bytes is unchanged, and the
+ * port carries its blind row if it gets a new version at all; @p text that
+ * opens to the same plaintext as it, for the same subject, is unchanged too,
+ * and *out_keep says to store @p was's ciphertext in its place, so that the
+ * port sees no change (AD-19: encryption is randomized, and whether a value
+ * changed is decided on the plaintext at write time).
  */
-static GDEFCORE_Result seal_value(GDEFCORE_Seals * seals,
-    const GDEFCORE_Allocator * alloc, const GDEFSTOR_Tree * now,
-    const GDEFSTOR_Tree * draft, const char * path, size_t path_len,
-    const char * text, size_t len, int same_place, const GDEFCORE_Text * source,
-    char subject[GDEFCORE_PUBLIC_ID_LEN + 1],
-    uint8_t mac[GDEFSTOR_BLIND_MAC_BYTES], int * out_has_mac) {
+static GDEFCORE_Result seal_value(GDEFCORE_Seals * seals, const char * path,
+    size_t path_len, const char * text, size_t len, const GDEFSTOR_Value * was,
+    const GDEFCORE_Text * source, char subject[GDEFCORE_PUBLIC_ID_LEN + 1],
+    uint8_t mac[GDEFSTOR_BLIND_MAC_BYTES], int * out_has_mac,
+    int * out_keep) {
   const GDEFCORE_SealNote * note = find_note(seals, text, len);
   int erased = 0;
-  int opened = 0;
   GDEFCORE_Result rc;
   *out_has_mac = 0;
+  *out_keep = 0;
   if (source != NULL) {
     /* The declaration names the subject: the reference in the same item. */
     if (source->n != GDEFCORE_PUBLIC_ID_LEN) {
@@ -1994,28 +2029,39 @@ static GDEFCORE_Result seal_value(GDEFCORE_Seals * seals,
     }
     memcpy(subject, source->p, GDEFCORE_PUBLIC_ID_LEN);
     subject[GDEFCORE_PUBLIC_ID_LEN] = '\0';
-  } else if (tree_subject(alloc, now, path, path_len, text, len, subject)) {
-    /* A value the entity holds: its subject is the one stored with it. */
-  } else if (note != NULL) {
-    memcpy(subject, note->subject, GDEFCORE_PUBLIC_ID_LEN + 1);
-  } else if (tree_subject(alloc, draft, path, path_len, text, len, subject)) {
-    /* A value the entity's draft holds, with the subject it recorded. */
-  } else if (probe_subject(seals, alloc, now, path, path_len, text, len,
-                 subject, mac) ||
-             probe_subject(seals, alloc, draft, path, path_len, text, len,
-                 subject, mac)) {
-    opened = 1;
+  } else if (seals->own[0] != '\0') {
+    /* Else the entity's own subject, kept with it (story S7). */
+    memcpy(subject, seals->own, GDEFCORE_PUBLIC_ID_LEN + 1);
   } else {
     /* A sealed text from nowhere: nothing says whose it is (AD-19). */
     seals->unknown = 1;
     return GDEFCORE_ERR_INVALID;
   }
-  if (!seals->index || same_place) {
+  if (note != NULL &&
+      !span_eq(note->subject, GDEFCORE_PUBLIC_ID_LEN, subject,
+          GDEFCORE_PUBLIC_ID_LEN)) {
+    /* Sealed for someone the declaration does not name here. */
+    seals->unknown = 1;
+    return GDEFCORE_ERR_INVALID;
+  }
+  if (was != NULL && value_is(was, text, len)) {
+    /* The value the place holds, as it is stored: unchanged, as long as it
+     * is still the person the declaration names (a reference that moved to
+     * someone else needs the value sealed for them). */
+    if (!span_eq((const char *)was->subject, was->subject_len, subject,
+            GDEFCORE_PUBLIC_ID_LEN)) {
+      seals->unknown = 1;
+      return GDEFCORE_ERR_INVALID;
+    }
     return GDEFCORE_OK;
   }
-  /* A new version of the value, so a new blind row, and only while the
-   * subject's key exists: asked here, inside the write, so that an erasure
-   * whose blind deletion ran before this write began is seen. */
+  if (!seals->index) {
+    return GDEFCORE_OK;
+  }
+  /* A new text, so (unless it opens to what the place holds) a new version
+   * and a new blind row, and only while the subject's key exists: asked
+   * here, inside the write, so that an erasure whose blind deletion ran
+   * before this write began is seen. */
   if (seals->subjects == NULL) {
     seals->unknown = 1;
     return GDEFCORE_ERR_INVALID;
@@ -2029,20 +2075,39 @@ static GDEFCORE_Result seal_value(GDEFCORE_Seals * seals,
     seals->erased = 1;
     return GDEFCORE_ERR_INVALID;
   }
-  if (opened) {
-    /* The MAC came with the opening. */
-  } else if (note != NULL && note->has_mac &&
-      span_eq(note->subject, GDEFCORE_PUBLIC_ID_LEN, subject,
-          GDEFCORE_PUBLIC_ID_LEN)) {
+  if (note != NULL && note->has_mac) {
     memcpy(mac, note->mac, GDEFSTOR_BLIND_MAC_BYTES);
   } else {
     rc = gdefcore_subject_mac_sealed(seals->subjects, subject,
         GDEFCORE_PUBLIC_ID_LEN, path, path_len, text, len, mac);
+    if (rc == GDEFCORE_ERR_INVALID) {
+      /* It does not open under the key of the subject the declaration
+       * names, for this field: not that person's value (AD-19). */
+      seals->unknown = 1;
+      return GDEFCORE_ERR_INVALID;
+    }
     if (rc != GDEFCORE_OK) {
-      if (source != NULL && rc == GDEFCORE_ERR_INVALID) {
-        /* Not sealed for the subject its item names, or for this field. */
-        seals->unknown = 1;
-      }
+      return rc;
+    }
+  }
+  if (was != NULL && was->type != 0 && was->bytes != NULL &&
+      span_eq((const char *)was->subject, was->subject_len, subject,
+          GDEFCORE_PUBLIC_ID_LEN)) {
+    /* Unchanged is decided on the plaintext: the MAC under the tenant's
+     * blind-index key is a function of it, so the two values are the same
+     * plaintext exactly when their MACs are equal. */
+    uint8_t now_mac[GDEFSTOR_BLIND_MAC_BYTES];
+    rc = gdefcore_subject_mac_sealed(seals->subjects, subject,
+        GDEFCORE_PUBLIC_ID_LEN, path, path_len, (const char *)was->bytes,
+        was->len, now_mac);
+    if (rc == GDEFCORE_OK &&
+        memcmp(now_mac, mac, GDEFSTOR_BLIND_MAC_BYTES) == 0) {
+      *out_keep = 1;
+      memset(now_mac, 0, sizeof now_mac);
+      return GDEFCORE_OK;
+    }
+    memset(now_mac, 0, sizeof now_mac);
+    if (rc != GDEFCORE_OK && rc != GDEFCORE_ERR_INVALID) {
       return rc;
     }
   }
@@ -2052,16 +2117,17 @@ static GDEFCORE_Result seal_value(GDEFCORE_Seals * seals,
 
 /* Set @p value on item @p item, as field @p at (NULL: the item's own value),
  * the field at @p path: for a personal field, with its subject and, where
- * seal_value() gives one, its MAC. */
+ * seal_value() gives one, its MAC. @p was is what the current tree holds at
+ * this place, or NULL. */
 static GDEFCORE_Result set_value(GDEFSTOR_Tree * tree, size_t item,
     const GDEFSTOR_FieldInfo * info, const char * at, size_t at_len,
     const char * path, size_t path_len, GDEFSTOR_Value * v, const char * text,
-    size_t len, GDEFCORE_Seals * seals, const GDEFCORE_Allocator * alloc,
-    const GDEFSTOR_Tree * now, const GDEFSTOR_Tree * draft, int same_place,
+    size_t len, GDEFCORE_Seals * seals, const GDEFSTOR_Value * was,
     const GDEFCORE_Text * source) {
   char subject[GDEFCORE_PUBLIC_ID_LEN + 1];
   uint8_t mac[GDEFSTOR_BLIND_MAC_BYTES];
   int has_mac = 0;
+  int keep = 0;
   GDEFCORE_Result rc;
   if ((info->flags & GDEFSTOR_FIELD_PERSONAL) == 0) {
     return gdefcore_ent_map(gdefstor_tree_set(tree, item, at, at_len, v));
@@ -2069,10 +2135,15 @@ static GDEFCORE_Result set_value(GDEFSTOR_Tree * tree, size_t item,
   if (seals == NULL) {
     return GDEFCORE_ERR_INVALID;
   }
-  rc = seal_value(seals, alloc, now, draft, path, path_len, text, len,
-      same_place, source, subject, mac, &has_mac);
+  rc = seal_value(seals, path, path_len, text, len, was, source, subject, mac,
+      &has_mac, &keep);
   if (rc != GDEFCORE_OK) {
     return rc;
+  }
+  if (keep) {
+    /* The same plaintext as the place holds: the stored ciphertext stays. */
+    v->bytes = was->bytes;
+    v->len = was->len;
   }
   v->subject = (const uint8_t *)subject;
   v->subject_len = GDEFCORE_PUBLIC_ID_LEN;
@@ -2087,6 +2158,7 @@ static GDEFCORE_Result set_value(GDEFSTOR_Tree * tree, size_t item,
     m.version = GDEFCORE_SUBJECT_MAC_VERSION;
     rc = gdefcore_ent_map(gdefstor_tree_set_blind(tree, item, at, at_len, &m));
   }
+  memset(mac, 0, sizeof mac);
   return rc;
 }
 
@@ -2145,14 +2217,16 @@ static size_t index_of(const IdAt * ids, size_t n, uint64_t id) {
   return hit == NULL ? SIZE_MAX : hit->at;
 }
 
-/* Whether item @p at of @p now holds @p text as field @p f (NULL: its own). */
-static int now_holds(const GDEFSTOR_Tree * now, size_t at, const char * f,
-    size_t fn, const char * text, size_t len) {
-  GDEFSTOR_Value was;
-  memset(&was, 0, sizeof was);
-  return at != SIZE_MAX &&
-         gdefstor_tree_get(now, at, f, fn, &was) == GDEFSTOR_OK &&
-         value_is(&was, text, len);
+/* What item @p at of @p now holds as field @p f (NULL: its own value), in
+ * @p out: NULL when the place is not there or holds nothing. */
+static const GDEFSTOR_Value * now_value(const GDEFSTOR_Tree * now, size_t at,
+    const char * f, size_t fn, GDEFSTOR_Value * out) {
+  memset(out, 0, sizeof *out);
+  if (now == NULL || at == SIZE_MAX ||
+      gdefstor_tree_get(now, at, f, fn, out) != GDEFSTOR_OK || out->type == 0) {
+    return NULL;
+  }
+  return out;
 }
 
 /* The text of the root's value of field @p name, or NULL. */
@@ -2178,7 +2252,7 @@ static const GDEFCORE_Text * root_value(const GDEFCORE_Lang * l,
 static GDEFCORE_Result build_groups(GDEFCORE_Catalog * cat,
     const GDEFSTOR_Type * type, const GDEFCORE_Lang * l, GDEFCORE_Seals * seals,
     const GDEFSTOR_Tree * now, const IdAt * ids, size_t nids,
-    const GDEFSTOR_Tree * draft, GDEFSTOR_Tree * tree) {
+    GDEFSTOR_Tree * tree) {
   const GDEFCORE_Tree * g = l->groups;
   size_t n = gdefcore_tree_item_count(g);
   size_t * map;
@@ -2232,6 +2306,7 @@ static GDEFCORE_Result build_groups(GDEFCORE_Catalog * cat,
       GDEFCORE_Text path;
       GDEFSTOR_FieldInfo info;
       GDEFSTOR_Value v;
+      GDEFSTOR_Value held;
       GDEFCORE_Text source;
       const GDEFCORE_Text * src = NULL;
       if (gdefcore_tree_value(g, i, k, &f, &fn, &text, &len) != GDEFCORE_OK) {
@@ -2268,8 +2343,8 @@ static GDEFCORE_Result build_groups(GDEFCORE_Catalog * cat,
       rc = gdefcore_value_parse(info.type, info.scale, text, len, &v);
       if (rc == GDEFCORE_OK) {
         rc = set_value(tree, item, &info, fn == 0 ? NULL : f, fn, path.p,
-            path.n, &v, text, len, seals, cat->alloc, now, draft,
-            now_holds(now, was, fn == 0 ? NULL : f, fn, text, len), src);
+            path.n, &v, text, len, seals,
+            now_value(now, was, fn == 0 ? NULL : f, fn, &held), src);
       }
       text_clear(cat->alloc, &path);
     }
@@ -2285,8 +2360,7 @@ static GDEFCORE_Result build_groups(GDEFCORE_Catalog * cat,
  * Retired fields are left out, which keeps them. */
 static GDEFCORE_Result build_tree(GDEFCORE_Catalog * cat,
     const GDEFSTOR_Type * type, const char * canon, int exists,
-    const GDEFCORE_Lang * l, GDEFCORE_Seals * seals,
-    const GDEFSTOR_Tree * draft, GDEFSTOR_Tree ** out) {
+    const GDEFCORE_Lang * l, GDEFCORE_Seals * seals, GDEFSTOR_Tree ** out) {
   GDEFSTOR_Tree * tree = NULL;
   GDEFSTOR_Tree * now = NULL;
   IdAt * byid = NULL;
@@ -2332,23 +2406,17 @@ static GDEFCORE_Result build_tree(GDEFCORE_Catalog * cat,
     }
     if ((info.flags & GDEFSTOR_FIELD_MULTIPLE) == 0) {
       GDEFSTOR_Value v;
-      GDEFSTOR_Value was;
-      int same = 0;
+      GDEFSTOR_Value held;
       if (f->nvals != 1) {
         rc = GDEFCORE_ERR_INVALID;
         break;
-      }
-      memset(&was, 0, sizeof was);
-      if (now != NULL &&
-          gdefstor_tree_get(now, 0, f->name.p, f->name.n, &was) == GDEFSTOR_OK) {
-        same = value_is(&was, f->vals[0].p, f->vals[0].n);
       }
       rc = gdefcore_value_parse(info.type, info.scale, f->vals[0].p,
           f->vals[0].n, &v);
       if (rc == GDEFCORE_OK) {
         rc = set_value(tree, 0, &info, f->name.p, f->name.n, f->name.p,
-            f->name.n, &v, f->vals[0].p, f->vals[0].n, seals, cat->alloc, now,
-            draft, same, src);
+            f->name.n, &v, f->vals[0].p, f->vals[0].n, seals,
+            now_value(now, 0, f->name.p, f->name.n, &held), src);
       }
       continue;
     }
@@ -2373,6 +2441,7 @@ static GDEFCORE_Result build_tree(GDEFCORE_Catalog * cat,
       }
       for (k = 0; rc == GDEFCORE_OK && k < f->nvals; k++) {
         GDEFSTOR_Value v;
+        GDEFSTOR_Value held;
         size_t item = 0;
         uint64_t id = 0;
         size_t place = SIZE_MAX;
@@ -2392,15 +2461,14 @@ static GDEFCORE_Result build_tree(GDEFCORE_Catalog * cat,
         }
         if (rc == GDEFCORE_OK) {
           rc = set_value(tree, item, &info, NULL, 0, f->name.p, f->name.n, &v,
-              f->vals[k].p, f->vals[k].n, seals, cat->alloc, now, draft,
-              now_holds(now, place, NULL, 0, f->vals[k].p, f->vals[k].n),
-              src);
+              f->vals[k].p, f->vals[k].n, seals,
+              now_value(now, place, NULL, 0, &held), src);
         }
       }
     }
   }
   if (rc == GDEFCORE_OK) {
-    rc = build_groups(cat, type, l, seals, now, byid, nbyid, draft, tree);
+    rc = build_groups(cat, type, l, seals, now, byid, nbyid, tree);
   }
   gcu_allocator_free(cat->alloc, byid);
   gdefstor_tree_free(now);
@@ -2493,110 +2561,14 @@ static void trees_free(const GDEFCORE_Allocator * alloc, Trees * t) {
   memset(t, 0, sizeof *t);
 }
 
-/* The entity's stored draft, one tree per language, for seal_value(): the
- * subjects a draft records for the values it holds. */
-typedef struct DraftTrees {
-  GDEFSTOR_Tree ** trees;
-  char (*langs)[GDEFSTOR_MODEL_MAX_LANGUAGE_BYTES];
-  size_t * lang_lens;
-  size_t n;
-} DraftTrees;
-
-static void draft_trees_free(const GDEFCORE_Allocator * alloc, DraftTrees * d) {
-  size_t i;
-  for (i = 0; i < d->n; i++) {
-    gdefstor_tree_free(d->trees[i]);
-  }
-  gcu_allocator_free(alloc, d->trees);
-  gcu_allocator_free(alloc, d->langs);
-  gcu_allocator_free(alloc, d->lang_lens);
-  memset(d, 0, sizeof *d);
-}
-
-static GDEFCORE_Result draft_trees_load(GDEFCORE_Catalog * cat,
-    const GDEFSTOR_Type * type, const char * canon, DraftTrees * out) {
-  GDEFSTOR_Draft * d = NULL;
-  GDEFSTOR_DraftInfo info;
-  GDEFSTOR_Result src;
-  GDEFCORE_Result rc = GDEFCORE_OK;
-  size_t i;
-  memset(out, 0, sizeof *out);
-  src = gdefstor_draft_get(cat->store, (const char *)cat->tenant,
-      cat->tenant_len, canon, GDEFCORE_PUBLIC_ID_LEN, &d);
-  if (src == GDEFSTOR_ERR_INVALID) {
-    return GDEFCORE_OK; /* no draft */
-  }
-  if (src != GDEFSTOR_OK) {
-    return gdefcore_ent_map(src);
-  }
-  memset(&info, 0, sizeof info);
-  info.size = sizeof info;
-  if (gdefstor_draft_info(d, &info) != GDEFSTOR_OK) {
-    gdefstor_draft_free(d);
-    return GDEFCORE_ERR_CORRUPT;
-  }
-  if (info.language_count > 0) {
-    out->trees = (GDEFSTOR_Tree **)gcu_allocator_calloc(cat->alloc,
-        info.language_count, sizeof *out->trees);
-    out->langs = (char (*)[GDEFSTOR_MODEL_MAX_LANGUAGE_BYTES])gcu_allocator_calloc(
-        cat->alloc, info.language_count, sizeof *out->langs);
-    out->lang_lens = (size_t *)gcu_allocator_calloc(cat->alloc,
-        info.language_count, sizeof *out->lang_lens);
-    if (out->trees == NULL || out->langs == NULL || out->lang_lens == NULL) {
-      rc = GDEFCORE_ERR_OOM;
-    }
-  }
-  for (i = 0; rc == GDEFCORE_OK && i < info.language_count; i++) {
-    GDEFSTOR_DraftTree dt;
-    memset(&dt, 0, sizeof dt);
-    dt.size = sizeof dt;
-    if (gdefstor_draft_tree(d, i, &dt) != GDEFSTOR_OK ||
-        dt.language_len > GDEFSTOR_MODEL_MAX_LANGUAGE_BYTES) {
-      rc = GDEFCORE_ERR_CORRUPT;
-      break;
-    }
-    rc = gdefcore_ent_map(gdefstor_tree_from_json(type, dt.json, dt.json_len,
-        NULL, &out->trees[i]));
-    if (rc == GDEFCORE_OK) {
-      memcpy(out->langs[i], dt.language, dt.language_len);
-      out->lang_lens[i] = dt.language_len;
-      out->n = i + 1;
-    }
-  }
-  gdefstor_draft_free(d);
-  if (rc != GDEFCORE_OK) {
-    draft_trees_free(cat->alloc, out);
-  }
-  return rc;
-}
-
-static const GDEFSTOR_Tree * draft_tree_of(const DraftTrees * d,
-    const GDEFCORE_Text * lang) {
-  size_t i;
-  for (i = 0; i < d->n; i++) {
-    if (span_eq(d->langs[i], d->lang_lens[i], lang->p, lang->n)) {
-      return d->trees[i];
-    }
-  }
-  return NULL;
-}
-
 static GDEFCORE_Result doc_trees(GDEFCORE_Catalog * cat,
     const GDEFSTOR_Type * type, const char * canon, int exists,
     const GDEFCORE_Doc * doc, GDEFCORE_Seals * seals, Trees * out) {
-  DraftTrees drafts;
   size_t i;
   GDEFCORE_Result rc = GDEFCORE_OK;
   memset(out, 0, sizeof *out);
-  memset(&drafts, 0, sizeof drafts);
   if (doc->nlangs == 0) {
     return GDEFCORE_OK;
-  }
-  if (seals != NULL && seals->with_draft) {
-    rc = draft_trees_load(cat, type, canon, &drafts);
-    if (rc != GDEFCORE_OK) {
-      return rc;
-    }
   }
   out->trees = (GDEFSTOR_Tree **)gcu_allocator_calloc(cat->alloc, doc->nlangs,
       sizeof *out->trees);
@@ -2604,15 +2576,13 @@ static GDEFCORE_Result doc_trees(GDEFCORE_Catalog * cat,
       doc->nlangs, sizeof *out->langs);
   if (out->trees == NULL || out->langs == NULL) {
     trees_free(cat->alloc, out);
-    draft_trees_free(cat->alloc, &drafts);
     return GDEFCORE_ERR_OOM;
   }
   for (i = 0; i < doc->nlangs; i++) {
     rc = build_tree(cat, type, canon, exists, &doc->langs[i], seals,
-        draft_tree_of(&drafts, &doc->langs[i].lang), &out->trees[i]);
+        &out->trees[i]);
     if (rc != GDEFCORE_OK) {
       trees_free(cat->alloc, out);
-      draft_trees_free(cat->alloc, &drafts);
       return rc;
     }
     out->n = i + 1;
@@ -2621,7 +2591,6 @@ static GDEFCORE_Result doc_trees(GDEFCORE_Catalog * cat,
     out->langs[i].language_len = doc->langs[i].lang.n;
     out->langs[i].tree = out->trees[i];
   }
-  draft_trees_free(cat->alloc, &drafts);
   return GDEFCORE_OK;
 }
 

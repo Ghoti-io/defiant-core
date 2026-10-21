@@ -269,6 +269,11 @@ static void fields_free(GDEFCORE_Catalog * catalog, FormField * fields,
     if (fields[i].own_texts) {
       if (fields[i].texts != NULL) {
         for (v = 0; v < fields[i].count; v++) {
+          if (fields[i].personal && fields[i].texts[v] != NULL &&
+              fields[i].lens != NULL && fields[i].lens[v] > 0) {
+            /* An editor's form holds a person's plaintext (story S7). */
+            gsec_wipe(fields[i].texts[v], fields[i].lens[v]);
+          }
           gdefcore_text_free(catalog, fields[i].texts[v]);
         }
         gdefcore_text_free(catalog, (char *)fields[i].texts);
@@ -1400,6 +1405,178 @@ GDEFCORE_Result gdefcore_form_tree(GDEFCORE_Catalog * catalog,
         return rc;
       }
     }
+  }
+  *out = form;
+  return GDEFCORE_OK;
+}
+
+/*
+ * The personal values of root field @p field in @p tree (the draft over the
+ * newest revision), each opened for the editor whose field filter has just
+ * allowed the field (AD-19, story S7): its plaintext, or the erased marker.
+ * A catalog with no subjects bound gives none. Each subject decrypted is
+ * recorded on @p request.
+ */
+static GDEFCORE_Result fill_personal(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Request * request, const GDEFCORE_Tree * tree, FormField * field) {
+  GDEFCORE_Subjects * subjects = gdefcore_catalog_subjects(catalog);
+  size_t n = gdefcore_tree_item_count(tree);
+  size_t i;
+  size_t count = 0;
+  char ** texts = NULL;
+  size_t * lens = NULL;
+  GDEFCORE_Result rc = GDEFCORE_OK;
+  if (subjects == NULL || n == 0) {
+    return GDEFCORE_OK;
+  }
+  texts = (char **)cat_zalloc(catalog, n * sizeof *texts);
+  lens = (size_t *)cat_zalloc(catalog, n * sizeof *lens);
+  if (texts == NULL || lens == NULL) {
+    gdefcore_text_free(catalog, (char *)texts);
+    gdefcore_text_free(catalog, (char *)lens);
+    return GDEFCORE_ERR_OOM;
+  }
+  for (i = 0; rc == GDEFCORE_OK && i < n; i++) {
+    GDEFCORE_TreeItem it;
+    size_t k;
+    memset(&it, 0, sizeof it);
+    it.size = sizeof it;
+    rc = gdefcore_tree_item(tree, i, &it);
+    if (rc != GDEFCORE_OK || (i > 0 && (it.parent != 0 ||
+                                           !span_eq(it.field, it.field_len,
+                                               field->name, field->name_len)))) {
+      continue;
+    }
+    for (k = 0; rc == GDEFCORE_OK && k < it.value_count && count < n; k++) {
+      const char * f = NULL;
+      size_t fn = 0;
+      const char * text = NULL;
+      size_t len = 0;
+      const char * sub = NULL;
+      size_t sub_len = 0;
+      char * plain = NULL;
+      size_t plain_len = 0;
+      int erased = 0;
+      rc = gdefcore_tree_value(tree, i, k, &f, &fn, &text, &len);
+      if (rc != GDEFCORE_OK ||
+          (i == 0 ? !span_eq(f, fn, field->name, field->name_len) : fn != 0)) {
+        continue;
+      }
+      rc = gdefcore_tree_value_subject(tree, i, k, &sub, &sub_len);
+      if (rc == GDEFCORE_OK && sub == NULL) {
+        rc = GDEFCORE_ERR_CORRUPT; /* never stored without its subject */
+      }
+      if (rc == GDEFCORE_OK) {
+        rc = gdefcore_subject_open_value(subjects, sub, sub_len, field->name,
+            field->name_len, text, len, &plain, &plain_len, &erased);
+      }
+      if (rc == GDEFCORE_OK) {
+        rc = cat_dup(catalog, plain, plain_len, &texts[count]);
+      }
+      if (plain != NULL && plain_len > 0) {
+        gsec_wipe(plain, plain_len);
+      }
+      gdefcore_subject_free(subjects, plain);
+      if (rc == GDEFCORE_OK && !erased) {
+        rc = gdefcore_request_record_subject(request, sub, sub_len);
+      }
+      if (rc == GDEFCORE_OK) {
+        lens[count] = plain_len;
+        count += 1;
+      }
+    }
+  }
+  if (rc != GDEFCORE_OK || count == 0) {
+    for (i = 0; i < count; i++) {
+      gsec_wipe(texts[i], lens[i]);
+      gdefcore_text_free(catalog, texts[i]);
+    }
+    gdefcore_text_free(catalog, (char *)texts);
+    gdefcore_text_free(catalog, (char *)lens);
+    return rc;
+  }
+  field->texts = texts;
+  field->lens = lens;
+  field->count = count;
+  field->own_texts = 1;
+  return GDEFCORE_OK;
+}
+
+GDEFCORE_Result gdefcore_form_tree_for(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Request * request, const char * id, size_t id_len,
+    const char * lang, size_t lang_len, GDEFCORE_Form ** out) {
+  char canon[GDEFCORE_PUBLIC_ID_LEN + 1];
+  char * type = NULL;
+  size_t type_len = 0;
+  int allowed = 0;
+  GDEFCORE_Form * form = NULL;
+  GDEFCORE_Tree * tree = NULL;
+  GDEFCORE_Result rc;
+  size_t i;
+  if (catalog == NULL || request == NULL || out == NULL || lang == NULL ||
+      lang_len == 0 ||
+      gdefcore_id_canonical(id, id_len, canon) != GDEFCORE_OK) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  rc = gdefcore_entity_type(catalog, canon, GDEFCORE_PUBLIC_ID_LEN, &type,
+      &type_len);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  /* An editor's form: the entity must be one the principal may change. One
+   * they may not answers as one that is not there. */
+  rc = gdefcore_access_can(catalog, request, GDEFCORE_ACTION_UPDATE,
+      strlen(GDEFCORE_ACTION_UPDATE), type, type_len, canon, &allowed);
+  if (rc == GDEFCORE_OK && !allowed) {
+    rc = GDEFCORE_ERR_INVALID;
+  }
+  if (rc == GDEFCORE_OK) {
+    form = cat_zalloc(catalog, sizeof *form);
+    if (form == NULL) {
+      rc = GDEFCORE_ERR_OOM;
+    }
+  }
+  if (rc == GDEFCORE_OK) {
+    form->catalog = catalog;
+    rc = load_type_fields(catalog, type, type_len, &form->fields,
+        &form->nfields);
+  }
+  if (rc == GDEFCORE_OK) {
+    GDEFCORE_Result tr = gdefcore_entity_tree(catalog, NULL,
+        GDEFCORE_VIEW_DRAFT, canon, GDEFCORE_PUBLIC_ID_LEN, lang, lang_len,
+        &tree);
+    if (tr != GDEFCORE_OK && tr != GDEFCORE_ERR_INVALID) {
+      rc = tr; /* INVALID: nothing in that language yet */
+    }
+  }
+  for (i = 0; rc == GDEFCORE_OK && form != NULL && i < form->nfields; i++) {
+    FormField * field = &form->fields[i];
+    int readable = 0;
+    /* The field filter first: a field the principal may not read holds no
+     * value here, and a personal one is never decrypted (AD-19). */
+    rc = gdefcore_access_can_field(catalog, request, GDEFCORE_ACTION_READ,
+        strlen(GDEFCORE_ACTION_READ), type, type_len, canon, field->name,
+        field->name_len, &readable);
+    if (rc != GDEFCORE_OK || !readable) {
+      continue;
+    }
+    if (field->personal) {
+      rc = tree == NULL ? GDEFCORE_OK
+                        : fill_personal(catalog, request, tree, field);
+    } else {
+      rc = fill_current(catalog, field, canon, GDEFCORE_PUBLIC_ID_LEN, lang,
+          lang_len);
+    }
+  }
+  gdefcore_tree_free(tree);
+  gdefcore_text_free(catalog, type);
+  if (rc != GDEFCORE_OK) {
+    if (form != NULL && form->fields != NULL) {
+      gdefcore_form_destroy(form);
+    } else if (form != NULL) {
+      gdefcore_text_free(catalog, (char *)form);
+    }
+    return rc;
   }
   *out = form;
   return GDEFCORE_OK;

@@ -572,9 +572,10 @@ TEST_F(Render, Personal) {
   field.name = "note";
   field.name_len = 4;
   field.personal = 1;
+  /* Its entities are subjects: the note's subject is each one's own. */
   ASSERT_EQ(GDEFCORE_OK,
-      gdefcore_type_define(catalog_, "site.person", 11, GDEFCORE_TYPE_CONTENT,
-          &field, 1));
+      gdefcore_type_define(catalog_, "site.person", 11,
+          GDEFCORE_TYPE_CONTENT | GDEFCORE_TYPE_SUBJECTS, &field, 1));
   ASSERT_EQ(GDEFCORE_OK,
       gdefcore_entity_ids(catalog_, "core.view", 9, &ids, &before));
   gdefcore_ids_free(catalog_, ids, before);
