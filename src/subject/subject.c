@@ -1961,90 +1961,70 @@ static int span_is(const char * text, size_t n, const char * want) {
   return n == want_len && memcmp(text, want, n) == 0;
 }
 
-static int grant_confirm_ok(const char * role, size_t role_len,
-    const char * confirm, size_t confirm_len) {
-  if (span_is(role, role_len, "anonymous")) {
-    return span_is(confirm, confirm_len, GDEFCORE_ACCESS_CONFIRM_ANONYMOUS);
-  }
-  if (span_is(role, role_len, "authenticated")) {
-    return span_is(confirm, confirm_len,
-        GDEFCORE_ACCESS_CONFIRM_AUTHENTICATED);
-  }
-  return span_is(confirm, confirm_len, "core.role");
-}
-
-/* A stored role row has no top-level role and label. Those two keys are an
- * applied grant, which needs the same confirmation the grant call does. */
-static GDEFCORE_Result judge_object(const GTEXT_JSON_Value * root) {
-  const GTEXT_JSON_Value * format;
-  const GTEXT_JSON_Value * entity;
-  const GTEXT_JSON_Value * type;
-  const GTEXT_JSON_Value * tenant;
-  const GTEXT_JSON_Value * role;
-  const GTEXT_JSON_Value * label;
-  const GTEXT_JSON_Value * confirm;
-  const char * format_text = NULL;
-  size_t format_len = 0;
+/* One entity a snapshot names: its type and its public id, as the entity
+ * part spells them (defiant-storage's formats.md). An internal (decimal) id,
+ * an id that is not a canonical public id, and an installation-scope type are
+ * refused (AD-34, AD-37). */
+static GDEFCORE_Result judge_entity(const GTEXT_JSON_Value * type,
+    const GTEXT_JSON_Value * entity) {
   const char * entity_text = NULL;
   size_t entity_len = 0;
   const char * type_text = NULL;
   size_t type_len = 0;
-  const char * role_text = NULL;
-  size_t role_len = 0;
-  const char * label_text = NULL;
-  size_t label_len = 0;
-  const char * confirm_text = NULL;
-  size_t confirm_len = 0;
   char canon[GDEFCORE_PUBLIC_ID_LEN + 1];
-  int revision = 0;
-  if (gtext_json_typeof(root) != GTEXT_JSON_OBJECT) {
-    return GDEFCORE_OK;
-  }
-  format = gtext_json_object_get(root, "format", 6);
-  if (gtext_json_get_string(format, &format_text, &format_len) ==
+  if (gtext_json_get_string(entity, &entity_text, &entity_len) !=
       GTEXT_JSON_OK) {
-    revision = format_len >= 17 &&
-               memcmp(format_text, "defiant-revision/", 17) == 0;
+    return GDEFCORE_ERR_CORRUPT;
   }
-  tenant = gtext_json_object_get(root, "tenant", 6);
-  if (tenant != NULL) {
+  if (digits_only(entity_text, entity_len)) {
     return GDEFCORE_ERR_INVALID;
   }
-  if (revision) {
-    entity = gtext_json_object_get(root, "entity", 6);
-    if (gtext_json_get_string(entity, &entity_text, &entity_len) !=
-        GTEXT_JSON_OK) {
-      return GDEFCORE_ERR_CORRUPT;
-    }
-    if (digits_only(entity_text, entity_len)) {
-      return GDEFCORE_ERR_INVALID;
-    }
-    if (gdefcore_id_canonical(entity_text, entity_len, canon) !=
-        GDEFCORE_OK) {
-      return GDEFCORE_ERR_INVALID;
-    }
-    type = gtext_json_object_get(root, "type", 4);
-    if (gtext_json_get_string(type, &type_text, &type_len) == GTEXT_JSON_OK &&
-        span_is(type_text, type_len, "core.tenant")) {
-      return GDEFCORE_ERR_INVALID;
-    }
-  }
-  role = gtext_json_object_get(root, "role", 4);
-  label = gtext_json_object_get(root, "label", 5);
-  if (role == NULL && label == NULL) {
-    return GDEFCORE_OK;
-  }
-  if (gtext_json_get_string(role, &role_text, &role_len) != GTEXT_JSON_OK ||
-      gtext_json_get_string(label, &label_text, &label_len) != GTEXT_JSON_OK) {
+  if (gdefcore_id_canonical(entity_text, entity_len, canon) != GDEFCORE_OK) {
     return GDEFCORE_ERR_INVALID;
   }
-  confirm = gtext_json_object_get(root, "confirmation", 12);
-  if (gtext_json_get_string(confirm, &confirm_text, &confirm_len) !=
-          GTEXT_JSON_OK ||
-      !grant_confirm_ok(role_text, role_len, confirm_text, confirm_len)) {
+  if (gtext_json_get_string(type, &type_text, &type_len) == GTEXT_JSON_OK &&
+      span_is(type_text, type_len, "core.tenant")) {
     return GDEFCORE_ERR_INVALID;
   }
   return GDEFCORE_OK;
+}
+
+/* A member of the entity part that names a tenant, or names an entity it
+ * must not: one entity's revisions (`"format":"defiant-revision/1"`, its
+ * `type` and `id`) or a type's entities (`type` and `entities`, each with an
+ * `id`). */
+static GDEFCORE_Result judge_object(const GTEXT_JSON_Value * root) {
+  const GTEXT_JSON_Value * format;
+  const GTEXT_JSON_Value * type;
+  const GTEXT_JSON_Value * entities;
+  const char * format_text = NULL;
+  size_t format_len = 0;
+  GDEFCORE_Result rc = GDEFCORE_OK;
+  if (gtext_json_typeof(root) != GTEXT_JSON_OBJECT) {
+    return GDEFCORE_OK;
+  }
+  if (gtext_json_object_get(root, "tenant", 6) != NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  type = gtext_json_object_get(root, "type", 4);
+  format = gtext_json_object_get(root, "format", 6);
+  if (gtext_json_get_string(format, &format_text, &format_len) ==
+          GTEXT_JSON_OK &&
+      format_len >= 17 && memcmp(format_text, "defiant-revision/", 17) == 0) {
+    return judge_entity(type, gtext_json_object_get(root, "id", 2));
+  }
+  entities = gtext_json_object_get(root, "entities", 8);
+  if (type != NULL && gtext_json_typeof(entities) == GTEXT_JSON_ARRAY) {
+    size_t i;
+    for (i = 0; rc == GDEFCORE_OK && i < gtext_json_array_size(entities); i++) {
+      const GTEXT_JSON_Value * e = gtext_json_array_get(entities, i);
+      if (gtext_json_typeof(e) != GTEXT_JSON_OBJECT) {
+        return GDEFCORE_ERR_CORRUPT;
+      }
+      rc = judge_entity(type, gtext_json_object_get(e, "id", 2));
+    }
+  }
+  return rc;
 }
 
 static GDEFCORE_Result from_garc(GARC_Result gr) {
@@ -2087,8 +2067,8 @@ static GDEFCORE_Result judge_member(const GDEFCORE_Allocator * alloc,
 }
 
 /* Walk the zip before any tenant write. A bad name, a defeated ratio, a
- * named tenant, an internal id, an installation-scope type, a mistyped
- * public id, or a role grant without its confirmation refuses the import. */
+ * named tenant, an internal id, an installation-scope type or a mistyped
+ * public id refuses the import. */
 static GDEFCORE_Result archive_refuse(const GDEFCORE_Allocator * alloc,
     const uint8_t * bytes, size_t len) {
   GARC_Stream * stream = NULL;
@@ -2158,9 +2138,7 @@ static GDEFCORE_Result archive_refuse(const GDEFCORE_Allocator * alloc,
       }
       got_total += got;
     }
-    if (rc == GDEFCORE_OK &&
-        !(member->name != NULL && member->name_length >= 2 &&
-            member->name[0] == 'b' && member->name[1] == ':')) {
+    if (rc == GDEFCORE_OK) {
       rc = judge_member(alloc, body, (size_t)member->size);
     }
     gcu_allocator_free(alloc, body);
