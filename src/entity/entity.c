@@ -1502,6 +1502,13 @@ GDEFCORE_Result gdefcore_type_define(GDEFCORE_Catalog * catalog,
     decls_free(catalog->alloc, decls, ndecls);
     return rc;
   }
+  gdefcore_ent_schema_reset(catalog);
+  rc = gdefcore_ent_core_check(catalog, write);
+  if (rc != GDEFCORE_OK) {
+    decls_free(catalog->alloc, decls, ndecls);
+    gdefstor_write_abort(write);
+    return rc;
+  }
   rc = write_type(catalog, write, name, name_len, kind_of(kind),
       (kind & GDEFCORE_TYPE_SUBJECTS) != 0, decls, ndecls, NULL, 0);
   decls_free(catalog->alloc, decls, ndecls);
@@ -1581,12 +1588,26 @@ GDEFCORE_Result gdefcore_entity_create(GDEFCORE_Catalog * catalog,
     return rc;
   }
   /* The id is reserved by a draft with no content: the entity, with its
-   * creator, is made at its first save (story S6b). */
-  rc = map_stor(gdefstor_draft_put(write, type_name, type_len, id,
-      GDEFCORE_PUBLIC_ID_LEN, 0, NULL, 0));
+   * creator, is made at its first save (story S6b). The empty draft is the
+   * type's data like any other, stamped as such (AD-15). */
+  gdefcore_ent_schema_reset(catalog);
+  rc = gdefcore_ent_core_check(catalog, write);
+  {
+    char stamp[GDEFSTOR_SCHEMA_MAX_BYTES + 1];
+    size_t stamp_len = 0;
+    if (rc == GDEFCORE_OK) {
+      rc = gdefcore_ent_type_stamp(catalog, write, type_name, type_len, stamp,
+          &stamp_len);
+    }
+    if (rc == GDEFCORE_OK) {
+      rc = map_stor(gdefstor_draft_put(write, type_name, type_len, id,
+          GDEFCORE_PUBLIC_ID_LEN, 0, stamp, stamp_len, NULL, 0));
+    }
+  }
   if (rc == GDEFCORE_OK && subjects) {
     rc = map_stor(gdefstor_record_put(write, GDEFCORE_ENT_SUBJECT_NS,
         sizeof GDEFCORE_ENT_SUBJECT_NS - 1, id, GDEFCORE_PUBLIC_ID_LEN,
+        GDEFCORE_SCHEMA_CORE_STAMP, sizeof GDEFCORE_SCHEMA_CORE_STAMP - 1,
         (const uint8_t *)sid, GDEFCORE_PUBLIC_ID_LEN));
   }
   if (rc != GDEFCORE_OK) {
@@ -3910,6 +3931,10 @@ static GDEFCORE_Result name_list(GDEFCORE_Changeset * cs) {
   return GDEFCORE_ERR_INVALID;
 }
 
+GDEFSTOR_Store * gdefcore_catalog_store(const GDEFCORE_Catalog * catalog) {
+  return catalog == NULL ? NULL : catalog->store;
+}
+
 const uint8_t * gdefcore_catalog_tenant(const GDEFCORE_Catalog * catalog,
     size_t * out_len) {
   if (catalog == NULL) {
@@ -4075,7 +4100,7 @@ static GDEFCORE_Result draft_author(GDEFCORE_Catalog * cat, const GDEFCORE_Op * 
   GDEFCORE_Result rc = map_stor(gdefstor_record_get(cat->store,
       (const char *)cat->tenant, cat->tenant_len, GDEFCORE_ENT_DRAFT_NS,
       sizeof GDEFCORE_ENT_DRAFT_NS - 1, op->id.p, op->id.n, &found, &bytes,
-      &len));
+      &len, NULL, NULL));
   *out_len = 0;
   if (rc == GDEFCORE_OK && found) {
     if (len >= cap) {
@@ -4095,6 +4120,7 @@ static GDEFCORE_Result put_draft_author(GDEFSTOR_Write * write,
     const GDEFCORE_Changeset * cs, const GDEFCORE_Op * op) {
   return map_stor(gdefstor_record_put(write, GDEFCORE_ENT_DRAFT_NS,
       sizeof GDEFCORE_ENT_DRAFT_NS - 1, op->id.p, op->id.n,
+      GDEFCORE_SCHEMA_CORE_STAMP, sizeof GDEFCORE_SCHEMA_CORE_STAMP - 1,
       (const uint8_t *)(cs->actor.p == NULL ? "" : cs->actor.p), cs->actor.n));
 }
 
@@ -4270,6 +4296,49 @@ static GDEFCORE_Result draft_fits(GDEFCORE_Changeset * cs, const GDEFCORE_Op * o
   return GDEFCORE_OK;
 }
 
+/* The stamp of revision @p op->target_seq's trees: one for every language it
+ * holds, else ::GDEFCORE_ERR_UNSUPPORTED. */
+static GDEFCORE_Result revert_stamp(GDEFCORE_Catalog * cat,
+    const GDEFCORE_Op * op, char out[GDEFSTOR_SCHEMA_MAX_BYTES + 1],
+    size_t * out_len) {
+  GDEFSTOR_History * h = NULL;
+  GDEFSTOR_Languages * langs = NULL;
+  size_t i;
+  GDEFCORE_Result rc = map_stor(gdefstor_entity_history(cat->store,
+      (const char *)cat->tenant, cat->tenant_len, op->id.p, op->id.n, NULL, 0,
+      &h));
+  if (rc == GDEFCORE_OK) {
+    rc = map_stor(gdefstor_entity_languages(cat->store,
+        (const char *)cat->tenant, cat->tenant_len, op->id.p, op->id.n,
+        op->target_seq, &langs));
+  }
+  *out_len = 0;
+  for (i = 0; rc == GDEFCORE_OK && i < gdefstor_languages_count(langs); i++) {
+    const char * lang = NULL;
+    size_t lang_len = 0;
+    char one[GDEFSTOR_SCHEMA_MAX_BYTES + 1];
+    size_t one_len = 0;
+    if (gdefstor_languages_get(langs, i, &lang, &lang_len) != GDEFSTOR_OK) {
+      rc = GDEFCORE_ERR_CORRUPT;
+      break;
+    }
+    rc = gdefcore_ent_lang_stamp(h, lang, lang_len, op->target_seq, one,
+        &one_len);
+    if (rc == GDEFCORE_OK && i == 0) {
+      memcpy(out, one, one_len + 1);
+      *out_len = one_len;
+    } else if (rc == GDEFCORE_OK && !span_eq(out, *out_len, one, one_len)) {
+      rc = GDEFCORE_ERR_UNSUPPORTED;
+    }
+  }
+  if (rc == GDEFCORE_OK && *out_len == 0) {
+    rc = GDEFCORE_ERR_CORRUPT; /* a revision with no tree, or no stamp */
+  }
+  gdefstor_languages_free(langs);
+  gdefstor_history_free(h);
+  return rc;
+}
+
 /*
  * One op, in the changeset's write. The op was staged against the entity's
  * revision, version and (for a draft) the revision its draft was made from;
@@ -4280,6 +4349,8 @@ static GDEFCORE_Result apply_op(GDEFCORE_Changeset * cs, GDEFSTOR_Write * write,
   GDEFCORE_Catalog * cat = cs->catalog;
   GDEFCORE_EntLook look;
   GDEFSTOR_RevisionMeta meta = revision_meta(cs, when);
+  char stamp[GDEFSTOR_SCHEMA_MAX_BYTES + 1];
+  size_t stamp_len = 0;
   uint64_t version = 0;
   uint64_t rev = 0;
   int changed = 0;
@@ -4326,9 +4397,19 @@ static GDEFCORE_Result apply_op(GDEFCORE_Changeset * cs, GDEFSTOR_Write * write,
   if (rc == GDEFCORE_OK) {
     rc = gdefcore_ent_version(cat, op->id.p, &version);
   }
+  if (rc == GDEFCORE_OK) {
+    /* Whose data the entity is, and the version its writes are stamped
+     * with: refused while the tenant waits for a migration (AD-15). */
+    rc = gdefcore_ent_type_stamp(cat, write,
+        look.exists || look.reserved ? look.type : op->type_name.p,
+        look.exists || look.reserved ? look.type_len : op->type_name.n, stamp,
+        &stamp_len);
+  }
   if (rc != GDEFCORE_OK) {
     return rc;
   }
+  meta.schema = stamp;
+  meta.schema_len = stamp_len;
   /* Every write that touches the entity moves its version, including the
    * ones that move no revision (a draft, a publish, an unpublish, a clear). */
   if (look.revision != op->base_seq || (op->have_ver && version != op->base_ver) ||
@@ -4419,7 +4500,7 @@ static GDEFCORE_Result apply_op(GDEFCORE_Changeset * cs, GDEFSTOR_Write * write,
     if (rc == GDEFCORE_OK) {
       rc = seals_refuse(cs, &seals, gdefcore_ent_put_draft(cat, write, op->id.p,
           op->type_name.p, op->type_name.n, look.exists ? op->draft_base : 0,
-          &op->staged, &seals));
+          &op->staged, &seals, stamp, stamp_len));
     }
     if (rc == GDEFCORE_OK) {
       rc = put_draft_author(write, cs, op);
@@ -4514,7 +4595,7 @@ static GDEFCORE_Result apply_op(GDEFCORE_Changeset * cs, GDEFSTOR_Write * write,
       GDEFCORE_Doc none;
       memset(&none, 0, sizeof none);
       rc = gdefcore_ent_put_draft(cat, write, op->id.p, op->type_name.p,
-          op->type_name.n, 0, &none, NULL);
+          op->type_name.n, 0, &none, NULL, stamp, stamp_len);
       changed = 1;
     }
     break;
@@ -4525,6 +4606,16 @@ static GDEFCORE_Result apply_op(GDEFCORE_Changeset * cs, GDEFSTOR_Write * write,
     if (!look.exists) {
       return GDEFCORE_ERR_INVALID;
     }
+    /* The revision is a copy of the target's trees, so it is data of the
+     * shape they were written in (AD-15): the target's stamp, never this
+     * write's. Trees of the target written at different versions have no
+     * one stamp, and the revert is refused. */
+    rc = revert_stamp(cat, op, stamp, &stamp_len);
+    if (rc != GDEFCORE_OK) {
+      return rc;
+    }
+    meta.schema = stamp;
+    meta.schema_len = stamp_len;
     src = gdefstor_entity_revert(write, op->id.p, op->id.n, op->base_seq,
         op->target_seq, &meta, &rev);
     if (src == GDEFSTOR_ERR_CONFLICT) {
@@ -4633,8 +4724,13 @@ GDEFCORE_Result gdefcore_changeset_apply(GDEFCORE_Changeset * changeset,
     return rc;
   }
   /* The tenant's writes queue behind this one now: what is committed cannot
-   * move until it commits, so this is the epoch it applies on. */
-  rc = read_epoch(changeset->catalog, &epoch);
+   * move until it commits, so this is the epoch it applies on, and where
+   * core's data stands is what it writes on (AD-15). */
+  gdefcore_ent_schema_reset(changeset->catalog);
+  rc = gdefcore_ent_core_check(changeset->catalog, write);
+  if (rc == GDEFCORE_OK) {
+    rc = read_epoch(changeset->catalog, &epoch);
+  }
   if (rc == GDEFCORE_OK && epoch != changeset->epoch) {
     conflict = 1;
   }
@@ -4748,6 +4844,44 @@ GDEFCORE_Result gdefcore_changeset_apply(GDEFCORE_Changeset * changeset,
       return first;
     }
   }
+  return GDEFCORE_OK;
+}
+
+GDEFCORE_Result gdefcore_ent_apply_in(GDEFCORE_Changeset * changeset,
+    GDEFSTOR_Write * write, int64_t when) {
+  uint64_t epoch = 0;
+  uint64_t next_epoch = 0;
+  int conflict = 0;
+  size_t i;
+  GDEFCORE_Result rc;
+  if (changeset == NULL || write == NULL || changeset->applied ||
+      changeset->job_key.p != NULL ||
+      gdefcore_changeset_module_count(changeset) > 0) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  rc = read_epoch(changeset->catalog, &epoch);
+  if (rc == GDEFCORE_OK && epoch != changeset->epoch) {
+    conflict = 1;
+  }
+  for (i = 0; rc == GDEFCORE_OK && !conflict && i < changeset->nops; i++) {
+    GDEFCORE_Op * op = &changeset->ops[i];
+    if (module_op_kind(op->kind)) {
+      continue;
+    }
+    rc = apply_op(changeset, write, op, when, &conflict);
+  }
+  if (rc == GDEFCORE_OK && !conflict) {
+    rc = map_stor(gdefstor_counter_next(write, GDEFCORE_ENT_EPOCH,
+        sizeof GDEFCORE_ENT_EPOCH - 1, &next_epoch));
+  }
+  if (rc != GDEFCORE_OK || conflict) {
+    for (i = 0; i < changeset->nops; i++) {
+      changeset->ops[i].written = 0;
+    }
+    return rc != GDEFCORE_OK ? rc : name_list(changeset);
+  }
+  changeset->applied = 1;
+  changeset->epoch = next_epoch;
   return GDEFCORE_OK;
 }
 

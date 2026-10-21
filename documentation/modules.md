@@ -189,23 +189,62 @@ with `(related "blog.group-editor" (principal field.group))` (conditions.md).
   (`GDEFCORE_MODULE_RELATIONS_MAX`), four columns each. A manifest built before
   relations existed declares none.
 
-## Stored-data schema version
+## Stored-data schema versions
 
-A manifest says the version of the module's stored-data schema
-(`schema_version`, appended after relations; AD-15): what a tenant's data for
-the module is written in. 0, and a manifest built before the member, is 1.
-Until the suite's first release every module is at 1 (AD-34). Enabling a
-module writes the tenant's record of it (`core.module.enabled`, keyed by the
-module's name) with the installed version as its text, and every enable
-changeset writes the records of every module in the resulting set the same
-way. The install record keeps the version too, so a quarantined module, which
-is not called, still answers it (`gdefcore_module_schema`).
+Every component that stores data, core and each module, has a stored-data
+schema version (AD-15): an integer, 1 for its first shape and one more for
+each later one, never a semver. A manifest must say its module's
+(`schema_version`): 0, and a manifest too short to hold the member, are
+refused at install, in words. Core's is `GDEFCORE_SCHEMA_VERSION`, 1.
+`gdefcore_module_schema` answers either; the install record keeps a module's,
+so a quarantined module, which is not called, still answers it.
 
-A tenant's data set carries the records and names each enabled module with its
-version in its manifest (subjects.md, "Backups"). A restore refuses a data set
-whose data for a module is newer than the module installed here, or for a
-module not installed here, naming the module and both versions, and records a
-module whose data is older at the installed version.
+**Stamps.** Every revision, draft and record a component writes carries its
+schema stamp, `<component>/<version>` (defiant-storage model.h): records are
+core's (`core/1`); an entity is the data of the module its type's namespace
+names when that module is installed or the tenant holds its data, and core's
+otherwise (`core.*`, `site.*`, and any other namespace). History keeps every
+stamp, through export, import and migration. A revert copies a past
+revision's trees, so it is stamped as they were written.
+
+**Where the data stands.** Per tenant, the record `core.schema` of each
+component (`GDEFCORE_SCHEMA_TYPE`, keyed by its name, text the version)
+says the version its current data is at. A component's first write records
+the installed version; an enable records it when the tenant has none; a
+disable leaves it. `core.module.enabled` is an empty record per enabled
+module. A write of a component whose data is at an older version than the
+one installed is refused with `GDEFCORE_ERR_MAINTENANCE` and writes nothing;
+at a newer one, `GDEFCORE_ERR_UNSUPPORTED`. `gdefcore_schema_status` says the
+same for a tenant, in words, for a maintenance response (AD-15).
+
+**Steps and upcasters.** A manifest declares forward steps
+(`GDEFCORE_Module_Step`, from N to N + 1) and read-time upcasters
+(`GDEFCORE_Module_Upcaster`, the shape of N into that of N + 1), each at most
+once per version below its own; there are no steps back. A step stages a
+changeset on the migration's catalog and applies it with
+`gdefcore_migration_apply`, in the step's write: what it writes is stamped
+with the step's target. It reads its component's data in the shape it
+starts from. A read of an entity whose module declares upcasters runs them
+on each tree, from the version of the revision that wrote it (the newest
+revision up to the one read that changed that language) or of the draft, up
+to where the tenant's current data stands.
+
+**One migration path.** `gdefcore_schema_migrate` brings a tenant forward:
+core first, then each module by name, every step in turn. It checks
+everything first and writes nothing on a refusal, naming the component and
+both versions: data at a version with no step from it (a gap), data newer
+than the installed component, data of a module not installed. Each step
+commits in a write of its own with its row in the migration table
+(`core.migration`, keyed `<component>:<from>` in ten digits, text
+`<from> <to>`) and the version it reaches, because the next step reads what
+it wrote; a failed step leaves the tenant at the last version reached, under
+maintenance. A live upgrade (a host with a module installed above the
+tenant's version) and a restore of older data (subjects.md, "Backups") both
+call it, so the same tenant brought forward either way is written alike.
+`tools/check-migration.sh` plants a migration skipped at import, a revision
+upcast as the wrong version, a step that rewrites the migration table's
+history, a restore that dates its steps by its own clock, and a write that
+records the installed version over data that is behind, each red by name.
 
 ## Hooks
 

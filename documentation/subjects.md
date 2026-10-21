@@ -178,10 +178,12 @@ A backup is a pair (AD-19, AD-23):
   export, personal values as ciphertext, with the time it was taken in its
   manifest and what the tenant needs to come back up (AD-23, story S8): its
   edition, as the caller passes it from the installation's directory, and
-  every module it has enabled with the stored-data schema version its data is
-  at, read from the tenant's own records (`core.module.enabled`, one per
-  module, whose text is that version; an enable writes the installed
-  module's `schema_version`). It holds no key, no keyring wrap and no ledger.
+  every component whose data the tenant holds (`core` and each module) with
+  the stored-data schema version its current data is at, read from the
+  tenant's own records (`core.schema`, one per component, whose text is that
+  version; modules.md, "Stored-data schema versions"). Every revision, draft
+  and record in it carries the schema stamp it was written with. It holds no
+  key, no keyring wrap and no ledger.
 - the **key set**, `gdefcore_subject_keyset`: the key store's export
   (`defiant-keyset/1`): the wrapped subject keys, the keyring's wrap and the
   ledger, with the time it was taken. It is a key backup, kept and retained
@@ -191,11 +193,12 @@ Take the key set after the data set it pairs with. `gdefcore_subject_restore`
 checks everything before it writes: the archive as untrusted input (AD-37),
 that it is a data set, that the key set is this tenant's and not older than
 the data set (`GDEFCORE_ERR_STALE` otherwise, since such a key set may hold a
-key erased between the two), and that every module the data set needs is
+key erased between the two), and that every component the data set needs is
 installed here (the host it is given) at a stored-data schema version no older
-than the data's (`GDEFCORE_ERR_UNSUPPORTED` otherwise, the report naming the
-module and both versions), with the manifest and the records it carries
-agreeing (`GDEFCORE_ERR_CORRUPT` otherwise). Then, in AD-23's order:
+than the data's, with a forward step from every version between
+(`GDEFCORE_ERR_UNSUPPORTED` otherwise, the report naming the component and
+both versions), with the manifest and the records it carries agreeing
+(`GDEFCORE_ERR_CORRUPT` otherwise). Then, in AD-23's order:
 
 1. it merges the key set into the key store (its ledger replayed as erasures;
    no key comes back for a subject the live ledger or the set's names);
@@ -208,10 +211,13 @@ agreeing (`GDEFCORE_ERR_CORRUPT` otherwise). Then, in AD-23's order:
    revision that holds none. The caller applies one with
    `gdefcore_access_grant` and the same typed confirmation. Grants to other
    roles are restored as they were;
-3. it runs the forward migrations: a module whose data is at an older schema
-   version than the one installed is recorded at the installed one, as an
-   enable records it. A module's rows keep their shape and are read through
-   its upcasters (AD-15), so none is rewritten;
+3. it runs the forward migrations, `gdefcore_schema_migrate`, the one path a
+   live upgrade takes too: every component whose data is at an older version
+   than the installed one is brought forward by its steps, dated by the time
+   the caller passes. What was written keeps its shape and its stamp and is
+   read through the component's upcasters (AD-15); no row is rewritten. A
+   step that fails stops the restore, with the tenant at the last version
+   reached and under maintenance;
 4. it replays the ledger, now the union of the two, over the restored tenant
    and over the subjects' own data store, and purges the bound fragment cache
    of every subject it names;

@@ -926,6 +926,14 @@ GDEFCORE_API const uint8_t * gdefcore_catalog_tenant(
     const GDEFCORE_Catalog * catalog, size_t * out_len);
 
 /**
+ * @brief Borrow the store the catalog reads and writes: what
+ * gdefcore_schema_status() (module.h) asks about, for a request's
+ * maintenance answer. NULL for a NULL catalog.
+ */
+GDEFCORE_API GDEFSTOR_Store * gdefcore_catalog_store(
+    const GDEFCORE_Catalog * catalog);
+
+/**
  * @brief Remember the module host apply should fire. NULL clears it.
  *
  * The host is borrowed. It must outlive the catalog, or be cleared first.

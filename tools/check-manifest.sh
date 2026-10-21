@@ -26,7 +26,7 @@
 #   Manifest.AddRoutesPutsTabsAfterTheirParents
 #   Manifest.ServiceResolution      a handler or provider is the module's own
 #                                   service, at the version the table has
-#   Manifest.OldPrefix              a manifest is read only as far as it says
+#   Manifest.APrefixWithoutItsSchemaVersionIsRefused  a manifest is read only as far as it says
 #   Manifest.TemplateVariable       a declared variable is in story 2's contract
 #   Manifest.TemplateVariableKinds  a variable for no kind is refused
 #   Manifest.Hostile, Manifest.Limits
@@ -170,7 +170,8 @@ plant service-version-ignored src/module/decl.c testModule \
   '      if (0 && svcs[i].version != version) {'
 
 # The manifest is read past the prefix the module filled.
-plant manifest-read-past-size src/module/module.c testModule 'Manifest.OldPrefix' \
+plant manifest-read-past-size src/module/module.c testModule \
+  'Manifest.APrefixWithoutItsSchemaVersionIsRefused' \
   '  take_prefix(&man, sizeof man, src);' \
   '  memcpy(&man, src, sizeof man);'
 

@@ -61,7 +61,7 @@ GDEFSTOR_Store * OpenStore() {
 
 GDEFSTOR_Result PutOne(GDEFSTOR_Write * write, const char * key,
     const uint8_t * bytes, size_t len) {
-  return gdefstor_record_put(write, "core.test", 9, key, strlen(key), bytes,
+  return gdefstor_record_put(write, "core.test", 9, key, strlen(key), "core/1", 6, bytes,
       len);
 }
 
@@ -508,7 +508,7 @@ TEST(Write, OtherWaitAbortsThePortWrite) {
   EXPECT_EQ(gdefcore_request_write(request), nullptr);
   int found = 1;
   EXPECT_EQ(gdefstor_record_get(store, tenant, strlen(tenant), "core.test", 9,
-                "h", 1, &found, &got, &got_len),
+                "h", 1, &found, &got, &got_len, NULL, NULL),
       GDEFSTOR_OK);
   EXPECT_EQ(found, 0);
   EXPECT_EQ(got, nullptr);

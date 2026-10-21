@@ -126,6 +126,7 @@ void EnableGranting(World * w, const std::string & condition) {
   g_module.man.size = sizeof g_module.man;
   g_module.man.core_token = kCoreToken;
   g_module.man.core_token_len = strlen(kCoreToken);
+  g_module.man.schema_version = 1;
   g_module.man.name = "oracle";
   g_module.man.name_len = 6;
   g_module.man.label = "oracle";

@@ -128,7 +128,7 @@ plant draft-writes-revision $ENT testRevisions \
   'Revisions.ADraftIsNeverARevision' \
   '      rc = seals_refuse(cs, &seals, gdefcore_ent_put_draft(cat, write, op->id.p,
           op->type_name.p, op->type_name.n, look.exists ? op->draft_base : 0,
-          &op->staged, &seals));
+          &op->staged, &seals, stamp, stamp_len));
     }' \
   '      int moved_ = 0;
       rc = look.exists
@@ -136,7 +136,8 @@ plant draft-writes-revision $ENT testRevisions \
                      op->type_name.n, op->draft_base, &meta, &op->staged,
                      &seals, &rev, &moved_)
                : gdefcore_ent_put_draft(cat, write, op->id.p, op->type_name.p,
-                     op->type_name.n, 0, &op->staged, &seals);
+                     op->type_name.n, 0, &op->staged, &seals, stamp,
+                     stamp_len);
     }'
 
 # The first draft leaves the id reserved and makes no entity.
@@ -205,9 +206,9 @@ plant save-keeps-draft $ENT testRevisions \
 # A create reserves nothing: the id has no draft, so nothing holds it.
 plant create-reserves-nothing $ENT testRevisions \
   'Revisions.CreateReservesTheIdWithADraft' \
-  '  rc = map_stor(gdefstor_draft_put(write, type_name, type_len, id,
-      GDEFCORE_PUBLIC_ID_LEN, 0, NULL, 0));' \
-  '  rc = GDEFCORE_OK;'
+  '      rc = map_stor(gdefstor_draft_put(write, type_name, type_len, id,
+          GDEFCORE_PUBLIC_ID_LEN, 0, stamp, stamp_len, NULL, 0));' \
+  '      rc = GDEFCORE_OK;'
 
 # A publish or a draft does not move the version (defect 1.5.2: the memo and
 # the read set were keyed on a number that did not move).
@@ -246,7 +247,8 @@ plant draft-on-moved-head $ENT testRevisions \
         rc = gdefcore_ent_read_doc(cat, op->id.p, 0, 1, &moved_);
         if (rc == GDEFCORE_OK) {
           rc = gdefcore_ent_put_draft(cat, write, op->id.p, op->type_name.p,
-              op->type_name.n, look.revision, &moved_, NULL);
+              op->type_name.n, look.revision, &moved_, NULL, stamp,
+              stamp_len);
         }
         gdefcore_ent_doc_free(cat->alloc, &moved_);
         if (rc != GDEFCORE_OK) {

@@ -115,7 +115,7 @@ static GDEFCORE_Result id_get(GDEFCORE_Catalog * cat, const char * canon,
   int found = 0;
   GDEFCORE_Result rc = map_stor(gdefstor_record_get(cat->store,
       (const char *)cat->tenant, cat->tenant_len, kIdNs, sizeof kIdNs - 1, canon,
-      GDEFCORE_PUBLIC_ID_LEN, &found, &bytes, &len));
+      GDEFCORE_PUBLIC_ID_LEN, &found, &bytes, &len, NULL, NULL));
   *out_found = 0;
   if (rc == GDEFCORE_OK && found) {
     static const int states[] = {GDEFCORE_SCHEDULE_PENDING, GDEFCORE_SCHEDULE_DONE,
@@ -161,7 +161,7 @@ static GDEFCORE_Result id_put(GDEFSTOR_Write * write, const char * canon,
     return GDEFCORE_ERR_INTERNAL;
   }
   return map_stor(gdefstor_record_put(write, kIdNs, sizeof kIdNs - 1, canon,
-      GDEFCORE_PUBLIC_ID_LEN, (const uint8_t *)text, (size_t)n));
+      GDEFCORE_PUBLIC_ID_LEN, GDEFCORE_SCHEMA_CORE_STAMP, sizeof GDEFCORE_SCHEMA_CORE_STAMP - 1, (const uint8_t *)text, (size_t)n));
 }
 
 /* The pending job row of the entity, if any, goes (in @p write). */
@@ -193,8 +193,18 @@ static GDEFCORE_Result canon_of(const char * id, size_t id_len,
 
 static GDEFCORE_Result write_begin(GDEFCORE_Catalog * cat,
     GDEFSTOR_Write ** out) {
-  return map_stor(gdefstor_write_begin(cat->store, (const char *)cat->tenant,
-      cat->tenant_len, NULL, out));
+  GDEFCORE_Result rc = map_stor(gdefstor_write_begin(cat->store,
+      (const char *)cat->tenant, cat->tenant_len, NULL, out));
+  if (rc == GDEFCORE_OK) {
+    /* Core's records, written where core's data stands (AD-15). */
+    gdefcore_ent_schema_reset(cat);
+    rc = gdefcore_ent_core_check(cat, *out);
+    if (rc != GDEFCORE_OK) {
+      gdefstor_write_abort(*out);
+      *out = NULL;
+    }
+  }
+  return rc;
 }
 
 static GDEFCORE_Result write_end(GDEFSTOR_Write * write, GDEFCORE_Result rc) {
@@ -236,6 +246,7 @@ GDEFCORE_Result gdefcore_entity_schedule_publish(GDEFCORE_Catalog * catalog,
   rc = drop_pending(catalog, write, canon, &had);
   if (rc == GDEFCORE_OK) {
     rc = map_stor(gdefstor_record_put(write, kNs, sizeof kNs - 1, key, kKeyLen,
+        GDEFCORE_SCHEMA_CORE_STAMP, sizeof GDEFCORE_SCHEMA_CORE_STAMP - 1,
         (const uint8_t *)who, strlen(who)));
   }
   if (rc == GDEFCORE_OK) {
@@ -315,7 +326,7 @@ GDEFCORE_Result gdefcore_schedule_due(GDEFCORE_Catalog * catalog,
     const uint8_t * bytes = NULL;
     size_t len = 0;
     GDEFCORE_ScheduleJob * job = &out_jobs[*out_count];
-    if (gdefstor_record_list_item(list, i, &key, &key_len, &bytes, &len) !=
+    if (gdefstor_record_list_item(list, i, &key, &key_len, &bytes, &len, NULL, NULL) !=
             GDEFSTOR_OK ||
         !key_parse(key, key_len, &job->at_ms, job->id)) {
       rc = GDEFCORE_ERR_CORRUPT;
@@ -348,7 +359,7 @@ GDEFCORE_Result gdefcore_ent_job_claim(GDEFCORE_Changeset * cs,
    * runner applied, or that was cancelled or moved, is gone by now. */
   rc = map_stor(gdefstor_record_get(cat->store, (const char *)cat->tenant,
       cat->tenant_len, kNs, sizeof kNs - 1, cs->job_key.p, cs->job_key.n,
-      &found, &bytes, &len));
+      &found, &bytes, &len, NULL, NULL));
   gdefstor_bytes_free(NULL, bytes);
   if (rc != GDEFCORE_OK) {
     return rc;
@@ -410,7 +421,7 @@ static GDEFCORE_Result job_end(GDEFCORE_Catalog * cat, const char * key,
   }
   rc = map_stor(gdefstor_record_get(cat->store, (const char *)cat->tenant,
       cat->tenant_len, kNs, sizeof kNs - 1, key, kKeyLen, &found, &bytes,
-      &len));
+      &len, NULL, NULL));
   gdefstor_bytes_free(NULL, bytes);
   if (rc == GDEFCORE_OK && found) {
     rc = map_stor(gdefstor_record_delete(write, kNs, sizeof kNs - 1, key,
@@ -442,7 +453,7 @@ GDEFCORE_Result gdefcore_schedule_apply(GDEFCORE_Catalog * catalog,
    * inside the publish's write, which is the read that decides. */
   rc = map_stor(gdefstor_record_get(catalog->store,
       (const char *)catalog->tenant, catalog->tenant_len, kNs, sizeof kNs - 1,
-      key, kKeyLen, &found, &who, &who_len));
+      key, kKeyLen, &found, &who, &who_len, NULL, NULL));
   if (rc != GDEFCORE_OK) {
     gdefstor_bytes_free(NULL, who);
     return rc;

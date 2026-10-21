@@ -47,9 +47,9 @@ plant import-without-rebuild "$SUB" testRestore \
 #    and the derived data rebuilt.
 plant restore-returns-before-replay "$SUB" testRestore \
   'Restore.EveryStepRunsInOrderBeforeTheRestoreReturns' \
-  '    rc = forward_migrations(subjects, host, tenant_store, about, report);
+  '    rc = forward_migrations(subjects, host, tenant_store, when_ms, report);
   }' \
-  '    rc = forward_migrations(subjects, host, tenant_store, about, report);
+  '    rc = forward_migrations(subjects, host, tenant_store, when_ms, report);
   }
   if (rc == GDEFCORE_OK) {
     goto done; /* served from here */

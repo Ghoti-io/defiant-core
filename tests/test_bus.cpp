@@ -214,6 +214,7 @@ class Bus : public ::testing::Test {
       gManifest.size = sizeof gManifest;
       gManifest.core_token = kCoreToken;
       gManifest.core_token_len = strlen(kCoreToken);
+      gManifest.schema_version = 1;
       gManifest.name = "m";
       gManifest.name_len = 1;
       gManifest.label = "m";

@@ -53,6 +53,9 @@
 
 namespace {
 
+/* When a restore's forward migrations are dated (core story S11). */
+constexpr int64_t kRestoreMs = 1700000000000;
+
 const char kPlain[] = "platypus-secret";
 const char kField[] = "name";
 /* The reference that names whose a person's `name` is (story S7: every
@@ -287,7 +290,7 @@ class Subject : public ::testing::Test {
   GDEFCORE_Result Restore(GDEFSTOR_Store * into, const Bytes & data,
       const Bytes & keys) {
     return gdefcore_subject_restore(subjects_, NULL, into, U(data), data.size(),
-        U(keys), keys.size(), NULL);
+        U(keys), keys.size(), kRestoreMs, NULL);
   }
 
   /* Until the clock has moved on by a millisecond or more: a set taken after
@@ -1131,7 +1134,7 @@ TEST_F(Subject, ARestoreRefusesAnOlderKeySet) {
         sizeof storage_, NULL, &zip, &n));
     ASSERT_EQ(GDEFSMEMORY_OK, gdefsmemory_store_create(NULL, NULL, &other));
     EXPECT_EQ(GDEFCORE_ERR_FORMAT, gdefcore_subject_restore(subjects_, NULL,
-        other, zip, n, U(keys), keys.size(), NULL));
+        other, zip, n, U(keys), keys.size(), kRestoreMs, NULL));
     gdefstor_bytes_free(NULL, zip);
     gdefstor_store_destroy(other);
   }

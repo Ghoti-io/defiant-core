@@ -210,6 +210,7 @@ static const Surface kSurface[] = {
     {"gdefcore_patch_free", "P"},
     {"gdefcore_changeset_parse", "W"},
     {"gdefcore_catalog_tenant", "P"},
+    {"gdefcore_catalog_store", "P"},
     {"gdefcore_catalog_bind_host", "W"},
     {"gdefcore_catalog_bind_subjects", "W"},
     {"gdefcore_changeset_set_request", "W"},
@@ -317,6 +318,19 @@ static const Surface kSurface[] = {
     {"gdefcore_module_enable", "W"},
     {"gdefcore_module_disable", "W"},
     {"gdefcore_module_enabled", "RF"},
+    /* Stored-data schema versions (story S11): the host's own tables, a
+     * tenant's version records (no principal: they are the operator's), and
+     * the migration that writes. */
+    {"gdefcore_module_step", "P"},
+    {"gdefcore_module_upcaster", "P"},
+    {"gdefcore_module_upcaster_count", "P"},
+    {"gdefcore_schema_status", "RA"},
+    {"gdefcore_schema_migrate", "W"},
+    {"gdefcore_schema_text_free", "P"},
+    {"gdefcore_migration_catalog", "P"},
+    {"gdefcore_migration_step_of", "P"},
+    {"gdefcore_migration_time", "P"},
+    {"gdefcore_migration_apply", "W"},
     {"gdefcore_module_notice", "P"},
     {"gdefcore_module_error", "P"},
     {"gdefcore_module_mark_entered", "W"},

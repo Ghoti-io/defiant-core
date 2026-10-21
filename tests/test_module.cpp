@@ -188,7 +188,7 @@ extern "C" void ProbeEntered(void) {
    * S6b): one line per fact, `entered <hex>`. */
   if (g_probe_store == NULL ||
       gdefstor_record_get(g_probe_store, "\x01", 1, "core.module.install", 19,
-          "example", 7, &found, &bytes, &len) != GDEFSTOR_OK ||
+          "example", 7, &found, &bytes, &len, NULL, NULL) != GDEFSTOR_OK ||
       !found) {
     gdefstor_bytes_free(NULL, bytes);
     return;
@@ -295,6 +295,7 @@ void InstallGuest(GDEFCORE_Host * host, const char * name, const char * token,
   g_man.size = sizeof g_man;
   g_man.core_token = token;
   g_man.core_token_len = strlen(token);
+  g_man.schema_version = 1;
   g_man.name = name;
   g_man.name_len = strlen(name);
   g_man.label = name;
@@ -649,6 +650,7 @@ TEST_F(Module, Namespace) {
   g_man.size = sizeof g_man;
   g_man.core_token = "other-core";
   g_man.core_token_len = 10;
+  g_man.schema_version = 1;
   g_man.name = "foreign";
   g_man.name_len = 7;
   g_man.subs = &g_sub;
@@ -1475,6 +1477,7 @@ struct Guest {
     man.size = sizeof man;
     man.core_token = kCoreToken;
     man.core_token_len = strlen(kCoreToken);
+    man.schema_version = 1;
     man.name = name.data();
     man.name_len = name.size();
     man.label = name.data();
@@ -2843,47 +2846,34 @@ TEST_F(Manifest, VariableAndCodeContributionClash) {
   ASSERT_EQ(GDEFCORE_OK, w_.Enable("dup2")) << w_.message;
 }
 
-TEST_F(Manifest, OldPrefix) {
-  /* A module that fills a shorter prefix declares none and otherwise works.
-   * The tail past the prefix is poison, so reading it is seen. */
-  Guest * g = Rich("zeta");
-  GDEFCORE_Module_Manifest * man = &g->man;
-  man->size = offsetof(GDEFCORE_Module_Manifest, routes);
-  /* CONTROL: full size declares. */
+TEST_F(Manifest, APrefixWithoutItsSchemaVersionIsRefused) {
+  /* A manifest must say the version of its stored-data schema (core story
+   * S11): one too short to hold the member, whatever else it declares, and
+   * one that leaves it 0, are refused at install, in words, and installs
+   * nothing; the full one installs and works. */
+  for (size_t size : {offsetof(GDEFCORE_Module_Manifest, services),
+           offsetof(GDEFCORE_Module_Manifest, routes),
+           offsetof(GDEFCORE_Module_Manifest, schema_version)}) {
+    Guest * g = Rich("zeta");
+    g->man.size = size;
+    EXPECT_EQ(GDEFCORE_ERR_INVALID,
+        gdefcore_module_install_guest(w_.host, kEntries[g->slot]));
+    EXPECT_NE(std::string::npos,
+        HostError(w_.host).find("no stored-data schema version"))
+        << HostError(w_.host);
+    uint32_t v = 0;
+    EXPECT_EQ(GDEFCORE_ERR_INVALID, gdefcore_module_schema(w_.host, "zeta", 4,
+        &v)) << "a refused manifest was installed";
+  }
+  Guest * zero = Rich("zero");
+  zero->man.schema_version = 0;
+  EXPECT_EQ(GDEFCORE_ERR_INVALID,
+      gdefcore_module_install_guest(w_.host, kEntries[zero->slot]));
+  /* CONTROL: full size, version 1, declares and works. */
   Guest * full = Rich("full");
   w_.Install(full);
   ASSERT_EQ(GDEFCORE_OK, w_.Enable("full"));
   EXPECT_EQ(5u, Count(w_.Dump(), "route full "));
-  ASSERT_EQ(GDEFCORE_OK, w_.Disable("full"));
-  w_.Install(g);
-  ASSERT_EQ(GDEFCORE_OK, w_.Enable("zeta")) << w_.message;
-  EXPECT_EQ("contributions core.page:\ncontributions core.pane:\n", w_.Dump());
-  EXPECT_EQ("", w_.TableDump());
-  /* Its own tables still work: the hook and the services. */
-  EXPECT_NE(nullptr,
-      gdefcore_module_service(w_.host, w_.request, "zeta.handler", 12,
-          GDEFCORE_MODULE_ROUTE_HANDLER_VERSION));
-  int on = 0;
-  ASSERT_EQ(GDEFCORE_OK,
-      gdefcore_module_enabled(w_.host, w_.request, "zeta", 4, &on));
-  EXPECT_EQ(1, on);
-  /* A prefix that ends after the routes: routes declared, links and the rest
-   * ignored although the tail says there are some. */
-  Guest * mid = Rich("mid");
-  mid->man.size = offsetof(GDEFCORE_Module_Manifest, links);
-  w_.Install(mid);
-  ASSERT_EQ(GDEFCORE_OK, w_.Enable("mid")) << w_.message;
-  std::string dump = w_.Dump();
-  EXPECT_EQ(5u, Count(dump, "route mid "));
-  EXPECT_EQ(0u, Count(dump, "link mid "));
-  EXPECT_EQ(0u, Count(dump, "setting mid "));
-  EXPECT_EQ(0u, Count(dump, "variable mid "));
-  /* A manifest that ends before the services: still loads. */
-  Guest * tiny = Rich("tiny");
-  tiny->man.size = offsetof(GDEFCORE_Module_Manifest, services);
-  w_.Install(tiny);
-  ASSERT_EQ(GDEFCORE_OK, w_.Enable("tiny")) << w_.message;
-  EXPECT_EQ(0u, Count(w_.Dump(), "route tiny "));
 }
 
 TEST_F(Manifest, BothLoaders) {

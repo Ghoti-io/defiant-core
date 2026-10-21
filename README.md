@@ -57,6 +57,10 @@ prints `SKIPPED: postgres` and is not counted as passed.
 The restore tests (`testRestore`, `check-restore`) restore a tenant taken on
 memory into memory and SQLite; `make test-restore-postgres` restores it into
 Postgres, through the same `tools/pg-test.sh`, and fails without a server.
+The same binary holds the forward-migration tests (`check-migration`): a
+restore of older data and a live upgrade bring a module's data forward by the
+same steps and end byte-identical, every revision keeping the version it was
+written at.
 
 The scale test (`testScale`, `check-scale`) holds a list, a count and a create
 at 10,000 entities of one type to what they cost at 1,000, on SQLite by

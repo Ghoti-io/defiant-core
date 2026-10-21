@@ -71,6 +71,9 @@
 
 namespace {
 
+/* When a restore's forward migrations are dated (core story S11). */
+constexpr int64_t kRestoreMs = 1700000000000;
+
 const char kCanary[] = "zq-canary-7f3a91c4-platypus";
 const char kCanaryLater[] = "zq-canary-7f3a91c4-platypus-v2";
 const char kCanaryFr[] = "zq-canary-7f3a91c4-ornithorynque";
@@ -620,7 +623,7 @@ class Erasure : public ::testing::Test {
         const uint8_t * tb = NULL;
         size_t tbn = 0;
         ASSERT_EQ(GDEFSTOR_OK,
-            gdefstor_record_list_item(types, ti, &tk, &tkn, &tb, &tbn));
+            gdefstor_record_list_item(types, ti, &tk, &tkn, &tb, &tbn, NULL, NULL));
         GDEFSTOR_Type * type = NULL;
         if (gdefstor_type_get(site_, tenant, sizeof storage_, tk, tkn, &type) !=
             GDEFSTOR_OK) {
@@ -1233,6 +1236,7 @@ TEST_F(Erasure, Channels) {
             sizeof storage_, NULL, &write));
     ASSERT_EQ(GDEFSTOR_OK,
         gdefstor_record_put(write, "x.test", 6, "row", 3,
+            "core/1", 6,
             reinterpret_cast<const uint8_t *>(kCanary), strlen(kCanary)));
     ASSERT_EQ(GDEFSTOR_OK, gdefstor_write_commit(write));
     zip = StorageExport(site_, storage_, sizeof storage_);
@@ -1481,7 +1485,7 @@ TEST_F(Erasure, SnapshotCarriesNoKey) {
   ASSERT_EQ(GDEFCORE_OK,
       gdefcore_subject_restore(subjects_, NULL, empty,
           reinterpret_cast<const uint8_t *>(taken.data()), taken.size(),
-          reinterpret_cast<const uint8_t *>(keys.data()), keys.size(), NULL));
+          reinterpret_cast<const uint8_t *>(keys.data()), keys.size(), kRestoreMs, NULL));
   ASSERT_EQ(GDEFCORE_OK,
       gdefcore_catalog_open(empty, storage_, sizeof storage_, NULL, NULL,
           &restored));
@@ -1738,6 +1742,8 @@ static void PlainRevision(GDEFSTOR_Store * store, const uint8_t * tenant,
   meta.who = "";
   meta.why = "";
   meta.when_ms = 1;
+  meta.schema = "core/1";
+  meta.schema_len = 6;
   ASSERT_EQ(GDEFSTOR_OK, gdefstor_write_begin(store,
       reinterpret_cast<const char *>(tenant), tenant_len, NULL, &w));
   ASSERT_EQ(GDEFSTOR_OK, gdefstor_entity_save(w, entity, strlen(entity), base,
@@ -1769,7 +1775,7 @@ static void PlainDraft(GDEFSTOR_Store * store, const uint8_t * tenant,
   ASSERT_EQ(GDEFSTOR_OK, gdefstor_write_begin(store,
       reinterpret_cast<const char *>(tenant), tenant_len, NULL, &w));
   ASSERT_EQ(GDEFSTOR_OK, gdefstor_draft_put(w, "site.person", 11, entity,
-      strlen(entity), base, &dt, 1));
+      strlen(entity), base, "core/1", 6, &dt, 1));
   ASSERT_EQ(GDEFSTOR_OK, gdefstor_write_commit(w));
   gdefstor_bytes_free(NULL, json);
   gdefstor_type_free(type);

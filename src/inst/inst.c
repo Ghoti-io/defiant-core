@@ -33,6 +33,7 @@
 
 #include <ghoti.io/defiant-core/macros.h>
 #include <ghoti.io/defiant-core/inst.h>
+#include <ghoti.io/defiant-core/module.h>
 #include <ghoti.io/defiant-core/subject.h>
 
 #include "inst_internal.h"
@@ -792,7 +793,7 @@ static GDEFCORE_Result write_record(GDEFCORE_Inst * inst, const char * id,
       (const char *)kRegistryTenant, sizeof kRegistryTenant, NULL, &write));
   if (rc == GDEFCORE_OK) {
     rc = map_stor(gdefstor_record_put(write, kRegistryNs, strlen(kRegistryNs),
-        id, GDEFCORE_PUBLIC_ID_LEN, (const uint8_t *)b.p, b.n));
+        id, GDEFCORE_PUBLIC_ID_LEN, GDEFCORE_SCHEMA_CORE_STAMP, sizeof GDEFCORE_SCHEMA_CORE_STAMP - 1, (const uint8_t *)b.p, b.n));
     if (rc == GDEFCORE_OK) {
       rc = map_stor(gdefstor_write_commit(write));
     } else {
@@ -1055,7 +1056,7 @@ static GDEFCORE_Result load_slots(GDEFCORE_Inst * inst, const uint8_t * root) {
       const uint8_t * bytes = NULL;
       size_t blen = 0;
       int is_default = 0;
-      if (gdefstor_record_list_item(list, i, &key, &key_len, &bytes, &blen) !=
+      if (gdefstor_record_list_item(list, i, &key, &key_len, &bytes, &blen, NULL, NULL) !=
           GDEFSTOR_OK) {
         gdefstor_record_list_free(list);
         return GDEFCORE_ERR_CORRUPT;

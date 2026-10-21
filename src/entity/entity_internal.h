@@ -34,6 +34,7 @@
 
 #include <ghoti.io/defiant-core/macros.h>
 #include <ghoti.io/defiant-core/entity.h>
+#include <ghoti.io/defiant-core/module.h>
 #include <ghoti.io/defiant-storage/model.h>
 
 enum {
@@ -198,6 +199,23 @@ struct GDEFCORE_Catalog {
   GDEFCORE_Limits limits;
   GDEFCORE_Host * host;
   struct GDEFCORE_Subjects * subjects; /* the keys that index its values */
+  /* A migration's catalog (migrate.c): its step's write, the component the
+   * step brings forward and the version it writes, and the step's clock.
+   * NULL outside a step. */
+  GDEFSTOR_Write * mig_write;
+  char mig_comp[GDEFSTOR_SCHEMA_COMPONENT_MAX + 1];
+  size_t mig_comp_len;
+  uint32_t mig_to;
+  int64_t mig_now;
+  /* The components a write has checked already (schema.c): where the
+   * tenant's data of each stands, for the write's stamps. */
+  const GDEFSTOR_Write * checked_write;
+  struct {
+    char name[GDEFSTOR_SCHEMA_COMPONENT_MAX + 1];
+    size_t len;
+    uint32_t version;
+  } checked[8];
+  size_t nchecked;
 };
 
 struct GDEFCORE_Changeset {
@@ -348,7 +366,7 @@ GDEFCORE_Result gdefcore_ent_save_doc(GDEFCORE_Catalog * cat,
 GDEFCORE_Result gdefcore_ent_put_draft(GDEFCORE_Catalog * cat,
     GDEFSTOR_Write * write, const char * canon, const char * type,
     size_t type_len, uint64_t base, const GDEFCORE_Doc * doc,
-    GDEFCORE_Seals * seals);
+    GDEFCORE_Seals * seals, const char * stamp, size_t stamp_len);
 
 /* The subject the entity's current tree, else its draft, records for sealed
  * text @p text of personal field @p field in @p lang; *out_found 0 when
@@ -357,6 +375,60 @@ GDEFCORE_Result gdefcore_ent_value_subject(GDEFCORE_Catalog * cat,
     const char * canon, const char * lang, size_t lang_len, const char * field,
     size_t field_len, const char * text, size_t len,
     char out[GDEFCORE_PUBLIC_ID_LEN + 1], int * out_found);
+
+/* ---- schema.c (AD-15, module.h) ------------------------------------------ */
+
+/* Apply @p changeset's ops in @p write, dated @p when, and move the config
+ * epoch there: a migration's step (migrate.c). No confirmation, no hook, no
+ * commit. A changeset that touches a module's enablement, or a scheduled
+ * publish's, is ::GDEFCORE_ERR_INVALID. */
+GDEFCORE_Result gdefcore_ent_apply_in(GDEFCORE_Changeset * changeset,
+    GDEFSTOR_Write * write, int64_t when);
+
+/* A positive decimal of at most 32 bits without leading zeros. */
+int gdefcore_ent_schema_text(const char * p, size_t n, uint32_t * out);
+/* Where the tenant's data of @p comp stands (::GDEFCORE_SCHEMA_TYPE), as of
+ * the last commit: *out_found 0 when it holds none. */
+GDEFCORE_Result gdefcore_ent_recorded(GDEFCORE_Catalog * cat,
+    const char * comp, size_t comp_len, int * out_found,
+    uint32_t * out_version);
+/* The component whose data entities of @p type are: the module the type's
+ * namespace names, when the host has it installed or the tenant holds its
+ * data; core otherwise (core.*, site.*, and any other namespace). */
+GDEFCORE_Result gdefcore_ent_owner(GDEFCORE_Catalog * cat, const char * type,
+    size_t type_len, char out[GDEFSTOR_SCHEMA_COMPONENT_MAX + 1],
+    size_t * out_len);
+/* The schema stamp a write of @p comp's data takes in @p write, once the
+ * tenant's data of it is seen to stand where the component writes it: its
+ * first data records it at the installed version, in @p write; data at an
+ * older version is ::GDEFCORE_ERR_MAINTENANCE, at a newer one
+ * ::GDEFCORE_ERR_UNSUPPORTED. Inside a migration's step, the step's target. */
+GDEFCORE_Result gdefcore_ent_stamp(GDEFCORE_Catalog * cat,
+    GDEFSTOR_Write * write, const char * comp, size_t comp_len,
+    char out[GDEFSTOR_SCHEMA_MAX_BYTES + 1], size_t * out_len);
+/* gdefcore_ent_stamp() of the owner of @p type. */
+GDEFCORE_Result gdefcore_ent_type_stamp(GDEFCORE_Catalog * cat,
+    GDEFSTOR_Write * write, const char * type, size_t type_len,
+    char out[GDEFSTOR_SCHEMA_MAX_BYTES + 1], size_t * out_len);
+/* gdefcore_ent_stamp() of core: every write of a tenant's data checks it. */
+GDEFCORE_Result gdefcore_ent_core_check(GDEFCORE_Catalog * cat,
+    GDEFSTOR_Write * write);
+/* Forget what earlier writes checked. */
+void gdefcore_ent_schema_reset(GDEFCORE_Catalog * cat);
+/* Whether a read of @p type has upcasters to run: the module its namespace
+ * names is installed and declares any. */
+int gdefcore_ent_upcasts(GDEFCORE_Catalog * cat, const char * type,
+    size_t type_len);
+/* Bring @p tree, written as @p stamp says, to the installed version of the
+ * stamp's component through its upcasters, in place. */
+GDEFCORE_Result gdefcore_ent_upcast(GDEFCORE_Catalog * cat, const char * type,
+    size_t type_len, const GDEFSTOR_Type * decl, const char * stamp,
+    size_t stamp_len, GDEFSTOR_Tree * tree);
+/* The stamp of language @p lang's tree as of @p revision (0: now): that of
+ * the newest revision up to it that changed the language. */
+GDEFCORE_Result gdefcore_ent_lang_stamp(const GDEFSTOR_History * h,
+    const char * lang, size_t lang_len, uint64_t revision,
+    char out[GDEFSTOR_SCHEMA_MAX_BYTES + 1], size_t * out_len);
 
 /* ---- schedule.c ---------------------------------------------------------- */
 

@@ -237,6 +237,7 @@ class TPerm : public ::testing::Test {
     g_man[slot].size = sizeof g_man[slot];
     g_man[slot].core_token = kCoreToken;
     g_man[slot].core_token_len = strlen(kCoreToken);
+    g_man[slot].schema_version = 1;
     g_man[slot].name = g_names[slot];
     g_man[slot].name_len = strlen(g_names[slot]);
     g_man[slot].label = g_names[slot];

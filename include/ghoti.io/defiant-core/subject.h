@@ -458,17 +458,19 @@ GDEFCORE_API GDEFCORE_Result gdefcore_subject_export(
  * It holds the tenant's rows, personal values as ciphertext, and nothing of
  * the key store: no key, no keyring wrap, no ledger. It holds no blind-index
  * row either (AD-23): gdefcore_subject_restore() rebuilds them. Its manifest
- * names @p edition and every module the tenant has enabled with the
- * stored-data schema version its data is at, read from the tenant's records
- * (::GDEFCORE_MODULE_ENABLED_TYPE), which travel in the same snapshot. Free
- * @p out_bytes with gdefstor_bytes_free() and the store allocator.
+ * names @p edition and every component whose data the tenant holds (`core`
+ * and its modules) with the stored-data schema version its current data is
+ * at, read from the tenant's records (::GDEFCORE_SCHEMA_TYPE), which travel
+ * in the same snapshot; every revision, draft and record in it carries the
+ * stamp it was written with. Free @p out_bytes with gdefstor_bytes_free()
+ * and the store allocator.
  *
  * @param edition The tenant's edition as its installation pins it
  *   (gdefcore_inst_resolve()), `defiant-edition/<n>`; NULL with
  *   @p edition_len 0 for a tenant that pins none.
  * @return ::GDEFCORE_OK, ::GDEFCORE_ERR_INVALID (an edition that is not
- *   `defiant-edition/<n>`), ::GDEFCORE_ERR_CORRUPT (an enabled module's record
- *   that does not hold a schema version), or the store's error.
+ *   `defiant-edition/<n>`), ::GDEFCORE_ERR_CORRUPT (a ::GDEFCORE_SCHEMA_TYPE
+ *   record that does not hold a schema version), or the store's error.
  */
 GDEFCORE_API GDEFCORE_Result gdefcore_subject_snapshot(
     GDEFCORE_Subjects * subjects, GDEFSTOR_Store * tenant_store,
@@ -519,12 +521,15 @@ typedef struct GDEFCORE_Restore_Held {
  * (a plain storage snapshot), is ::GDEFCORE_ERR_FORMAT. A key set older than
  * the data set is ::GDEFCORE_ERR_STALE: it could bring back a key erased after
  * it was taken. A key set whose keyring wrap is not this tenant's is
- * ::GDEFCORE_ERR_INVALID. A module the data set's manifest names that its
- * records do not enable at that version, or the other way about, is
- * ::GDEFCORE_ERR_CORRUPT. A module the data set needs that @p host does not
- * have installed, or whose stored data is at a schema version newer than the
- * installed one (gdefcore_module_schema()), is ::GDEFCORE_ERR_UNSUPPORTED,
- * and the report says, naming the module and both versions.
+ * ::GDEFCORE_ERR_INVALID. A component the data set's manifest names that its
+ * records (::GDEFCORE_SCHEMA_TYPE) do not hold at that version, or the other
+ * way about, is ::GDEFCORE_ERR_CORRUPT. A module the data set needs that
+ * @p host does not have installed, a component whose stored data is at a
+ * schema version newer than the installed one (gdefcore_module_schema()),
+ * and one whose data is at a version from which no forward step leads to the
+ * installed one (a gap, gdefcore_module_step()) are each
+ * ::GDEFCORE_ERR_UNSUPPORTED, and the report says, naming the component and
+ * both versions.
  *
  * Then, in this order: (1) the key set is merged into the key store (its
  * ledger rows replayed as erasures, and no key brought back for a subject the
@@ -534,11 +539,13 @@ typedef struct GDEFCORE_Restore_Held {
  * held back (gdefcore_access_hold_for_confirmation()): rated, reported in words,
  * and not applied, because granting it is what the admin edit asks a typed
  * confirmation for; the caller applies one with that confirmation through
- * gdefcore_access_grant(); (3) the forward migrations: a module whose data is
- * at an older schema version than the installed one is recorded at the
- * installed one, as an enable records it (::GDEFCORE_MODULE_ENABLED_TYPE;
- * AD-15: a module's stored data keeps its shape and is read through its
- * upcasters, so no row is rewritten); (4) the ledger, now the union of the
+ * gdefcore_access_grant(); (3) the forward migrations: every component whose
+ * data is at an older schema version than the installed one is brought
+ * forward by gdefcore_schema_migrate(), the path a live upgrade takes, its
+ * steps dated @p when_ms (what was written keeps its shape and its stamp and
+ * is read through the upcasters; no row is rewritten; a step that fails
+ * stops the restore with the tenant under maintenance); (4) the ledger, now
+ * the union of the
  * live one and the set's, is replayed: the blind-index rows of every subject
  * it names are deleted, in @p tenant_store and in this subjects' own data
  * store, and the bound fragment cache purged of them; (5) the derived data a
@@ -553,8 +560,11 @@ typedef struct GDEFCORE_Restore_Held {
  * keyring from it, and then call this.
  *
  * @param host The destination's modules (borrowed): the installed versions a
- *   data set's modules are checked against. NULL is an installation with no
- *   module installed.
+ *   data set's components are checked against and brought to. NULL is an
+ *   installation with no module installed.
+ * @param when_ms What the forward migrations' writes are dated (the
+ *   caller's clock, AD-8): a live upgrade run at the same time writes the
+ *   same rows.
  * @param out_report May be NULL. Receives the report, on success and on a
  *   refusal alike (a refusal's reason is gdefcore_restore_reason()), unless
  *   memory ran out for it. Free it with gdefcore_restore_free().
@@ -562,7 +572,8 @@ typedef struct GDEFCORE_Restore_Held {
 GDEFCORE_API GDEFCORE_Result gdefcore_subject_restore(
     GDEFCORE_Subjects * subjects, struct GDEFCORE_Host * host,
     GDEFSTOR_Store * tenant_store, const uint8_t * data, size_t data_len,
-    const uint8_t * keys, size_t keys_len, GDEFCORE_Restore ** out_report);
+    const uint8_t * keys, size_t keys_len, int64_t when_ms,
+    GDEFCORE_Restore ** out_report);
 
 /**
  * @brief Why the restore refused, in plain words, NUL-terminated; NULL when
@@ -591,7 +602,7 @@ GDEFCORE_API size_t gdefcore_restore_held_count(
 GDEFCORE_API GDEFCORE_Result gdefcore_restore_held(
     const GDEFCORE_Restore * report, size_t index, GDEFCORE_Restore_Held * out);
 
-/** @return How many modules the restore's forward migrations moved on. */
+/** @return How many forward steps the restore's migrations applied. */
 GDEFCORE_API size_t gdefcore_restore_migrated_count(
     const GDEFCORE_Restore * report);
 

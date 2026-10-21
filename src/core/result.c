@@ -51,6 +51,8 @@ const char * gdefcore_result_string(GDEFCORE_Result result) {
       return "Offload queue full";
     case GDEFCORE_ERR_STALE:
       return "Key set older than its data set";
+    case GDEFCORE_ERR_MAINTENANCE:
+      return "Tenant under maintenance: a migration is due";
     case GDEFCORE_RESULT_COUNT:
     default:
       return "Unknown error";

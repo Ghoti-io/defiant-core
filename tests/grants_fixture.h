@@ -151,6 +151,7 @@ struct ModDef {
     man.size = sizeof man;
     man.core_token = kCoreToken;
     man.core_token_len = strlen(kCoreToken);
+    man.schema_version = 1;
     man.name = S(name);
     man.name_len = name.size();
     man.label = man.name;

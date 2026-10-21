@@ -2201,11 +2201,13 @@ static int schema_text(const char * p, size_t n, uint32_t * out) {
   return 1;
 }
 
-/* The tenant's enabled modules, from its own records, in key order: what the
- * data set it is in says, so the manifest and the records agree. */
-static GDEFCORE_Result enabled_modules(GDEFCORE_Subjects * subjects,
+/* The components whose data the tenant holds (core and its modules), from
+ * its own records (::GDEFCORE_SCHEMA_TYPE), in key order, each with where its
+ * current data stands: what the data set they are in says, so the manifest
+ * and the records agree. */
+static GDEFCORE_Result data_components(GDEFCORE_Subjects * subjects,
     GDEFSTOR_Store * store, ModRec * out, size_t * out_n) {
-  static const char ns[] = GDEFCORE_MODULE_ENABLED_TYPE;
+  static const char ns[] = GDEFCORE_SCHEMA_TYPE;
   uint64_t offset = 0;
   *out_n = 0;
   for (;;) {
@@ -2225,7 +2227,7 @@ static GDEFCORE_Result enabled_modules(GDEFCORE_Subjects * subjects,
       const uint8_t * bytes = NULL;
       size_t blen = 0;
       rc = from_stor(gdefstor_record_list_item(list, i, &key, &key_len,
-          &bytes, &blen));
+          &bytes, &blen, NULL, NULL));
       if (rc == GDEFCORE_OK && *out_n >= kModulesMax) {
         rc = GDEFCORE_ERR_LIMIT;
       }
@@ -2262,7 +2264,7 @@ GDEFCORE_Result gdefcore_subject_snapshot(GDEFCORE_Subjects * subjects,
       out_len == NULL || (edition == NULL && edition_len != 0)) {
     return GDEFCORE_ERR_INVALID;
   }
-  rc = enabled_modules(subjects, tenant_store, mods, &n);
+  rc = data_components(subjects, tenant_store, mods, &n);
   if (rc != GDEFCORE_OK) {
     return rc;
   }
@@ -2429,20 +2431,20 @@ static GDEFCORE_Result from_garc(GARC_Result gr) {
 }
 
 /* What the walk of a data set saw that a restore checks before it writes:
- * the modules its records enable, at the schema their records hold. */
+ * the components whose data its records hold, at the versions they say. */
 typedef struct Walk {
   ModRec mods[kModulesMax];
   size_t n;
-  int bad; /* a module record that is not a name and a schema version */
+  int bad; /* a schema record that is not a name and a schema version */
 } Walk;
 
 static const char kRecordsMember[] = "model/records.json";
 
-/* The records member's module records (formats.md:
- * `{"records":[{"namespace":…,"key":…,"text":…|"hex":…}]}`). Anything else
- * in it is the storage import's to judge. */
+/* The records member's schema records (formats.md:
+ * `{"records":[{"namespace":…,"key":…,"text":…|"hex":…,"schema":…}]}`).
+ * Anything else in it is the storage import's to judge. */
 static void walk_records(const GTEXT_JSON_Value * root, Walk * walk) {
-  static const char ns[] = GDEFCORE_MODULE_ENABLED_TYPE;
+  static const char ns[] = GDEFCORE_SCHEMA_TYPE;
   const GTEXT_JSON_Value * arr = gtext_json_object_get(root, "records", 7);
   size_t i;
   for (i = 0; i < gtext_json_array_size(arr); i++) {
@@ -2760,64 +2762,90 @@ void gdefcore_restore_free(GDEFCORE_Restore * report) {
 
 /* ---- the restore's steps ---------------------------------------------------- */
 
-/* The modules the data set needs, against what is installed here (AD-23):
- * the manifest and the records it carries agree, every module is installed,
- * and none of its data is at a schema newer than the installed one. Nothing
- * is written. */
+/* The components the data set needs, against what is installed here (AD-23,
+ * AD-15): the manifest and the records it carries agree, every module is
+ * installed, none of the data is at a version newer than the installed one,
+ * and from the version each one's data is at, a forward step leads to every
+ * version up to the installed one. Nothing is written. */
 static GDEFCORE_Result check_modules(struct GDEFCORE_Host * host,
     const GDEFSTOR_SnapshotAbout * about, const Walk * walk,
     GDEFCORE_Restore * report) {
   size_t n = gdefstor_snapshot_about_module_count(about);
   size_t i;
   if (walk->bad) {
-    report_why(report, "The snapshot holds a record of an enabled module that "
-                       "is not a module name and a stored-data schema "
-                       "version, so nothing was restored.");
+    report_why(report, "The snapshot holds a record of where a component's "
+                       "data stands that is not a component name and a "
+                       "stored-data schema version, so nothing was "
+                       "restored.");
     return GDEFCORE_ERR_CORRUPT;
   }
   if (n != walk->n) {
-    report_why(report, "The snapshot's manifest names %lu enabled modules and "
-                       "its records enable %lu, so it does not say what the "
-                       "tenant needs and nothing was restored.",
+    report_why(report, "The snapshot's manifest names %lu components with "
+                       "stored data and its records name %lu, so it does not "
+                       "say what the tenant needs and nothing was restored.",
         (unsigned long)n, (unsigned long)walk->n);
     return GDEFCORE_ERR_CORRUPT;
   }
   for (i = 0; i < n; i++) {
     GDEFSTOR_SnapshotModule m;
-    char name[GDEFSTOR_SNAPSHOT_MODULE_NAME_MAX + 1];
+    char name[GDEFSTOR_SNAPSHOT_MODULE_NAME_MAX + 16];
     uint32_t here = 0;
+    uint32_t v;
     GDEFCORE_Result rc = from_stor(gdefstor_snapshot_about_module(about, i,
         &m));
     if (rc != GDEFCORE_OK) {
       return rc;
     }
     shown(name, sizeof name, m.name, m.name_len);
+    if (!span_eq(m.name, m.name_len, GDEFCORE_SCHEMA_CORE,
+            sizeof GDEFCORE_SCHEMA_CORE - 1)) {
+      /* A module is named as one; core is core. */
+      char bare[GDEFSTOR_SNAPSHOT_MODULE_NAME_MAX + 1];
+      shown(bare, sizeof bare, m.name, m.name_len);
+      snprintf(name, sizeof name, "module %.64s", bare);
+    }
     if (!span_eq(m.name, m.name_len, walk->mods[i].name, walk->mods[i].len) ||
         m.schema != walk->mods[i].schema) {
-      report_why(report, "The snapshot's manifest says module %s's data is at "
+      report_why(report, "The snapshot's manifest says %s's data is at "
                          "stored-data schema version %lu, and its records do "
-                         "not enable it at that version, so nothing was "
-                         "restored.",
+                         "not say so, so nothing was restored.",
           name, (unsigned long)m.schema);
       return GDEFCORE_ERR_CORRUPT;
     }
     if (gdefcore_module_schema(host, m.name, m.name_len, &here) !=
         GDEFCORE_OK) {
-      report_why(report, "The snapshot's tenant has module %s enabled, with "
-                         "its data at stored-data schema version %lu, and "
-                         "module %s is not installed here, so nothing was "
-                         "restored. Install it first.",
+      report_why(report, "The snapshot's tenant holds data of %s, at "
+                         "stored-data schema version %lu, and %s is not "
+                         "installed here, so nothing was restored. Install it "
+                         "first.",
           name, (unsigned long)m.schema, name);
       return GDEFCORE_ERR_UNSUPPORTED;
     }
     if (m.schema > here) {
-      report_why(report, "The snapshot holds module %s's data at stored-data "
-                         "schema version %lu, newer than version %lu of module "
-                         "%s installed here, so nothing was restored. Install "
-                         "module %s at version %lu or later first.",
+      report_why(report, "The snapshot holds %s's data at stored-data "
+                         "schema version %lu, newer than version %lu of %s "
+                         "installed here, so nothing was restored. Install "
+                         "%s at version %lu or later first.",
           name, (unsigned long)m.schema, (unsigned long)here, name, name,
           (unsigned long)m.schema);
       return GDEFCORE_ERR_UNSUPPORTED;
+    }
+    for (v = m.schema; v < here; v++) {
+      GDEFCORE_Step_Fn fn = NULL;
+      rc = gdefcore_module_step(host, m.name, m.name_len, v, &fn, NULL);
+      if (rc != GDEFCORE_OK) {
+        return rc;
+      }
+      if (fn == NULL) {
+        report_why(report, "The snapshot holds %s's data at stored-data "
+                           "schema version %lu and version %lu is installed "
+                           "here, and %s declares no step from version %lu "
+                           "to %lu, so its data could not be brought forward "
+                           "and nothing was restored.",
+            name, (unsigned long)m.schema, (unsigned long)here, name,
+            (unsigned long)v, (unsigned long)(v + 1));
+        return GDEFCORE_ERR_UNSUPPORTED;
+      }
     }
   }
   return GDEFCORE_OK;
@@ -2918,53 +2946,26 @@ static GDEFCORE_Result import_data(GDEFCORE_Subjects * subjects,
   return rc;
 }
 
-/* Step 3, the forward migrations: a module whose data the set holds at an
- * older stored-data schema than the one installed is recorded at the
- * installed one, as enabling it records it. Its rows keep their shape and are
- * read through its upcasters (AD-15), so none is rewritten. */
+/* Step 3, the forward migrations: every component whose data the set holds
+ * at an older stored-data schema version than the one installed is brought
+ * forward by its steps, through the one migration path a live upgrade takes
+ * too (gdefcore_schema_migrate(), AD-15), dated @p now. What was written
+ * at the older version keeps its shape and its stamp, and is read through
+ * the component's upcasters. */
 static GDEFCORE_Result forward_migrations(GDEFCORE_Subjects * subjects,
-    struct GDEFCORE_Host * host, GDEFSTOR_Store * tenant_store,
-    const GDEFSTOR_SnapshotAbout * about, GDEFCORE_Restore * report) {
-  static const char ns[] = GDEFCORE_MODULE_ENABLED_TYPE;
-  GDEFSTOR_Write * write = NULL;
+    struct GDEFCORE_Host * host, GDEFSTOR_Store * tenant_store, int64_t now,
+    GDEFCORE_Restore * report) {
   size_t moved = 0;
-  size_t i;
-  GDEFCORE_Result rc = GDEFCORE_OK;
-  for (i = 0; rc == GDEFCORE_OK &&
-              i < gdefstor_snapshot_about_module_count(about);
-       i++) {
-    GDEFSTOR_SnapshotModule m;
-    uint32_t here = 0;
-    char text[16];
-    int n;
-    rc = from_stor(gdefstor_snapshot_about_module(about, i, &m));
-    if (rc == GDEFCORE_OK) {
-      rc = gdefcore_module_schema(host, m.name, m.name_len, &here);
-    }
-    if (rc != GDEFCORE_OK || m.schema >= here) {
-      continue;
-    }
-    if (write == NULL) {
-      rc = from_stor(gdefstor_write_begin(tenant_store,
-          (const char *)subjects->tenant, subjects->tenant_len, NULL, &write));
-      if (rc != GDEFCORE_OK) {
-        break;
-      }
-    }
-    n = snprintf(text, sizeof text, "%lu", (unsigned long)here);
-    rc = n > 0 && (size_t)n < sizeof text
-             ? from_stor(gdefstor_record_put(write, ns, sizeof ns - 1, m.name,
-                   m.name_len, (const uint8_t *)text, (size_t)n))
-             : GDEFCORE_ERR_INTERNAL;
-    moved += 1;
+  char * why = NULL;
+  size_t why_len = 0;
+  GDEFCORE_Result rc = gdefcore_schema_migrate(host, tenant_store,
+      subjects->tenant, subjects->tenant_len, now, &moved, &why, &why_len);
+  if (rc != GDEFCORE_OK && why != NULL) {
+    report_why(report, "The data set was imported and its forward migration "
+                       "stopped: %.*s",
+        (int)(why_len > 600 ? 600 : why_len), why);
   }
-  if (write != NULL) {
-    if (rc == GDEFCORE_OK) {
-      rc = from_stor(gdefstor_write_commit(write));
-    } else {
-      gdefstor_write_abort(write);
-    }
-  }
+  gdefcore_schema_text_free(why);
   if (rc == GDEFCORE_OK && report != NULL) {
     report->migrated = moved;
   }
@@ -3029,7 +3030,7 @@ static GDEFCORE_Result restore_checks(GDEFCORE_Subjects * subjects,
 GDEFCORE_Result gdefcore_subject_restore(GDEFCORE_Subjects * subjects,
     struct GDEFCORE_Host * host, GDEFSTOR_Store * tenant_store,
     const uint8_t * data, size_t data_len, const uint8_t * keys,
-    size_t keys_len, GDEFCORE_Restore ** out_report) {
+    size_t keys_len, int64_t when_ms, GDEFCORE_Restore ** out_report) {
   Walk * walk = NULL;
   GDEFSTOR_SnapshotAbout * about = NULL;
   GDEFCORE_Restore * report = NULL;
@@ -3081,7 +3082,7 @@ GDEFCORE_Result gdefcore_subject_restore(GDEFCORE_Subjects * subjects,
   }
   if (rc == GDEFCORE_OK) {
     /* 3. The forward migrations. */
-    rc = forward_migrations(subjects, host, tenant_store, about, report);
+    rc = forward_migrations(subjects, host, tenant_store, when_ms, report);
   }
   if (rc == GDEFCORE_OK) {
     /* Then the ledger, the live one and the set's together now, before

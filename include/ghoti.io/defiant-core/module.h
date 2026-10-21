@@ -477,6 +477,102 @@ typedef struct GDEFCORE_Module_Variable {
 /** @} */
 
 /**
+ * @name Stored-data schema versions (AD-15)
+ *
+ * Every component that stores data, core itself and each module, has a
+ * stored-data schema version: an integer, 1 for its first shape and one more
+ * for each later one, never a semver (a module's release version, if it has
+ * one, is another thing). Every revision, draft and record a component writes
+ * carries the component's version at the time, in its schema stamp
+ * (`<component>/<version>`, defiant-storage model.h), and history keeps it:
+ * a revision written at 1 says so for ever.
+ *
+ * A component brings its *current* data forward by numbered steps, each from
+ * one version to the next (::GDEFCORE_Module_Step); there are none back. A
+ * step adds what the new shape needs, through changesets applied in the
+ * migration's write (gdefcore_migration_apply()): new revisions in the new
+ * shape, declarations, records. It never rewrites what was written, and
+ * nothing it writes is stamped older than the step's target. What was written
+ * at an older version is read through the component's read-time upcasters
+ * (::GDEFCORE_Module_Upcaster), one per version whose shape changed, run from
+ * the version a revision or draft was written at up to where the tenant's
+ * current data stands (the installed version, once migrated; inside a step,
+ * the version the step starts from).
+ *
+ * Per tenant, the record ::GDEFCORE_SCHEMA_TYPE of each component says where
+ * its current data stands, and ::GDEFCORE_MIGRATION_TYPE records each step
+ * applied. A live upgrade (a module installed at a version above the
+ * tenant's) and a restore of older data (gdefcore_subject_restore()) run the
+ * same steps through the same code, gdefcore_schema_migrate(). Until it has
+ * run, the tenant is under maintenance: its writes and gdefcore_schema_status()
+ * answer ::GDEFCORE_ERR_MAINTENANCE.
+ * @{
+ */
+
+/** Core's own stored-data schema version: the shape of the records and
+ * declarations core keeps for itself. */
+#define GDEFCORE_SCHEMA_VERSION 1
+/** The component name core stamps its own data with. */
+#define GDEFCORE_SCHEMA_CORE "core"
+/** Core's schema stamp, `core/<GDEFCORE_SCHEMA_VERSION>`. */
+#define GDEFCORE_SCHEMA_CORE_STAMP "core/1"
+
+/**
+ * The record namespace of where a tenant's data stands: one record per
+ * component whose data the tenant holds (`core`, and each module), keyed by
+ * its name, whose text is the version its current data is at, in decimal.
+ * Written with a component's first data, by an enable, and by a migration;
+ * never deleted.
+ */
+#define GDEFCORE_SCHEMA_TYPE "core.schema"
+
+/**
+ * The record namespace of the tenant's migration table: one record per step
+ * applied, keyed `<component>:<from>` (from in ten digits, so the keys sort
+ * by it), whose text is `<from> <to>`. Written in the write that applies the
+ * step; never rewritten.
+ */
+#define GDEFCORE_MIGRATION_TYPE "core.migration"
+
+/** A migration in progress, handed to a step. Opaque. */
+typedef struct GDEFCORE_Migration GDEFCORE_Migration;
+
+/**
+ * @brief One forward step: it brings the component's current data at
+ * version @p from to @p from + 1, in the migration's write.
+ */
+typedef GDEFCORE_Result (*GDEFCORE_Step_Fn)(GDEFCORE_Migration * migration,
+    void * user);
+
+/** One forward step a module declares. Begins with @ref size. */
+typedef struct GDEFCORE_Module_Step {
+  size_t size;            ///< `sizeof(GDEFCORE_Module_Step)`.
+  uint32_t from;          ///< The version it starts from, 1 or more.
+  GDEFCORE_Step_Fn fn;    ///< The step. Required.
+  void * user;            ///< Passed back to @ref fn. May be NULL.
+} GDEFCORE_Module_Step;
+
+/**
+ * @brief A read-time upcaster: it turns one language's tree of entity type
+ * @p type, written in the shape of version @p from, into the shape of
+ * @p from + 1, in place. @p decl is the type's declaration as it is now: the
+ * tree may be given values of any field it declares. Nothing is written.
+ */
+typedef GDEFCORE_Result (*GDEFCORE_Upcast_Fn)(const char * type,
+    size_t type_len, const GDEFSTOR_Type * decl, GDEFSTOR_Tree * tree,
+    void * user);
+
+/** One upcaster a module declares. Begins with @ref size. */
+typedef struct GDEFCORE_Module_Upcaster {
+  size_t size;            ///< `sizeof(GDEFCORE_Module_Upcaster)`.
+  uint32_t from;          ///< The version whose shape it reads, 1 or more.
+  GDEFCORE_Upcast_Fn fn;  ///< The upcaster. Required.
+  void * user;            ///< Passed back to @ref fn. May be NULL.
+} GDEFCORE_Module_Upcaster;
+
+/** @} */
+
+/**
  * @brief What `gdefcore_module_manifest` returns. Begins with @ref size.
  *
  * @ref core_token is the namespace token the module was built against. The
@@ -484,12 +580,12 @@ typedef struct GDEFCORE_Module_Variable {
  * both.
  *
  * @ref schema_version is the version of the module's stored-data schema
- * (AD-15): what a tenant's data for the module is written in. 0, and a
- * manifest from before the member (a smaller @ref size), read as 1. A tenant's
- * record of an enabled module holds the version its data is at
- * (::GDEFCORE_MODULE_ENABLED_TYPE), a snapshot carries it (AD-23), and a
- * restore refuses data at a version newer than the one installed
- * (gdefcore_subject_restore()).
+ * (AD-15): what its data is written in now. It is required: 0, and a manifest
+ * too short to hold it, are refused at install, in words. @ref steps and
+ * @ref upcasters are its forward steps and its read-time upcasters (above),
+ * each at most once per version, from 1 to @ref schema_version - 1; a version
+ * may have neither (no data of its shape to bring forward, or none to read
+ * differently).
  */
 typedef struct GDEFCORE_Module_Manifest {
   size_t size;                              ///< Prefix the module filled.
@@ -519,14 +615,18 @@ typedef struct GDEFCORE_Module_Manifest {
   size_t ngrants;                           ///< How many grants.
   const GDEFCORE_Module_Relation * relations; ///< Declared relations. May be NULL.
   size_t nrelations;                        ///< How many relations.
-  uint32_t schema_version;                  ///< Stored-data schema version; 0 is 1.
+  uint32_t schema_version;                  ///< Stored-data schema version, 1 or more.
+  const GDEFCORE_Module_Step * steps;       ///< Forward steps. May be NULL.
+  size_t nsteps;                            ///< How many steps.
+  const GDEFCORE_Module_Upcaster * upcasters; ///< Read-time upcasters. May be NULL.
+  size_t nupcasters;                        ///< How many upcasters.
 } GDEFCORE_Module_Manifest;
 
 /**
- * The record namespace of a tenant's enabled modules (story S6b): one record
- * per module, keyed by its name, whose text is the stored-data schema version
- * the tenant's data for it is at, in decimal (story S8). A snapshot carries
- * them with the rest of the tenant's records (AD-23).
+ * The record namespace of a tenant's enabled modules (story S6b): one empty
+ * record per module, keyed by its name. Where each one's data stands is
+ * ::GDEFCORE_SCHEMA_TYPE's, which a disable leaves. A snapshot carries both
+ * with the rest of the tenant's records (AD-23).
  */
 #define GDEFCORE_MODULE_ENABLED_TYPE "core.module.enabled"
 
@@ -606,15 +706,128 @@ GDEFCORE_API GDEFCORE_Result gdefcore_module_disable(GDEFCORE_Host * host,
     GDEFCORE_Changeset * changeset, const char * name, size_t name_len);
 
 /**
- * @brief The stored-data schema version of installed module @p name: its
- * manifest's ::GDEFCORE_Module_Manifest::schema_version, 1 when it says 0.
+ * @brief The stored-data schema version of installed component @p name: a
+ * module's manifest ::GDEFCORE_Module_Manifest::schema_version, or for
+ * `core`, ::GDEFCORE_SCHEMA_VERSION.
  *
  * A quarantined native module answers the version its install recorded.
  * @return ::GDEFCORE_OK, or ::GDEFCORE_ERR_INVALID when no module of that
- *   name is installed (a NULL @p host has none).
+ *   name is installed (a NULL @p host has none, and still has core).
  */
 GDEFCORE_API GDEFCORE_Result gdefcore_module_schema(const GDEFCORE_Host * host,
     const char * name, size_t name_len, uint32_t * out_version);
+
+/**
+ * @brief The forward step component @p name declares from version @p from,
+ * if any. Core has none at ::GDEFCORE_SCHEMA_VERSION 1.
+ *
+ * @param out_fn Receives the step, or NULL when there is none (a gap).
+ * @param out_user Receives its user pointer. May be NULL.
+ * @return ::GDEFCORE_OK (with or without a step), or ::GDEFCORE_ERR_INVALID
+ *   for a component that is not installed. A quarantined native module is
+ *   never called: it has no step here.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_module_step(const GDEFCORE_Host * host,
+    const char * name, size_t name_len, uint32_t from,
+    GDEFCORE_Step_Fn * out_fn, void ** out_user);
+
+/**
+ * @brief The read-time upcaster component @p name declares for the shape of
+ * version @p from, if any, as gdefcore_module_step(). Core has none.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_module_upcaster(
+    const GDEFCORE_Host * host, const char * name, size_t name_len,
+    uint32_t from, GDEFCORE_Upcast_Fn * out_fn, void ** out_user);
+
+/** @return How many read-time upcasters installed module @p name declares
+ * (0 for core, and for a module not installed). */
+GDEFCORE_API size_t gdefcore_module_upcaster_count(const GDEFCORE_Host * host,
+    const char * name, size_t name_len);
+
+/**
+ * @brief Whether a tenant's stored data stands where the components
+ * installed here write it (AD-15): ::GDEFCORE_OK when it does, or when it
+ * holds none of a component; ::GDEFCORE_ERR_MAINTENANCE when a component's
+ * data is at an older version and waits for gdefcore_schema_migrate() (a
+ * request for the tenant gets a maintenance response); ::GDEFCORE_ERR_UNSUPPORTED
+ * when a component's data is newer than the one installed, or its module is
+ * not installed; ::GDEFCORE_ERR_CORRUPT for a ::GDEFCORE_SCHEMA_TYPE record
+ * that is not a version. Reads the last commit; writes nothing.
+ *
+ * @param host The installed modules. NULL: core only.
+ * @param out_reason NULL, or receives the answer in plain words, naming the
+ *   component and both versions (NULL on ::GDEFCORE_OK). Free it with
+ *   gdefcore_schema_text_free().
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_schema_status(GDEFCORE_Host * host,
+    GDEFSTOR_Store * store, const uint8_t * tenant, size_t tenant_len,
+    char ** out_reason, size_t * out_reason_len);
+
+/**
+ * @brief Bring a tenant's stored data forward to the versions installed
+ * here: the one migration path, for a live upgrade and for a restore alike.
+ *
+ * For core and then each module whose data the tenant holds (by name), from
+ * the version its ::GDEFCORE_SCHEMA_TYPE record says to the installed one,
+ * every step in turn, each called with a migration whose catalog is the
+ * tenant's: a step stages a changeset on it and applies it with
+ * gdefcore_migration_apply(), into the step's write. That write also records
+ * the step in ::GDEFCORE_MIGRATION_TYPE and the version it reaches in
+ * ::GDEFCORE_SCHEMA_TYPE, and commits only when the step succeeded: a step
+ * and the version it brings the data to commit together or not at all. Each
+ * step has a write of its own because the next one reads what it wrote (the
+ * port reads the last commit), so a step that fails leaves the tenant at the
+ * last version reached, recorded, and still under maintenance. A revision a
+ * step writes is stamped with the step's target version and dated
+ * @p now_ms.
+ *
+ * Everything is checked before anything is written. Refused, in words naming
+ * the component and both versions, with nothing written: data at a version
+ * for which a step is missing (::GDEFCORE_ERR_UNSUPPORTED), data newer than
+ * the installed component (::GDEFCORE_ERR_UNSUPPORTED), data of a module
+ * not installed (::GDEFCORE_ERR_UNSUPPORTED). A step that fails aborts the
+ * write (its result). A tenant already current writes nothing.
+ *
+ * @param out_migrated Receives how many steps were applied. May be NULL.
+ * @param out_reason As gdefcore_schema_status(); on success, NULL.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_schema_migrate(GDEFCORE_Host * host,
+    GDEFSTOR_Store * store, const uint8_t * tenant, size_t tenant_len,
+    int64_t now_ms, size_t * out_migrated, char ** out_reason,
+    size_t * out_reason_len);
+
+/** @brief Free a reason gdefcore_schema_status() or gdefcore_schema_migrate()
+ * gave. NULL is ignored. */
+GDEFCORE_API void gdefcore_schema_text_free(char * text);
+
+/** @brief The tenant's catalog a step stages its changesets on. */
+GDEFCORE_API GDEFCORE_Catalog * gdefcore_migration_catalog(
+    GDEFCORE_Migration * migration);
+
+/** @brief The step's component, its starting version and its target. */
+GDEFCORE_API void gdefcore_migration_step_of(
+    const GDEFCORE_Migration * migration, const char ** out_component,
+    size_t * out_component_len, uint32_t * out_from, uint32_t * out_to);
+
+/** @brief When the migration is dated: what each revision it writes says. */
+GDEFCORE_API int64_t gdefcore_migration_time(
+    const GDEFCORE_Migration * migration);
+
+/**
+ * @brief Apply @p changeset, staged on gdefcore_migration_catalog(), in the
+ * migration's write: its declarations, saves, drafts and reverts, stamped
+ * with the step's target version, with no confirmation (the operator who runs
+ * the migration is its authority) and no hook (a step is the component's own
+ * code, and nothing has committed). It reads the last commit, as every
+ * staging does: a step applies one changeset, or several that do not build
+ * on each other. A changeset that touches a module's enablement is refused.
+ *
+ * @return ::GDEFCORE_OK, ::GDEFCORE_ERR_INVALID (a changeset of another
+ *   catalog, or one applied already), or the apply's error, which fails the
+ *   step and so the migration.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_migration_apply(
+    GDEFCORE_Migration * migration, GDEFCORE_Changeset * changeset);
 
 /**
  * @brief Whether @p name is enabled for the request's tenant.

@@ -82,6 +82,7 @@ void InstallCounter(GDEFCORE_Host * host, const char * name, const char * hook,
   g_man.size = sizeof g_man;
   g_man.core_token = kCoreToken;
   g_man.core_token_len = strlen(kCoreToken);
+  g_man.schema_version = 1;
   g_man.name = name;
   g_man.name_len = strlen(name);
   g_man.label = name;

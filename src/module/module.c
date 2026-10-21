@@ -52,6 +52,7 @@ enum {
   kSubMax = 16,
   kSvcMax = 16,
   kPermMax = 8,
+  kStepMax = 64,
   kChainMax = 32,
   kNodeMax = 64,
   kNoticeMax = 1024,
@@ -68,6 +69,8 @@ static const char kEntrySymbol[] = "gdefcore_module_manifest";
 static const char kInstallTenant[] = "\x01";
 static const char kInstallType[] = "core.module.install";
 static const char kEnabledType[] = GDEFCORE_MODULE_ENABLED_TYPE;
+static const char kSchemaType[] = GDEFCORE_SCHEMA_TYPE;
+static const char kCoreStamp[] = GDEFCORE_SCHEMA_CORE_STAMP;
 
 typedef struct Name {
   char text[kNameMax + 1];
@@ -113,6 +116,14 @@ typedef struct Perm {
   size_t field_len;
 } Perm;
 
+/* A forward step or a read-time upcaster, by the version it starts from. */
+typedef struct Step {
+  uint32_t from;
+  GDEFCORE_Step_Fn step;
+  GDEFCORE_Upcast_Fn up;
+  void * user;
+} Step;
+
 typedef struct Mod {
   int used;
   char name[kNameMax + 1];
@@ -140,6 +151,10 @@ typedef struct Mod {
   size_t nperms;
   Decl * decl;
   uint32_t schema; /* stored-data schema version (AD-15), 1 or more */
+  Step steps[kStepMax];
+  size_t nsteps;
+  Step ups[kStepMax];
+  size_t nups;
 } Mod;
 
 typedef struct ChainNode {
@@ -509,8 +524,8 @@ static GDEFCORE_Result load_names(GDEFCORE_Host * host, const char * tenant,
       size_t key_len = 0;
       const uint8_t * bytes = NULL;
       size_t blen = 0;
-      if (gdefstor_record_list_item(list, i, &key, &key_len, &bytes, &blen) !=
-          GDEFSTOR_OK) {
+      if (gdefstor_record_list_item(list, i, &key, &key_len, &bytes, &blen,
+              NULL, NULL) != GDEFSTOR_OK) {
         gdefstor_record_list_free(list);
         return GDEFCORE_ERR_CORRUPT;
       }
@@ -557,8 +572,8 @@ static GDEFCORE_Result put_install_row(GDEFSTOR_Write * write, const Mod * mod,
   {
     char schema[16];
     int n = snprintf(schema, sizeof schema, "%lu",
-        (unsigned long)(mod->schema == 0 ? 1u : mod->schema));
-    if (n <= 0 || (size_t)n >= sizeof schema) {
+        (unsigned long)mod->schema);
+    if (mod->schema == 0 || n <= 0 || (size_t)n >= sizeof schema) {
       return GDEFCORE_ERR_INTERNAL;
     }
     rec_put(&b, "schema", schema, (size_t)n);
@@ -567,7 +582,8 @@ static GDEFCORE_Result put_install_row(GDEFSTOR_Write * write, const Mod * mod,
     return GDEFCORE_ERR_LIMIT;
   }
   return map_stor(gdefstor_record_put(write, kInstallType, strlen(kInstallType),
-      mod->name, mod->name_len, (const uint8_t *)b.text, b.n));
+      mod->name, mod->name_len, kCoreStamp, strlen(kCoreStamp),
+      (const uint8_t *)b.text, b.n));
 }
 
 /* The installation's record of a module, in a write of its own on the
@@ -670,8 +686,67 @@ static GDEFCORE_Result copy_manifest(GDEFCORE_Host * host, Mod * mod,
     set_error(host, "Module core token is missing.");
     return GDEFCORE_ERR_INVALID;
   }
-  /* A manifest from before the member, and one that leaves it 0, is at 1. */
-  mod->schema = man.schema_version == 0 ? 1u : man.schema_version;
+  /* The module's stored-data schema version is required (AD-15): a manifest
+   * that leaves it 0, or is too short to hold it, says nothing about what its
+   * data is written in, and is refused. */
+  if (man.schema_version == 0) {
+    set_error(host, "Module manifest declares no stored-data schema version; "
+                    "its schema_version must be 1 or more.");
+    return GDEFCORE_ERR_INVALID;
+  }
+  mod->schema = man.schema_version;
+  if (man.nsteps > kStepMax || man.nupcasters > kStepMax) {
+    return GDEFCORE_ERR_LIMIT;
+  }
+  if ((man.nsteps > 0 && man.steps == NULL) ||
+      (man.nupcasters > 0 && man.upcasters == NULL)) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  mod->nsteps = 0;
+  for (i = 0; i < man.nsteps; i++) {
+    GDEFCORE_Module_Step st;
+    size_t k;
+    take_prefix(&st, sizeof st, &man.steps[i]);
+    if (st.fn == NULL || st.from == 0 || st.from >= mod->schema) {
+      set_error(host, "A module's forward step starts from a version that is "
+                      "not below its schema version, or has no function.");
+      return GDEFCORE_ERR_INVALID;
+    }
+    for (k = 0; k < mod->nsteps; k++) {
+      if (mod->steps[k].from == st.from) {
+        set_error(host, "A module declares two forward steps from one "
+                        "version.");
+        return GDEFCORE_ERR_INVALID;
+      }
+    }
+    mod->steps[mod->nsteps].from = st.from;
+    mod->steps[mod->nsteps].step = st.fn;
+    mod->steps[mod->nsteps].up = NULL;
+    mod->steps[mod->nsteps].user = st.user;
+    mod->nsteps += 1;
+  }
+  mod->nups = 0;
+  for (i = 0; i < man.nupcasters; i++) {
+    GDEFCORE_Module_Upcaster up;
+    size_t k;
+    take_prefix(&up, sizeof up, &man.upcasters[i]);
+    if (up.fn == NULL || up.from == 0 || up.from >= mod->schema) {
+      set_error(host, "A module's upcaster reads a version that is not below "
+                      "its schema version, or has no function.");
+      return GDEFCORE_ERR_INVALID;
+    }
+    for (k = 0; k < mod->nups; k++) {
+      if (mod->ups[k].from == up.from) {
+        set_error(host, "A module declares two upcasters for one version.");
+        return GDEFCORE_ERR_INVALID;
+      }
+    }
+    mod->ups[mod->nups].from = up.from;
+    mod->ups[mod->nups].step = NULL;
+    mod->ups[mod->nups].up = up.fn;
+    mod->ups[mod->nups].user = up.user;
+    mod->nups += 1;
+  }
   if (man.nrels > kRelMax || man.nsubs > kSubMax || man.nservices > kSvcMax) {
     return GDEFCORE_ERR_LIMIT;
   }
@@ -958,7 +1033,8 @@ static GDEFCORE_Result reload_one(GDEFCORE_Host * host, const Name * name) {
     return GDEFCORE_ERR_LIMIT;
   }
   src = gdefstor_record_get(host->store, kInstallTenant, 1, kInstallType,
-      strlen(kInstallType), name->text, name->len, &found, &bytes, &blen);
+      strlen(kInstallType), name->text, name->len, &found, &bytes, &blen,
+      NULL, NULL);
   if (src != GDEFSTOR_OK) {
     return map_stor(src);
   }
@@ -981,13 +1057,16 @@ static GDEFCORE_Result reload_one(GDEFCORE_Host * host, const Name * name) {
   }
   if (rc == GDEFCORE_OK) {
     /* What the install recorded, for a module that is not called again
-     * (quarantined); a record from before the line is at 1. */
+     * (quarantined). Every install records it. */
     char schema[16];
     size_t schema_len = 0;
     rc = rec_copy(bytes, blen, "schema", 6, schema, sizeof schema, &schema_len,
-        0);
-    mod.schema = 1;
-    if (rc == GDEFCORE_OK && schema_len > 0) {
+        1);
+    mod.schema = 0;
+    if (rc == GDEFCORE_OK && schema_len == 0) {
+      rc = GDEFCORE_ERR_CORRUPT;
+    }
+    if (rc == GDEFCORE_OK) {
       uint64_t v = 0;
       size_t i;
       for (i = 0; i < schema_len; i++) {
@@ -1479,24 +1558,121 @@ static GDEFCORE_Result enabled_names(GDEFCORE_Host * host, const uint8_t * tenan
       kModMax, out_n);
 }
 
-GDEFCORE_Result gdefcore_module_schema(const GDEFCORE_Host * host,
-    const char * name, size_t name_len, uint32_t * out_version) {
+static const Mod * find_const(const GDEFCORE_Host * host, const char * name,
+    size_t name_len) {
   size_t i;
-  if (out_version == NULL || name == NULL) {
-    return GDEFCORE_ERR_INVALID;
-  }
-  if (host == NULL) {
-    return GDEFCORE_ERR_INVALID;
-  }
-  for (i = 0; i < host->nmods; i++) {
+  for (i = 0; host != NULL && i < host->nmods; i++) {
     const Mod * mod = &host->mods[i];
     if (mod->used && mod->name_len == name_len &&
         memcmp(mod->name, name, name_len) == 0) {
-      *out_version = mod->schema == 0 ? 1u : mod->schema;
-      return GDEFCORE_OK;
+      return mod;
     }
   }
-  return GDEFCORE_ERR_INVALID;
+  return NULL;
+}
+
+static int is_core(const char * name, size_t name_len) {
+  return name_len == strlen(GDEFCORE_SCHEMA_CORE) &&
+         memcmp(name, GDEFCORE_SCHEMA_CORE, name_len) == 0;
+}
+
+GDEFCORE_Result gdefcore_module_schema(const GDEFCORE_Host * host,
+    const char * name, size_t name_len, uint32_t * out_version) {
+  const Mod * mod;
+  if (out_version == NULL || name == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  if (is_core(name, name_len)) {
+    *out_version = GDEFCORE_SCHEMA_VERSION;
+    return GDEFCORE_OK;
+  }
+  mod = find_const(host, name, name_len);
+  if (mod == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  *out_version = mod->schema;
+  return GDEFCORE_OK;
+}
+
+/* A step (@p ups 0) or an upcaster of component @p name from @p from. Core
+ * declares neither at its version 1. */
+static GDEFCORE_Result find_step(const GDEFCORE_Host * host, const char * name,
+    size_t name_len, uint32_t from, int ups, const Step ** out) {
+  const Mod * mod;
+  const Step * v;
+  size_t n;
+  size_t i;
+  *out = NULL;
+  if (name == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  if (is_core(name, name_len)) {
+    return GDEFCORE_OK;
+  }
+  mod = find_const(host, name, name_len);
+  if (mod == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  if (mod->quarantined) {
+    return GDEFCORE_OK;
+  }
+  v = ups ? mod->ups : mod->steps;
+  n = ups ? mod->nups : mod->nsteps;
+  for (i = 0; i < n; i++) {
+    if (v[i].from == from) {
+      *out = &v[i];
+      break;
+    }
+  }
+  return GDEFCORE_OK;
+}
+
+GDEFCORE_Result gdefcore_module_step(const GDEFCORE_Host * host,
+    const char * name, size_t name_len, uint32_t from,
+    GDEFCORE_Step_Fn * out_fn, void ** out_user) {
+  const Step * st = NULL;
+  GDEFCORE_Result rc;
+  if (out_fn == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  rc = find_step(host, name, name_len, from, 0, &st);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  *out_fn = st == NULL ? NULL : st->step;
+  if (out_user != NULL) {
+    *out_user = st == NULL ? NULL : st->user;
+  }
+  return GDEFCORE_OK;
+}
+
+size_t gdefcore_module_upcaster_count(const GDEFCORE_Host * host,
+    const char * name, size_t name_len) {
+  const Mod * mod;
+  if (name == NULL || is_core(name, name_len)) {
+    return 0;
+  }
+  mod = find_const(host, name, name_len);
+  return mod == NULL || mod->quarantined ? 0 : mod->nups;
+}
+
+GDEFCORE_Result gdefcore_module_upcaster(const GDEFCORE_Host * host,
+    const char * name, size_t name_len, uint32_t from,
+    GDEFCORE_Upcast_Fn * out_fn, void ** out_user) {
+  const Step * st = NULL;
+  GDEFCORE_Result rc;
+  if (out_fn == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  rc = find_step(host, name, name_len, from, 1, &st);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  *out_fn = st == NULL ? NULL : st->up;
+  if (out_user != NULL) {
+    *out_user = st == NULL ? NULL : st->user;
+  }
+  return GDEFCORE_OK;
 }
 
 GDEFCORE_Result gdefcore_module_enabled(GDEFCORE_Host * host,
@@ -2706,18 +2882,35 @@ GDEFCORE_Result gdefcore_module_write_enables(GDEFCORE_Host * host,
       }
     }
   }
-  /* Each record holds the stored-data schema version the tenant's data for
-   * the module is written in from now on: the installed one (AD-15). */
+  /* Every module the set holds has its enabled record, and a record of where
+   * its data stands (AD-15): one the tenant has already is where its data
+   * is, and stays (a module enabled again, or one waiting for its migration);
+   * a module whose data the tenant has never held is at the installed
+   * version, which its writes will be in. */
   for (i = 0; i < nnames; i++) {
     const Mod * mod = find_mod(host, names[i].text, names[i].len);
-    char schema[16];
-    int n = snprintf(schema, sizeof schema, "%lu",
-        (unsigned long)(mod == NULL || mod->schema == 0 ? 1u : mod->schema));
-    if (n <= 0 || (size_t)n >= sizeof schema) {
-      return GDEFCORE_ERR_INTERNAL;
-    }
+    int found = 0;
+    uint8_t * bytes = NULL;
+    size_t blen = 0;
     rc = map_stor(gdefstor_record_put(write, kEnabledType, strlen(kEnabledType),
-        names[i].text, names[i].len, (const uint8_t *)schema, (size_t)n));
+        names[i].text, names[i].len, kCoreStamp, strlen(kCoreStamp), NULL, 0));
+    if (rc == GDEFCORE_OK) {
+      rc = map_stor(gdefstor_record_get(host->store, (const char *)tenant,
+          tenant_len, kSchemaType, strlen(kSchemaType), names[i].text,
+          names[i].len, &found, &bytes, &blen, NULL, NULL));
+      gdefstor_bytes_free(NULL, bytes);
+    }
+    if (rc == GDEFCORE_OK && !found) {
+      char schema[16];
+      int n = snprintf(schema, sizeof schema, "%lu",
+          (unsigned long)(mod == NULL ? 0u : mod->schema));
+      if (mod == NULL || n <= 0 || (size_t)n >= sizeof schema) {
+        return GDEFCORE_ERR_INTERNAL;
+      }
+      rc = map_stor(gdefstor_record_put(write, kSchemaType,
+          strlen(kSchemaType), names[i].text, names[i].len, kCoreStamp,
+          strlen(kCoreStamp), (const uint8_t *)schema, (size_t)n));
+    }
     if (rc != GDEFCORE_OK) {
       return rc;
     }

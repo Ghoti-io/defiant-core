@@ -252,8 +252,10 @@ plant snapshot-key src/subject/subject.c Erasure.SnapshotCarriesNoKey \
             subjects->tenant_len, wrap, &found) == GDEFCORE_OK && found &&
         gdefstor_write_begin(tenant_store, (const char *)subjects->tenant,
             subjects->tenant_len, NULL, &kw) == GDEFSTOR_OK) {
-      if (gdefstor_record_put(kw, "core.keyring", 12, "wrap", 4, wrap,
-              kWrap) == GDEFSTOR_OK) {
+      if (gdefstor_record_put(kw, "core.keyring", 12, "wrap", 4,
+              GDEFCORE_SCHEMA_CORE_STAMP,
+              sizeof GDEFCORE_SCHEMA_CORE_STAMP - 1, wrap, kWrap) ==
+          GDEFSTOR_OK) {
         (void)gdefstor_write_commit(kw);
       } else {
         gdefstor_write_abort(kw);

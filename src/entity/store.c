@@ -693,7 +693,8 @@ GDEFCORE_Result gdefcore_ent_type_load(GDEFCORE_Catalog * cat,
   }
   rc = gdefcore_ent_map(gdefstor_record_get(cat->store,
       (const char *)cat->tenant, cat->tenant_len, GDEFCORE_ENT_TYPE_NS,
-      sizeof GDEFCORE_ENT_TYPE_NS - 1, name, name_len, &found, &bytes, &len));
+      sizeof GDEFCORE_ENT_TYPE_NS - 1, name, name_len, &found, &bytes, &len,
+      NULL, NULL));
   if (rc != GDEFCORE_OK) {
     return rc;
   }
@@ -870,8 +871,9 @@ GDEFCORE_Result gdefcore_ent_type_write(GDEFCORE_Catalog * cat,
     return GDEFCORE_ERR_OOM;
   }
   rc = gdefcore_ent_map(gdefstor_record_put(write, GDEFCORE_ENT_TYPE_NS,
-      sizeof GDEFCORE_ENT_TYPE_NS - 1, name, name_len, (const uint8_t *)b.p,
-      b.n));
+      sizeof GDEFCORE_ENT_TYPE_NS - 1, name, name_len,
+      GDEFCORE_SCHEMA_CORE_STAMP, sizeof GDEFCORE_SCHEMA_CORE_STAMP - 1,
+      (const uint8_t *)b.p, b.n));
   gcu_allocator_free(cat->alloc, b.p);
   return rc;
 }
@@ -1797,6 +1799,8 @@ GDEFCORE_Result gdefcore_ent_read_doc(GDEFCORE_Catalog * cat,
   GDEFCORE_EntLook look;
   GDEFSTOR_Type * type = NULL;
   GDEFSTOR_Languages * langs = NULL;
+  GDEFSTOR_History * history = NULL;
+  int upcasts;
   GDEFCORE_Result rc;
   size_t i;
   memset(out, 0, sizeof *out);
@@ -1807,6 +1811,19 @@ GDEFCORE_Result gdefcore_ent_read_doc(GDEFCORE_Catalog * cat,
   rc = load_port_type(cat, look.type, look.type_len, &type);
   if (rc != GDEFCORE_OK) {
     return rc;
+  }
+  /* A component that declares upcasters reads what was written at an older
+   * version through them (AD-15): each tree is read in the shape of the
+   * revision that wrote it, which its history's stamps say. */
+  upcasts = gdefcore_ent_upcasts(cat, look.type, look.type_len);
+  if (upcasts && look.exists && look.revision > 0) {
+    rc = gdefcore_ent_map(gdefstor_entity_history(cat->store,
+        (const char *)cat->tenant, cat->tenant_len, canon,
+        GDEFCORE_PUBLIC_ID_LEN, NULL, 0, &history));
+    if (rc != GDEFCORE_OK) {
+      gdefstor_type_free(type);
+      return rc;
+    }
   }
   /* A cleared entity reads as one with no content now; its history stays. */
   if (look.exists && look.revision > 0 && revision <= look.revision &&
@@ -1825,6 +1842,16 @@ GDEFCORE_Result gdefcore_ent_read_doc(GDEFCORE_Catalog * cat,
       rc = gdefcore_ent_map(gdefstor_entity_tree(cat->store,
           (const char *)cat->tenant, cat->tenant_len, canon,
           GDEFCORE_PUBLIC_ID_LEN, lang, lang_len, revision, &tree));
+      if (rc == GDEFCORE_OK && history != NULL) {
+        char stamp[GDEFSTOR_SCHEMA_MAX_BYTES + 1];
+        size_t stamp_len = 0;
+        rc = gdefcore_ent_lang_stamp(history, lang, lang_len,
+            revision == 0 ? look.revision : revision, stamp, &stamp_len);
+        if (rc == GDEFCORE_OK) {
+          rc = gdefcore_ent_upcast(cat, look.type, look.type_len, type, stamp,
+              stamp_len, tree);
+        }
+      }
       if (rc == GDEFCORE_OK) {
         rc = doc_put_tree(cat->alloc, type, out, lang, lang_len, tree);
       }
@@ -1856,6 +1883,11 @@ GDEFCORE_Result gdefcore_ent_read_doc(GDEFCORE_Catalog * cat,
       }
       rc = gdefcore_ent_map(gdefstor_tree_from_json(type, dt.json, dt.json_len,
           NULL, &tree));
+      if (rc == GDEFCORE_OK && upcasts) {
+        /* A draft is in the shape of the version it was put at. */
+        rc = gdefcore_ent_upcast(cat, look.type, look.type_len, type,
+            info.schema, info.schema_len, tree);
+      }
       if (rc == GDEFCORE_OK) {
         rc = doc_put_tree(cat->alloc, type, out, dt.language, dt.language_len,
             tree);
@@ -1864,6 +1896,7 @@ GDEFCORE_Result gdefcore_ent_read_doc(GDEFCORE_Catalog * cat,
     }
     gdefstor_draft_free(d);
   }
+  gdefstor_history_free(history);
   gdefstor_type_free(type);
   if (rc != GDEFCORE_OK) {
     gdefcore_ent_doc_free(cat->alloc, out);
@@ -1979,7 +2012,7 @@ GDEFCORE_Result gdefcore_ent_own_subject(GDEFCORE_Catalog * cat,
   GDEFCORE_Result rc = gdefcore_ent_map(gdefstor_record_get(cat->store,
       (const char *)cat->tenant, cat->tenant_len, GDEFCORE_ENT_SUBJECT_NS,
       sizeof GDEFCORE_ENT_SUBJECT_NS - 1, canon, GDEFCORE_PUBLIC_ID_LEN, &found,
-      &bytes, &len));
+      &bytes, &len, NULL, NULL));
   *out_found = 0;
   out[0] = '\0';
   if (rc == GDEFCORE_OK && found) {
@@ -2627,7 +2660,7 @@ GDEFCORE_Result gdefcore_ent_save_doc(GDEFCORE_Catalog * cat,
 GDEFCORE_Result gdefcore_ent_put_draft(GDEFCORE_Catalog * cat,
     GDEFSTOR_Write * write, const char * canon, const char * type_name,
     size_t type_len, uint64_t base, const GDEFCORE_Doc * doc,
-    GDEFCORE_Seals * seals) {
+    GDEFCORE_Seals * seals, const char * stamp, size_t stamp_len) {
   GDEFSTOR_Type * type = NULL;
   GDEFSTOR_DraftTree * drafts = NULL;
   uint8_t ** jsons = NULL;
@@ -2658,7 +2691,7 @@ GDEFCORE_Result gdefcore_ent_put_draft(GDEFCORE_Catalog * cat,
   }
   if (rc == GDEFCORE_OK) {
     rc = gdefcore_ent_map(gdefstor_draft_put(write, type_name, type_len, canon,
-        GDEFCORE_PUBLIC_ID_LEN, base, drafts, t.n));
+        GDEFCORE_PUBLIC_ID_LEN, base, stamp, stamp_len, drafts, t.n));
   }
   for (i = 0; jsons != NULL && i < t.n; i++) {
     gdefstor_bytes_free(NULL, jsons[i]);

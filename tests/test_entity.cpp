@@ -178,6 +178,7 @@ TEST_F(Entity, ATypeRecordInAnotherFormatIsCorrupt) {
   ASSERT_EQ(GDEFSTOR_OK, gdefstor_write_begin(store_, kTenant, 1, NULL, &write));
   ASSERT_EQ(GDEFSTOR_OK,
       gdefstor_record_put(write, "core.type", 9, "site.old", 8,
+          "core/1", 6,
           (const uint8_t *)bad, strlen(bad)));
   ASSERT_EQ(GDEFSTOR_OK, gdefstor_write_commit(write));
   EXPECT_EQ(GDEFCORE_ERR_CORRUPT, gdefcore_type_kind(catalog_, "site.old", 8, &kind));

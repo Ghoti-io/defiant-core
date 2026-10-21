@@ -36,11 +36,15 @@ extern "C" {
 /**
  * @brief Result of a kernel call.
  *
- * Two codes are past the suite's common list. `GDEFCORE_ERR_BUSY`: the
+ * Three codes are past the suite's common list. `GDEFCORE_ERR_BUSY`: the
  * offload pool's queue is full, and the call returns without blocking the
  * thread. `GDEFCORE_ERR_STALE`: a restore was handed a key set older than the
  * data set it pairs with (subject.h), which would bring back a key erased
- * after the key set was taken, and refused it.
+ * after the key set was taken, and refused it. `GDEFCORE_ERR_MAINTENANCE`:
+ * the tenant's stored data is at an older schema version than a component
+ * installed here and waits for its forward migration (module.h,
+ * gdefcore_schema_migrate()); a request for it gets a maintenance response
+ * (AD-15), and nothing was written.
  */
 typedef enum GDEFCORE_Result {
   GDEFCORE_OK = 0,          ///< Succeeded.
@@ -54,6 +58,7 @@ typedef enum GDEFCORE_Result {
   GDEFCORE_ERR_INTERNAL,    ///< A library invariant failed.
   GDEFCORE_ERR_BUSY,        ///< The offload queue is full. The thread is not blocked.
   GDEFCORE_ERR_STALE,       ///< A key set older than the data set it pairs with.
+  GDEFCORE_ERR_MAINTENANCE, ///< The tenant waits for a forward migration.
   GDEFCORE_RESULT_COUNT     ///< Not a result. Closes the string table.
 } GDEFCORE_Result;
 

@@ -148,6 +148,7 @@ class Templates : public ::testing::Test {
     g_man[slot].size = sizeof g_man[slot];
     g_man[slot].core_token = kCoreToken;
     g_man[slot].core_token_len = strlen(kCoreToken);
+    g_man[slot].schema_version = 1;
     g_man[slot].name = g_names[slot];
     g_man[slot].name_len = strlen(g_names[slot]);
     g_man[slot].label = g_names[slot];
@@ -1304,6 +1305,8 @@ TEST_F(Templates, RevertIsVetted) {
     meta.size = sizeof meta;
     meta.who = "";
     meta.why = "";
+    meta.schema = "core/1";
+    meta.schema_len = 6;
     GDEFSTOR_Write * write = NULL;
     ASSERT_EQ(GDEFSTOR_OK, gdefstor_write_begin(store_, tenant, 1, NULL, &write));
     uint64_t rev = 0;

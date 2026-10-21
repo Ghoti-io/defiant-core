@@ -77,6 +77,9 @@
 
 namespace {
 
+/* When a restore's forward migrations are dated (core story S11). */
+constexpr int64_t kRestoreMs = 1700000000000;
+
 const char kTenant[] = "t";
 const char kPerson[] = "site.person";
 const char kPost[] = "site.post";
@@ -85,10 +88,25 @@ const char kCoreToken[] = RESTORE_STR(GHOTIIO_DEFCORE_NAME);
 
 /* ---- the module `blog`, at the stored-data schema version a test asks ---- */
 
+/* A step with nothing to bring forward: blog's data here has no shape that
+ * changes between versions. */
+GDEFCORE_Result NoStep(GDEFCORE_Migration *, void *) { return GDEFCORE_OK; }
+
+/* Blog at version V, with a step from every version below it. */
 template <uint32_t V>
 const GDEFCORE_Module_Manifest * Blog() {
   static GDEFCORE_Module_Manifest m;
+  static GDEFCORE_Module_Step steps[8];
+  uint32_t i;
   memset(&m, 0, sizeof m);
+  memset(steps, 0, sizeof steps);
+  for (i = 1; i < V && i <= 8; i++) {
+    steps[i - 1].size = sizeof steps[i - 1];
+    steps[i - 1].from = i;
+    steps[i - 1].fn = NoStep;
+  }
+  m.steps = steps;
+  m.nsteps = V > 1 ? V - 1 : 0;
   m.size = sizeof m;
   m.core_token = kCoreToken;
   m.core_token_len = strlen(kCoreToken);
@@ -448,7 +466,7 @@ class Restore : public ::testing::Test {
   GDEFCORE_Result RestoreInto(Dest * d, const Bytes & data, const Bytes & keys,
       GDEFCORE_Restore ** report) {
     return gdefcore_subject_restore(subjects_, d->host, d->store, U(data),
-        data.size(), U(keys), keys.size(), report);
+        data.size(), U(keys), keys.size(), kRestoreMs, report);
   }
 
   static std::string Reason(const GDEFCORE_Restore * r) {
@@ -589,7 +607,7 @@ class Restore : public ::testing::Test {
     uint8_t * bytes = NULL;
     size_t n = 0;
     EXPECT_EQ(GDEFSTOR_OK, gdefstor_record_get(store, kTenant, 1, ns,
-        strlen(ns), key, strlen(key), &found, &bytes, &n));
+        strlen(ns), key, strlen(key), &found, &bytes, &n, NULL, NULL));
     std::string out = found ? std::string(reinterpret_cast<const char *>(bytes),
                                   n)
                             : std::string("<none>");
@@ -662,7 +680,8 @@ TEST_F(Restore, ATenantTakenOnMemoryComesBackThroughCoreOnEveryBackend) {
     gdefcore_restore_free(report);
     /* Entities, revisions, records, drafts: the same truth. */
     EXPECT_EQ(truth, Truth(d.store));
-    EXPECT_EQ("1", Record(d.store, GDEFCORE_MODULE_ENABLED_TYPE, "blog"));
+    EXPECT_EQ("1", Record(d.store, GDEFCORE_SCHEMA_TYPE, "blog"));
+    EXPECT_EQ("", Record(d.store, GDEFCORE_MODULE_ENABLED_TYPE, "blog"));
     GDEFCORE_Catalog * dc = OpenCatalog(d.store);
     ASSERT_NE(nullptr, dc);
     /* Subjects. */
@@ -727,7 +746,7 @@ TEST_F(Restore, EveryStepRunsInOrderBeforeTheRestoreReturns) {
     /* Migrated: the data was at 1, the module here is at 2. */
     EXPECT_EQ(1u, gdefcore_restore_migrated_count(report));
     gdefcore_restore_free(report);
-    EXPECT_EQ("2", Record(d.store, GDEFCORE_MODULE_ENABLED_TYPE, "blog"));
+    EXPECT_EQ("2", Record(d.store, GDEFCORE_SCHEMA_TYPE, "blog"));
     /* Replayed: the erasure is finished in the live store and the cache. */
     EXPECT_EQ(0u, BlindLines(site_, sbob_));
     EXPECT_EQ(0u, gdefcore_fragment_count(cache_));
@@ -794,13 +813,13 @@ TEST_F(Restore, ADataSetNewerThanAModuleHereIsRefusedNamingItsVersions) {
         << Reason(report);
     EXPECT_EQ(0u, gdefcore_restore_migrated_count(report));
     gdefcore_restore_free(report);
-    EXPECT_EQ("3", Record(d.store, GDEFCORE_MODULE_ENABLED_TYPE, "blog"));
+    EXPECT_EQ("3", Record(d.store, GDEFCORE_SCHEMA_TYPE, "blog"));
   }
   {
     Dest d(backend);
     d.Install(Blog<4>);
     EXPECT_EQ(GDEFCORE_OK, RestoreInto(&d, data, keys, NULL));
-    EXPECT_EQ("4", Record(d.store, GDEFCORE_MODULE_ENABLED_TYPE, "blog"));
+    EXPECT_EQ("4", Record(d.store, GDEFCORE_SCHEMA_TYPE, "blog"));
   }
 }
 
@@ -823,8 +842,9 @@ TEST_F(Restore, AManifestThatDisagreesWithItsRecordsIsRefused) {
   };
   Bytes keys = Keyset();
   int backend = Backends()[0];
-  const std::vector<std::vector<GDEFSTOR_SnapshotModule>> bad = {
-      {}, {{"blog", 4, 1}, {"shop", 4, 1}}, {{"blog", 4, 2}}};
+  const std::vector<std::vector<GDEFSTOR_SnapshotModule>> bad = {{},
+      {{"blog", 4, 1}}, {{"blog", 4, 1}, {"core", 4, 1}, {"shop", 4, 1}},
+      {{"blog", 4, 2}, {"core", 4, 1}}};
   for (const auto & mods : bad) {
     Dest d(backend);
     d.Install(Blog<4>);
@@ -840,7 +860,8 @@ TEST_F(Restore, AManifestThatDisagreesWithItsRecordsIsRefused) {
     Dest d(backend);
     d.Install(Blog<4>);
     EXPECT_EQ(GDEFCORE_OK,
-        RestoreInto(&d, exported({{"blog", 4, 1}}), keys, NULL));
+        RestoreInto(&d, exported({{"blog", 4, 1}, {"core", 4, 1}}), keys,
+            NULL));
   }
   {
     Dest d(backend);
@@ -977,23 +998,611 @@ TEST_F(Restore, ARestoredGrantToAStateIsHeldForItsTypedConfirmation) {
 /* ---- the version a module says ------------------------------------------ */
 
 /* An installed module answers the stored-data schema version its manifest
- * says, 0 reading as 1; an unknown module and no host answer nothing; and
- * enabling it records that version as the tenant's (the record a snapshot
- * carries). */
+ * says, and core answers its own, host or no host; an unknown module and no
+ * host answer nothing; a manifest that says no version (0) is refused at
+ * install, in words; and enabling a module records the version its data is
+ * at as the tenant's (the record a snapshot carries). */
 TEST_F(Restore, AModuleSaysItsStoredDataSchemaVersion) {
   uint32_t v = 0;
   EXPECT_EQ(GDEFCORE_ERR_INVALID, gdefcore_module_schema(host_, "blog", 4, &v));
   EXPECT_EQ(GDEFCORE_ERR_INVALID, gdefcore_module_schema(NULL, "blog", 4, &v));
-  EnableBlog(Blog<0>);
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_module_schema(NULL, "core", 4, &v));
+  EXPECT_EQ((uint32_t)GDEFCORE_SCHEMA_VERSION, v);
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, gdefcore_module_install_guest(host_,
+      Blog<0>));
+  {
+    size_t n = 0;
+    const char * why = gdefcore_module_error(host_, &n);
+    ASSERT_NE(nullptr, why);
+    EXPECT_NE(std::string::npos,
+        std::string(why, n).find("no stored-data schema version"))
+        << std::string(why, n);
+  }
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, gdefcore_module_schema(host_, "blog", 4, &v));
+  EnableBlog(Blog<1>);
   ASSERT_FALSE(HasFatalFailure());
   ASSERT_EQ(GDEFCORE_OK, gdefcore_module_schema(host_, "blog", 4, &v));
   EXPECT_EQ(1u, v);
   EXPECT_EQ(GDEFCORE_ERR_INVALID, gdefcore_module_schema(host_, "shop", 4, &v));
-  EXPECT_EQ("1", Record(site_, GDEFCORE_MODULE_ENABLED_TYPE, "blog"));
+  EXPECT_EQ("1", Record(site_, GDEFCORE_SCHEMA_TYPE, "blog"));
+  EXPECT_EQ("", Record(site_, GDEFCORE_MODULE_ENABLED_TYPE, "blog"));
   Dest d(Backends()[0]);
   d.Install(Blog<7>);
   ASSERT_EQ(GDEFCORE_OK, gdefcore_module_schema(d.host, "blog", 4, &v));
   EXPECT_EQ(7u, v);
+}
+
+/* ---- forward migrations (story S11) -------------------------------------- */
+
+namespace {
+
+const char kItem[] = "news.item";
+
+/* The module `news`, whose one type is news.item:
+ *  - version 1: title and body;
+ *  - version 2 declares slug (step 1 -> 2 is the declaration; a version-1
+ *    item is a version-2 one with no slug yet, so there is no upcaster);
+ *  - version 3: every item has its slug, the title in lower case (step 2 -> 3
+ *    gives each current item one; the upcaster from 2 does the same for a
+ *    tree read from history). */
+std::string Lower(std::string s) {
+  for (char & c : s) {
+    if (c >= 'A' && c <= 'Z') {
+      c = (char)(c - 'A' + 'a');
+    }
+  }
+  return s;
+}
+
+GDEFCORE_Field NewsField(const char * name) {
+  GDEFCORE_Field f;
+  memset(&f, 0, sizeof f);
+  f.size = sizeof f;
+  f.name = name;
+  f.name_len = strlen(name);
+  return f;
+}
+
+/* What every step the test ran saw: "<component> <from>-><to>". */
+std::vector<std::string> g_steps;
+
+GDEFCORE_Result DeclareSlug(GDEFCORE_Migration * m, void *) {
+  const char * comp = NULL;
+  size_t comp_len = 0;
+  uint32_t from = 0;
+  uint32_t to = 0;
+  gdefcore_migration_step_of(m, &comp, &comp_len, &from, &to);
+  g_steps.push_back(std::string(comp, comp_len) + " " + std::to_string(from) +
+                    "->" + std::to_string(to));
+  GDEFCORE_Catalog * cat = gdefcore_migration_catalog(m);
+  GDEFCORE_Field f[3] = {NewsField("title"), NewsField("body"),
+      NewsField("slug")};
+  GDEFCORE_Changeset * cs = NULL;
+  GDEFCORE_Result rc = gdefcore_changeset_prepare(cat, NULL, 0, &cs);
+  if (rc == GDEFCORE_OK) {
+    rc = gdefcore_changeset_define(cs, kItem, strlen(kItem),
+        GDEFCORE_TYPE_CONTENT, f, 3);
+  }
+  if (rc == GDEFCORE_OK) {
+    rc = gdefcore_migration_apply(m, cs);
+  }
+  gdefcore_changeset_destroy(cs);
+  return rc;
+}
+
+GDEFCORE_Result FillSlugs(GDEFCORE_Migration * m, void *) {
+  const char * comp = NULL;
+  size_t comp_len = 0;
+  uint32_t from = 0;
+  uint32_t to = 0;
+  gdefcore_migration_step_of(m, &comp, &comp_len, &from, &to);
+  g_steps.push_back(std::string(comp, comp_len) + " " + std::to_string(from) +
+                    "->" + std::to_string(to));
+  GDEFCORE_Catalog * cat = gdefcore_migration_catalog(m);
+  char ** ids = NULL;
+  size_t n = 0;
+  GDEFCORE_Changeset * cs = NULL;
+  GDEFCORE_Result rc = gdefcore_entity_ids(cat, kItem, strlen(kItem), &ids,
+      &n);
+  if (rc == GDEFCORE_OK) {
+    rc = gdefcore_changeset_prepare(cat, NULL, 0, &cs);
+  }
+  for (size_t i = 0; rc == GDEFCORE_OK && i < n; i++) {
+    char ** texts = NULL;
+    size_t * lens = NULL;
+    size_t count = 0;
+    rc = gdefcore_entity_values(cat, NULL, GDEFCORE_VIEW_CURRENT, ids[i],
+        strlen(ids[i]), "en", 2, "title", 5, &texts, &lens, &count);
+    if (rc != GDEFCORE_OK) {
+      break;
+    }
+    std::string slug = count == 0 ? std::string() : Lower(std::string(
+        texts[0], lens[0]));
+    gdefcore_values_free(cat, texts, lens, count);
+    if (slug.empty()) {
+      continue;
+    }
+    const char * t = slug.c_str();
+    size_t tl = slug.size();
+    GDEFCORE_Value v;
+    memset(&v, 0, sizeof v);
+    v.size = sizeof v;
+    v.field = "slug";
+    v.field_len = 4;
+    v.texts = &t;
+    v.text_lens = &tl;
+    v.count = 1;
+    rc = gdefcore_entity_save(cs, ids[i], strlen(ids[i]), "en", 2, &v, 1);
+  }
+  if (rc == GDEFCORE_OK) {
+    rc = gdefcore_migration_apply(m, cs);
+  }
+  gdefcore_changeset_destroy(cs);
+  gdefcore_ids_free(cat, ids, n);
+  return rc;
+}
+
+/* A version-2 tree into version 3's shape: the slug a version-3 item has. */
+GDEFCORE_Result SlugUp(const char *, size_t, const GDEFSTOR_Type *,
+    GDEFSTOR_Tree * tree, void *) {
+  GDEFSTOR_Value title;
+  GDEFSTOR_Value slug;
+  memset(&title, 0, sizeof title);
+  memset(&slug, 0, sizeof slug);
+  if (gdefstor_tree_get(tree, 0, "slug", 4, &slug) != GDEFSTOR_OK ||
+      gdefstor_tree_get(tree, 0, "title", 5, &title) != GDEFSTOR_OK) {
+    return GDEFCORE_ERR_CORRUPT;
+  }
+  if (slug.type != 0 || title.type == 0) {
+    return GDEFCORE_OK;
+  }
+  std::string lower = Lower(std::string(
+      reinterpret_cast<const char *>(title.bytes), title.len));
+  GDEFSTOR_Value v;
+  memset(&v, 0, sizeof v);
+  v.type = GDEFSTOR_FIELD_TEXT;
+  v.bytes = reinterpret_cast<const uint8_t *>(lower.data());
+  v.len = lower.size();
+  return gdefstor_tree_set(tree, 0, "slug", 4, &v) == GDEFSTOR_OK
+             ? GDEFCORE_OK
+             : GDEFCORE_ERR_CORRUPT;
+}
+
+/* News at version V (1 to 3): its steps and its upcaster, the step from 1
+ * left out when @p gap. */
+template <uint32_t V, bool Gap = false>
+const GDEFCORE_Module_Manifest * News() {
+  static GDEFCORE_Module_Manifest m;
+  static GDEFCORE_Module_Step steps[2];
+  static GDEFCORE_Module_Upcaster ups[1];
+  memset(&m, 0, sizeof m);
+  memset(steps, 0, sizeof steps);
+  memset(ups, 0, sizeof ups);
+  steps[0].size = sizeof steps[0];
+  steps[0].from = 1;
+  steps[0].fn = DeclareSlug;
+  steps[1].size = sizeof steps[1];
+  steps[1].from = 2;
+  steps[1].fn = FillSlugs;
+  ups[0].size = sizeof ups[0];
+  ups[0].from = 2;
+  ups[0].fn = SlugUp;
+  m.size = sizeof m;
+  m.core_token = kCoreToken;
+  m.core_token_len = strlen(kCoreToken);
+  m.name = "news";
+  m.name_len = 4;
+  m.schema_version = V;
+  m.steps = Gap ? &steps[1] : steps;
+  m.nsteps = V <= 1 ? 0 : Gap ? 1 : V - 1;
+  m.upcasters = ups;
+  m.nupcasters = V >= 3 ? 1 : 0;
+  return &m;
+}
+
+/* When a live upgrade's steps run: the same as kRestoreMs, so the same
+ * tenant upgraded and restored is written alike. */
+constexpr int64_t kUpgradeMs = kRestoreMs;
+
+class Migration : public Restore {
+ protected:
+  std::vector<std::string> items_;
+
+  /* A tenant that holds news at version 1: two items, one saved twice, and
+   * a draft of the other, all at news/1. */
+  void PopulateNews() {
+    GDEFCORE_Changeset * cs = NULL;
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_module_install_guest(host_, News<1>));
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_module_enable(host_, cs, "news", 4));
+    GDEFCORE_Result rc = gdefcore_changeset_apply(cs, "news", 4);
+    gdefcore_changeset_destroy(cs);
+    ASSERT_EQ(GDEFCORE_OK, rc);
+    GDEFCORE_Field f[2] = {NewsField("title"), NewsField("body")};
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_type_define(catalog_, kItem, strlen(kItem),
+        GDEFCORE_TYPE_CONTENT, f, 2));
+    for (const char * title : {"Hello World", "Second Item"}) {
+      char id[GDEFCORE_PUBLIC_ID_LEN + 1];
+      ASSERT_EQ(GDEFCORE_OK,
+          gdefcore_entity_create(catalog_, kItem, strlen(kItem), id, NULL));
+      ASSERT_EQ(GDEFCORE_OK, Put(catalog_, id, "title", title));
+      ASSERT_EQ(GDEFCORE_OK, Put(catalog_, id, "body", "text"));
+      items_.push_back(id);
+    }
+  }
+
+  static GDEFCORE_Result Put(GDEFCORE_Catalog * cat, const std::string & id,
+      const char * field, const std::string & text) {
+    GDEFCORE_Changeset * cs = NULL;
+    const char * t = text.c_str();
+    size_t tl = text.size();
+    GDEFCORE_Value v;
+    memset(&v, 0, sizeof v);
+    v.size = sizeof v;
+    v.field = field;
+    v.field_len = strlen(field);
+    v.texts = &t;
+    v.text_lens = &tl;
+    v.count = 1;
+    GDEFCORE_Result rc = gdefcore_changeset_prepare(cat, NULL, 0, &cs);
+    if (rc == GDEFCORE_OK) {
+      rc = gdefcore_entity_save(cs, id.data(), id.size(), "en", 2, &v, 1);
+    }
+    if (rc == GDEFCORE_OK) {
+      rc = gdefcore_changeset_apply(cs, NULL, 0);
+    }
+    gdefcore_changeset_destroy(cs);
+    return rc;
+  }
+
+  /* A field of revision @p seq (0: the current one), as read: "<none>",
+   * "<error>", or the text. */
+  static std::string Field(GDEFCORE_Catalog * cat, const std::string & id,
+      uint64_t seq, const char * field) {
+    char ** texts = NULL;
+    size_t * lens = NULL;
+    size_t n = 0;
+    GDEFCORE_Result rc = seq == 0
+        ? gdefcore_entity_values(cat, NULL, GDEFCORE_VIEW_CURRENT, id.data(),
+              id.size(), "en", 2, field, strlen(field), &texts, &lens, &n)
+        : gdefcore_entity_revision_values(cat, id.data(), id.size(), seq, "en",
+              2, field, strlen(field), &texts, &lens, &n);
+    if (rc != GDEFCORE_OK) {
+      return "<error " + std::string(gdefcore_result_string(rc)) + ">";
+    }
+    std::string out = n == 0 ? "<none>" : std::string(texts[0], lens[0]);
+    gdefcore_values_free(cat, texts, lens, n);
+    return out;
+  }
+
+  /* The stamps of an entity's revisions, oldest first. */
+  static std::string Stamps(GDEFSTOR_Store * store, const std::string & id) {
+    GDEFSTOR_History * h = NULL;
+    if (gdefstor_entity_history(store, kTenant, 1, id.data(), id.size(), NULL,
+            0, &h) != GDEFSTOR_OK) {
+      return "<failed>";
+    }
+    std::string out;
+    for (size_t i = 0; i < gdefstor_history_revision_count(h); i++) {
+      GDEFSTOR_RevisionInfo r;
+      memset(&r, 0, sizeof r);
+      r.size = sizeof r;
+      gdefstor_history_revision(h, i, &r);
+      out += (i == 0 ? "" : " ") + std::string(r.schema, r.schema_len);
+    }
+    gdefstor_history_free(h);
+    return out;
+  }
+
+  static std::string RecordStamp(GDEFSTOR_Store * store, const char * ns,
+      const std::string & key) {
+    int found = 0;
+    uint8_t * bytes = NULL;
+    size_t n = 0;
+    char stamp[GDEFSTOR_SCHEMA_MAX_BYTES + 1];
+    size_t stamp_len = 0;
+    EXPECT_EQ(GDEFSTOR_OK, gdefstor_record_get(store, kTenant, 1, ns,
+        strlen(ns), key.data(), key.size(), &found, &bytes, &n, stamp,
+        &stamp_len));
+    gdefstor_bytes_free(NULL, bytes);
+    return found ? std::string(stamp, stamp_len) : std::string("<none>");
+  }
+
+  /* The migration table, one "<key>=<text>" per row. */
+  static std::vector<std::string> Table(GDEFSTOR_Store * store) {
+    GDEFSTOR_RecordList * l = NULL;
+    std::vector<std::string> out;
+    EXPECT_EQ(GDEFSTOR_OK, gdefstor_record_list(store, kTenant, 1,
+        GDEFCORE_MIGRATION_TYPE, strlen(GDEFCORE_MIGRATION_TYPE), "", 0, 0,
+        100, &l));
+    for (size_t i = 0; i < gdefstor_record_list_count(l); i++) {
+      const char * k = NULL;
+      size_t kn = 0;
+      const uint8_t * b = NULL;
+      size_t bn = 0;
+      gdefstor_record_list_item(l, i, &k, &kn, &b, &bn, NULL, NULL);
+      out.push_back(std::string(k, kn) + "=" +
+                    std::string(reinterpret_cast<const char *>(b), bn));
+    }
+    gdefstor_record_list_free(l);
+    return out;
+  }
+
+  /* gdefcore_schema_migrate() and its reason. */
+  static GDEFCORE_Result Migrate(GDEFCORE_Host * host, GDEFSTOR_Store * store,
+      std::string * why, size_t * moved = NULL) {
+    char * text = NULL;
+    size_t n = 0;
+    GDEFCORE_Result rc = gdefcore_schema_migrate(host, store,
+        (const uint8_t *)kTenant, 1, kUpgradeMs, moved, &text, &n);
+    *why = text == NULL ? std::string() : std::string(text, n);
+    gdefcore_schema_text_free(text);
+    return rc;
+  }
+
+  static GDEFCORE_Result Status(GDEFCORE_Host * host, GDEFSTOR_Store * store,
+      std::string * why) {
+    char * text = NULL;
+    size_t n = 0;
+    GDEFCORE_Result rc = gdefcore_schema_status(host, store,
+        (const uint8_t *)kTenant, 1, &text, &n);
+    *why = text == NULL ? std::string() : std::string(text, n);
+    gdefcore_schema_text_free(text);
+    return rc;
+  }
+};
+
+}  // namespace
+
+/* A restore of data at news/1 into an installation with news at 3, which
+ * steps from 1 to 2 and from 2 to 3: the restore runs both, in order, before
+ * it returns, records version 3 and each step in the migration table; the
+ * current items have their slugs as version 3 writes them; and a revision
+ * written at version 1 reads through the upcaster in the shape of 3. */
+TEST_F(Migration, ARestoreOfOlderDataRunsEveryStepAndReadsHistoryThroughTheUpcasters) {
+  PopulateNews();
+  ASSERT_FALSE(HasFatalFailure());
+  Bytes data = Snapshot();
+  Bytes keys = Keyset();
+  for (int backend : Backends()) {
+    SCOPED_TRACE(BackendName(backend));
+    Dest d(backend);
+    d.Install(News<3>);
+    g_steps.clear();
+    GDEFCORE_Restore * report = NULL;
+    ASSERT_EQ(GDEFCORE_OK, RestoreInto(&d, data, keys, &report))
+        << Reason(report);
+    EXPECT_EQ(2u, gdefcore_restore_migrated_count(report));
+    gdefcore_restore_free(report);
+    EXPECT_EQ(std::vector<std::string>({"news 1->2", "news 2->3"}), g_steps);
+    EXPECT_EQ("3", Record(d.store, GDEFCORE_SCHEMA_TYPE, "news"));
+    EXPECT_EQ(std::vector<std::string>({"news:0000000001=1 2",
+                  "news:0000000002=2 3"}),
+        Table(d.store));
+    std::string why;
+    EXPECT_EQ(GDEFCORE_OK, Status(d.host, d.store, &why)) << why;
+    GDEFCORE_Catalog * dc = OpenCatalog(d.store);
+    ASSERT_NE(nullptr, dc);
+    gdefcore_catalog_bind_host(dc, d.host);
+    /* Current data: written at version 3 by the step, read as it is. */
+    EXPECT_EQ("hello world", Field(dc, items_[0], 0, "slug"));
+    EXPECT_EQ("second item", Field(dc, items_[1], 0, "slug"));
+    EXPECT_EQ("news/1 news/1 news/3", Stamps(d.store, items_[0]));
+    /* History: revision 1 was written at version 1, before slug existed,
+     * and reads in version 3's shape. */
+    EXPECT_EQ("hello world", Field(dc, items_[0], 1, "slug"));
+    EXPECT_EQ("Hello World", Field(dc, items_[0], 1, "title"));
+    EXPECT_EQ("text", Field(dc, items_[0], 2, "body"));
+    gdefcore_catalog_bind_subjects(dc, NULL);
+    gdefcore_catalog_destroy(dc);
+  }
+}
+
+/* The same tenant on a live installation upgraded from news at 1 to news at
+ * 3 is under maintenance until migrated, then runs the same steps, through
+ * the same code, and ends byte-identical to the one a restore brought to 3:
+ * the same truth, row for row, and the same snapshot bytes. */
+TEST_F(Migration, ALiveUpgradeAndARestoreEndByteIdentical) {
+  PopulateNews();
+  ASSERT_FALSE(HasFatalFailure());
+  Bytes data = Snapshot();
+  Bytes keys = Keyset();
+  Dest d(Backends()[0] == kPostgres ? kPostgres : kMemory);
+  d.Install(News<3>);
+  ASSERT_EQ(GDEFCORE_OK, RestoreInto(&d, data, keys, NULL));
+  /* The live installation: the same store, a host with news at 3. */
+  GDEFCORE_Host * up = NULL;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_host_open(site_, NULL, &up));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_module_install_guest(up, News<3>));
+  std::string why;
+  EXPECT_EQ(GDEFCORE_ERR_MAINTENANCE, Status(up, site_, &why));
+  EXPECT_NE(std::string::npos, why.find("module news")) << why;
+  EXPECT_NE(std::string::npos, why.find("version 1")) << why;
+  EXPECT_NE(std::string::npos, why.find("version 3")) << why;
+  g_steps.clear();
+  size_t moved = 0;
+  ASSERT_EQ(GDEFCORE_OK, Migrate(up, site_, &why, &moved)) << why;
+  EXPECT_EQ(2u, moved);
+  EXPECT_EQ(std::vector<std::string>({"news 1->2", "news 2->3"}), g_steps);
+  EXPECT_EQ(GDEFCORE_OK, Status(up, site_, &why)) << why;
+  /* Migrated again: nothing is due, and nothing is written. */
+  std::string live = Dump(site_);
+  ASSERT_EQ(GDEFCORE_OK, Migrate(up, site_, &why, &moved)) << why;
+  EXPECT_EQ(0u, moved);
+  EXPECT_EQ(live, Dump(site_));
+  EXPECT_EQ(live, Dump(d.store));
+  EXPECT_EQ(Truth(site_), Truth(d.store));
+  gdefcore_host_destroy(up);
+}
+
+/* Data at news/1 where news at 3 declares no step from 1 to 2 is refused in
+ * words naming the module and both versions, and nothing is written: by a
+ * restore, before the import, and by a live migration. */
+TEST_F(Migration, AGapIsRefusedInWordsAndWritesNothing) {
+  PopulateNews();
+  ASSERT_FALSE(HasFatalFailure());
+  Bytes data = Snapshot();
+  Bytes keys = Keyset();
+  {
+    Dest d(Backends()[0]);
+    d.Install(News<3, true>);
+    GDEFCORE_Restore * report = NULL;
+    EXPECT_EQ(GDEFCORE_ERR_UNSUPPORTED, RestoreInto(&d, data, keys, &report));
+    std::string why = Reason(report);
+    gdefcore_restore_free(report);
+    for (const char * words : {"module news", "version 1", "version 3",
+             "no step from version 1 to 2", "nothing was restored"}) {
+      EXPECT_NE(std::string::npos, why.find(words)) << why;
+    }
+    EXPECT_EQ("", Dump(d.store)) << "a refused restore wrote to the tenant";
+  }
+  GDEFCORE_Host * up = NULL;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_host_open(site_, NULL, &up));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_module_install_guest(up, News<3, true>));
+  std::string before = Dump(site_);
+  std::string why;
+  EXPECT_EQ(GDEFCORE_ERR_UNSUPPORTED, Migrate(up, site_, &why));
+  for (const char * words : {"module news", "version 1", "version 3",
+           "no step from version 1 to 2", "nothing was written"}) {
+    EXPECT_NE(std::string::npos, why.find(words)) << why;
+  }
+  EXPECT_EQ(before, Dump(site_));
+  gdefcore_host_destroy(up);
+}
+
+/* Every revision keeps the version it was written at, through an export, an
+ * import and the migration: the stamps of the source's history are the
+ * restored tenant's, the step's revision comes after them at its own, each
+ * revision reads as of itself in the installed shape, and the migration
+ * table keeps a row for every step applied, a later migration adding to it
+ * and rewriting none. */
+TEST_F(Migration, EveryRevisionKeepsTheVersionItWasWrittenAt) {
+  PopulateNews();
+  ASSERT_FALSE(HasFatalFailure());
+  std::string source_stamps = Stamps(site_, items_[0]);
+  ASSERT_EQ("news/1 news/1", source_stamps);
+  /* A live upgrade to 2 first, then a save at 2, then a restore to 3. */
+  GDEFCORE_Host * two = NULL;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_host_open(site_, NULL, &two));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_module_install_guest(two, News<2>));
+  std::string why;
+  ASSERT_EQ(GDEFCORE_OK, Migrate(two, site_, &why)) << why;
+  gdefcore_catalog_bind_host(catalog_, two);
+  ASSERT_EQ(GDEFCORE_OK, Put(catalog_, items_[1], "body", "edited at 2"));
+  gdefcore_catalog_bind_host(catalog_, host_);
+  EXPECT_EQ("news/1 news/1 news/2", Stamps(site_, items_[1]));
+  EXPECT_EQ(std::vector<std::string>({"news:0000000001=1 2"}), Table(site_));
+  Bytes data = Snapshot();
+  Bytes keys = Keyset();
+  Dest d(Backends()[0]);
+  d.Install(News<3>);
+  ASSERT_EQ(GDEFCORE_OK, RestoreInto(&d, data, keys, NULL));
+  gdefcore_host_destroy(two);
+  /* Imported as written, and the step's revisions after them. */
+  EXPECT_EQ("news/1 news/1 news/3", Stamps(d.store, items_[0]));
+  EXPECT_EQ("news/1 news/1 news/2 news/3", Stamps(d.store, items_[1]));
+  EXPECT_EQ(std::vector<std::string>({"news:0000000001=1 2",
+                "news:0000000002=2 3"}),
+      Table(d.store));
+  GDEFCORE_Catalog * dc = OpenCatalog(d.store);
+  ASSERT_NE(nullptr, dc);
+  gdefcore_catalog_bind_host(dc, d.host);
+  /* Each revision as of itself: 1 and 2 were written before any slug, 3 at
+   * version 2 (the edit), 4 by the step. */
+  for (uint64_t seq = 1; seq <= 4; seq++) {
+    SCOPED_TRACE(seq);
+    EXPECT_EQ("second item", Field(dc, items_[1], seq, "slug"));
+  }
+  EXPECT_EQ("text", Field(dc, items_[1], 2, "body"));
+  EXPECT_EQ("edited at 2", Field(dc, items_[1], 3, "body"));
+  gdefcore_catalog_bind_subjects(dc, NULL);
+  gdefcore_catalog_destroy(dc);
+}
+
+/* A tenant whose data is behind the modules installed is under maintenance:
+ * its status says so in words, and a write of a behind module's data is
+ * refused and records nothing, its recorded version staying where its data
+ * stands; data newer than the module here is refused the same way. Core's
+ * own data is not behind, and its writes go through. */
+TEST_F(Migration, ATenantBehindItsModulesAnswersMaintenanceAndRecordsNothing) {
+  PopulateNews();
+  ASSERT_FALSE(HasFatalFailure());
+  GDEFCORE_Host * up = NULL;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_host_open(site_, NULL, &up));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_module_install_guest(up, News<3>));
+  gdefcore_catalog_bind_host(catalog_, up);
+  std::string before = Dump(site_);
+  EXPECT_EQ(GDEFCORE_ERR_MAINTENANCE, Put(catalog_, items_[0], "body", "x"));
+  EXPECT_EQ(before, Dump(site_));
+  EXPECT_EQ("1", Record(site_, GDEFCORE_SCHEMA_TYPE, "news"));
+  std::string why;
+  EXPECT_EQ(GDEFCORE_ERR_MAINTENANCE, Status(up, site_, &why));
+  /* Once migrated, the write goes through, at news/3. */
+  ASSERT_EQ(GDEFCORE_OK, Migrate(up, site_, &why)) << why;
+  EXPECT_EQ(GDEFCORE_OK, Put(catalog_, items_[0], "body", "x"));
+  EXPECT_EQ("news/1 news/1 news/3 news/3", Stamps(site_, items_[0]));
+  gdefcore_catalog_bind_host(catalog_, host_);
+  gdefcore_host_destroy(up);
+  /* Newer than here: the host at 1 neither writes nor serves it. */
+  before = Dump(site_);
+  EXPECT_EQ(GDEFCORE_ERR_UNSUPPORTED, Put(catalog_, items_[0], "body", "y"));
+  EXPECT_EQ(before, Dump(site_));
+  EXPECT_EQ(GDEFCORE_ERR_UNSUPPORTED, Status(host_, site_, &why));
+  EXPECT_NE(std::string::npos, why.find("newer")) << why;
+}
+
+/* Core's own records and declarations carry core's version, the tenant
+ * records where core's data stands beside its modules', and core goes
+ * through the same checks a module does: a data set that says core's data
+ * is newer than this core is refused, naming core and both versions. */
+TEST_F(Migration, CoresOwnDataCarriesCoresVersionAndIsCheckedTheSameWay) {
+  PopulateNews();
+  ASSERT_FALSE(HasFatalFailure());
+  EXPECT_EQ(std::to_string(GDEFCORE_SCHEMA_VERSION),
+      Record(site_, GDEFCORE_SCHEMA_TYPE, "core"));
+  EXPECT_EQ(GDEFCORE_SCHEMA_CORE_STAMP,
+      RecordStamp(site_, "core.type", kItem));
+  EXPECT_EQ(GDEFCORE_SCHEMA_CORE_STAMP,
+      RecordStamp(site_, GDEFCORE_SCHEMA_TYPE, "news"));
+  EXPECT_EQ(GDEFCORE_SCHEMA_CORE_STAMP,
+      RecordStamp(site_, GDEFCORE_MODULE_ENABLED_TYPE, "news"));
+  uint32_t v = 0;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_module_schema(host_, "core", 4, &v));
+  EXPECT_EQ((uint32_t)GDEFCORE_SCHEMA_VERSION, v);
+  GDEFCORE_Step_Fn fn = NULL;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_module_step(host_, "core", 4, 1, &fn, NULL));
+  EXPECT_EQ(nullptr, fn);
+  /* A data set from a newer core: its manifest and its records say core is
+   * at 2. */
+  uint8_t * zip = NULL;
+  size_t n = 0;
+  {
+    GDEFSTOR_Write * w = NULL;
+    ASSERT_EQ(GDEFSTOR_OK, gdefstor_write_begin(site_, kTenant, 1, NULL, &w));
+    ASSERT_EQ(GDEFSTOR_OK, gdefstor_record_put(w, GDEFCORE_SCHEMA_TYPE,
+        strlen(GDEFCORE_SCHEMA_TYPE), "core", 4, "core/2", 6,
+        reinterpret_cast<const uint8_t *>("2"), 1));
+    ASSERT_EQ(GDEFSTOR_OK, gdefstor_write_commit(w));
+  }
+  std::string why;
+  EXPECT_EQ(GDEFCORE_ERR_UNSUPPORTED, Status(host_, site_, &why));
+  EXPECT_NE(std::string::npos, why.find("core's data")) << why;
+  EXPECT_EQ(GDEFCORE_ERR_UNSUPPORTED, Put(catalog_, items_[0], "body", "z"));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_subject_snapshot(subjects_, site_, kEdition,
+      strlen(kEdition), &zip, &n));
+  Bytes data(reinterpret_cast<const char *>(zip), n);
+  gdefstor_bytes_free(NULL, zip);
+  Bytes keys = Keyset();
+  Dest d(Backends()[0]);
+  d.Install(News<1>);
+  GDEFCORE_Restore * report = NULL;
+  EXPECT_EQ(GDEFCORE_ERR_UNSUPPORTED, RestoreInto(&d, data, keys, &report));
+  why = Reason(report);
+  gdefcore_restore_free(report);
+  EXPECT_NE(std::string::npos, why.find("core's data")) << why;
+  EXPECT_NE(std::string::npos, why.find("version 2")) << why;
+  EXPECT_NE(std::string::npos, why.find("version 1")) << why;
+  EXPECT_EQ("", Dump(d.store));
 }
 
 /* What the Postgres arm needs, else the backends of the default run. */
