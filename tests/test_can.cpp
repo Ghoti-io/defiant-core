@@ -1237,11 +1237,11 @@ TEST_F(Can, RouteSpecsKeepTheirMeaning) {
   spec.path = "/b/:id";
   spec.entity_capture = NULL;
   spec.entity_capture_len = 0;
-  spec.size = GDEFCORE_ROUTE_SPEC_SIZE_V1;
   EXPECT_EQ(GDEFCORE_OK, gdefcore_route_add_spec(routes_, &spec, NULL, NULL));
+  /* One size: a spec that ends before the entity capture is refused. */
   spec.machine = "c";
   spec.path = "/c/:id";
-  spec.size = GDEFCORE_ROUTE_SPEC_SIZE_V1 - 1;
+  spec.size = offsetof(GDEFCORE_Route_Spec, entity_capture);
   EXPECT_EQ(GDEFCORE_ERR_INVALID, gdefcore_route_add_spec(routes_, &spec, NULL, NULL));
 }
 

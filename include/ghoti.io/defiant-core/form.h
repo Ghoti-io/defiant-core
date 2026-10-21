@@ -406,14 +406,6 @@ typedef struct GDEFCORE_Route_Spec {
 } GDEFCORE_Route_Spec;
 
 /**
- * The size of a ::GDEFCORE_Route_Spec before @ref
- * GDEFCORE_Route_Spec::entity_capture was added. A spec of that size is
- * accepted, and names no entity capture.
- */
-#define GDEFCORE_ROUTE_SPEC_SIZE_V1 \
-  (offsetof(GDEFCORE_Route_Spec, entity_capture))
-
-/**
  * @brief One route as the enumeration reports it.
  *
  * The text pointers are borrowed from the route table and stay valid until

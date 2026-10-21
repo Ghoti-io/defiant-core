@@ -199,8 +199,8 @@ decision, and the route table uses it through a ready-made check:
   for that entity. A segment that is not an id, an entity that is not there,
   one on which no grant holds, and a permission nobody declared are all one
   answer: no, and so the route does not match and the request is answered as
-  for a path with no such route. A spec built before the field existed (its
-  size is `GDEFCORE_ROUTE_SPEC_SIZE_V1`) is accepted and names none. A module
+  for a path with no such route. The spec has one size,
+  `sizeof(GDEFCORE_Route_Spec)`; a NULL capture names none. A module
   manifest's route has the field too.
 - `gdefcore_routes_tabs_visible(routes, parent, len, page, &tabs, &n)` is
   `gdefcore_routes_tabs()` without the tabs the check refuses. `page` is the

@@ -3062,7 +3062,6 @@ GDEFCORE_Result gdefcore_route_add(GDEFCORE_Routes * routes, const char * machin
 
 GDEFCORE_Result gdefcore_route_add_spec(GDEFCORE_Routes * routes,
     const GDEFCORE_Route_Spec * spec, char ** out_error, size_t * out_error_len) {
-  GDEFCORE_Route_Spec local;
   if (out_error != NULL) {
     *out_error = NULL;
   }
@@ -3070,16 +3069,12 @@ GDEFCORE_Result gdefcore_route_add_spec(GDEFCORE_Routes * routes,
     *out_error_len = 0;
   }
   if (routes == NULL || spec == NULL ||
-      (spec->size != sizeof *spec && spec->size != GDEFCORE_ROUTE_SPEC_SIZE_V1) ||
+      spec->size != sizeof *spec ||
       spec->machine == NULL || spec->machine_len == 0 || spec->path == NULL ||
       ((spec->fn == NULL) == (spec->call_fn == NULL))) {
     return GDEFCORE_ERR_INVALID;
   }
-  /* A spec from before the entity capture existed names none. */
-  memset(&local, 0, sizeof local);
-  memcpy(&local, spec, spec->size);
-  local.size = sizeof local;
-  return route_insert(routes, &local, 1, out_error, out_error_len);
+  return route_insert(routes, spec, 1, out_error, out_error_len);
 }
 
 GDEFCORE_Result gdefcore_routes_set_check(GDEFCORE_Routes * routes,
