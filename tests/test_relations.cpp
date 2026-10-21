@@ -674,7 +674,12 @@ TEST_F(Relations, AFailureWhileReadingGrantsNothing) {
   /* Every allocation of the catalog, failed in turn, over decisions that rest
    * on a relation and on its negation. A failure is never a yes that is not the
    * truth, and `not` of a failure is not a yes. */
-  FailAlloc fa;
+  /* Static: the catalog keeps this allocator until TearDown closes it,
+   * after this body has returned. As a local it was freed through a dead
+   * frame; x86-64 still held it there and nothing showed, and on s390x under
+   * suite/tools/xarch (story S10) TearDown jumped into libc's data. */
+  static FailAlloc fa;
+  fa = FailAlloc();
   fa.alloc.ctx = &fa;
   fa.alloc.malloc_fn = FaMalloc;
   fa.alloc.calloc_fn = FaCalloc;
