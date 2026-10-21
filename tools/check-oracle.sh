@@ -41,9 +41,11 @@ plant sort-unreadable-field src/access/access.c testOracle 'Oracle.Fields' \
 # Alias resolution: a hidden entity's alias resolves, so the path answers
 # differently from a path nobody owns.
 plant alias-resolves-unfiltered src/form/form.c testOracle 'Oracle.Entities' \
-  '    rc = gdefcore_access_read(catalog, request, target, target_len, lang, lang_len,' \
+  '    rc = gdefcore_access_read(catalog, request, target, target_len, lang, lang_len,
+        field, field_len, &texts, &lens, &n, NULL);' \
   '    (void)request;
-    rc = gdefcore_entity_values(catalog, NULL, GDEFCORE_VIEW_PUBLISHED, target, target_len, lang, lang_len,'
+    rc = gdefcore_entity_values(catalog, NULL, GDEFCORE_VIEW_PUBLISHED, target, target_len, lang, lang_len,
+        field, field_len, &texts, &lens, &n);'
 
 # A list that shows rows the principal may not read: count and order differ.
 # (The list asks two things of a row, whether it is published and whether a

@@ -610,7 +610,7 @@ inline std::string ReadLine(World & w, const std::string & who,
   GDEFCORE_Result rc;
   Note("gdefcore_access_read");
   rc = gdefcore_access_read(w.site.catalog, req, id.data(), id.size(), "en", 2,
-      field, strlen(field), &texts, &lens, &count);
+      field, strlen(field), &texts, &lens, &count, NULL);
   out = "rc=" + Rc(rc);
   if (texts == (char **)0x1 && lens == (size_t *)0x1 && count == 99) {
     out += " untouched";

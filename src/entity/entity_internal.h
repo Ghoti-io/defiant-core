@@ -118,12 +118,21 @@ const GDEFCORE_Decl * gdefcore_ent_decl_at(const GDEFCORE_Decl * decls,
 /* A field tree in texts (story S6d): the public GDEFCORE_Tree. Values are
  * canonical texts held as text values of a port tree; each item knows the
  * path of the field it sits under. */
+/* A field of an item that a filtered read marked locked (story A6). */
+typedef struct GDEFCORE_TreeLocked {
+  size_t item;
+  char * field;
+  size_t field_len;
+} GDEFCORE_TreeLocked;
+
 struct GDEFCORE_Tree {
   const GDEFCORE_Allocator * alloc;
   GDEFSTOR_Tree * t;
   GDEFCORE_Text * paths;
   size_t npaths;
   size_t cap;
+  GDEFCORE_TreeLocked * locked;
+  size_t nlocked;
 };
 
 GDEFCORE_Result gdefcore_ent_tree_new(const GDEFCORE_Allocator * alloc,

@@ -259,6 +259,216 @@ typedef struct GDEFCORE_Module_Relation {
   size_t ncolumns;          ///< How many, 1 to 4.
 } GDEFCORE_Module_Relation;
 
+/**
+ * @name Access callbacks (access SPEC CAP-A5)
+ *
+ * Some access answers cannot be data: "has this reader paid for this
+ * article". A module registers a **callback** that grants a permission it may
+ * grant (its own, or the kernel's; never another module's) for one of two
+ * scopes:
+ *
+ * - ::GDEFCORE_CALLBACK_FIELD: may this principal read (or write) this field
+ *   of this entity, on a row the principal can already see. The permission
+ *   names the field.
+ * - ::GDEFCORE_CALLBACK_OPERATION: may this principal perform this operation
+ *   on this one entity (edit, delete, publish, show a tab). The permission is
+ *   entity-wide, and is not a row action: `read`, or an action with a part
+ *   `list`, `search`, `count` or `export`.
+ *
+ * ::GDEFCORE_CALLBACK_ROW (whether an entity is in a list, or counted) is
+ * refused at install, and so is an operation callback on a row action at
+ * enable: lists compile their filter into the storage query, and a per-row
+ * callback would break paging and counts and open an oracle.
+ *
+ * A callback grants or has no opinion, never denies (AD-10): it is one more
+ * grant, consulted only when no other grant of the permission holds. The host
+ * asks it in process (deferred D1: never a remote call), and:
+ *
+ * - **batched**: one call answers a page of entities (up to
+ *   ::GDEFCORE_CALLBACK_BATCH_MAX): the entities of the request's last list
+ *   page (gdefcore_request_set_batch()) are asked about together;
+ * - **memoized per request**: per (callback, principal, acting principal,
+ *   entity, entity version), so a second read in the request asks nothing;
+ * - **bounded**: each call has @ref GDEFCORE_Module_Callback::fuel units
+ *   (gdefcore_callback_spend()) and @ref GDEFCORE_Module_Callback::timeout_ms
+ *   (never past the request's deadline), and costs the request
+ *   ::GDEFCORE_CALLBACK_REQUEST_FUEL;
+ * - **fail closed**: an error returned (a trap), a malformed answer, a call
+ *   that spent past its fuel, one that returned after its timeout, a request
+ *   with no fuel left, and a callback asked from inside a callback each grant
+ *   nothing, for every entity of the call, for the rest of the request; the
+ *   failure is reported on the request (note `defiant.callback.failed`,
+ *   `<module>.<name> <reason>`) and makes it uncacheable. It is not an error
+ *   of the read or decision that asked;
+ * - **cacheable as declared**: ::GDEFCORE_CALLBACK_CACHE_TOKEN (each answer
+ *   gives a validity token, which enters the render key), _TTL (the key
+ *   changes every @ref GDEFCORE_Module_Callback::ttl_seconds of request time),
+ *   or _NONE (a request that consulted it is uncacheable,
+ *   gdefcore_request_cacheable()).
+ *
+ * A field a field callback governs is unusable in a filter, a sort or a
+ * condition (a list's or a grant's) by anyone: a list naming it is refused,
+ * and a condition naming it is refused at validation and does not hold when
+ * evaluated, so the field cannot be probed through a list
+ * (gdefcore_access_field_governed()). With ::GDEFCORE_CALLBACK_LOCKED, a
+ * principal the field is refused to is told that a value is there and not
+ * what it is (gdefcore_access_read(), gdefcore_tree_locked()).
+ *
+ * Callbacks are shown in the access matrix as granted by the module and
+ * evaluated per entity, and an enable that brings one is rated high.
+ * @{
+ */
+
+/** Row scope: whether an entity is in a list. Refused. */
+#define GDEFCORE_CALLBACK_ROW 1
+/** Field scope: may the principal read or write this field of this entity. */
+#define GDEFCORE_CALLBACK_FIELD 2
+/** Operation scope: may the principal do this to this one entity. */
+#define GDEFCORE_CALLBACK_OPERATION 3
+
+/** A request that consulted the callback is not cached. */
+#define GDEFCORE_CALLBACK_CACHE_NONE 0
+/** Each answer carries a validity token, which the render key carries. */
+#define GDEFCORE_CALLBACK_CACHE_TOKEN 1
+/** An answer holds for a time: the render key changes every TTL. */
+#define GDEFCORE_CALLBACK_CACHE_TTL 2
+
+/** Flag: the governed field tells a refused principal it is LOCKED. */
+#define GDEFCORE_CALLBACK_LOCKED 1
+
+/** Most entities one call is asked about. */
+#define GDEFCORE_CALLBACK_BATCH_MAX 200
+/** Most fuel one call may be given. */
+#define GDEFCORE_CALLBACK_FUEL_MAX ((uint64_t)1000000)
+/** Longest timeout one call may be given, in milliseconds. */
+#define GDEFCORE_CALLBACK_TIMEOUT_MAX_MS 1000
+/** Longest time to live, in seconds. */
+#define GDEFCORE_CALLBACK_TTL_MAX 86400
+/** Longest validity token, in bytes (printable ASCII, no space). */
+#define GDEFCORE_CALLBACK_TOKEN_MAX 64
+/** Fuel of the request one call of a callback costs. */
+#define GDEFCORE_CALLBACK_REQUEST_FUEL 8
+/** The version of an access callback service table. */
+#define GDEFCORE_MODULE_ACCESS_CALLBACK_VERSION 1
+
+/** One call of a callback: its fuel and its clock. Opaque. */
+typedef struct GDEFCORE_Callback_Call GDEFCORE_Callback_Call;
+
+/**
+ * @brief What a callback is asked. Begins with @ref size. Borrowed for the
+ * call.
+ */
+typedef struct GDEFCORE_Callback_Question {
+  size_t size;                ///< `sizeof(GDEFCORE_Callback_Question)`.
+  const char * module;        ///< The registering module.
+  size_t module_len;          ///< Length of @ref module.
+  const char * name;          ///< The callback's name.
+  size_t name_len;            ///< Length of @ref name.
+  int scope;                  ///< ::GDEFCORE_CALLBACK_FIELD or _OPERATION.
+  const char * permission;    ///< The permission's label.
+  size_t permission_len;      ///< Length of @ref permission.
+  const char * action;        ///< Its action.
+  size_t action_len;          ///< Length of @ref action.
+  const char * type_name;     ///< The entities' type.
+  size_t type_name_len;       ///< Length of @ref type_name.
+  const char * field;         ///< The field; "" for an operation.
+  size_t field_len;           ///< Length of @ref field.
+  const char * principal;     ///< The principal; NULL for the anonymous state.
+  size_t principal_len;       ///< Length of @ref principal.
+  const char * acting;        ///< An acting principal, or NULL.
+  size_t acting_len;          ///< Length of @ref acting.
+  const char * const * entities; ///< Canonical public ids, NUL-terminated.
+  size_t count;               ///< How many, 1 to ::GDEFCORE_CALLBACK_BATCH_MAX.
+} GDEFCORE_Callback_Question;
+
+/**
+ * @brief What a callback answers. Begins with @ref size. The host zeroes it.
+ *
+ * @ref granted has one slot per entity of the question, in order: 1 grants,
+ * 0 has no opinion; anything else is a malformed answer. A callback declared
+ * ::GDEFCORE_CALLBACK_CACHE_TOKEN sets @ref token (1 to
+ * ::GDEFCORE_CALLBACK_TOKEN_MAX printable ASCII bytes, no space); one with no
+ * token is malformed.
+ */
+typedef struct GDEFCORE_Callback_Answer {
+  size_t size;                ///< `sizeof(GDEFCORE_Callback_Answer)`.
+  int * granted;              ///< One slot per entity, zeroed.
+  size_t count;               ///< Slots in @ref granted.
+  char token[GDEFCORE_CALLBACK_TOKEN_MAX + 1]; ///< The validity token.
+  size_t token_len;           ///< Its length.
+} GDEFCORE_Callback_Answer;
+
+/**
+ * @brief A callback. Return ::GDEFCORE_OK with @p answer filled; any other
+ * result is a trap and grants nothing. @p request is the request that asked:
+ * a callback reads through the access filter as its principal, and a callback
+ * asked again from inside one grants nothing.
+ */
+typedef GDEFCORE_Result (*GDEFCORE_Callback_Fn)(GDEFCORE_Callback_Call * call,
+    GDEFCORE_Request * request, const GDEFCORE_Callback_Question * question,
+    GDEFCORE_Callback_Answer * answer, void * user);
+
+/**
+ * @brief The table an access callback's service carries (version
+ * ::GDEFCORE_MODULE_ACCESS_CALLBACK_VERSION). Begins with @ref size.
+ */
+typedef struct GDEFCORE_Module_Access_Callback {
+  size_t size;                ///< `sizeof(GDEFCORE_Module_Access_Callback)`.
+  GDEFCORE_Callback_Fn fn;    ///< The callback. Required.
+  void * user;                ///< Passed back to @ref fn.
+} GDEFCORE_Module_Access_Callback;
+
+/**
+ * @brief A callback a module registers. Begins with @ref size.
+ *
+ * @ref name is `[a-z][a-z0-9_]*`, unique in the module, at most 64 bytes.
+ * @ref permission, @ref type_name and @ref field name the permission it
+ * grants, as for ::GDEFCORE_Module_Grant: a field callback's permission names
+ * @ref field, an operation callback's names none. @ref service is a service
+ * the module declares, at ::GDEFCORE_MODULE_ACCESS_CALLBACK_VERSION.
+ * @ref fuel is 1 to ::GDEFCORE_CALLBACK_FUEL_MAX, @ref timeout_ms 1 to
+ * ::GDEFCORE_CALLBACK_TIMEOUT_MAX_MS, @ref cache one of the
+ * `GDEFCORE_CALLBACK_CACHE_` kinds, @ref ttl_seconds 1 to
+ * ::GDEFCORE_CALLBACK_TTL_MAX for _TTL and 0 otherwise, and @ref flags 0 or,
+ * for a field callback, ::GDEFCORE_CALLBACK_LOCKED. Anything else is refused
+ * at install, with words.
+ */
+typedef struct GDEFCORE_Module_Callback {
+  size_t size;                ///< `sizeof(GDEFCORE_Module_Callback)`.
+  const char * name;          ///< Its name in the module. Borrowed.
+  size_t name_len;            ///< Length of @ref name.
+  int scope;                  ///< ::GDEFCORE_CALLBACK_FIELD or _OPERATION.
+  const char * permission;    ///< Label of the permission granted. Borrowed.
+  size_t permission_len;      ///< Length of @ref permission.
+  const char * type_name;     ///< The permission's type. Borrowed.
+  size_t type_name_len;       ///< Length of @ref type_name.
+  const char * field;         ///< The permission's field, or NULL.
+  size_t field_len;           ///< Length of @ref field.
+  const char * service;       ///< Name of the module's callback service.
+  size_t service_len;         ///< Length of @ref service.
+  uint64_t fuel;              ///< Fuel of one call.
+  uint32_t timeout_ms;        ///< Timeout of one call.
+  int cache;                  ///< A `GDEFCORE_CALLBACK_CACHE_` kind.
+  uint32_t ttl_seconds;       ///< For ::GDEFCORE_CALLBACK_CACHE_TTL.
+  int flags;                  ///< 0 or ::GDEFCORE_CALLBACK_LOCKED.
+} GDEFCORE_Module_Callback;
+
+/**
+ * @brief Spend @p units of the call's fuel. ::GDEFCORE_ERR_LIMIT when there
+ * is less left: the call is then over budget, and grants nothing whatever it
+ * answers.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_callback_spend(
+    GDEFCORE_Callback_Call * call, uint64_t units);
+
+/**
+ * @brief Whether the call has passed its timeout: what it answers now grants
+ * nothing. A callback that loops checks this.
+ */
+GDEFCORE_API int gdefcore_callback_expired(const GDEFCORE_Callback_Call * call);
+
+/** @} */
+
 /** A contribution provider answers with text (also for `markup`). */
 #define GDEFCORE_CONTRIBUTION_TEXT 1
 /** A contribution provider answers with an integer. */
@@ -326,6 +536,8 @@ typedef GDEFCORE_Result (*GDEFCORE_Contribution_Fn)(GDEFCORE_Request * request,
 #define GDEFCORE_MODULE_GRANTS_MAX 16
 /** Most relations one manifest declares. */
 #define GDEFCORE_MODULE_RELATIONS_MAX 16
+/** Most access callbacks one manifest registers. */
+#define GDEFCORE_MODULE_CALLBACKS_MAX 16
 /** Most columns one relation has. */
 #define GDEFCORE_RELATION_COLUMNS_MAX 4
 /** Longest name of a relation column, in bytes. */
@@ -620,6 +832,8 @@ typedef struct GDEFCORE_Module_Manifest {
   size_t nsteps;                            ///< How many steps.
   const GDEFCORE_Module_Upcaster * upcasters; ///< Read-time upcasters. May be NULL.
   size_t nupcasters;                        ///< How many upcasters.
+  const GDEFCORE_Module_Callback * callbacks; ///< Access callbacks. May be NULL.
+  size_t ncallbacks;                        ///< How many callbacks.
 } GDEFCORE_Module_Manifest;
 
 /**
@@ -1197,6 +1411,30 @@ typedef struct GDEFCORE_Module_Declared_Grant {
   size_t condition_len;       ///< Length of @ref condition.
 } GDEFCORE_Module_Declared_Grant;
 
+/** @brief An access callback as the enumeration reports it. Borrowed from
+ * the host; the service is resolved. */
+typedef struct GDEFCORE_Module_Declared_Callback {
+  size_t size;                ///< `sizeof(GDEFCORE_Module_Declared_Callback)`.
+  const char * module;        ///< The registering module.
+  size_t module_len;          ///< Length of @ref module.
+  const char * name;          ///< Its name in the module.
+  size_t name_len;            ///< Length of @ref name.
+  int scope;                  ///< ::GDEFCORE_CALLBACK_FIELD or _OPERATION.
+  const char * permission;    ///< Label of the permission granted.
+  size_t permission_len;      ///< Length of @ref permission.
+  const char * type_name;     ///< The permission's type.
+  size_t type_name_len;       ///< Length of @ref type_name.
+  const char * field;         ///< The permission's field; "" for none.
+  size_t field_len;           ///< Length of @ref field.
+  GDEFCORE_Callback_Fn fn;    ///< The callback.
+  void * user;                ///< Its user pointer.
+  uint64_t fuel;              ///< Fuel of one call.
+  uint32_t timeout_ms;        ///< Timeout of one call.
+  int cache;                  ///< A `GDEFCORE_CALLBACK_CACHE_` kind.
+  uint32_t ttl_seconds;       ///< For ::GDEFCORE_CALLBACK_CACHE_TTL.
+  int flags;                  ///< 0 or ::GDEFCORE_CALLBACK_LOCKED.
+} GDEFCORE_Module_Declared_Callback;
+
 /** @brief A relation as the enumeration reports it. Borrowed from the host. */
 typedef struct GDEFCORE_Module_Declared_Relation {
   size_t size;                ///< `sizeof(GDEFCORE_Module_Declared_Relation)`.
@@ -1283,8 +1521,35 @@ GDEFCORE_API GDEFCORE_Result gdefcore_module_relations(GDEFCORE_Host * host,
     const GDEFCORE_Module_Declared_Relation *** out_items, size_t * out_count);
 
 /**
+ * @brief The access callbacks of the enabled modules.
+ *
+ * As gdefcore_module_grants(): in module order and, within a module, by
+ * name; a disabled or quarantined module's are not here, so they grant
+ * nothing and govern no field. Free @p out_items with
+ * gdefcore_module_declared_free().
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_module_callbacks(GDEFCORE_Host * host,
+    const uint8_t * tenant, size_t tenant_len,
+    const GDEFCORE_Changeset * projection,
+    const GDEFCORE_Module_Declared_Callback *** out_items, size_t * out_count);
+
+/**
+ * @brief Whether a field callback of a module enabled for @p tenant governs
+ * field @p field of @p type_name (gdefcore_access_field_governed()), and
+ * whether one of them opts the field in to the locked indicator
+ * (@p out_locked, may be NULL). A module that registers none costs no read
+ * of the store. When the enabled set cannot be read and an installed module
+ * registers one for the field, the field is governed: unknown is refused.
+ * @return 1 when governed, else 0.
+ */
+GDEFCORE_API int gdefcore_module_field_governed(GDEFCORE_Host * host,
+    const uint8_t * tenant, size_t tenant_len, const char * type_name,
+    size_t type_name_len, const char * field, size_t field_len,
+    int * out_locked);
+
+/**
  * @brief Free an array from gdefcore_module_routes(), _links(), _settings(),
- * _variables(), _grants() or _relations(). NULL is ignored.
+ * _variables(), _grants(), _relations() or _callbacks(). NULL is ignored.
  */
 GDEFCORE_API void gdefcore_module_declared_free(GDEFCORE_Host * host,
     const void * items);

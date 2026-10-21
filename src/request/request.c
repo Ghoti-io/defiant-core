@@ -110,6 +110,16 @@ void gdefcore_request_destroy(GDEFCORE_Request * request) {
   gcu_allocator_free(allocator, request->memo);
   gcu_allocator_free(allocator, request->reads);
   gcu_allocator_free(allocator, request->subjects);
+  {
+    size_t i;
+    for (i = 0; i < request->nvalidity; i++) {
+      gcu_allocator_free(allocator, request->validity[i]);
+    }
+    gcu_allocator_free(allocator, request->validity);
+    gcu_allocator_free(allocator, request->validity_lens);
+  }
+  gcu_allocator_free(allocator, request->batch_type);
+  gcu_allocator_free(allocator, request->batch);
   gcu_allocator_free(allocator, request->principal);
   gcu_allocator_free(allocator, request->acting);
   gcu_allocator_free(allocator, request->tenant);
@@ -224,11 +234,23 @@ static const char * get_public_id(const GDEFCORE_Request * request,
   return slot;
 }
 
+/* The batch was a page as one principal saw it: another principal starts with
+ * none. */
+static void batch_clear(GDEFCORE_Request * request) {
+  gcu_allocator_free(request->allocator, request->batch_type);
+  gcu_allocator_free(request->allocator, request->batch);
+  request->batch_type = NULL;
+  request->batch_type_len = 0;
+  request->batch = NULL;
+  request->nbatch = 0;
+}
+
 GDEFCORE_Result gdefcore_request_set_principal(
     GDEFCORE_Request * request, const char * id, size_t id_len) {
   if (request == NULL) {
     return GDEFCORE_ERR_INVALID;
   }
+  batch_clear(request);
   return set_public_id(
       request, &request->principal, &request->principal_len, id, id_len);
 }
@@ -247,6 +269,7 @@ GDEFCORE_Result gdefcore_request_set_acting_principal(
   if (request == NULL) {
     return GDEFCORE_ERR_INVALID;
   }
+  batch_clear(request);
   return set_public_id(request, &request->acting, &request->acting_len, id,
       id_len);
 }
@@ -631,4 +654,146 @@ uint64_t gdefcore_request_fuel_left(const GDEFCORE_Request * request) {
     return UINT64_MAX;
   }
   return request->fuel;
+}
+
+/* ---- what the access callbacks consulted say of the cache (story A6) ---- */
+
+GDEFCORE_Result gdefcore_request_record_validity(GDEFCORE_Request * request,
+    const char * line, size_t len) {
+  size_t i;
+  char * copy;
+  if (request == NULL || line == NULL || len == 0) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  for (i = 0; i < len; i++) {
+    if ((unsigned char)line[i] < 0x20 || line[i] == 0x7f) {
+      return GDEFCORE_ERR_INVALID;
+    }
+  }
+  for (i = 0; i < request->nvalidity; i++) {
+    if (request->validity_lens[i] == len &&
+        memcmp(request->validity[i], line, len) == 0) {
+      return GDEFCORE_OK;
+    }
+  }
+  if (request->nvalidity >= GDEFCORE_REQUEST_VALIDITY_MAX) {
+    /* A key that cannot carry every token cannot be trusted with any. */
+    request->uncacheable = 1;
+    return GDEFCORE_OK;
+  }
+  if (request->nvalidity % 8 == 0) {
+    size_t cap = request->nvalidity + 8;
+    char ** lines = (char **)gcu_allocator_realloc(request->allocator,
+        request->validity, cap * sizeof *lines);
+    size_t * lens;
+    if (lines == NULL) {
+      request->uncacheable = 1;
+      return GDEFCORE_ERR_OOM;
+    }
+    request->validity = lines;
+    lens = (size_t *)gcu_allocator_realloc(request->allocator,
+        request->validity_lens, cap * sizeof *lens);
+    if (lens == NULL) {
+      request->uncacheable = 1;
+      return GDEFCORE_ERR_OOM;
+    }
+    request->validity_lens = lens;
+  }
+  copy = copy_bytes(request->allocator, line, len);
+  if (copy == NULL) {
+    request->uncacheable = 1;
+    return GDEFCORE_ERR_OOM;
+  }
+  request->validity[request->nvalidity] = copy;
+  request->validity_lens[request->nvalidity] = len;
+  request->nvalidity += 1;
+  return GDEFCORE_OK;
+}
+
+size_t gdefcore_request_validity_count(const GDEFCORE_Request * request) {
+  return request == NULL ? 0 : request->nvalidity;
+}
+
+int gdefcore_request_validity_at(const GDEFCORE_Request * request, size_t index,
+    const char ** out_line, size_t * out_len) {
+  if (request == NULL || index >= request->nvalidity) {
+    return 0;
+  }
+  if (out_line != NULL) {
+    *out_line = request->validity[index];
+  }
+  if (out_len != NULL) {
+    *out_len = request->validity_lens[index];
+  }
+  return 1;
+}
+
+void gdefcore_request_mark_uncacheable(GDEFCORE_Request * request) {
+  if (request != NULL) {
+    request->uncacheable = 1;
+  }
+}
+
+int gdefcore_request_cacheable(const GDEFCORE_Request * request) {
+  return request != NULL && !request->uncacheable;
+}
+
+/* ---- the next batch an access callback is asked (story A6) ------------ */
+
+GDEFCORE_Result gdefcore_request_set_batch(GDEFCORE_Request * request,
+    const char * type, size_t type_len, const char * const * ids,
+    size_t count) {
+  char * type_copy;
+  char (*batch)[GDEFCORE_PUBLIC_ID_LEN + 1] = NULL;
+  size_t i;
+  size_t n = 0;
+  if (request == NULL || (count > 0 && (ids == NULL || type == NULL ||
+                                           type_len == 0))) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  batch_clear(request);
+  if (count == 0) {
+    return GDEFCORE_OK;
+  }
+  if (count > GDEFCORE_REQUEST_BATCH_MAX) {
+    count = GDEFCORE_REQUEST_BATCH_MAX;
+  }
+  type_copy = copy_bytes(request->allocator, type, type_len);
+  batch = (char (*)[GDEFCORE_PUBLIC_ID_LEN + 1])gcu_allocator_calloc(
+      request->allocator, count, sizeof *batch);
+  if (type_copy == NULL || batch == NULL) {
+    gcu_allocator_free(request->allocator, type_copy);
+    gcu_allocator_free(request->allocator, batch);
+    return GDEFCORE_ERR_OOM;
+  }
+  for (i = 0; i < count; i++) {
+    if (ids[i] != NULL &&
+        gdefcore_id_canonical(ids[i], strlen(ids[i]), batch[n]) == GDEFCORE_OK) {
+      n += 1;
+    }
+  }
+  request->batch_type = type_copy;
+  request->batch_type_len = type_len;
+  request->batch = batch;
+  request->nbatch = n;
+  return GDEFCORE_OK;
+}
+
+size_t gdefcore_request_batch(const GDEFCORE_Request * request,
+    const char ** out_type, size_t * out_type_len) {
+  if (out_type != NULL) {
+    *out_type = request == NULL ? NULL : request->batch_type;
+  }
+  if (out_type_len != NULL) {
+    *out_type_len = request == NULL ? 0 : request->batch_type_len;
+  }
+  return request == NULL ? 0 : request->nbatch;
+}
+
+const char * gdefcore_request_batch_at(const GDEFCORE_Request * request,
+    size_t index) {
+  if (request == NULL || index >= request->nbatch) {
+    return NULL;
+  }
+  return request->batch[index];
 }

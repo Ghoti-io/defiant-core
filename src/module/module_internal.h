@@ -94,6 +94,11 @@ typedef struct DeclGrant {
   size_t index;
 } DeclGrant;
 
+typedef struct DeclCallback {
+  GDEFCORE_Module_Declared_Callback pub;
+  size_t index;
+} DeclCallback;
+
 typedef struct DeclRelation {
   GDEFCORE_Module_Declared_Relation pub;
   GDEFCORE_Module_Relation_Column cols[GDEFCORE_RELATION_COLUMNS_MAX];
@@ -122,6 +127,8 @@ struct Decl {
   size_t ngrants;
   DeclRelation * relations;
   size_t nrelations;
+  DeclCallback * callbacks;
+  size_t ncallbacks;
 };
 
 /** The declarations of the modules in force, already in module order. */
@@ -170,6 +177,10 @@ GDEFCORE_Result gdefcore_decl_variables(const GDEFCORE_Allocator * alloc,
 GDEFCORE_Result gdefcore_decl_grants(const GDEFCORE_Allocator * alloc,
     const DeclRef * refs, size_t n,
     const GDEFCORE_Module_Declared_Grant *** out, size_t * count);
+
+GDEFCORE_Result gdefcore_decl_callbacks(const GDEFCORE_Allocator * alloc,
+    const DeclRef * refs, size_t n,
+    const GDEFCORE_Module_Declared_Callback *** out, size_t * count);
 
 GDEFCORE_Result gdefcore_decl_relations(const GDEFCORE_Allocator * alloc,
     const DeclRef * refs, size_t n,

@@ -390,6 +390,66 @@ GDEFCORE_API int gdefcore_request_subject_at(const GDEFCORE_Request * request,
 GDEFCORE_API int gdefcore_request_subjects_overflowed(
     const GDEFCORE_Request * request);
 
+/** Most validity lines a request keeps (story A6). */
+#define GDEFCORE_REQUEST_VALIDITY_MAX 64
+/** Most entities the request keeps as the next batch (story A6). */
+#define GDEFCORE_REQUEST_BATCH_MAX 200
+
+/**
+ * @brief Record what an access callback the request consulted says of a
+ * cached render (module.h, story A6): one line naming the callback and its
+ * validity, a token or a time window. gdefcore_access_render_key() carries
+ * every line, so a changed token is a changed key. A line already recorded is
+ * not recorded twice; past ::GDEFCORE_REQUEST_VALIDITY_MAX the request is
+ * uncacheable. A line holds no control character.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_request_record_validity(
+    GDEFCORE_Request * request, const char * line, size_t len);
+
+/** @brief How many validity lines the request has recorded. */
+GDEFCORE_API size_t gdefcore_request_validity_count(
+    const GDEFCORE_Request * request);
+
+/**
+ * @brief One recorded validity line, in the order recorded, borrowed. Returns
+ * 1, or 0 for an index past the end.
+ */
+GDEFCORE_API int gdefcore_request_validity_at(const GDEFCORE_Request * request,
+    size_t index, const char ** out_line, size_t * out_len);
+
+/**
+ * @brief Mark that what this request renders must not be cached: it consulted
+ * an access callback that declares no cacheability, or one that failed. The
+ * mark stays until the request is destroyed. NULL is ignored.
+ */
+GDEFCORE_API void gdefcore_request_mark_uncacheable(GDEFCORE_Request * request);
+
+/**
+ * @brief Whether a fragment rendered for this request may be cached
+ * (gdefcore_fragment_put() refuses one that may not). 0 for NULL.
+ */
+GDEFCORE_API int gdefcore_request_cacheable(const GDEFCORE_Request * request);
+
+/**
+ * @brief Keep the entities of a page the request listed as the next batch
+ * (story A6): an access callback asked about one of them is asked about all
+ * of them in one call. The list keeps its page here (gdefcore_access_list());
+ * a caller that reads entities it did not list may set them. Replaces the
+ * batch; at most ::GDEFCORE_REQUEST_BATCH_MAX are kept, and an id that is not
+ * one is skipped. Changing the principal or the acting principal empties it.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_request_set_batch(
+    GDEFCORE_Request * request, const char * type, size_t type_len,
+    const char * const * ids, size_t count);
+
+/** @brief The batch's size, and its type (borrowed; may be NULL). */
+GDEFCORE_API size_t gdefcore_request_batch(const GDEFCORE_Request * request,
+    const char ** out_type, size_t * out_type_len);
+
+/** @brief The @p index th entity of the batch, canonical, or NULL. */
+GDEFCORE_API const char * gdefcore_request_batch_at(
+    const GDEFCORE_Request * request, size_t index);
+
 /**
  * @brief Give the request a budget of fuel, in units. Replaces any budget.
  *

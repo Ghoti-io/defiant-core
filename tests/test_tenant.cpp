@@ -325,7 +325,7 @@ TEST(Tenant, Interleaved) {
         size_t k;
         EXPECT_EQ(GDEFCORE_ERR_INVALID,
             gdefcore_access_read(site.catalog, anon, two.shared[j].data(),
-                two.shared[j].size(), "en", 2, "title", 5, &texts, &lens, &n));
+                two.shared[j].size(), "en", 2, "title", 5, &texts, &lens, &n, NULL));
         EXPECT_EQ(GDEFCORE_ERR_INVALID,
             gdefcore_entity_values(site.catalog, NULL, GDEFCORE_VIEW_PUBLISHED,
                 two.shared[j].data(), two.shared[j].size(), "en", 2, "title", 5,

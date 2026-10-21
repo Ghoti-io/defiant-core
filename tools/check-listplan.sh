@@ -91,9 +91,10 @@ plant tiebreak-by-id src/access/access.c testListplan \
 plant field-grant-widens src/access/access.c testListplan \
   'ListPlan.AFieldWithAFieldGrantIsDecidedEntityByEntity' \
   '    if (!same(grants[i].type_name, grants[i].type_len, type, type_len) ||
-        grants[i].field_len != 0 ||
+        grants[i].field_len != 0 || grants[i].source == kSrcCallback ||
         !same(grants[i].action, grants[i].action_len, "read", 4)) {' \
   '    if (!same(grants[i].type_name, grants[i].type_len, type, type_len) ||
+        grants[i].source == kSrcCallback ||
         !same(grants[i].action, grants[i].action_len, "read", 4)) {'
 
 # The ceiling of an acting principal left out of the compiled list.
@@ -109,10 +110,10 @@ plant personal-field-accepted src/condition/condition_plan.c testListplan \
   'ListPlan.APersonalFieldIsNeverComparedAndNeverGrants' \
   '  if (cond_field_info(p->catalog, p->type, p->type_len, name, name_len, info) !=
           0 ||
-      !info->found || info->personal) {' \
+      !info->found || info->personal || info->governed) {' \
   '  if (cond_field_info(p->catalog, p->type, p->type_len, name, name_len, info) !=
           0 ||
-      !info->found) {'
+      !info->found || info->governed) {'
 
 # A failure that cannot be decided carried into no predicate: the evaluator
 # says no, the list says yes.

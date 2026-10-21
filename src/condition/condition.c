@@ -83,6 +83,8 @@ static const char kMsgRenamed[] =
 static const char kMsgTrail[] = "unexpected text after the condition";
 static const char kMsgFieldName[] = "a field name was expected after field.";
 static const char kMsgNoField[] = "no such field";
+static const char kMsgGoverned[] =
+    "the field is decided by an access callback and cannot be tested";
 static const char kMsgNoType[] = "no such type";
 static const char kMsgNoState[] = "no such state";
 static const char kMsgOrderType[] =
@@ -956,7 +958,7 @@ static int field_usable(GDEFCORE_Catalog * catalog, const char * type,
   if (cond_field_info(catalog, type, type_len, name, name_len, out) != 0) {
     return 0;
   }
-  return out->found && !out->personal;
+  return out->found && !out->personal && !out->governed;
 }
 
 static int state_name_ok(const char * s, size_t n) {
@@ -1094,11 +1096,17 @@ GDEFCORE_Result gdefcore_condition_validate_in(GDEFCORE_Catalog * catalog,
     }
     if (node->kind == kField) {
       CondField f;
+      memset(&f, 0, sizeof f);
       if (type_name == NULL ||
           !field_usable(catalog, type_name, type_name_len,
               condition->pool + node->str, node->str_len, &f)) {
-        /* Absent and personal read alike (AD-19). */
-        set_error(out_error, node->pos, kMsgNoField);
+        /* Absent and personal read alike (AD-19). A governed field says
+         * what it is: which fields a callback decides is configuration, not
+         * data (story A6). */
+        set_error(out_error, node->pos,
+            type_name != NULL && f.found && f.governed && !f.personal
+                ? kMsgGoverned
+                : kMsgNoField);
         return GDEFCORE_ERR_INVALID;
       }
     }

@@ -3614,7 +3614,7 @@ static GDEFCORE_Result resolve_alias(GDEFCORE_Catalog * catalog,
       continue;
     }
     rc = gdefcore_access_read(catalog, request, target, target_len, lang, lang_len,
-        field, field_len, &texts, &lens, &n);
+        field, field_len, &texts, &lens, &n, NULL);
     gdefcore_text_free(catalog, field);
     gdefcore_values_free(catalog, texts, lens, n);
     gdefcore_text_free(catalog, lang);

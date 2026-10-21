@@ -450,14 +450,15 @@ const GDEFSTOR_QueryNode * gdefcore_plan_creator_is_principal(
 /* A field read as the evaluator reads it. Returns 0, or 1 when the field is one
  * the evaluator fails on (a personal field, or one the type lacks): the leaf
  * is then a failure. A field the plan cannot promise to read the same way is
- * marked unsupported. @p info receives what the field is. */
+ * marked unsupported. A field an access callback governs is one the
+ * evaluator fails on (story A6). @p info receives what the field is. */
 static int field_operand(GDEFCORE_Plan * p, const char * name, size_t name_len,
     CondField * info, GDEFSTOR_QueryOperand * out) {
   char * key;
   memset(out, 0, sizeof *out);
   if (cond_field_info(p->catalog, p->type, p->type_len, name, name_len, info) !=
           0 ||
-      !info->found || info->personal) {
+      !info->found || info->personal || info->governed) {
     return 1;
   }
   if (info->many && p->max_values > kMaxFieldValues) {

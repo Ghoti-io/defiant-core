@@ -148,6 +148,35 @@ rated.
   An empty permission, type or condition is refused when the module is
   installed. A manifest built before grants existed declares none.
 
+## Access callbacks
+
+A manifest can register **access callbacks** (`GDEFCORE_Module_Callback`,
+appended after the upcasters): a name, a scope (`GDEFCORE_CALLBACK_FIELD` or
+`_OPERATION`), the permission it grants with its type and field, the service
+that carries the function (`GDEFCORE_Module_Access_Callback`, at
+`GDEFCORE_MODULE_ACCESS_CALLBACK_VERSION`), the fuel and timeout of a call,
+its cacheability (`GDEFCORE_CALLBACK_CACHE_TOKEN`, `_TTL` with
+`ttl_seconds`, or `_NONE`) and, for a field, `GDEFCORE_CALLBACK_LOCKED`.
+access.md has how a callback is asked, bounded and shown.
+
+- **At install** the shape is checked, in words: row scope
+  (`GDEFCORE_CALLBACK_ROW`) is refused, a field scope names a field and an
+  operation none, the fuel, timeout and time to live are within their limits,
+  the flag is locked or none, the name is `[a-z][a-z0-9_]*` and unique in the
+  module, and the service resolves to a function.
+- **At enable** the permission is judged as a grant's is (the module's own or
+  the kernel's, on its type and field), a field callback's permission names
+  the field, and an operation callback's action is not a row action. A
+  refusal names the module, the callback and why, and stages nothing.
+- **Confirmation.** Enabling adds one line per callback: `Module <m> decides
+  <permission> per entity with its callback <name> (<scope> scope, high
+  risk): its breadth cannot be judged.`
+- **Enumeration.** `gdefcore_module_callbacks()` returns the callbacks of the
+  enabled modules; `gdefcore_module_field_governed()` says whether one governs
+  a field. A disabled module's callbacks grant nothing and govern nothing.
+- **Limits.** At most 16 callbacks per manifest
+  (`GDEFCORE_MODULE_CALLBACKS_MAX`).
+
 ## Relations
 
 A manifest can declare **relations** (`GDEFCORE_Module_Relation`, appended after

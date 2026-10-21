@@ -28,6 +28,7 @@
  */
 
 #include <ghoti.io/defiant-core/macros.h>
+#include <ghoti.io/defiant-core/access.h>
 #include <ghoti.io/defiant-core/entity.h>
 
 #include "condition_internal.h"
@@ -66,6 +67,10 @@ int cond_field_info(GDEFCORE_Catalog * catalog, const char * type,
         return 1;
       }
       out->personal = personal;
+      /* A field an access callback decides is unusable in any condition, so
+       * that no list can probe it (story A6). */
+      out->governed = gdefcore_access_field_governed(catalog, type, type_len,
+          name, name_len);
       return 0;
     }
   }

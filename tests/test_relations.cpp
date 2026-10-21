@@ -638,7 +638,7 @@ TEST_F(Relations, RowsAreHiddenFromTheManWhoseAccessTheyGive) {
   size_t count = 9;
   EXPECT_EQ(GDEFCORE_ERR_INVALID,
       gdefcore_access_read(catalog_, r, row.data(), row.size(), "en", 2, "c0", 2,
-          &texts, &lens, &count));
+          &texts, &lens, &count, NULL));
   /* The relation's state entity is as hidden. */
   q.type_name = GDEFCORE_RELATION_STATE_TYPE;
   q.type_name_len = strlen(GDEFCORE_RELATION_STATE_TYPE);

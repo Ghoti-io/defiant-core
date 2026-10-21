@@ -1382,7 +1382,7 @@ struct AEnv : Env {
     size_t * lens = (size_t *)0x1;
     size_t count = 99;
     GDEFCORE_Result rc = gdefcore_access_read(catalog, r, id.data(), id.size(),
-        "en", 2, field, strlen(field), &texts, &lens, &count);
+        "en", 2, field, strlen(field), &texts, &lens, &count, NULL);
     std::string out = gdefcore_result_string(rc);
     if (texts == (char **)0x1 && lens == (size_t *)0x1 && count == 99) {
       out += "|untouched";

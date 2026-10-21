@@ -166,7 +166,7 @@ std::string Filtered(GDEFCORE_Catalog * catalog, GDEFCORE_Request * request,
   size_t * lens = NULL;
   size_t count = 0;
   GDEFCORE_Result rc = gdefcore_access_read(catalog, request, id, strlen(id),
-      "en", 2, field, strlen(field), &texts, &lens, &count);
+      "en", 2, field, strlen(field), &texts, &lens, &count, NULL);
   if (out_rc != NULL) {
     *out_rc = rc;
   }
@@ -188,7 +188,7 @@ GDEFCORE_Result ReadUntouched(GDEFCORE_Catalog * catalog,
   size_t * lens = (size_t *)0x1;
   size_t count = 99;
   GDEFCORE_Result rc = gdefcore_access_read(catalog, request, id, strlen(id),
-      "en", 2, field, strlen(field), &texts, &lens, &count);
+      "en", 2, field, strlen(field), &texts, &lens, &count, NULL);
   EXPECT_EQ((char **)0x1, texts);
   EXPECT_EQ((size_t *)0x1, lens);
   EXPECT_EQ(99u, count);

@@ -83,6 +83,16 @@ struct GDEFCORE_Request {
   int subjects_overflowed;
   int has_fuel;
   uint64_t fuel;
+  /* Story A6: what the access callbacks consulted say of the cache. */
+  char ** validity;
+  size_t * validity_lens;
+  size_t nvalidity;
+  int uncacheable;
+  /* Story A6: the last list page, the next batch a callback is asked. */
+  char * batch_type;
+  size_t batch_type_len;
+  char (*batch)[GDEFCORE_PUBLIC_ID_LEN + 1];
+  size_t nbatch;
   const GDEFCORE_Allocator * allocator;
 };
 

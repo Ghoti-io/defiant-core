@@ -26,6 +26,9 @@
  * callback. A filtered read is the read a principal uses.
  */
 
+/* clock_gettime(), for an access callback's timeout (story A6). */
+#define _POSIX_C_SOURCE 200809L
+
 #include <ghoti.io/defiant-core/macros.h>
 #include <ghoti.io/defiant-core/access.h>
 #include <ghoti.io/defiant-core/condition.h>
@@ -43,6 +46,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 enum {
   kStageSlots = 8,
@@ -55,10 +59,15 @@ enum {
   /* Where a grant came from. */
   kSrcRole = 0,
   kSrcModule = 1,
+  /* An enabled module's access callback (story A6): decided per entity by
+   * the module's code, held by everyone it grants. */
+  kSrcCallback = 2,
   kAssignedRoles = 8,
   /* A grant whose condition is an expression (condition.h). The public
    * ::GDEFCORE_ACCESS_ANY and ::GDEFCORE_ACCESS_OWN stay 1 and 2. */
-  kCondExpr = 3
+  kCondExpr = 3,
+  /* A grant decided by an access callback (story A6). */
+  kCondCallback = 4
 };
 
 static const char kLang[] = "en";
@@ -79,6 +88,8 @@ static const char kCondOwn[] = "own";
 static const char kCondExprMark[] = "expr";
 static const char kFailedNote[] = "defiant.condition.failed";
 static const char kListNote[] = "defiant.access.list";
+static const char kCallbackNote[] = "defiant.callback.failed";
+static const char kCallbackRunning[] = "defiant.callback.running";
 
 typedef struct StagePerm {
   char label[kPart];
@@ -118,6 +129,8 @@ typedef struct Grant {
   int source;
   const char * expr;
   size_t expr_len;
+  /* kSrcCallback: the callback, borrowed from the module host as expr is. */
+  const GDEFCORE_Module_Declared_Callback * cb;
 } Grant;
 
 static StageSlot g_stage[kStageSlots];
@@ -626,6 +639,96 @@ static GDEFCORE_Result load_module_grants(GDEFCORE_Catalog * catalog,
   return rc;
 }
 
+/*
+ * The access callbacks of the enabled modules (story A6), as grants everyone
+ * holds whom the callback grants. As for a module grant, one whose permission
+ * is not declared, or is declared by another module than its own and not by
+ * the kernel, or differs from the permission in type or field, is inert; so
+ * is one whose scope does not fit its permission (a field callback's names
+ * the field, an operation callback's none), which the enable refuses.
+ */
+static GDEFCORE_Result load_module_callbacks(GDEFCORE_Catalog * catalog,
+    Grant * grants, size_t cap, size_t * out_n) {
+  GDEFCORE_Host * host = gdefcore_catalog_host(catalog);
+  const GDEFCORE_Module_Declared_Callback ** items = NULL;
+  size_t count = 0;
+  size_t i;
+  const uint8_t * tenant;
+  size_t tenant_len = 0;
+  GDEFCORE_Result rc;
+  if (host == NULL) {
+    return GDEFCORE_OK;
+  }
+  tenant = gdefcore_catalog_tenant(catalog, &tenant_len);
+  rc = gdefcore_module_callbacks(host, tenant, tenant_len, NULL, &items,
+      &count);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  for (i = 0; i < count; i++) {
+    const GDEFCORE_Module_Declared_Callback * item = items[i];
+    Grant info;
+    Grant * g;
+    char owner[kPart];
+    size_t owner_len = 0;
+    rc = permission_by_label(catalog, item->permission, item->permission_len,
+        NULL, &info, owner, sizeof owner, &owner_len);
+    if (rc == GDEFCORE_ERR_INVALID) {
+      rc = GDEFCORE_OK;
+      continue;
+    }
+    if (rc != GDEFCORE_OK) {
+      break;
+    }
+    if ((!same(owner, owner_len, "core", 4) &&
+            !same(owner, owner_len, item->module, item->module_len)) ||
+        !same(info.type_name, info.type_len, item->type_name,
+            item->type_name_len) ||
+        !same(info.field, info.field_len, item->field, item->field_len) ||
+        (item->scope == GDEFCORE_CALLBACK_FIELD) != (info.field_len > 0) ||
+        (item->scope == GDEFCORE_CALLBACK_OPERATION &&
+            gdefcore_access_row_action(info.action, info.action_len))) {
+      continue;
+    }
+    if (*out_n >= cap) {
+      rc = GDEFCORE_ERR_LIMIT;
+      break;
+    }
+    g = &grants[*out_n];
+    memset(g, 0, sizeof *g);
+    if (!copy_part(g->label, sizeof g->label, &g->label_len, item->permission,
+            item->permission_len) ||
+        !copy_part(g->module_name, sizeof g->module_name, &g->module_len,
+            item->module, item->module_len)) {
+      continue;
+    }
+    memcpy(g->action, info.action, info.action_len + 1);
+    g->action_len = info.action_len;
+    memcpy(g->type_name, info.type_name, info.type_len + 1);
+    g->type_len = info.type_len;
+    memcpy(g->field, info.field, info.field_len + 1);
+    g->field_len = info.field_len;
+    g->condition = kCondCallback;
+    g->source = kSrcCallback;
+    g->cb = item;
+    *out_n += 1;
+  }
+  gdefcore_module_declared_free(host, items);
+  return rc;
+}
+
+/* The module grants, then the module callbacks: a callback is asked only when
+ * nothing before it in the list grants (the decisions stop at the first
+ * grant that holds). */
+static GDEFCORE_Result load_module_all(GDEFCORE_Catalog * catalog,
+    Grant * grants, size_t cap, size_t * out_n) {
+  GDEFCORE_Result rc = load_module_grants(catalog, grants, cap, out_n);
+  if (rc == GDEFCORE_OK) {
+    rc = load_module_callbacks(catalog, grants, cap, out_n);
+  }
+  return rc;
+}
+
 static GDEFCORE_Result load_effective_for(GDEFCORE_Catalog * catalog,
     const char * principal, size_t principal_len, Grant * grants, size_t cap,
     size_t * out_n, int * read_principal, int with_modules) {
@@ -695,7 +798,7 @@ static GDEFCORE_Result load_effective_for(GDEFCORE_Catalog * catalog,
       *out_n += got;
     }
     gdefcore_values_free(catalog, held, held_lens, held_n);
-    return with_modules ? load_module_grants(catalog, grants, cap, out_n)
+    return with_modules ? load_module_all(catalog, grants, cap, out_n)
                         : GDEFCORE_OK;
   }
   {
@@ -703,7 +806,7 @@ static GDEFCORE_Result load_effective_for(GDEFCORE_Catalog * catalog,
     size_t got = 0;
     size_t g;
     if (find_role(catalog, roles[0], role_lens[0], role_id) != GDEFCORE_OK) {
-      return with_modules ? load_module_grants(catalog, grants, cap, out_n)
+      return with_modules ? load_module_all(catalog, grants, cap, out_n)
                           : GDEFCORE_OK;
     }
     if (load_role_grants(catalog, role_id, grants, cap, &got) != GDEFCORE_OK) {
@@ -716,7 +819,7 @@ static GDEFCORE_Result load_effective_for(GDEFCORE_Catalog * catalog,
     }
     *out_n = got;
   }
-  return with_modules ? load_module_grants(catalog, grants, cap, out_n)
+  return with_modules ? load_module_all(catalog, grants, cap, out_n)
                       : GDEFCORE_OK;
 }
 
@@ -1002,6 +1105,312 @@ static int expr_holds(Eval * ev, const Grant * grant, const char * id,
   return r;
 }
 
+/* ---- access callbacks (story A6) ---------------------------------------- */
+
+struct GDEFCORE_Callback_Call {
+  uint64_t fuel;        /* left of the call's own */
+  int over;             /* it spent past it */
+  uint64_t deadline_ms; /* monotonic */
+};
+
+static uint64_t mono_ms(void) {
+  struct timespec ts;
+  if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+    return 0;
+  }
+  return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
+}
+
+GDEFCORE_Result gdefcore_callback_spend(GDEFCORE_Callback_Call * call,
+    uint64_t units) {
+  if (call == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  if (call->over || call->fuel < units) {
+    call->fuel = 0;
+    call->over = 1;
+    return GDEFCORE_ERR_LIMIT;
+  }
+  call->fuel -= units;
+  return GDEFCORE_OK;
+}
+
+int gdefcore_callback_expired(const GDEFCORE_Callback_Call * call) {
+  return call == NULL || mono_ms() > call->deadline_ms;
+}
+
+int gdefcore_access_row_action(const char * action, size_t len) {
+  static const char * const words[] = {"list", "search", "count", "export"};
+  size_t start = 0;
+  size_t i;
+  if (action == NULL) {
+    return 0;
+  }
+  if (same(action, len, "read", 4)) {
+    return 1;
+  }
+  for (i = 0; i <= len; i++) {
+    if (i == len || action[i] == '.') {
+      size_t w;
+      for (w = 0; w < sizeof words / sizeof words[0]; w++) {
+        if (same(action + start, i - start, words[w], strlen(words[w]))) {
+          return 1;
+        }
+      }
+      start = i + 1;
+    }
+  }
+  return 0;
+}
+
+/* The memo key of one answer of @p cb: who asks (and for whom), of which
+ * entity at which version. 0 when it does not fit (the answer is then not
+ * remembered, and asked again). */
+static int callback_key(char * out, size_t cap, const GDEFCORE_Request * request,
+    const GDEFCORE_Module_Declared_Callback * cb, const char * entity,
+    uint64_t version) {
+  size_t principal_len = 0;
+  const char * principal = gdefcore_request_principal(request, &principal_len);
+  size_t acting_len = 0;
+  const char * acting = gdefcore_request_acting_principal(request, &acting_len);
+  const char * who = principal == NULL ? "-" : principal;
+  size_t who_len = principal == NULL ? 1 : principal_len;
+  const char * agent = acting == NULL ? "-" : acting;
+  size_t agent_len = acting == NULL ? 1 : acting_len;
+  int n = snprintf(out, cap, "cb\x1f%.*s\x1f%.*s\x1f%.*s\x1f%.*s\x1f%s\x1f%llu",
+      (int)cb->module_len, cb->module, (int)cb->name_len, cb->name,
+      (int)who_len, who, (int)agent_len, agent, entity,
+      (unsigned long long)version);
+  return n > 0 && (size_t)n < cap ? n : 0;
+}
+
+/* A failed call: it grants nothing, for every entity it was asked about, for
+ * the rest of the request; the request says so, and is not cached (AD-10 as
+ * amended: a failing grant hook grants nothing and is reported). */
+static void callback_failed(GDEFCORE_Request * request,
+    const GDEFCORE_Module_Declared_Callback * cb, const char * reason) {
+  char text[256];
+  int n = snprintf(text, sizeof text, "%.*s.%.*s %s", (int)cb->module_len,
+      cb->module, (int)cb->name_len, cb->name, reason);
+  if (n > 0) {
+    (void)gdefcore_request_set_note(request, kCallbackNote,
+        strlen(kCallbackNote), text,
+        (size_t)n < sizeof text ? (size_t)n : sizeof text - 1);
+  }
+  gdefcore_request_mark_uncacheable(request);
+}
+
+/* A validity token: printable ASCII, no space. */
+static int token_ok(const char * token, size_t len) {
+  size_t i;
+  if (len == 0 || len > GDEFCORE_CALLBACK_TOKEN_MAX) {
+    return 0;
+  }
+  for (i = 0; i < len; i++) {
+    if ((unsigned char)token[i] <= 0x20 || (unsigned char)token[i] >= 0x7f) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+/* What a call that answered says of the cache, recorded on the request. */
+static void callback_validity(GDEFCORE_Request * request,
+    const GDEFCORE_Module_Declared_Callback * cb,
+    const GDEFCORE_Callback_Answer * answer) {
+  char line[GDEFCORE_CALLBACK_TOKEN_MAX + 200];
+  int n = 0;
+  if (cb->cache == GDEFCORE_CALLBACK_CACHE_TOKEN) {
+    n = snprintf(line, sizeof line, "%.*s.%.*s token %.*s",
+        (int)cb->module_len, cb->module, (int)cb->name_len, cb->name,
+        (int)answer->token_len, answer->token);
+  } else if (cb->cache == GDEFCORE_CALLBACK_CACHE_TTL && cb->ttl_seconds > 0) {
+    /* The window of request time the answer holds for: the key moves on
+     * every ttl_seconds. */
+    int64_t now = gdefcore_request_time(request);
+    int64_t window = now >= 0 ? now / (int64_t)cb->ttl_seconds
+                              : -((-now + (int64_t)cb->ttl_seconds - 1) /
+                                    (int64_t)cb->ttl_seconds);
+    n = snprintf(line, sizeof line, "%.*s.%.*s ttl %lu@%lld",
+        (int)cb->module_len, cb->module, (int)cb->name_len, cb->name,
+        (unsigned long)cb->ttl_seconds, (long long)window);
+  }
+  if (n <= 0 || (size_t)n >= sizeof line ||
+      gdefcore_request_record_validity(request, line, (size_t)n) !=
+          GDEFCORE_OK) {
+    /* No cacheability declared, or one that cannot be recorded. */
+    gdefcore_request_mark_uncacheable(request);
+  }
+}
+
+/*
+ * Ask @p grant's callback whether it grants on ev->id (story A6). Asked once
+ * per (callback, principal, acting principal, entity, version) per request:
+ * a miss asks about ev->id and, in the same call, about every entity of the
+ * request's batch of the same type not answered yet, and remembers each
+ * answer. A call that fails grants nothing and is reported; it never marks
+ * the evaluation failed, because a grant that grants nothing is no grant, not
+ * an undecided one (AD-10 as amended).
+ */
+static int callback_holds(Eval * ev, const Grant * grant) {
+  const GDEFCORE_Module_Declared_Callback * cb = grant->cb;
+  GDEFCORE_Request * request = ev->request;
+  const char * ids[GDEFCORE_CALLBACK_BATCH_MAX];
+  uint64_t versions[GDEFCORE_CALLBACK_BATCH_MAX];
+  int granted[GDEFCORE_CALLBACK_BATCH_MAX];
+  char key[512];
+  int key_len;
+  int value = 0;
+  size_t n = 0;
+  size_t i;
+  uint64_t version = 0;
+  const char * running = NULL;
+  size_t running_len = 0;
+  const char * principal = NULL;
+  size_t principal_len = 0;
+  const char * acting = NULL;
+  size_t acting_len = 0;
+  GDEFCORE_Callback_Call call;
+  GDEFCORE_Callback_Question q;
+  GDEFCORE_Callback_Answer a;
+  const char * reason = NULL;
+  uint64_t start = 0;
+  GDEFCORE_Result rc = GDEFCORE_OK;
+  memset(&call, 0, sizeof call);
+  memset(&q, 0, sizeof q);
+  memset(&a, 0, sizeof a);
+  if (cb == NULL || cb->fn == NULL || ev->id == NULL || request == NULL) {
+    return 0;
+  }
+  /* Its answer is about the principal: what renders from it is too. */
+  gdefcore_request_mark_principal_dependent(request);
+  if (gdefcore_entity_version(ev->catalog, ev->id, GDEFCORE_PUBLIC_ID_LEN,
+          &version) != GDEFCORE_OK) {
+    return 0;
+  }
+  key_len = callback_key(key, sizeof key, request, cb, ev->id, version);
+  if (key_len > 0 &&
+      gdefcore_request_memo_get(request, key, (size_t)key_len, &value)) {
+    return value == 1;
+  }
+  running = gdefcore_request_note(request, kCallbackRunning,
+      strlen(kCallbackRunning), &running_len);
+  if (running != NULL && same(running, running_len, "1", 1)) {
+    /* Asked from inside a callback: it would decide its own question. */
+    callback_failed(request, cb, "reentered");
+    return 0;
+  }
+  ids[n] = ev->id;
+  versions[n] = version;
+  n += 1;
+  {
+    const char * btype = NULL;
+    size_t btype_len = 0;
+    size_t nb = gdefcore_request_batch(request, &btype, &btype_len);
+    if (nb > 0 && same(btype, btype_len, grant->type_name, grant->type_len)) {
+      for (i = 0; i < nb && n < GDEFCORE_CALLBACK_BATCH_MAX; i++) {
+        const char * id = gdefcore_request_batch_at(request, i);
+        char other[512];
+        int other_len;
+        int ignored = 0;
+        uint64_t v = 0;
+        if (id == NULL || same(id, strlen(id), ev->id, GDEFCORE_PUBLIC_ID_LEN) ||
+            gdefcore_entity_version(ev->catalog, id, GDEFCORE_PUBLIC_ID_LEN,
+                &v) != GDEFCORE_OK) {
+          continue;
+        }
+        other_len = callback_key(other, sizeof other, request, cb, id, v);
+        if (other_len > 0 && gdefcore_request_memo_get(request, other,
+                                 (size_t)other_len, &ignored)) {
+          continue;
+        }
+        ids[n] = id;
+        versions[n] = v;
+        n += 1;
+      }
+    }
+  }
+  memset(granted, 0, sizeof granted);
+  if (gdefcore_request_spend_fuel(request, GDEFCORE_CALLBACK_REQUEST_FUEL) !=
+      GDEFCORE_OK) {
+    reason = "request-fuel";
+  } else {
+    uint64_t deadline;
+    uint64_t request_deadline = gdefcore_request_deadline_ms(request);
+    principal = gdefcore_request_principal(request, &principal_len);
+    acting = gdefcore_request_acting_principal(request, &acting_len);
+    memset(&q, 0, sizeof q);
+    q.size = sizeof q;
+    q.module = cb->module;
+    q.module_len = cb->module_len;
+    q.name = cb->name;
+    q.name_len = cb->name_len;
+    q.scope = cb->scope;
+    q.permission = grant->label;
+    q.permission_len = grant->label_len;
+    q.action = grant->action;
+    q.action_len = grant->action_len;
+    q.type_name = grant->type_name;
+    q.type_name_len = grant->type_len;
+    q.field = grant->field;
+    q.field_len = grant->field_len;
+    q.principal = principal;
+    q.principal_len = principal == NULL ? 0 : principal_len;
+    q.acting = acting;
+    q.acting_len = acting == NULL ? 0 : acting_len;
+    q.entities = ids;
+    q.count = n;
+    memset(&a, 0, sizeof a);
+    a.size = sizeof a;
+    a.granted = granted;
+    a.count = n;
+    start = mono_ms();
+    deadline = start + cb->timeout_ms;
+    if (request_deadline != 0 && request_deadline < deadline) {
+      deadline = request_deadline;
+    }
+    call.fuel = cb->fuel;
+    call.over = 0;
+    call.deadline_ms = deadline;
+    (void)gdefcore_request_set_note(request, kCallbackRunning,
+        strlen(kCallbackRunning), "1", 1);
+    rc = cb->fn(&call, request, &q, &a, cb->user);
+    (void)gdefcore_request_set_note(request, kCallbackRunning,
+        strlen(kCallbackRunning), "0", 1);
+    if (rc != GDEFCORE_OK) {
+      reason = "trapped";
+    } else if (call.over) {
+      reason = "out-of-fuel";
+    } else if (mono_ms() > deadline) {
+      reason = "timed-out";
+    } else if (a.granted != granted || a.count != n ||
+               a.token_len > GDEFCORE_CALLBACK_TOKEN_MAX ||
+               (cb->cache == GDEFCORE_CALLBACK_CACHE_TOKEN &&
+                   !token_ok(a.token, a.token_len))) {
+      reason = "malformed";
+    }
+    for (i = 0; reason == NULL && i < n; i++) {
+      if (granted[i] != 0 && granted[i] != 1) {
+        reason = "malformed";
+      }
+    }
+  }
+  if (reason != NULL) {
+    callback_failed(request, cb, reason);
+    memset(granted, 0, sizeof granted);
+  } else {
+    callback_validity(request, cb, &a);
+  }
+  for (i = 0; i < n; i++) {
+    char k[512];
+    int kl = callback_key(k, sizeof k, request, cb, ids[i], versions[i]);
+    if (kl > 0) {
+      (void)gdefcore_request_memo_put(request, k, (size_t)kl, granted[i]);
+    }
+  }
+  return granted[0] == 1;
+}
+
 static int base_condition_ok(Eval * ev, const Grant * grant,
     const char * actor, size_t actor_len, const char * principal,
     size_t principal_len) {
@@ -1013,6 +1422,13 @@ static int base_condition_ok(Eval * ev, const Grant * grant,
       return 0;
     }
     return expr_holds(ev, grant, ev->id, GDEFCORE_PUBLIC_ID_LEN);
+  }
+  if (grant->condition == kCondCallback) {
+    /* Decided per entity: with none there is nothing to ask about. */
+    if (ev == NULL || ev->id == NULL) {
+      return 0;
+    }
+    return callback_holds(ev, grant);
   }
   if (grant->condition != GDEFCORE_ACCESS_OWN) {
     return 0;
@@ -1079,7 +1495,9 @@ static int entity_visible(Eval * ev, const Grant * grants, size_t ngrants,
     if (!same(grants[i].type_name, grants[i].type_len, type, type_len)) {
       continue;
     }
-    if (grants[i].field_len != 0) {
+    if (grants[i].field_len != 0 || grants[i].source == kSrcCallback) {
+      /* A field grant says nothing of the row, and no callback decides
+       * whether an entity is seen (story A6: row scope is refused). */
       continue;
     }
     if (same(grants[i].action, grants[i].action_len, "read", 4) &&
@@ -2163,6 +2581,42 @@ GDEFCORE_Result gdefcore_access_principal_roles(GDEFCORE_Catalog * catalog,
   return GDEFCORE_OK;
 }
 
+/* ---- governed fields (story A6) ----------------------------------------- */
+
+int gdefcore_access_field_governed(GDEFCORE_Catalog * catalog,
+    const char * type, size_t type_len, const char * field, size_t field_len) {
+  GDEFCORE_Host * host;
+  const uint8_t * tenant;
+  size_t tenant_len = 0;
+  if (catalog == NULL) {
+    return 0;
+  }
+  host = gdefcore_catalog_host(catalog);
+  if (host == NULL) {
+    return 0;
+  }
+  tenant = gdefcore_catalog_tenant(catalog, &tenant_len);
+  return gdefcore_module_field_governed(host, tenant, tenant_len, type,
+      type_len, field, field_len, NULL);
+}
+
+/* Whether a callback that governs the field opts it in to the locked
+ * indicator (access SPEC decision 4). */
+static int field_locks(GDEFCORE_Catalog * catalog, const char * type,
+    size_t type_len, const char * field, size_t field_len) {
+  GDEFCORE_Host * host = gdefcore_catalog_host(catalog);
+  const uint8_t * tenant;
+  size_t tenant_len = 0;
+  int locked = 0;
+  if (host == NULL) {
+    return 0;
+  }
+  tenant = gdefcore_catalog_tenant(catalog, &tenant_len);
+  return gdefcore_module_field_governed(host, tenant, tenant_len, type,
+             type_len, field, field_len, &locked) &&
+         locked;
+}
+
 /* ---- personal values in the read path (AD-19, story S7) ------------------ */
 
 static int field_is_personal(GDEFCORE_Catalog * catalog, const char * type,
@@ -2353,7 +2807,8 @@ static GDEFCORE_Result personal_texts(GDEFCORE_Catalog * catalog,
 GDEFCORE_Result gdefcore_access_read(GDEFCORE_Catalog * catalog,
     GDEFCORE_Request * request, const char * id, size_t id_len,
     const char * lang, size_t lang_len, const char * field, size_t field_len,
-    char *** out_texts, size_t ** out_lens, size_t * out_count) {
+    char *** out_texts, size_t ** out_lens, size_t * out_count,
+    int * out_locked) {
   char canon[GDEFCORE_PUBLIC_ID_LEN + 1];
   char * type_name = NULL;
   size_t type_len = 0;
@@ -2371,6 +2826,9 @@ GDEFCORE_Result gdefcore_access_read(GDEFCORE_Catalog * catalog,
   int granted = 1;
   int personal = 0;
   GDEFCORE_Result rc;
+  if (out_locked != NULL) {
+    *out_locked = 0;
+  }
   if (catalog == NULL || request == NULL || out_texts == NULL ||
       out_lens == NULL || out_count == NULL || field == NULL) {
     return GDEFCORE_ERR_INVALID;
@@ -2428,11 +2886,37 @@ GDEFCORE_Result gdefcore_access_read(GDEFCORE_Catalog * catalog,
     return GDEFCORE_ERR_INVALID;
   }
   if (!granted) {
-    gdefcore_text_free(catalog, type_name);
-    gdefcore_text_free(catalog, actor);
     *out_texts = NULL;
     *out_lens = NULL;
     *out_count = 0;
+    if (out_locked != NULL &&
+        field_locks(catalog, type_name, type_len, field, field_len)) {
+      /* The field opts in to the locked indicator (story A6): the principal
+       * is told a value is there, and never what it is. Read unfiltered only
+       * to count, and wiped: the values never leave. */
+      char ** held = NULL;
+      size_t * held_lens = NULL;
+      size_t nheld = 0;
+      rc = gdefcore_entity_values(catalog, NULL, GDEFCORE_VIEW_PUBLISHED, canon,
+          GDEFCORE_PUBLIC_ID_LEN, lang, lang_len, field, field_len, &held,
+          &held_lens, &nheld);
+      if (rc == GDEFCORE_OK) {
+        size_t k;
+        *out_locked = nheld > 0;
+        for (k = 0; k < nheld; k++) {
+          if (held[k] != NULL && held_lens[k] > 0) {
+            gsec_wipe(held[k], held_lens[k]);
+          }
+        }
+        gdefcore_values_free(catalog, held, held_lens, nheld);
+      } else if (rc != GDEFCORE_ERR_INVALID) {
+        gdefcore_text_free(catalog, type_name);
+        gdefcore_text_free(catalog, actor);
+        return rc;
+      }
+    }
+    gdefcore_text_free(catalog, type_name);
+    gdefcore_text_free(catalog, actor);
     return GDEFCORE_OK;
   }
   gdefcore_text_free(catalog, actor);
@@ -2462,6 +2946,7 @@ typedef struct PathSeen {
   char path[GDEFCORE_FIELD_PATH_MAX + 1];
   size_t path_len;
   int shown;
+  int locked; /* not shown, and its field opts in to the locked indicator */
 } PathSeen;
 
 typedef struct TreeFilter {
@@ -2547,9 +3032,24 @@ static int path_shown(TreeFilter * f, const char * path, size_t path_len) {
     memcpy(f->seen[f->nseen].path, path, path_len);
     f->seen[f->nseen].path_len = path_len;
     f->seen[f->nseen].shown = shown;
+    f->seen[f->nseen].locked = !shown && field_locks(f->ev->catalog, f->type,
+                                             f->type_len, path, path_len);
     f->nseen += 1;
   }
   return shown;
+}
+
+/* Whether a path path_shown() refused opts in to the locked indicator (story
+ * A6). Asked after path_shown(), which remembered it. */
+static int path_locked(TreeFilter * f, const char * path, size_t path_len) {
+  size_t i;
+  for (i = 0; i < f->nseen; i++) {
+    if (same(f->seen[i].path, f->seen[i].path_len, path, path_len)) {
+      return f->seen[i].locked;
+    }
+  }
+  return !path_shown(f, path, path_len) &&
+         field_locks(f->ev->catalog, f->type, f->type_len, path, path_len);
 }
 
 /* The path of value @p field of an item at @p item_path, in @p buf. */
@@ -2601,7 +3101,16 @@ static GDEFCORE_Result filter_tree(GDEFCORE_Catalog * catalog, TreeFilter * f,
     }
     map[i] = kGone;
     if (i > 0) {
-      if (map[it.parent] == kGone || !path_shown(f, it.path, it.path_len)) {
+      if (map[it.parent] == kGone) {
+        continue;
+      }
+      if (!path_shown(f, it.path, it.path_len)) {
+        if (path_locked(f, it.path, it.path_len)) {
+          /* An item of a field refused and locked: the field says a value is
+           * there, and the item goes with its values (story A6). */
+          rc = gdefcore_tree_set_locked(t, map[it.parent], it.field,
+              it.field_len);
+        }
         continue;
       }
       rc = gdefcore_tree_add(t, map[it.parent], it.field, it.field_len, it.id,
@@ -2629,6 +3138,10 @@ static GDEFCORE_Result filter_tree(GDEFCORE_Catalog * catalog, TreeFilter * f,
       }
       /* An item's own value is its field's, and was decided with the item. */
       if (field_len > 0 && !path_shown(f, path, pn)) {
+        if (path_locked(f, path, pn)) {
+          /* Refused and locked (story A6): marked, never set. */
+          rc = gdefcore_tree_set_locked(t, item, field, field_len);
+        }
         continue;
       }
       if (personal_path(f, path, pn)) {
@@ -3196,7 +3709,7 @@ static const GDEFSTOR_QueryNode * access_node(Eval * ev, GDEFCORE_Plan * plan,
     const GDEFSTOR_QueryNode * base;
     const GDEFSTOR_QueryNode * ceiling;
     if (!same(grants[i].type_name, grants[i].type_len, type, type_len) ||
-        grants[i].field_len != 0 ||
+        grants[i].field_len != 0 || grants[i].source == kSrcCallback ||
         !same(grants[i].action, grants[i].action_len, "read", 4)) {
       continue;
     }
@@ -3683,9 +4196,14 @@ static GDEFCORE_Result list_impl(Eval * ev, GDEFCORE_Catalog * catalog,
   }
   eval_init(ev, catalog, request, local.lang, local.lang_len);
   (void)setup_ceiling(ev);
+  /* A field an access callback governs is not filtered or sorted on by
+   * anyone, whoever may read it (story A6): a list would probe it. A
+   * condition naming one is refused by its validation below. */
   if (local.filter_field != NULL && local.filter_field_len > 0) {
     if (!type_has_field(catalog, local.type_name, local.type_name_len,
             local.filter_field, local.filter_field_len) ||
+        gdefcore_access_field_governed(catalog, local.type_name,
+            local.type_name_len, local.filter_field, local.filter_field_len) ||
         !grant_names_field(grants, ngrants, decls, ndecls, local.type_name,
             local.type_name_len, local.filter_field, local.filter_field_len,
             principal, principal_len)) {
@@ -3699,6 +4217,8 @@ static GDEFCORE_Result list_impl(Eval * ev, GDEFCORE_Catalog * catalog,
   if (local.sort_field != NULL && local.sort_field_len > 0) {
     if (!type_has_field(catalog, local.type_name, local.type_name_len,
             local.sort_field, local.sort_field_len) ||
+        gdefcore_access_field_governed(catalog, local.type_name,
+            local.type_name_len, local.sort_field, local.sort_field_len) ||
         !grant_names_field(grants, ngrants, decls, ndecls, local.type_name,
             local.type_name_len, local.sort_field, local.sort_field_len,
             principal, principal_len)) {
@@ -3712,6 +4232,8 @@ static GDEFCORE_Result list_impl(Eval * ev, GDEFCORE_Catalog * catalog,
   if (local.sort2_field != NULL && local.sort2_field_len > 0) {
     if (!type_has_field(catalog, local.type_name, local.type_name_len,
             local.sort2_field, local.sort2_field_len) ||
+        gdefcore_access_field_governed(catalog, local.type_name,
+            local.type_name_len, local.sort2_field, local.sort2_field_len) ||
         !grant_names_field(grants, ngrants, decls, ndecls, local.type_name,
             local.type_name_len, local.sort2_field, local.sort2_field_len,
             principal, principal_len)) {
@@ -3811,6 +4333,13 @@ static GDEFCORE_Result list_impl(Eval * ev, GDEFCORE_Catalog * catalog,
   /* How this list was answered, for a test or an explain trace to read. */
   (void)gdefcore_request_set_note(request, kListNote, strlen(kListNote),
       planned ? "planned" : "evaluated", planned ? 7 : 9);
+  if (!count_only) {
+    /* The page is the next batch an access callback is asked about, when
+     * its entities are read (story A6). The list itself asks nothing: what
+     * is listed and counted is the conditions' alone. */
+    (void)gdefcore_request_set_batch(request, local.type_name,
+        local.type_name_len, (const char * const *)*out_ids, *out_count);
+  }
   if (out_total != NULL) {
     *out_total = total;
   }
@@ -3939,6 +4468,66 @@ static int deps_digest(const GDEFCORE_Request * request, char out[80]) {
   return 1;
 }
 
+/* A digest of the validity lines the request recorded (story A6), order
+ * ignored, or 0 when it recorded none. */
+static int validity_digest(const GDEFCORE_Request * request, char out[80]) {
+  size_t n = gdefcore_request_validity_count(request);
+  size_t i;
+  const char ** lines;
+  size_t * lens;
+  GSEC_Sha256 ctx;
+  uint8_t dig[GSEC_SHA256_DIGEST_LEN];
+  static const char hexd[] = "0123456789abcdef";
+  int ok;
+  if (n == 0) {
+    return 0;
+  }
+  lines = (const char **)gcu_allocator_calloc(alloc_default(), n,
+      sizeof *lines);
+  lens = (size_t *)gcu_allocator_calloc(alloc_default(), n, sizeof *lens);
+  if (lines == NULL || lens == NULL) {
+    gcu_allocator_free(alloc_default(), lines);
+    gcu_allocator_free(alloc_default(), lens);
+    snprintf(out, 80, "unreadable");
+    return 1;
+  }
+  for (i = 0; i < n; i++) {
+    (void)gdefcore_request_validity_at(request, i, &lines[i], &lens[i]);
+  }
+  /* An insertion sort by bytes: few lines, and no context for qsort. */
+  for (i = 1; i < n; i++) {
+    size_t j = i;
+    while (j > 0 && cmp_bytes(lines[j - 1], lens[j - 1], lines[j], lens[j]) >
+                        0) {
+      const char * t = lines[j];
+      size_t tl = lens[j];
+      lines[j] = lines[j - 1];
+      lens[j] = lens[j - 1];
+      lines[j - 1] = t;
+      lens[j - 1] = tl;
+      j -= 1;
+    }
+  }
+  ok = gsec_sha256_init(&ctx) == GSEC_OK;
+  for (i = 0; ok && i < n; i++) {
+    ok = gsec_sha256_update(&ctx, lines[i], lens[i]) == GSEC_OK &&
+         gsec_sha256_update(&ctx, "\n", 1) == GSEC_OK;
+  }
+  ok = ok && gsec_sha256_final(&ctx, dig) == GSEC_OK;
+  gcu_allocator_free(alloc_default(), lines);
+  gcu_allocator_free(alloc_default(), lens);
+  if (!ok) {
+    snprintf(out, 80, "unreadable");
+    return 1;
+  }
+  for (i = 0; i < GSEC_SHA256_DIGEST_LEN; i++) {
+    out[i * 2] = hexd[dig[i] >> 4];
+    out[i * 2 + 1] = hexd[dig[i] & 0x0fu];
+  }
+  out[64] = '\0';
+  return 1;
+}
+
 GDEFCORE_Result gdefcore_access_render_key(GDEFCORE_Catalog * catalog,
     GDEFCORE_Request * request, const char * overlay, size_t overlay_len,
     const uint8_t * module_bytes, size_t module_len, char ** out_key,
@@ -3954,6 +4543,7 @@ GDEFCORE_Result gdefcore_access_render_key(GDEFCORE_Catalog * catalog,
   char perm_hex[65];
   char module_hex[65];
   char deps_hex[80];
+  char validity_hex[80];
   char * lines[kGrantMax];
   size_t nlines = 0;
   char * blob = NULL;
@@ -4040,6 +4630,13 @@ GDEFCORE_Result gdefcore_access_render_key(GDEFCORE_Catalog * catalog,
         }
       }
       gdefcore_condition_text_free(canon);
+    } else if (grants[i].condition == kCondCallback) {
+      /* A callback is named; what it answered is the validity line below. */
+      snprintf(cond_text, sizeof cond_text, "cb:%.*s.%.*s",
+          (int)(grants[i].cb->module_len > 32 ? 32 : grants[i].cb->module_len),
+          grants[i].cb->module,
+          (int)(grants[i].cb->name_len > 32 ? 32 : grants[i].cb->name_len),
+          grants[i].cb->name);
     } else {
       snprintf(cond_text, sizeof cond_text, "%s",
           grants[i].condition == GDEFCORE_ACCESS_OWN ? kCondOwn : kCondAny);
@@ -4165,6 +4762,18 @@ GDEFCORE_Result gdefcore_access_render_key(GDEFCORE_Catalog * catalog,
       ADD_KEY("\nreads:", 7);
       ADD_KEY(deps_hex, strlen(deps_hex));
     }
+    if (validity_digest(request, validity_hex)) {
+      /* What the access callbacks it consulted said (story A6): a changed
+       * validity token, or the next window of a time to live, is a different
+       * key. */
+      ADD_KEY("\ncallbacks:", 11);
+      ADD_KEY(validity_hex, strlen(validity_hex));
+    }
+    if (!gdefcore_request_cacheable(request)) {
+      /* A callback that declares no cacheability, or one that failed: the
+       * key is for no cache (gdefcore_fragment_put() refuses it). */
+      ADD_KEY("\ncache:none", 11);
+    }
     ADD_KEY("\n", 1);
 #undef ADD_KEY
   }
@@ -4221,6 +4830,10 @@ static int permits_in(Eval * ev, const Grant * grants, size_t ngrants,
     }
     if (type != NULL && (grants[i].field_len != 0 ||
             !same(grants[i].type_name, grants[i].type_len, type, type_len))) {
+      continue;
+    }
+    if (grants[i].condition == kCondCallback) {
+      /* Decided per entity, and there is none to ask about (story A6). */
       continue;
     }
     if (grants[i].condition != kCondExpr || expr_could_apply(ev, &grants[i])) {
@@ -4857,6 +5470,57 @@ GDEFCORE_Result gdefcore_access_stage_module_grant(
   return rc;
 }
 
+/* ---- a module's access callback, offered at enable (story A6) ---------- */
+
+GDEFCORE_Result gdefcore_access_stage_module_callback(
+    GDEFCORE_Changeset * changeset, const char * module_name,
+    size_t module_name_len, const char * name, size_t name_len, int scope,
+    const char * label, size_t label_len, const char * action,
+    size_t action_len, const char * type_name, size_t type_name_len,
+    const char * field, size_t field_len) {
+  char * line;
+  size_t cap;
+  size_t i;
+  int n;
+  GDEFCORE_Result rc;
+  if (changeset == NULL || !line_ok(module_name, module_name_len) ||
+      !line_ok(name, name_len) || !line_ok(label, label_len) ||
+      !line_ok(action, action_len) || !line_ok(type_name, type_name_len) ||
+      (scope != GDEFCORE_CALLBACK_FIELD && scope != GDEFCORE_CALLBACK_OPERATION) ||
+      (field_len > 0 && !line_ok(field, field_len))) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  cap = module_name_len + name_len + label_len + 160;
+  line = (char *)gcu_allocator_malloc(alloc_default(), cap);
+  if (line == NULL) {
+    return GDEFCORE_ERR_OOM;
+  }
+  /* Rated high whatever it guards: its breadth is the module's code, which
+   * no rating can read (AD-11). */
+  n = snprintf(line, cap,
+      "Module %.*s decides %.*s per entity with its callback %.*s (%s scope, "
+      "%s risk): its breadth cannot be judged.",
+      (int)module_name_len, module_name, (int)label_len, label, (int)name_len,
+      name, scope == GDEFCORE_CALLBACK_FIELD ? "field" : "operation",
+      gdefcore_access_risk_name(GDEFCORE_ACCESS_RISK_HIGH));
+  (void)type_name;
+  (void)type_name_len;
+  (void)action;
+  (void)action_len;
+  if (n <= 0 || (size_t)n >= cap) {
+    gcu_allocator_free(alloc_default(), line);
+    return GDEFCORE_ERR_LIMIT;
+  }
+  for (i = 0; i < (size_t)n; i++) {
+    if ((unsigned char)line[i] < 0x20 || line[i] == 0x7f) {
+      line[i] = '?';
+    }
+  }
+  rc = gdefcore_changeset_add_confirm_line(changeset, line, (size_t)n);
+  gcu_allocator_free(alloc_default(), line);
+  return rc == GDEFCORE_OK ? GDEFCORE_OK : rc;
+}
+
 /* ---- the matrix -------------------------------------------------------- */
 
 typedef struct MatrixBuild {
@@ -5203,6 +5867,112 @@ static GDEFCORE_Result mx_role(MatrixBuild * b, Eval * ev, const char * role_id)
   return rc;
 }
 
+/* The enabled modules' access callbacks as rows (story A6): granted by the
+ * module, evaluated per entity, rated high. */
+static GDEFCORE_Result mx_callbacks(MatrixBuild * b, GDEFCORE_Host * host) {
+  const GDEFCORE_Module_Declared_Callback ** items = NULL;
+  size_t ncallbacks = 0;
+  size_t tenant_len = 0;
+  const uint8_t * tenant = gdefcore_catalog_tenant(b->catalog, &tenant_len);
+  size_t i;
+  GDEFCORE_Result rc = gdefcore_module_callbacks(host, tenant, tenant_len, NULL,
+      &items, &ncallbacks);
+  for (i = 0; rc == GDEFCORE_OK && i < ncallbacks; i++) {
+    const GDEFCORE_Module_Declared_Callback * c = items[i];
+    GDEFCORE_Access_Matrix_Row * row;
+    Grant info;
+    char owner[kPart];
+    size_t owner_len = 0;
+    char source[kPart + 8];
+    char cond[kPart + 80];
+    char explain[1024];
+    int sn;
+    int cn;
+    int en;
+    const char * action = "";
+    size_t action_len = 0;
+    const char * cache_words =
+        c->cache == GDEFCORE_CALLBACK_CACHE_TOKEN
+            ? "A page that asked it is cached under the validity token it gives"
+            : (c->cache == GDEFCORE_CALLBACK_CACHE_TTL
+                      ? "A page that asked it is cached for its time to live"
+                      : "A page that asked it is not cached");
+    if (permission_by_label(b->catalog, c->permission, c->permission_len, NULL,
+            &info, owner, sizeof owner, &owner_len) == GDEFCORE_OK) {
+      action = info.action;
+      action_len = info.action_len;
+    }
+    sn = snprintf(source, sizeof source, "module %.*s", (int)c->module_len,
+        c->module);
+    cn = snprintf(cond, sizeof cond, "callback %.*s.%.*s", (int)c->module_len,
+        c->module, (int)c->name_len, c->name);
+    en = snprintf(explain, sizeof explain,
+        "Granted by module %.*s, evaluated per entity by its callback %.*s (%s "
+        "scope); its breadth cannot be judged. %s%s.",
+        (int)c->module_len, c->module, (int)c->name_len, c->name,
+        c->scope == GDEFCORE_CALLBACK_FIELD ? "field" : "operation",
+        cache_words,
+        (c->flags & GDEFCORE_CALLBACK_LOCKED) != 0
+            ? "; a reader it refuses is told the field is locked"
+            : "");
+    if (sn <= 0 || (size_t)sn >= sizeof source || cn <= 0 ||
+        (size_t)cn >= sizeof cond || en <= 0 || (size_t)en >= sizeof explain) {
+      rc = GDEFCORE_ERR_LIMIT;
+      break;
+    }
+    if (b->n == b->cap) {
+      size_t cap = b->cap == 0 ? 16 : b->cap * 2;
+      GDEFCORE_Access_Matrix_Row * next =
+          (GDEFCORE_Access_Matrix_Row *)gcu_allocator_realloc(alloc_default(),
+              b->rows, cap * sizeof *next);
+      if (next == NULL) {
+        rc = GDEFCORE_ERR_OOM;
+        break;
+      }
+      b->rows = next;
+      b->cap = cap;
+    }
+    row = &b->rows[b->n];
+    memset(row, 0, sizeof *row);
+    row->size = sizeof *row;
+    row->from_module = 1;
+    row->callback = 1;
+    row->risk = GDEFCORE_ACCESS_RISK_HIGH;
+    rc = mx_text(b->catalog, source, (size_t)sn, &row->source, &row->source_len);
+    if (rc == GDEFCORE_OK) {
+      rc = mx_text(b->catalog, c->permission, c->permission_len,
+          &row->permission, &row->permission_len);
+    }
+    if (rc == GDEFCORE_OK) {
+      rc = mx_text(b->catalog, action, action_len, &row->action,
+          &row->action_len);
+    }
+    if (rc == GDEFCORE_OK) {
+      rc = mx_text(b->catalog, c->type_name, c->type_name_len, &row->type_name,
+          &row->type_name_len);
+    }
+    if (rc == GDEFCORE_OK) {
+      rc = mx_text(b->catalog, c->field, c->field_len, &row->field,
+          &row->field_len);
+    }
+    if (rc == GDEFCORE_OK) {
+      rc = mx_text(b->catalog, cond, (size_t)cn, &row->condition,
+          &row->condition_len);
+    }
+    if (rc == GDEFCORE_OK) {
+      rc = mx_text(b->catalog, explain, (size_t)en, &row->explain,
+          &row->explain_len);
+    }
+    if (rc != GDEFCORE_OK) {
+      mx_free_row(b->catalog, row);
+      break;
+    }
+    b->n += 1;
+  }
+  gdefcore_module_declared_free(host, items);
+  return rc;
+}
+
 GDEFCORE_Result gdefcore_access_matrix(GDEFCORE_Catalog * catalog,
     GDEFCORE_Request * request, GDEFCORE_Access_Matrix_Row ** out_rows,
     size_t * out_count) {
@@ -5301,6 +6071,9 @@ GDEFCORE_Result gdefcore_access_matrix(GDEFCORE_Catalog * catalog,
   }
   if (host != NULL) {
     gdefcore_module_declared_free(host, items);
+  }
+  if (rc == GDEFCORE_OK && host != NULL) {
+    rc = mx_callbacks(&b, host);
   }
   eval_done(&ev);
   if (rc != GDEFCORE_OK) {
@@ -5662,6 +6435,10 @@ static int field_grant_holds(Eval * ev, const Grant * grants, size_t ngrants,
       continue;
     }
     if (type_level) {
+      if (grants[i].condition == kCondCallback) {
+        /* No stored entity to ask the callback about (story A6). */
+        continue;
+      }
       if (grants[i].condition != kCondExpr || expr_could_apply(ev, &grants[i])) {
         return 1;
       }

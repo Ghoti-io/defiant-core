@@ -68,6 +68,10 @@ struct ModDef {
   std::vector<GDEFCORE_Module_Relation> relations;
   std::list<std::vector<GDEFCORE_Module_Relation_Column> > relation_columns;
   std::vector<std::string> lines;   /* the confirmation lines the test expects */
+  /* Access callbacks (story A6), each with the service that carries it. */
+  std::list<GDEFCORE_Module_Access_Callback> callback_tables;
+  std::vector<GDEFCORE_Module_Service> services;
+  std::vector<GDEFCORE_Module_Callback> callbacks;
   GDEFCORE_Module_Manifest man;
 
   const char * S(const std::string & s) {
@@ -146,6 +150,51 @@ struct ModDef {
     relations.push_back(r);
   }
 
+  /** An access callback: its service is `<module>.cb.<name>`. */
+  GDEFCORE_Module_Callback & Callback(const std::string & cb_name, int scope,
+      const std::string & permission, const std::string & type,
+      const std::string & field, GDEFCORE_Callback_Fn fn, void * user,
+      int cache = GDEFCORE_CALLBACK_CACHE_TOKEN, int flags = 0) {
+    GDEFCORE_Module_Access_Callback t;
+    GDEFCORE_Module_Service svc;
+    GDEFCORE_Module_Callback c;
+    std::string service = name + ".cb." + cb_name;
+    memset(&t, 0, sizeof t);
+    t.size = sizeof t;
+    t.fn = fn;
+    t.user = user;
+    callback_tables.push_back(t);
+    memset(&svc, 0, sizeof svc);
+    svc.size = sizeof svc;
+    svc.name = S(service);
+    svc.name_len = service.size();
+    svc.version = GDEFCORE_MODULE_ACCESS_CALLBACK_VERSION;
+    svc.table = &callback_tables.back();
+    services.push_back(svc);
+    memset(&c, 0, sizeof c);
+    c.size = sizeof c;
+    c.name = S(cb_name);
+    c.name_len = cb_name.size();
+    c.scope = scope;
+    c.permission = S(permission);
+    c.permission_len = permission.size();
+    c.type_name = S(type);
+    c.type_name_len = type.size();
+    if (!field.empty()) {
+      c.field = S(field);
+      c.field_len = field.size();
+    }
+    c.service = svc.name;
+    c.service_len = svc.name_len;
+    c.fuel = 100;
+    c.timeout_ms = 500;
+    c.cache = cache;
+    c.ttl_seconds = cache == GDEFCORE_CALLBACK_CACHE_TTL ? 60 : 0;
+    c.flags = flags;
+    callbacks.push_back(c);
+    return callbacks.back();
+  }
+
   void Finish() {
     memset(&man, 0, sizeof man);
     man.size = sizeof man;
@@ -162,6 +211,10 @@ struct ModDef {
     man.ngrants = grants.size();
     man.relations = relations.empty() ? NULL : &relations[0];
     man.nrelations = relations.size();
+    man.services = services.empty() ? NULL : &services[0];
+    man.nservices = services.size();
+    man.callbacks = callbacks.empty() ? NULL : &callbacks[0];
+    man.ncallbacks = callbacks.size();
   }
 };
 
@@ -412,7 +465,7 @@ class GrantsFixture : public ::testing::Test {
     size_t * lens = NULL;
     size_t count = 0;
     GDEFCORE_Result rc = gdefcore_access_read(catalog_, req, id.data(), id.size(),
-        "en", 2, field, strlen(field), &texts, &lens, &count);
+        "en", 2, field, strlen(field), &texts, &lens, &count, NULL);
     std::string out;
     if (rc != GDEFCORE_OK) {
       return "<denied>";

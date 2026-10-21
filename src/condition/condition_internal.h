@@ -115,6 +115,8 @@ int cond_parse_int(const char * p, size_t n, int64_t * out);
 typedef struct CondField {
   int found;
   int personal;
+  /* An access callback governs it (story A6): never read by a condition. */
+  int governed;
   int many;
   int type;
   int scale;

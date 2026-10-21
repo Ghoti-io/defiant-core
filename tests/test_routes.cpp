@@ -491,7 +491,7 @@ int AccessCheck(const GDEFCORE_Route_Call * call, const char * permission,
   }
   gate->ids.push_back(std::string(v, n));
   rc = gdefcore_access_read(gate->catalog, call->request, v, n, "en", 2, "title", 5,
-      &texts, &lens, &count);
+      &texts, &lens, &count, NULL);
   if (rc != GDEFCORE_OK) {
     return 0;
   }

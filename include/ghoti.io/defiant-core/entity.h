@@ -1343,6 +1343,25 @@ GDEFCORE_API GDEFCORE_Result gdefcore_tree_value_subject(
     const char ** out_subject, size_t * out_len);
 
 /**
+ * @brief Mark field @p field of item @p item locked (story A6): a filtered
+ * read (gdefcore_access_tree()) leaves out a value the principal is refused
+ * and, for a field that opts in to the locked indicator, says here that one
+ * is there. Marking twice is once. Sets no value.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_tree_set_locked(GDEFCORE_Tree * tree,
+    size_t item, const char * field, size_t field_len);
+
+/**
+ * @brief Whether field @p field of item @p item is marked locked: a value is
+ * there that the principal may not read, and the tree does not hold it.
+ */
+GDEFCORE_API int gdefcore_tree_locked(const GDEFCORE_Tree * tree, size_t item,
+    const char * field, size_t field_len);
+
+/** @brief How many fields of the tree are marked locked. */
+GDEFCORE_API size_t gdefcore_tree_locked_count(const GDEFCORE_Tree * tree);
+
+/**
  * @brief The value of @p field on item @p item, borrowed: @p out_text NULL
  * when there is none.
  */

@@ -206,6 +206,79 @@ widened, when its permission is not declared (yet), is declared by a module
 other than the grant's own or the kernel, or differs from the grant in type or
 field. Role grants and module grants share one limit of 64 grants per decision.
 
+## Access callbacks
+
+Some answers cannot be data: "has this reader paid for this article". A
+module registers an **access callback** (modules.md) that grants a permission
+it may grant, decided per entity by the module's code, for one of two scopes
+(access SPEC, "Three scopes"):
+
+- **field**: may this principal read (or write) this field of this entity, on
+  a row the principal can already see. Its permission names the field.
+- **operation**: may this principal do this to this one entity (edit, delete,
+  publish, show a tab). Its permission is entity-wide and is not a row action
+  (`gdefcore_access_row_action()`: `read`, or an action with a part `list`,
+  `search`, `count` or `export`).
+
+Row scope, whether an entity is in a list or counted, is refused when the
+module is installed, and an operation callback on a row action when it is
+enabled: a list compiles its filter into the storage query, and a per-row
+callback would break paging and counts and open an oracle. A list never asks
+a callback anything (`gdefcore_access_list()`).
+
+A callback is one more grant: it grants or has no opinion and never denies
+(AD-10 as amended). It is asked only when no other grant of the permission
+holds, and:
+
+- **batched**: a list keeps the page it returned as the request's next batch
+  (`gdefcore_request_set_batch()`), and the first question about one of those
+  entities asks about all of them, up to `GDEFCORE_CALLBACK_BATCH_MAX`, in one
+  call;
+- **memoized per request**: by callback, principal, acting principal, entity
+  and the entity's version, so a second read in the request, of the field or a
+  tree, asks nothing, and a changed entity is a new question;
+- **bounded**: a call has the fuel and the timeout its registration declares
+  (never past the request's deadline) and costs the request
+  `GDEFCORE_CALLBACK_REQUEST_FUEL`; a callback runs in process (remote
+  callbacks are deferred, D1), so the timeout is measured: a call that
+  returns after it counts for nothing;
+- **fail closed**: an error returned, a malformed answer, fuel spent past the
+  call's, a timeout, no request fuel left, and a callback asked from inside a
+  callback each grant nothing, for every entity of the call, for the rest of
+  the request. The request's note `defiant.callback.failed` says
+  `<module>.<name> <reason>` (`trapped`, `malformed`, `out-of-fuel`,
+  `timed-out`, `request-fuel`, `reentered`), and the request is uncacheable. It
+  is not an error of the read or `can()` that asked: another grant still
+  grants.
+
+At type level (`gdefcore_access_can()` with no entity,
+`gdefcore_access_permits()`, a create's field check) there is no entity to
+ask, so a callback grant holds nothing there.
+
+### Governed fields
+
+A field a field callback of an enabled module governs
+(`gdefcore_access_field_governed()`) is unusable in a filter, a sort or a
+condition by anyone, administrators and those who may read it included: a
+list naming it in its filter or either sort is refused, and a condition
+naming it, a list's or a grant's, is refused at validation ("the field is
+decided by an access callback and cannot be tested") and does not hold when
+evaluated or compiled, so the field cannot be probed through a list. Core has
+no search or aggregate; whatever adds one asks the same question. Disabling
+the module ends it.
+
+### The locked indicator
+
+A field callback may opt its field in to the locked indicator
+(`GDEFCORE_CALLBACK_LOCKED`; access SPEC decision 4, a deliberate exception
+to AD-11's "absent, not hidden"). Then, to a principal the field is refused to
+and only when it has a value, `gdefcore_access_read()` answers a count of 0
+and `out_locked` 1, and `gdefcore_access_tree()` leaves the value out and
+marks the field locked on its item (`gdefcore_tree_locked()`). The value is
+never returned. Without the flag a refused field is absent, as any other.
+Templates bind the filtered tree as before, so a locked field is absent from
+a render until the template contract can carry it (deferred D2).
+
 ## Acting for a person
 
 A request can name an acting principal (an agent or a delegate) besides its
@@ -506,6 +579,15 @@ module's compiled filter is also keyed by the hash of that module's
 bytes, not its name. Two principals with the same grants and an `own`
 condition get different keys. Two with the same grants and only `any`
 conditions get the same key.
+
+A request that consulted an access callback depends on its principal, and
+carries what the callback said of the cache (story A6): a validity token, or
+the window of a time to live (the request's time divided by the TTL), one
+line per callback in `gdefcore_request_validity_at()`, and the key a
+`callbacks:` digest of them, so a changed token is a changed key. A callback
+that declares no cacheability, or one that failed, makes the request
+uncacheable (`gdefcore_request_cacheable()`): its key ends in `cache:none` and
+`gdefcore_fragment_put()` refuses it.
 
 ## Holding a permission
 

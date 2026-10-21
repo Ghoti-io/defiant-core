@@ -156,6 +156,11 @@ GDEFCORE_Result gdefcore_fragment_put(GDEFCORE_FragmentCache * cache,
      * person's plaintext past their erasure. */
     return GDEFCORE_ERR_LIMIT;
   }
+  if (!gdefcore_request_cacheable(request)) {
+    /* It consulted an access callback that declares no cacheability, or one
+     * that failed (story A6): no key says when it stops being right. */
+    return GDEFCORE_ERR_LIMIT;
+  }
   memset(&f, 0, sizeof f);
   ns = gdefcore_request_subject_count(request);
   f.key = (char *)gcu_allocator_malloc(cache->alloc, key_len);

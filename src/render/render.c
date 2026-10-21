@@ -1037,7 +1037,7 @@ static GDEFCORE_Result access_copy(GDEFCORE_Catalog * catalog,
   *out = NULL;
   *out_len = 0;
   rc = gdefcore_access_read(catalog, request, id, id_len, "en", 2, field,
-      strlen(field), &texts, &lens, &count);
+      strlen(field), &texts, &lens, &count, NULL);
   if (rc == GDEFCORE_ERR_INVALID) {
     *missing = 1;
     return GDEFCORE_OK;

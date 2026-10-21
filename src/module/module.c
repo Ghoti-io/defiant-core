@@ -1296,15 +1296,16 @@ typedef struct GrantTarget {
   size_t field_len;
 } GrantTarget;
 
-static int grant_target(GDEFCORE_Host * host, GDEFCORE_Catalog * catalog,
-    const Mod * mod, const GDEFCORE_Module_Declared_Grant * g, GrantTarget * t) {
+static int label_target(GDEFCORE_Host * host, GDEFCORE_Catalog * catalog,
+    const Mod * mod, const char * permission, size_t permission_len,
+    GrantTarget * t) {
   size_t i;
   GDEFCORE_Access_Permission info;
   size_t j;
   memset(t, 0, sizeof *t);
   for (i = 0; i < mod->nperms; i++) {
-    if (mod->perms[i].label_len == g->permission_len &&
-        memcmp(mod->perms[i].label, g->permission, g->permission_len) == 0) {
+    if (mod->perms[i].label_len == permission_len &&
+        memcmp(mod->perms[i].label, permission, permission_len) == 0) {
       memcpy(t->owner, mod->name, mod->name_len);
       memcpy(t->action, mod->perms[i].action, mod->perms[i].action_len);
       memcpy(t->type_name, mod->perms[i].type_name, mod->perms[i].type_len);
@@ -1316,7 +1317,7 @@ static int grant_target(GDEFCORE_Host * host, GDEFCORE_Catalog * catalog,
   }
   memset(&info, 0, sizeof info);
   info.size = sizeof info;
-  if (gdefcore_access_permission_info(catalog, g->permission, g->permission_len,
+  if (gdefcore_access_permission_info(catalog, permission, permission_len,
           &info) == GDEFCORE_OK) {
     snprintf(t->owner, sizeof t->owner, "%s", info.module);
     snprintf(t->action, sizeof t->action, "%s", info.action);
@@ -1333,8 +1334,8 @@ static int grant_target(GDEFCORE_Host * host, GDEFCORE_Catalog * catalog,
       continue;
     }
     for (j = 0; j < other->nperms; j++) {
-      if (other->perms[j].label_len == g->permission_len &&
-          memcmp(other->perms[j].label, g->permission, g->permission_len) == 0) {
+      if (other->perms[j].label_len == permission_len &&
+          memcmp(other->perms[j].label, permission, permission_len) == 0) {
         memcpy(t->owner, other->name, other->name_len);
         memcpy(t->action, other->perms[j].action, other->perms[j].action_len);
         memcpy(t->type_name, other->perms[j].type_name,
@@ -1347,6 +1348,63 @@ static int grant_target(GDEFCORE_Host * host, GDEFCORE_Catalog * catalog,
     }
   }
   return 0;
+}
+
+static int grant_target(GDEFCORE_Host * host, GDEFCORE_Catalog * catalog,
+    const Mod * mod, const GDEFCORE_Module_Declared_Grant * g, GrantTarget * t) {
+  return label_target(host, catalog, mod, g->permission, g->permission_len, t);
+}
+
+/*
+ * The access callbacks a module registers, judged at enable as its grants
+ * are: each names a permission the module may grant, on that permission's
+ * type and field. A field callback's permission names the field; an
+ * operation callback's names none and is not a row action, which is row
+ * scope by another name. A refusal names the module and the callback, and
+ * nothing has been staged.
+ */
+static GDEFCORE_Result check_callbacks(GDEFCORE_Host * host,
+    GDEFCORE_Changeset * changeset, const Mod * mod) {
+  const Decl * d = mod->decl;
+  GDEFCORE_Catalog * catalog = gdefcore_changeset_catalog(changeset);
+  size_t i;
+  if (d == NULL || d->ncallbacks == 0) {
+    return GDEFCORE_OK;
+  }
+  if (catalog == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  for (i = 0; i < d->ncallbacks; i++) {
+    const GDEFCORE_Module_Declared_Callback * c = &d->callbacks[i].pub;
+    GrantTarget t;
+    char text[kErrorMax];
+    const char * why = NULL;
+    if (!label_target(host, catalog, mod, c->permission, c->permission_len,
+            &t)) {
+      why = "which no module or the kernel declares";
+    } else if (strcmp(t.owner, mod->name) != 0 &&
+               strcmp(t.owner, "core") != 0) {
+      why = "which another module declares";
+    } else if (t.type_len != c->type_name_len ||
+               memcmp(t.type_name, c->type_name, c->type_name_len) != 0 ||
+               t.field_len != c->field_len ||
+               memcmp(t.field, c->field, c->field_len) != 0) {
+      why = "on a type or field other than the one the permission declares";
+    } else if (c->scope == GDEFCORE_CALLBACK_OPERATION &&
+               gdefcore_access_row_action(t.action, strlen(t.action))) {
+      why = "whose action decides whether an entity is seen, listed or "
+            "counted: that is row scope, decided by conditions only";
+    }
+    if (why != NULL) {
+      snprintf(text, sizeof text,
+          "Module %s access callback %.*s grants permission %.*s, %s.",
+          mod->name, (int)c->name_len, c->name, (int)c->permission_len,
+          c->permission, why);
+      set_error(host, text);
+      return GDEFCORE_ERR_INVALID;
+    }
+  }
+  return GDEFCORE_OK;
 }
 
 /*
@@ -1507,6 +1565,10 @@ GDEFCORE_Result gdefcore_module_enable(GDEFCORE_Host * host,
     if (rc != GDEFCORE_OK) {
       return rc;
     }
+    rc = check_callbacks(host, changeset, mod);
+    if (rc != GDEFCORE_OK) {
+      return rc;
+    }
   }
   rc = stage_named(host, changeset, name, name_len, 1);
   if (rc != GDEFCORE_OK) {
@@ -1526,6 +1588,21 @@ GDEFCORE_Result gdefcore_module_enable(GDEFCORE_Host * host,
         g->permission, g->permission_len, t.action, strlen(t.action),
         g->type_name, g->type_name_len, g->field, g->field_len, g->condition,
         g->condition_len);
+    if (rc != GDEFCORE_OK) {
+      return rc;
+    }
+  }
+  for (i = 0; mod->decl != NULL && i < mod->decl->ncallbacks; i++) {
+    const GDEFCORE_Module_Declared_Callback * c = &mod->decl->callbacks[i].pub;
+    GrantTarget t;
+    if (!label_target(host, gdefcore_changeset_catalog(changeset), mod,
+            c->permission, c->permission_len, &t)) {
+      return GDEFCORE_ERR_INVALID;
+    }
+    rc = gdefcore_access_stage_module_callback(changeset, name, name_len,
+        c->name, c->name_len, c->scope, c->permission, c->permission_len,
+        t.action, strlen(t.action), c->type_name, c->type_name_len, c->field,
+        c->field_len);
     if (rc != GDEFCORE_OK) {
       return rc;
     }
@@ -2142,6 +2219,106 @@ GDEFCORE_Result gdefcore_module_relations(GDEFCORE_Host * host,
   rc = gdefcore_decl_relations(host->alloc, refs, n, out_items, out_count);
   gcu_allocator_free(host->alloc, refs);
   return rc;
+}
+
+GDEFCORE_Result gdefcore_module_callbacks(GDEFCORE_Host * host,
+    const uint8_t * tenant, size_t tenant_len,
+    const GDEFCORE_Changeset * projection,
+    const GDEFCORE_Module_Declared_Callback *** out_items, size_t * out_count) {
+  DeclRef * refs;
+  size_t n;
+  GDEFCORE_Result rc;
+  if (out_items == NULL || out_count == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  *out_items = NULL;
+  *out_count = 0;
+  if (host == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  {
+    /* Access asks this on every decision: when nothing installed registers
+     * a callback, the answer needs no read of the store. */
+    size_t k;
+    int any = 0;
+    for (k = 0; k < host->nmods && !any; k++) {
+      any = host->mods[k].used && host->mods[k].decl != NULL &&
+            host->mods[k].decl->ncallbacks > 0;
+    }
+    if (!any) {
+      return GDEFCORE_OK;
+    }
+  }
+  rc = enumerate_refs(host, tenant, tenant_len, projection, &refs, &n);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  rc = gdefcore_decl_callbacks(host->alloc, refs, n, out_items, out_count);
+  gcu_allocator_free(host->alloc, refs);
+  return rc;
+}
+
+/* Whether @p d registers a field callback on (type, field); its locked flag
+ * in @p locked. */
+static int decl_governs(const Decl * d, const char * type, size_t type_len,
+    const char * field, size_t field_len, int * locked) {
+  size_t i;
+  int found = 0;
+  for (i = 0; d != NULL && i < d->ncallbacks; i++) {
+    const GDEFCORE_Module_Declared_Callback * c = &d->callbacks[i].pub;
+    if (c->scope == GDEFCORE_CALLBACK_FIELD && c->type_name_len == type_len &&
+        memcmp(c->type_name, type, type_len) == 0 &&
+        c->field_len == field_len &&
+        memcmp(c->field, field, field_len) == 0) {
+      found = 1;
+      if ((c->flags & GDEFCORE_CALLBACK_LOCKED) != 0) {
+        *locked = 1;
+      }
+    }
+  }
+  return found;
+}
+
+int gdefcore_module_field_governed(GDEFCORE_Host * host,
+    const uint8_t * tenant, size_t tenant_len, const char * type_name,
+    size_t type_name_len, const char * field, size_t field_len,
+    int * out_locked) {
+  DeclRef * refs = NULL;
+  size_t n = 0;
+  size_t i;
+  int any = 0;
+  int ignored = 0;
+  int governed = 0;
+  int locked = 0;
+  if (out_locked != NULL) {
+    *out_locked = 0;
+  }
+  if (host == NULL || type_name == NULL || field == NULL || field_len == 0) {
+    return 0;
+  }
+  /* Nothing installed registers one: no read of the store. */
+  for (i = 0; i < host->nmods && !any; i++) {
+    any = host->mods[i].used &&
+          decl_governs(host->mods[i].decl, type_name, type_name_len, field,
+              field_len, &ignored);
+  }
+  if (!any) {
+    return 0;
+  }
+  if (enumerate_refs(host, tenant, tenant_len, NULL, &refs, &n) !=
+      GDEFCORE_OK) {
+    /* Unknown is governed: refused, never probed. */
+    return 1;
+  }
+  for (i = 0; i < n; i++) {
+    governed |= decl_governs(refs[i].decl, type_name, type_name_len, field,
+        field_len, &locked);
+  }
+  gcu_allocator_free(host->alloc, refs);
+  if (out_locked != NULL) {
+    *out_locked = governed && locked;
+  }
+  return governed;
 }
 
 void gdefcore_module_declared_free(GDEFCORE_Host * host, const void * items) {

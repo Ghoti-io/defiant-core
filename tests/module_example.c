@@ -190,7 +190,7 @@ static const char kToken[] = EXAMPLE_STR(GHOTIIO_DEFCORE_NAME);
 
 static const GDEFCORE_Module_Manifest kManifest = {sizeof(GDEFCORE_Module_Manifest),
     kToken, sizeof kToken - 1, "example", 7, "Example", 7, &kRel, 1, &kSub, 1,
-    kSvcs, 3, NULL, 0, kRoutes, 5, kLinks, 3, kSettings, 3, kVariables, 1, NULL, 0, NULL, 0, 1, NULL, 0, NULL, 0};
+    kSvcs, 3, NULL, 0, kRoutes, 5, kLinks, 3, kSettings, 3, kVariables, 1, NULL, 0, NULL, 0, 1, NULL, 0, NULL, 0, NULL, 0};
 
 EXAMPLE_EXPORT const GDEFCORE_Module_Manifest * gdefcore_module_manifest(void) {
   return &kManifest;

@@ -46,15 +46,19 @@ plant list-skips-visibility src/access/access.c testReadpaths 'Paths.NoPermissio
 
 # The render path reads fields through the filter; this one reads them raw.
 plant render-reads-unfiltered src/render/render.c testReadpaths 'Paths.NoPermission' \
-  '  rc = gdefcore_access_read(catalog, request, id, id_len, "en", 2, field,' \
+  '  rc = gdefcore_access_read(catalog, request, id, id_len, "en", 2, field,
+      strlen(field), &texts, &lens, &count, NULL);' \
   '  (void)request;
-  rc = gdefcore_entity_values(catalog, NULL, GDEFCORE_VIEW_PUBLISHED, id, id_len, "en", 2, field,'
+  rc = gdefcore_entity_values(catalog, NULL, GDEFCORE_VIEW_PUBLISHED, id, id_len, "en", 2, field,
+      strlen(field), &texts, &lens, &count);'
 
 # An alias resolves to an entity the request may not read.
 plant alias-resolves-unfiltered src/form/form.c testReadpaths 'Paths.NoPermission' \
-  '    rc = gdefcore_access_read(catalog, request, target, target_len, lang, lang_len,' \
+  '    rc = gdefcore_access_read(catalog, request, target, target_len, lang, lang_len,
+        field, field_len, &texts, &lens, &n, NULL);' \
   '    (void)request;
-    rc = gdefcore_entity_values(catalog, NULL, GDEFCORE_VIEW_PUBLISHED, target, target_len, lang, lang_len,'
+    rc = gdefcore_entity_values(catalog, NULL, GDEFCORE_VIEW_PUBLISHED, target, target_len, lang, lang_len,
+        field, field_len, &texts, &lens, &n);'
 
 # "An access-relevant alter that traps": the subscriber is skipped and the
 # call goes on, so a failed access check reads as no check.

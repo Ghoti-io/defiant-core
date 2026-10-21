@@ -155,8 +155,8 @@ plant trailing-garbage-accepted $PARSE testCondition 'Cond.RefusesBadSyntax' \
 # Plant 9: a personal field may be named in a condition.
 plant personal-field-allowed $PARSE testCondition \
   'Cond.PersonalFieldRefused CondAccess.DeclareRefusals' \
-  '  return out->found && !out->personal;' \
-  '  return out->found;'
+  '  return out->found && !out->personal && !out->governed;' \
+  '  return out->found && !out->governed;'
 
 # Plant 10a: an evaluation that failed holds.
 plant failure-grants-in-eval $EVAL testCondition 'Cond.FailureNeverGrants' \

@@ -147,7 +147,7 @@ void DoOperation(const GDEFCORE_Route_Call * call) {
     size_t * lens = NULL;
     size_t n = 0;
     g_run.rc = gdefcore_access_read(catalog, call->request, id.data(), id.size(),
-        "en", 2, "title", 5, &texts, &lens, &n);
+        "en", 2, "title", 5, &texts, &lens, &n, NULL);
     gdefcore_values_free(catalog, texts, lens, n);
   } else if (machine == "post.history") {
     char ** texts = NULL;

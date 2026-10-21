@@ -120,8 +120,9 @@ static int read_field(Ctx * ctx, const CNode * node, Vals * vals) {
   GDEFCORE_Result rc;
   if (cond_field_info(ctx->catalog, ctx->type, ctx->type_len, name, name_len,
           &vals->f) != 0 ||
-      !vals->f.found || vals->f.personal) {
-    /* A personal value is ciphertext: never compare it. */
+      !vals->f.found || vals->f.personal || vals->f.governed) {
+    /* A personal value is ciphertext: never compare it. A field an access
+     * callback decides is never compared either (story A6). */
     return ctx_fail(ctx);
   }
   if (!ctx->real) {

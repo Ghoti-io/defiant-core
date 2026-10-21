@@ -223,6 +223,13 @@ static int cmp_relation(const void * a, const void * b) {
   return c != 0 ? c : (x->index < y->index ? -1 : (x->index > y->index));
 }
 
+static int cmp_callback(const void * a, const void * b) {
+  const DeclCallback * x = (const DeclCallback *)a;
+  const DeclCallback * y = (const DeclCallback *)b;
+  int c = span_cmp(x->pub.name, x->pub.name_len, y->pub.name, y->pub.name_len);
+  return c != 0 ? c : (x->index < y->index ? -1 : (x->index > y->index));
+}
+
 static int cmp_var(const void * a, const void * b) {
   const DeclVar * x = (const DeclVar *)a;
   const DeclVar * y = (const DeclVar *)b;
@@ -248,6 +255,7 @@ void gdefcore_decl_free(Decl * d) {
   gcu_allocator_free(d->alloc, d->vars);
   gcu_allocator_free(d->alloc, d->grants);
   gcu_allocator_free(d->alloc, d->relations);
+  gcu_allocator_free(d->alloc, d->callbacks);
   gcu_allocator_free(d->alloc, d);
 }
 
@@ -537,6 +545,186 @@ static void build_relations(Build * b, const GDEFCORE_Module_Manifest * m) {
   }
 }
 
+/* A callback's name: `[a-z][a-z0-9_]*`, at most 64 bytes. */
+static int callback_name_ok(const char * s, size_t n) {
+  size_t i;
+  if (s == NULL || n == 0 || n > 64 || s[0] < 'a' || s[0] > 'z') {
+    return 0;
+  }
+  for (i = 1; i < n; i++) {
+    if (!((s[i] >= 'a' && s[i] <= 'z') || (s[i] >= '0' && s[i] <= '9') ||
+            s[i] == '_')) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+/* Refuse callback @p i in words: the host error says which and why. */
+static void callback_fail(Build * b, size_t i, const char * name,
+    size_t name_len, const char * why) {
+  if (b->rc != GDEFCORE_OK) {
+    return;
+  }
+  b->rc = GDEFCORE_ERR_INVALID;
+  if (b->err != NULL && b->cap > 0) {
+    char a[kShow + 8];
+    size_t n = name_len < kShow ? name_len : kShow;
+    size_t k;
+    for (k = 0; k < n; k++) {
+      unsigned char c = (unsigned char)name[k];
+      a[k] = c < 0x20 || c >= 0x7f ? '?' : (char)c;
+    }
+    a[n] = '\0';
+    snprintf(b->err, b->cap, "Module %s: access callback %zu ('%s') %s",
+        b->d->module, i + 1, a, why);
+  }
+}
+
+/*
+ * The access callbacks a module registers (access SPEC CAP-A5). Registration
+ * is where row scope is refused: whether an entity is in a list, or counted,
+ * is decided by conditions, which compile into the list's query, and never
+ * by a callback. The rest of a callback's shape is checked here too, so a
+ * malformed one is never installed; what its permission is, and whether the
+ * module may grant it, is the enable's to judge (module.c).
+ */
+static void build_callbacks(Build * b, const GDEFCORE_Module_Manifest * m,
+    const DeclSvc * svcs, size_t nsvcs) {
+  Decl * d = b->d;
+  size_t i;
+  size_t k;
+  d->callbacks = (DeclCallback *)gcu_allocator_calloc(d->alloc,
+      m->ncallbacks, sizeof *d->callbacks);
+  if (d->callbacks == NULL) {
+    build_fail(b, GDEFCORE_ERR_OOM, "callback", 0);
+    return;
+  }
+  for (i = 0; i < m->ncallbacks && b->rc == GDEFCORE_OK; i++) {
+    GDEFCORE_Module_Callback c;
+    DeclCallback * dc = &d->callbacks[i];
+    const void * table = NULL;
+    int resolved;
+    take_prefix(&c, sizeof c, &m->callbacks[i]);
+    dc->index = i;
+    dc->pub.size = sizeof dc->pub;
+    dc->pub.module = d->module;
+    dc->pub.module_len = d->module_len;
+    dc->pub.name = dup_str(b, c.name, c.name_len, "callback", i);
+    dc->pub.name_len = c.name_len;
+    dc->pub.scope = c.scope;
+    dc->pub.permission = dup_str(b, c.permission, c.permission_len,
+        "callback", i);
+    dc->pub.permission_len = c.permission_len;
+    dc->pub.type_name = dup_str(b, c.type_name, c.type_name_len, "callback", i);
+    dc->pub.type_name_len = c.type_name_len;
+    dc->pub.field = dup_str(b, c.field, c.field_len, "callback", i);
+    dc->pub.field_len = c.field_len;
+    dc->pub.fuel = c.fuel;
+    dc->pub.timeout_ms = c.timeout_ms;
+    dc->pub.cache = c.cache;
+    dc->pub.ttl_seconds = c.ttl_seconds;
+    dc->pub.flags = c.flags;
+    d->ncallbacks = i + 1;
+    if (b->rc != GDEFCORE_OK) {
+      break;
+    }
+    if (c.scope == GDEFCORE_CALLBACK_ROW) {
+      callback_fail(b, i, c.name, c.name_len,
+          "is of row scope. Whether an entity is in a list, or counted, is "
+          "decided by conditions, which compile into the list's query, and "
+          "never by a callback.");
+      break;
+    }
+    if (!callback_name_ok(c.name, c.name_len)) {
+      callback_fail(b, i, c.name, c.name_len,
+          "has a name that is not [a-z][a-z0-9_]* of at most 64 bytes.");
+      break;
+    }
+    if (c.scope != GDEFCORE_CALLBACK_FIELD &&
+        c.scope != GDEFCORE_CALLBACK_OPERATION) {
+      callback_fail(b, i, c.name, c.name_len,
+          "has a scope that is neither field nor operation.");
+      break;
+    }
+    if (c.permission_len == 0 || c.type_name_len == 0) {
+      callback_fail(b, i, c.name, c.name_len, "names no permission or type.");
+      break;
+    }
+    if ((c.scope == GDEFCORE_CALLBACK_FIELD) != (c.field_len > 0)) {
+      callback_fail(b, i, c.name, c.name_len,
+          c.scope == GDEFCORE_CALLBACK_FIELD
+              ? "is of field scope and names no field."
+              : "is of operation scope and names a field.");
+      break;
+    }
+    if (c.fuel == 0 || c.fuel > GDEFCORE_CALLBACK_FUEL_MAX ||
+        c.timeout_ms == 0 || c.timeout_ms > GDEFCORE_CALLBACK_TIMEOUT_MAX_MS) {
+      callback_fail(b, i, c.name, c.name_len,
+          "has no fuel or no timeout, or more than a call may have.");
+      break;
+    }
+    if (!(c.cache == GDEFCORE_CALLBACK_CACHE_NONE ||
+            c.cache == GDEFCORE_CALLBACK_CACHE_TOKEN ||
+            c.cache == GDEFCORE_CALLBACK_CACHE_TTL) ||
+        (c.cache == GDEFCORE_CALLBACK_CACHE_TTL) !=
+            (c.ttl_seconds > 0) ||
+        c.ttl_seconds > GDEFCORE_CALLBACK_TTL_MAX) {
+      callback_fail(b, i, c.name, c.name_len,
+          "declares a cacheability that is not none, a token, or a time to "
+          "live of 1 to 86400 seconds.");
+      break;
+    }
+    if ((c.flags & ~GDEFCORE_CALLBACK_LOCKED) != 0 ||
+        ((c.flags & GDEFCORE_CALLBACK_LOCKED) != 0 &&
+            c.scope != GDEFCORE_CALLBACK_FIELD)) {
+      callback_fail(b, i, c.name, c.name_len,
+          "has a flag other than locked, or is locked and not of field "
+          "scope.");
+      break;
+    }
+    resolved = resolve(svcs, nsvcs, c.service, c.service_len,
+        GDEFCORE_MODULE_ACCESS_CALLBACK_VERSION,
+        offsetof(GDEFCORE_Module_Access_Callback, fn) +
+            sizeof(GDEFCORE_Callback_Fn),
+        &table);
+    if (resolved == kDeclResolved) {
+      GDEFCORE_Module_Access_Callback t;
+      take_prefix(&t, sizeof t, table);
+      if (t.fn == NULL) {
+        resolved = kDeclBadTable;
+      } else {
+        dc->pub.fn = t.fn;
+        dc->pub.user = t.user;
+      }
+    }
+    if (resolved != kDeclResolved) {
+      callback_fail(b, i, c.name, c.name_len,
+          resolved == kDeclNoName
+              ? "names no service."
+              : (resolved == kDeclNoService
+                        ? "names a service the module does not declare."
+                        : (resolved == kDeclBadVersion
+                                  ? "names a service declared at another "
+                                    "version."
+                                  : "names a service whose table does not "
+                                    "carry the function.")));
+      break;
+    }
+    for (k = 0; k < i; k++) {
+      if (span_is(d->callbacks[k].pub.name, d->callbacks[k].pub.name_len,
+              c.name, c.name_len)) {
+        callback_fail(b, i, c.name, c.name_len,
+            "has the name of another callback of the module.");
+        break;
+      }
+    }
+  }
+  if (b->rc == GDEFCORE_OK && d->ncallbacks > 1) {
+    qsort(d->callbacks, d->ncallbacks, sizeof *d->callbacks, cmp_callback);
+  }
+}
+
 GDEFCORE_Result gdefcore_decl_build(const GDEFCORE_Allocator * alloc,
     const char * module, size_t module_len,
     const GDEFCORE_Module_Manifest * man, const DeclSvc * svcs, size_t nsvcs,
@@ -545,7 +733,8 @@ GDEFCORE_Result gdefcore_decl_build(const GDEFCORE_Allocator * alloc,
   Decl * d;
   *out = NULL;
   if (man->nroutes == 0 && man->nlinks == 0 && man->nsettings == 0 &&
-      man->nvariables == 0 && man->ngrants == 0 && man->nrelations == 0) {
+      man->nvariables == 0 && man->ngrants == 0 && man->nrelations == 0 &&
+      man->ncallbacks == 0) {
     return GDEFCORE_OK;
   }
   if (module_len > 64) {
@@ -568,22 +757,25 @@ GDEFCORE_Result gdefcore_decl_build(const GDEFCORE_Allocator * alloc,
       man->nsettings > GDEFCORE_MODULE_SETTINGS_MAX ||
       man->nvariables > GDEFCORE_MODULE_VARIABLES_MAX ||
       man->ngrants > GDEFCORE_MODULE_GRANTS_MAX ||
-      man->nrelations > GDEFCORE_MODULE_RELATIONS_MAX) {
+      man->nrelations > GDEFCORE_MODULE_RELATIONS_MAX ||
+      man->ncallbacks > GDEFCORE_MODULE_CALLBACKS_MAX) {
     b.rc = GDEFCORE_ERR_LIMIT;
     if (err != NULL && cap > 0) {
       snprintf(err, cap,
           "Module %s declares more than %d routes, %d links, %d settings, "
-          "%d variables, %d grants or %d relations.",
+          "%d variables, %d grants, %d relations or %d access callbacks.",
           d->module, GDEFCORE_MODULE_ROUTES_MAX, GDEFCORE_MODULE_LINKS_MAX,
           GDEFCORE_MODULE_SETTINGS_MAX, GDEFCORE_MODULE_VARIABLES_MAX,
-          GDEFCORE_MODULE_GRANTS_MAX, GDEFCORE_MODULE_RELATIONS_MAX);
+          GDEFCORE_MODULE_GRANTS_MAX, GDEFCORE_MODULE_RELATIONS_MAX,
+          GDEFCORE_MODULE_CALLBACKS_MAX);
     }
   } else if ((man->nroutes > 0 && man->routes == NULL) ||
              (man->nlinks > 0 && man->links == NULL) ||
              (man->nsettings > 0 && man->settings == NULL) ||
              (man->nvariables > 0 && man->variables == NULL) ||
              (man->ngrants > 0 && man->grants == NULL) ||
-             (man->nrelations > 0 && man->relations == NULL)) {
+             (man->nrelations > 0 && man->relations == NULL) ||
+             (man->ncallbacks > 0 && man->callbacks == NULL)) {
     b.rc = GDEFCORE_ERR_INVALID;
     if (err != NULL && cap > 0) {
       snprintf(err, cap, "Module %s: a declared table has a count and no data.",
@@ -607,6 +799,9 @@ GDEFCORE_Result gdefcore_decl_build(const GDEFCORE_Allocator * alloc,
   }
   if (b.rc == GDEFCORE_OK && man->nrelations > 0) {
     build_relations(&b, man);
+  }
+  if (b.rc == GDEFCORE_OK && man->ncallbacks > 0) {
+    build_callbacks(&b, man, svcs, nsvcs);
   }
   if (b.rc != GDEFCORE_OK) {
     gdefcore_decl_free(d);
@@ -1535,6 +1730,37 @@ GDEFCORE_Result gdefcore_decl_grants(const GDEFCORE_Allocator * alloc,
   for (m = 0; m < n; m++) {
     for (i = 0; i < refs[m].decl->ngrants; i++) {
       items[at++] = &refs[m].decl->grants[i].pub;
+    }
+  }
+  *out = items;
+  *count = total;
+  return GDEFCORE_OK;
+}
+
+GDEFCORE_Result gdefcore_decl_callbacks(const GDEFCORE_Allocator * alloc,
+    const DeclRef * refs, size_t n,
+    const GDEFCORE_Module_Declared_Callback *** out, size_t * count) {
+  size_t m;
+  size_t i;
+  size_t total = 0;
+  size_t at = 0;
+  const GDEFCORE_Module_Declared_Callback ** items;
+  *out = NULL;
+  *count = 0;
+  for (m = 0; m < n; m++) {
+    total += refs[m].decl->ncallbacks;
+  }
+  if (total == 0) {
+    return GDEFCORE_OK;
+  }
+  items = (const GDEFCORE_Module_Declared_Callback **)gcu_allocator_calloc(
+      alloc, total, sizeof *items);
+  if (items == NULL) {
+    return GDEFCORE_ERR_OOM;
+  }
+  for (m = 0; m < n; m++) {
+    for (i = 0; i < refs[m].decl->ncallbacks; i++) {
+      items[at++] = &refs[m].decl->callbacks[i].pub;
     }
   }
   *out = items;

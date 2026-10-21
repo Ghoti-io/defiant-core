@@ -131,6 +131,11 @@
 #define gdefcore_access_matrix_free GHOTIIO_DEFCORE(gdefcore_access_matrix_free)
 #define gdefcore_access_stage_module_grant \
   GHOTIIO_DEFCORE(gdefcore_access_stage_module_grant)
+#define gdefcore_access_stage_module_callback \
+  GHOTIIO_DEFCORE(gdefcore_access_stage_module_callback)
+#define gdefcore_access_field_governed \
+  GHOTIIO_DEFCORE(gdefcore_access_field_governed)
+#define gdefcore_access_row_action GHOTIIO_DEFCORE(gdefcore_access_row_action)
 #define gdefcore_access_can GHOTIIO_DEFCORE(gdefcore_access_can)
 #define gdefcore_access_route_check \
   GHOTIIO_DEFCORE(gdefcore_access_route_check)
@@ -245,6 +250,9 @@
 #define gdefcore_tree_create GHOTIIO_DEFCORE(gdefcore_tree_create)
 #define gdefcore_tree_free GHOTIIO_DEFCORE(gdefcore_tree_free)
 #define gdefcore_tree_get GHOTIIO_DEFCORE(gdefcore_tree_get)
+#define gdefcore_tree_set_locked GHOTIIO_DEFCORE(gdefcore_tree_set_locked)
+#define gdefcore_tree_locked GHOTIIO_DEFCORE(gdefcore_tree_locked)
+#define gdefcore_tree_locked_count GHOTIIO_DEFCORE(gdefcore_tree_locked_count)
 #define gdefcore_tree_item GHOTIIO_DEFCORE(gdefcore_tree_item)
 #define gdefcore_tree_item_count GHOTIIO_DEFCORE(gdefcore_tree_item_count)
 #define gdefcore_tree_save GHOTIIO_DEFCORE(gdefcore_tree_save)
@@ -348,6 +356,11 @@
 #define gdefcore_module_settings GHOTIIO_DEFCORE(gdefcore_module_settings)
 #define gdefcore_module_grants GHOTIIO_DEFCORE(gdefcore_module_grants)
 #define gdefcore_module_relations GHOTIIO_DEFCORE(gdefcore_module_relations)
+#define gdefcore_module_callbacks GHOTIIO_DEFCORE(gdefcore_module_callbacks)
+#define gdefcore_module_field_governed \
+  GHOTIIO_DEFCORE(gdefcore_module_field_governed)
+#define gdefcore_callback_spend GHOTIIO_DEFCORE(gdefcore_callback_spend)
+#define gdefcore_callback_expired GHOTIIO_DEFCORE(gdefcore_callback_expired)
 #define gdefcore_module_variables GHOTIIO_DEFCORE(gdefcore_module_variables)
 #define gdefcore_module_schema GHOTIIO_DEFCORE(gdefcore_module_schema)
 #define gdefcore_module_step GHOTIIO_DEFCORE(gdefcore_module_step)
@@ -408,6 +421,18 @@
 #define gdefcore_request_set_fuel GHOTIIO_DEFCORE(gdefcore_request_set_fuel)
 #define gdefcore_request_spend_fuel GHOTIIO_DEFCORE(gdefcore_request_spend_fuel)
 #define gdefcore_request_fuel_left GHOTIIO_DEFCORE(gdefcore_request_fuel_left)
+#define gdefcore_request_record_validity \
+  GHOTIIO_DEFCORE(gdefcore_request_record_validity)
+#define gdefcore_request_validity_count \
+  GHOTIIO_DEFCORE(gdefcore_request_validity_count)
+#define gdefcore_request_validity_at \
+  GHOTIIO_DEFCORE(gdefcore_request_validity_at)
+#define gdefcore_request_mark_uncacheable \
+  GHOTIIO_DEFCORE(gdefcore_request_mark_uncacheable)
+#define gdefcore_request_cacheable GHOTIIO_DEFCORE(gdefcore_request_cacheable)
+#define gdefcore_request_set_batch GHOTIIO_DEFCORE(gdefcore_request_set_batch)
+#define gdefcore_request_batch GHOTIIO_DEFCORE(gdefcore_request_batch)
+#define gdefcore_request_batch_at GHOTIIO_DEFCORE(gdefcore_request_batch_at)
 #define gdefcore_request_set_time GHOTIIO_DEFCORE(gdefcore_request_set_time)
 #define gdefcore_request_time GHOTIIO_DEFCORE(gdefcore_request_time)
 #define gdefcore_request_mark_principal_dependent                              \

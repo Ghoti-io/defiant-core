@@ -157,7 +157,8 @@ typedef struct GDEFCORE_Access_Permission {
  * Every text is plain, not escaped for any output, and may hold what a module
  * author wrote: a page must escape it. @ref source reads `role <name>` or
  * `module <name>`. A role grant made with a condition of its own shows the
- * permission's label, not the stored name of the derived permission.
+ * permission's label, not the stored name of the derived permission. A
+ * module's access callback is a row of its module, marked @ref callback.
  */
 typedef struct GDEFCORE_Access_Matrix_Row {
   size_t size;                ///< `sizeof(GDEFCORE_Access_Matrix_Row)`.
@@ -177,6 +178,11 @@ typedef struct GDEFCORE_Access_Matrix_Row {
   const char * explain;       ///< The condition in plain English.
   size_t explain_len;         ///< Length of @ref explain.
   int risk;                   ///< ::GDEFCORE_ACCESS_RISK_LOW, _MEDIUM or _HIGH.
+  /** Non-zero: the grant is a module's access callback (module.h), decided
+   * per entity by the module's code. @ref condition reads `callback
+   * <module>.<name>`, @ref explain says so in words, and @ref risk is
+   * ::GDEFCORE_ACCESS_RISK_HIGH: its breadth cannot be judged. */
+  int callback;
 } GDEFCORE_Access_Matrix_Row;
 
 /** A revision's field: the values were returned. */
@@ -202,7 +208,14 @@ typedef struct GDEFCORE_Access_Matrix_Row {
  * @brief A filtered list. Begins with @ref size.
  *
  * A filter or a sort that names a field the principal may not read, or a
- * field the type does not have, is refused and returns no rows.
+ * field the type does not have, is refused and returns no rows. So is one
+ * that names a field an access callback governs, by anyone, whoever may read
+ * it (gdefcore_access_field_governed()), and a condition that names one.
+ *
+ * A list asks no access callback anything: what is listed and counted is
+ * decided by conditions alone. The page it returns is kept on the request as
+ * the next batch (gdefcore_request_set_batch()), so that reading those
+ * entities asks a callback about all of them in one call.
  *
  * What is listed is the published entities of the type for which some read
  * grant of the principal holds (AD-11), narrowed by the filter and by
@@ -586,7 +599,12 @@ GDEFCORE_API GDEFCORE_Result gdefcore_access_principal_roles(
  * An id the principal may not see is ::GDEFCORE_ERR_INVALID, the same as an
  * id that was never created, and no field value is written. A field the
  * principal may not read is absent: success with a count of 0, not an empty
- * string. A personal field the principal may read is decrypted then, and only
+ * string. The one exception is a field an access callback governs and opts in
+ * to the locked indicator (module.h, ::GDEFCORE_CALLBACK_LOCKED; access SPEC
+ * decision 4): when it is refused to the principal and has a value,
+ * @p out_locked is 1, still with a count of 0 and no value. Otherwise
+ * @p out_locked (which may be NULL) is 0, for a field shown, a field with no
+ * value and a field hidden alike. A personal field the principal may read is decrypted then, and only
  * then (AD-19, story S7): each value's plaintext, or ::GDEFCORE_SUBJECT_ERASED
  * for an erased subject, opened with the catalog's subjects
  * (gdefcore_catalog_bind_subjects()) and its subject recorded on @p request
@@ -597,7 +615,8 @@ GDEFCORE_API GDEFCORE_Result gdefcore_access_principal_roles(
 GDEFCORE_API GDEFCORE_Result gdefcore_access_read(GDEFCORE_Catalog * catalog,
     GDEFCORE_Request * request, const char * id, size_t id_len,
     const char * lang, size_t lang_len, const char * field, size_t field_len,
-    char *** out_texts, size_t ** out_lens, size_t * out_count);
+    char *** out_texts, size_t ** out_lens, size_t * out_count,
+    int * out_locked);
 
 /**
  * @brief Read one language of an entity as a tree through the access filter
@@ -612,7 +631,9 @@ GDEFCORE_API GDEFCORE_Result gdefcore_access_read(GDEFCORE_Catalog * catalog,
  * permission names a field inside a group by its path (`lines.price`). A
  * personal value of a field the principal may read, at any depth, is
  * decrypted after that check, as by gdefcore_access_read(): its plaintext, or
- * ::GDEFCORE_SUBJECT_ERASED, never the stored text (story S7). An entity with
+ * ::GDEFCORE_SUBJECT_ERASED, never the stored text (story S7). A field that
+ * gdefcore_access_read() would report locked is absent from its item with
+ * its value, and marked there (gdefcore_tree_locked()). An entity with
  * no content in @p lang is
  * ::GDEFCORE_ERR_INVALID. Free @p out_tree with gdefcore_tree_free().
  */
@@ -669,6 +690,23 @@ GDEFCORE_API GDEFCORE_Result gdefcore_access_count(GDEFCORE_Catalog * catalog,
  */
 GDEFCORE_API int gdefcore_access_permits(GDEFCORE_Catalog * catalog,
     GDEFCORE_Request * request, const char * permission, size_t permission_len);
+
+/**
+ * @brief Whether @p action decides row visibility (access SPEC "Three
+ * scopes"): `read`, or an action with a dot-separated part `list`, `search`,
+ * `count` or `export`. Such an action is decided by conditions alone; an
+ * access callback may not grant it (module.h).
+ */
+GDEFCORE_API int gdefcore_access_row_action(const char * action, size_t len);
+
+/**
+ * @brief Whether an access callback of an enabled module governs @p field of
+ * @p type (module.h): the field is then unusable in a filter, a sort or a
+ * condition, by anyone, so that it cannot be probed through a list. 1 also
+ * when it cannot be told. A catalog with no module host governs nothing.
+ */
+GDEFCORE_API int gdefcore_access_field_governed(GDEFCORE_Catalog * catalog,
+    const char * type, size_t type_len, const char * field, size_t field_len);
 
 /** Fuel a gdefcore_access_can() that is answered from the request's memo costs. */
 #define GDEFCORE_ACCESS_CAN_FUEL_HIT 1
@@ -836,6 +874,21 @@ GDEFCORE_API GDEFCORE_Result gdefcore_access_stage_module_grant(
     const char * action, size_t action_len, const char * type_name,
     size_t type_name_len, const char * field, size_t field_len,
     const char * condition_text, size_t condition_len);
+
+/**
+ * @brief Remember a module's access callback for the enable confirmation.
+ *
+ * Adds the line `Module <m> decides <permission> per entity with its
+ * callback <name> (<scope> scope, high risk): its breadth cannot be judged.`,
+ * so that applying the enable means having been shown it. Writes nothing.
+ * @param scope ::GDEFCORE_CALLBACK_FIELD or ::GDEFCORE_CALLBACK_OPERATION.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_access_stage_module_callback(
+    GDEFCORE_Changeset * changeset, const char * module_name,
+    size_t module_name_len, const char * name, size_t name_len, int scope,
+    const char * label, size_t label_len, const char * action,
+    size_t action_len, const char * type_name, size_t type_name_len,
+    const char * field, size_t field_len);
 
 /** @brief Grant staged module permissions to admin. A changeset with none is success. */
 GDEFCORE_API GDEFCORE_Result gdefcore_access_commit_staged(

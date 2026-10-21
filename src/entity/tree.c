@@ -133,8 +133,57 @@ void gdefcore_tree_free(GDEFCORE_Tree * tree) {
     gcu_allocator_free(tree->alloc, tree->paths[i].p);
   }
   gcu_allocator_free(tree->alloc, tree->paths);
+  for (i = 0; i < tree->nlocked; i++) {
+    gcu_allocator_free(tree->alloc, tree->locked[i].field);
+  }
+  gcu_allocator_free(tree->alloc, tree->locked);
   gdefstor_tree_free(tree->t);
   gcu_allocator_free(tree->alloc, tree);
+}
+
+GDEFCORE_Result gdefcore_tree_set_locked(GDEFCORE_Tree * tree, size_t item,
+    const char * field, size_t field_len) {
+  GDEFCORE_TreeLocked * next;
+  char * copy;
+  if (tree == NULL || item >= tree->npaths || !name_ok(field, field_len)) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  if (gdefcore_tree_locked(tree, item, field, field_len)) {
+    return GDEFCORE_OK;
+  }
+  next = (GDEFCORE_TreeLocked *)gcu_allocator_realloc(tree->alloc, tree->locked,
+      (tree->nlocked + 1) * sizeof *next);
+  if (next == NULL) {
+    return GDEFCORE_ERR_OOM;
+  }
+  tree->locked = next;
+  copy = (char *)gcu_allocator_malloc(tree->alloc, field_len + 1);
+  if (copy == NULL) {
+    return GDEFCORE_ERR_OOM;
+  }
+  memcpy(copy, field, field_len);
+  copy[field_len] = '\0';
+  tree->locked[tree->nlocked].item = item;
+  tree->locked[tree->nlocked].field = copy;
+  tree->locked[tree->nlocked].field_len = field_len;
+  tree->nlocked += 1;
+  return GDEFCORE_OK;
+}
+
+int gdefcore_tree_locked(const GDEFCORE_Tree * tree, size_t item,
+    const char * field, size_t field_len) {
+  size_t i;
+  for (i = 0; tree != NULL && field != NULL && i < tree->nlocked; i++) {
+    if (tree->locked[i].item == item && tree->locked[i].field_len == field_len &&
+        memcmp(tree->locked[i].field, field, field_len) == 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+size_t gdefcore_tree_locked_count(const GDEFCORE_Tree * tree) {
+  return tree == NULL ? 0 : tree->nlocked;
 }
 
 GDEFCORE_Result gdefcore_tree_add(GDEFCORE_Tree * tree, size_t parent,

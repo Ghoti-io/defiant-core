@@ -457,7 +457,7 @@ class Personal : public ::testing::Test {
     size_t * lens = NULL;
     size_t n = 0;
     GDEFCORE_Result rc = gdefcore_access_read(catalog_, req, id.data(),
-        id.size(), "en", 2, field, strlen(field), &texts, &lens, &n);
+        id.size(), "en", 2, field, strlen(field), &texts, &lens, &n, NULL);
     if (rc != GDEFCORE_OK) {
       return "<" + std::to_string(static_cast<int>(rc)) + ">";
     }

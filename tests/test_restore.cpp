@@ -592,7 +592,7 @@ class Restore : public ::testing::Test {
     size_t * lens = NULL;
     size_t n = 0;
     GDEFCORE_Result rc = gdefcore_access_read(catalog, Req(who), id.data(),
-        id.size(), "en", 2, "title", 5, &texts, &lens, &n);
+        id.size(), "en", 2, "title", 5, &texts, &lens, &n, NULL);
     if (rc != GDEFCORE_OK) {
       return "<denied>";
     }

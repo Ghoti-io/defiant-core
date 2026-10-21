@@ -186,7 +186,10 @@ GDEFCORE_API void gdefcore_fragment_cache_destroy(GDEFCORE_FragmentCache * cache
  * A fragment already under @p key is replaced. A request whose subject set
  * overflowed (gdefcore_request_subjects_overflowed()) is ::GDEFCORE_ERR_LIMIT
  * and nothing is kept: a fragment whose dependencies are not all known could
- * outlive an erasure. The bytes and the key are copied.
+ * outlive an erasure. So is a request that is not cacheable
+ * (gdefcore_request_cacheable(): it consulted an access callback that
+ * declares no cacheability, or one that failed). The bytes and the key are
+ * copied.
  */
 GDEFCORE_API GDEFCORE_Result gdefcore_fragment_put(
     GDEFCORE_FragmentCache * cache, const GDEFCORE_Request * request,
