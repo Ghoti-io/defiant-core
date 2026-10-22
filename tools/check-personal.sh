@@ -7,7 +7,7 @@
 # the fragments that depend on it, and "everything about this person" lists
 # every value. Runs the Personal tests on the real tree, then plants each
 # defect in a COPY of the source by an exact text edit and requires the named
-# test to fail (tools/plant-lib.sh):
+# test to fail (defiant-storage's plant-lib.sh):
 #
 # The story's five:
 #
@@ -35,7 +35,7 @@
 
 set -u
 
-. "$(dirname "$0")/plant-lib.sh"
+. "$(dirname "$0")/plant-load.sh"
 plant_setup "$@"
 
 plant_control testPersonal 'Personal.*'

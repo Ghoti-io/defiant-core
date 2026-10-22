@@ -4,7 +4,7 @@
 # registers a callback that grants a field or an operation, per entity, for
 # what data cannot say. Runs the Callbacks tests on the real tree, then plants
 # each defect in a COPY of the source by an exact text edit and requires the
-# named test to fail (tools/plant-lib.sh):
+# named test to fail (defiant-storage's plant-lib.sh):
 #
 # The story's five:
 #
@@ -39,7 +39,7 @@
 
 set -u
 
-. "$(dirname "$0")/plant-lib.sh"
+. "$(dirname "$0")/plant-load.sh"
 plant_setup "$@"
 
 plant_control testCallbacks 'Callbacks.*'

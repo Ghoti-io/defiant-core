@@ -25,14 +25,13 @@
 
 set -u
 . "$(dirname "$0")/plant-fibers.sh"
-pl_init "$@"
-L=check-bus
 EXE=testBus
 GATE='Bus.*'
+fibers_gate check-bus "$GATE" "$@"
 
-pl_control "$EXE" "$GATE" "$L"
+plant_control "$EXE" "$GATE"
 
-pl_plant "$L" epoch-remembered src/entity/entity.c "$EXE" "$GATE" \
+plant epoch-remembered src/entity/entity.c "$EXE" \
   'Bus.ConfigEpoch Bus.FragmentKey' \
   '  if (catalog == NULL || out_epoch == NULL) {
     return GDEFCORE_ERR_INVALID;
@@ -59,12 +58,12 @@ pl_plant "$L" epoch-remembered src/entity/entity.c "$EXE" "$GATE" \
   }
   return read;'
 
-pl_plant "$L" chain-served-stale src/module/module.c "$EXE" "$GATE" \
+plant chain-served-stale src/module/module.c "$EXE" \
   'Bus.ConfigEpoch' \
   '    if (!chain->used || chain->epoch != epoch || chain->tenant_len != tenant_len ||' \
   '    if (!chain->used || ((void)epoch, 0) || chain->tenant_len != tenant_len ||'
 
-pl_plant "$L" session-epoch-trusted src/account/account.c "$EXE" "$GATE" \
+plant session-epoch-trusted src/account/account.c "$EXE" \
   'Bus.SessionEpoch' \
   '  rc = load_epoch(catalog, account, epoch_id, &current);
   if (rc != GDEFCORE_OK) {
@@ -94,4 +93,4 @@ pl_plant "$L" session-epoch-trusted src/account/account.c "$EXE" "$GATE" \
   }
   if (token_epoch != current) {'
 
-pl_finish "$L"
+plant_finish

@@ -3,7 +3,7 @@
 # The restore gate (storage story S8): a backup pair restored through core,
 # end to end, as AD-23 and AD-37 say. Runs the named tests on the real tree,
 # then plants each defect the story names in a COPY of the source by an exact
-# text edit and requires the named test to fail (tools/plant-lib.sh):
+# text edit and requires the named test to fail (defiant-storage's plant-lib.sh):
 #
 #   import-without-rebuild         Restore.ATenantTakenOnMemoryComesBackThroughCoreOnEveryBackend
 #   restore-returns-before-replay  Restore.EveryStepRunsInOrderBeforeTheRestoreReturns
@@ -26,7 +26,7 @@ MAKE="${1:?usage: check-restore.sh <make> <build-dir> [make args]}"
 BUILD_DIR="${2:?usage: check-restore.sh <make> <build-dir> [make args]}"
 shift 2
 
-. tools/plant-lib.sh
+. tools/plant-load.sh
 plant_setup "$MAKE" "$BUILD_DIR" "$@"
 
 plant_control testRestore 'Restore.*'

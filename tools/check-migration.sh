@@ -5,7 +5,7 @@
 # a live upgrade bring it forward by the same steps. Runs the named tests on
 # the real tree, then plants each defect the story names in a COPY of the
 # source by an exact text edit and requires the named test to fail
-# (tools/plant-lib.sh):
+# (defiant-storage's plant-lib.sh):
 #
 #   migration-skipped-at-import          Migration.ARestoreOfOlderDataRunsEveryStepAndReadsHistoryThroughTheUpcasters
 #   revision-upcast-as-the-wrong-version Migration.EveryRevisionKeepsTheVersionItWasWrittenAt
@@ -24,7 +24,7 @@ MAKE="${1:?usage: check-migration.sh <make> <build-dir> [make args]}"
 BUILD_DIR="${2:?usage: check-migration.sh <make> <build-dir> [make args]}"
 shift 2
 
-. tools/plant-lib.sh
+. tools/plant-load.sh
 plant_setup "$MAKE" "$BUILD_DIR" "$@"
 
 plant_control testRestore 'Migration.*'

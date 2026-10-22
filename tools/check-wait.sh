@@ -20,16 +20,15 @@
 
 set -u
 . "$(dirname "$0")/plant-fibers.sh"
-pl_init "$@"
-L=check-wait
 EXE=testMatrix
 GATE='Write.OtherWaitAbortsThePortWrite:Write.YieldWhileHoldingAbortsThePortWrite:Write.TurnAgainWhileHoldingAbortsThePortWrite'
+fibers_gate check-wait "$GATE" "$@"
 
-pl_control "$EXE" "$GATE" "$L"
+plant_control "$EXE" "$GATE"
 
 # Every route calls abort_write; making it keep the write is the defect in
 # the row ("is not rolled back") with no route left out.
-pl_plant "$L" no-rollback src/sched/sched.c "$EXE" "$GATE" \
+plant no-rollback src/sched/sched.c "$EXE" \
   'Write.OtherWaitAbortsThePortWrite Write.YieldWhileHoldingAbortsThePortWrite Write.TurnAgainWhileHoldingAbortsThePortWrite' \
   '  gdefcore_request_set_write(request, NULL);
   gdefcore_request_set_status(request, GDEFCORE_ERR_INVALID);
@@ -40,7 +39,7 @@ pl_plant "$L" no-rollback src/sched/sched.c "$EXE" "$GATE" \
 # One route at a time: the rollback is absent on that route only. The turn
 # route ends the fiber with the write held rather than looping, so the test
 # fails by its own assertion and not by hanging.
-pl_plant "$L" offload-holds-write src/sched/sched.c "$EXE" "$GATE" \
+plant offload-holds-write src/sched/sched.c "$EXE" \
   'Write.OtherWaitAbortsThePortWrite' \
   '  if (gdefcore_request_write(slot->request) != NULL) {
     abort_write(slot->request);
@@ -49,7 +48,7 @@ pl_plant "$L" offload-holds-write src/sched/sched.c "$EXE" "$GATE" \
   if (deadline_passed(slot->request)) {' \
   '  if (deadline_passed(slot->request)) {'
 
-pl_plant "$L" yield-holds-write src/sched/sched.c "$EXE" "$GATE" \
+plant yield-holds-write src/sched/sched.c "$EXE" \
   'Write.YieldWhileHoldingAbortsThePortWrite' \
   '  if (gdefcore_request_write(slot->request) != NULL) {
     abort_write(slot->request);
@@ -62,7 +61,7 @@ pl_plant "$L" yield-holds-write src/sched/sched.c "$EXE" "$GATE" \
   gcu_fiber_yield();
   return GDEFCORE_OK;'
 
-pl_plant "$L" turn-holds-write src/sched/sched.c "$EXE" "$GATE" \
+plant turn-holds-write src/sched/sched.c "$EXE" \
   'Write.TurnAgainWhileHoldingAbortsThePortWrite' \
   '    if (gdefcore_request_write(slot->request) != NULL) {
       abort_write(slot->request);
@@ -74,4 +73,18 @@ pl_plant "$L" turn-holds-write src/sched/sched.c "$EXE" "$GATE" \
     }
     slot->phase = GDEFCORE_SCHED_PHASE_TURN;'
 
-pl_finish "$L"
+# The stale-object plant. A plant's copy starts from the finished build, so the
+# edit has to be compiled into it; this one is made not to be (the objects that
+# depend on the edit are left looking up to date), and the gate has to refuse
+# it as a STALE OBJECT. If it ever passes instead, a warm copy could pass with
+# the defect never built in.
+plant_stale stale-object src/sched/sched.c "$EXE" \
+  'Write.OtherWaitAbortsThePortWrite' \
+  '  if (gdefcore_request_write(slot->request) != NULL) {
+    abort_write(slot->request);
+    return GDEFCORE_ERR_INVALID;
+  }
+  if (deadline_passed(slot->request)) {' \
+  '  if (deadline_passed(slot->request)) {'
+
+plant_finish

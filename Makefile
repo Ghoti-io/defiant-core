@@ -351,6 +351,7 @@ endif
 BUILD_DIR := ./build/$(BUILD)
 OBJ_DIR := $(BUILD_DIR)/objects
 FLAGS_STAMP := $(OBJ_DIR)/.flags
+EXAMPLE_STAMP := $(OBJ_DIR)/.flags-example
 GEN_DIR := $(BUILD_DIR)/generated
 APP_DIR := $(BUILD_DIR)/apps
 
@@ -602,6 +603,19 @@ EXAMPLES := $(patsubst examples/%.c,$(APP_DIR)/examples/%$(EXE_EXTENSION),$(EXAM
 MODEL_ROOT := $(CURDIR)
 TEST_DATA := $(CURDIR)/tests/data
 
+# The plant gates build in a scratch copy of this tree that starts from the
+# finished build, so the copy has to compile with the flags this tree did or
+# every object is stale and the library is compiled again for every plant. The
+# one path that is baked into the objects of every test is handed to the copy
+# as a make argument. The example module and the example program are named by
+# path in two test objects only, and those objects have a stamp of their own
+# (EXAMPLE_STAMP), so a copy compiles those two and nothing else for them. The
+# helpers are defiant-storage's, installed with its conformance suites
+# (plant-lib.sh).
+STOR_CONFORMANCE := $(strip $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_LOOKUP_PATH) pkg-config --variable=conformance_dir $(STOR_PC) 2>/dev/null))
+PLANT_PATHS = TEST_DATA=$(TEST_DATA)
+PLANT_LIB = $(STOR_CONFORMANCE)/plant-lib.sh
+
 all: $(APP_DIR)/$(TARGET) $(APP_DIR)/$(STATIC_TARGET) ## Build shared + static libraries
 
 ####################################################################
@@ -725,12 +739,21 @@ endif
 $(OBJ_DIR)/tests/%.o: tests/%.cpp $(FLAGS_STAMP) | $(LIBVER_GEN)
 	@printf "\n### Compiling Test: $* ###\n"
 	@mkdir -p $(@D)
-	$(CXX) $(CXXFLAGS) $(INCLUDE) $(TEST_COMPILE_FLAGS) -Itests -DGDEFCORE_TEST_DATA=\"$(TEST_DATA)\" $(MODULE_EXAMPLE_DEF) $(EFFECTIVE_DEF) -c $< -MMD -MP -MF $(@:.o=.d) -o $@
+	$(CXX) $(CXXFLAGS) $(INCLUDE) $(TEST_COMPILE_FLAGS) -Itests -DGDEFCORE_TEST_DATA=\"$(TEST_DATA)\" $(TEST_OBJ_DEFS) -c $< -MMD -MP -MF $(@:.o=.d) -o $@
 
 $(OBJ_DIR)/tests/%.o: tests/unit/%.cpp $(FLAGS_STAMP) | $(LIBVER_GEN)
 	@printf "\n### Compiling Test: $* ###\n"
 	@mkdir -p $(@D)
-	$(CXX) $(CXXFLAGS) $(INCLUDE) $(TEST_COMPILE_FLAGS) -Itests -DGDEFCORE_TEST_DATA=\"$(TEST_DATA)\" $(MODULE_EXAMPLE_DEF) $(EFFECTIVE_DEF) -c $< -MMD -MP -MF $(@:.o=.d) -o $@
+	$(CXX) $(CXXFLAGS) $(INCLUDE) $(TEST_COMPILE_FLAGS) -Itests -DGDEFCORE_TEST_DATA=\"$(TEST_DATA)\" $(TEST_OBJ_DEFS) -c $< -MMD -MP -MF $(@:.o=.d) -o $@
+
+# test_module.cpp names the example module by path and test_inst.cpp names the
+# example program by path; no other test is compiled with either, and both
+# paths are the build directory's own (absolute), so a copy of the tree
+# compiles these two for its own paths and keeps every other test object.
+$(OBJ_DIR)/tests/test_module.o: TEST_OBJ_DEFS = $(MODULE_EXAMPLE_DEF)
+$(OBJ_DIR)/tests/test_module.o: $(EXAMPLE_STAMP)
+$(OBJ_DIR)/tests/test_inst.o: TEST_OBJ_DEFS = $(EFFECTIVE_DEF)
+$(OBJ_DIR)/tests/test_inst.o: $(EXAMPLE_STAMP)
 
 # Build rule for one test executable. $1 = source path, $2 = executable name.
 # Tests compile to .o first and link separately, so a library change relinks
@@ -757,7 +780,7 @@ $(foreach pair,$(TEST_PAIRS),\
 
 # TODO(windows): the example is a .so here. A DLL name is untested.
 $(APP_DIR)/libgdefcore-module-example.$(LIB_EXTENSION): tests/module_example.c \
-		$(APP_DIR)/$(TARGET) $(FLAGS_STAMP)
+		$(APP_DIR)/$(TARGET) $(FLAGS_STAMP) $(EXAMPLE_STAMP)
 	@printf "\n### Linking example module ###\n"
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -fPIC -shared $(INCLUDE) -o $@ $< $(LDFLAGS) $(EXAMPLE_LINK)
@@ -1646,7 +1669,15 @@ help: ## Display this help
 
 $(FLAGS_STAMP): force-flags
 	@mkdir -p $(@D)
-	@printf '%s\n' '$(CC) $(CXX) $(LIB_CFLAGS) $(CFLAGS) $(CXXFLAGS) $(LDFLAGS) $(INCLUDE) $(TEST_DATA) $(MODELLIBRARY) $(STOR_LIBS) $(CUTIL_LIBS) $(SEC_LIBS) $(TEXT_LIBS) $(REGEX_LIBS) $(LTANG_LIBS) $(ARC_LIBS) $(MEM_LIBS) $(SQL_LIBS) $(PG_LIBS) $(TESTFLAGS) $(TEST_COMPILE_FLAGS) $(TEST_LDFLAGS) $(OS_SPECIFIC_LIBRARY_NAME_FLAG) $(EXAMPLE_LINK) $(EXAMPLE_RPATH) $(MODULE_EXAMPLE_DEF) $(EFFECTIVE_DEF)' > $@.new
+	@printf '%s\n' '$(CC) $(CXX) $(LIB_CFLAGS) $(CFLAGS) $(CXXFLAGS) $(LDFLAGS) $(INCLUDE) $(TEST_DATA) $(MODELLIBRARY) $(STOR_LIBS) $(CUTIL_LIBS) $(SEC_LIBS) $(TEXT_LIBS) $(REGEX_LIBS) $(LTANG_LIBS) $(ARC_LIBS) $(MEM_LIBS) $(SQL_LIBS) $(PG_LIBS) $(TESTFLAGS) $(TEST_COMPILE_FLAGS) $(TEST_LDFLAGS) $(OS_SPECIFIC_LIBRARY_NAME_FLAG) $(EXAMPLE_RPATH)' > $@.new
+	@cmp -s $@.new $@ 2>/dev/null && rm -f $@.new || mv -f $@.new $@
+
+# What names this tree's own directory: the example module's link line and the
+# two paths compiled into test_module.o and test_inst.o. Apart from the main
+# stamp so that a copy of the tree (a plant) rebuilds these and not the rest.
+$(EXAMPLE_STAMP): force-flags
+	@mkdir -p $(@D)
+	@printf '%s\n' '$(EXAMPLE_LINK) $(MODULE_EXAMPLE_DEF) $(EFFECTIVE_DEF)' > $@.new
 	@cmp -s $@.new $@ 2>/dev/null && rm -f $@.new || mv -f $@.new $@
 
 $(ASAN_FLAGS_STAMP): force-flags
@@ -1673,35 +1704,35 @@ check-account: $(APP_DIR)/testAccount$(EXE_EXTENSION) ## The session-revocation 
 check-inst: $(APP_DIR)/testInst$(EXE_EXTENSION) ## The cross-tenant gate, with a plant
 	@LD_LIBRARY_PATH="$(TEST_LD_PATH)" tools/check-inst.sh "$(APP_DIR)/testInst$(EXE_EXTENSION)"
 check-erasure: $(APP_DIR)/testErasure$(EXE_EXTENSION) ## The erasure sweep and the key-in-a-snapshot gate, each with plants
-	@LD_LIBRARY_PATH="$(TEST_LD_PATH)" tools/check-erasure.sh "$(MAKE)" "$(APP_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX))
+	@GHOTI_PLANT_LIB=$(PLANT_LIB) tools/check-erasure.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX)) $(PLANT_PATHS)
 check-oracle: ## The oracle sweep: hidden and missing entities answer alike, with real-source plants
-	@tools/check-oracle.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX))
+	@GHOTI_PLANT_LIB=$(PLANT_LIB) tools/check-oracle.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX)) $(PLANT_PATHS)
 check-readpaths: ## Every read path as a principal with no grants; a trapping access-relevant alter; real-source plants
-	@tools/check-readpaths.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX))
+	@GHOTI_PLANT_LIB=$(PLANT_LIB) tools/check-readpaths.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX)) $(PLANT_PATHS)
 check-routes: $(APP_DIR)/testRoutes$(EXE_EXTENSION) ## Route patterns: captures, permission with values, default tabs; real-source plants
-	@tools/check-routes.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX))
+	@GHOTI_PLANT_LIB=$(PLANT_LIB) tools/check-routes.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX)) $(PLANT_PATHS)
 check-tenant: ## Two tenants interleaved through every route and View; real-source plants
-	@tools/check-tenant.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX))
+	@GHOTI_PLANT_LIB=$(PLANT_LIB) tools/check-tenant.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX)) $(PLANT_PATHS)
 check-renderkey: ## Two principals of one role, own output differs, render keys differ; real-source plants
-	@tools/check-renderkey.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX))
+	@GHOTI_PLANT_LIB=$(PLANT_LIB) tools/check-renderkey.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX)) $(PLANT_PATHS)
 check-wait: $(APP_DIR)/testMatrix$(EXE_EXTENSION) ## Transaction wait: a wait that keeps its write is caught
-	@tools/check-wait.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX))
+	@GHOTI_PLANT_LIB=$(PLANT_LIB) tools/check-wait.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX)) $(PLANT_PATHS)
 check-contexts: $(APP_DIR)/testContexts$(EXE_EXTENSION) ## Contexts under fibers, with plants
-	@tools/check-contexts.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX))
+	@GHOTI_PLANT_LIB=$(PLANT_LIB) tools/check-contexts.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX)) $(PLANT_PATHS)
 check-bus: $(APP_DIR)/testBus$(EXE_EXTENSION) ## Bus as accelerator, with plants
-	@tools/check-bus.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX))
+	@GHOTI_PLANT_LIB=$(PLANT_LIB) tools/check-bus.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX)) $(PLANT_PATHS)
 check-defects: $(APP_DIR)/$(TARGET) ## Real-source plants under the revocation and form gates
-	@tools/check-defects.sh "$(MAKE)" "$(BUILD_DIR)" PREFIX="$(PREFIX)"
+	@GHOTI_PLANT_LIB=$(PLANT_LIB) tools/check-defects.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX)) $(PLANT_PATHS)
 check-safeout: $(APP_DIR)/testSafeout$(EXE_EXTENSION) ## Bound values inert by default, url(), the region paste; real-source plants
-	@tools/check-safeout.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX))
+	@GHOTI_PLANT_LIB=$(PLANT_LIB) tools/check-safeout.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX)) $(PLANT_PATHS)
 check-templates: $(APP_DIR)/testTemplates$(EXE_EXTENSION) ## Template kinds, contracts, validation, lazy contributions; real-source plants
-	@tools/check-templates.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX))
+	@GHOTI_PLANT_LIB=$(PLANT_LIB) tools/check-templates.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX)) $(PLANT_PATHS)
 check-tpermission: $(APP_DIR)/testTpermission$(EXE_EXTENSION) ## Who may edit a template, the decision hook, the sample render and the shared cache; real-source plants
-	@tools/check-tpermission.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX))
+	@GHOTI_PLANT_LIB=$(PLANT_LIB) tools/check-tpermission.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX)) $(PLANT_PATHS)
 check-subject: $(APP_DIR)/testSubject$(EXE_EXTENSION) ## Erasure survives restore, with a plant
 	@LD_LIBRARY_PATH="$(TEST_LD_PATH)" tools/check-subject.sh "$(APP_DIR)/testSubject$(EXE_EXTENSION)"
 check-keystore: $(APP_DIR)/testSubject$(EXE_EXTENSION) ## Keys and the ledger only in the key store, the erasure order, the backup pair; real-source plants
-	@tools/check-keystore.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX))
+	@GHOTI_PLANT_LIB=$(PLANT_LIB) tools/check-keystore.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX)) $(PLANT_PATHS)
 # The subject suite and the erasure sweep on the SQLite key store (`make test`
 # runs both on the memory one). The Postgres arm needs a server, so it is a
 # target of its own, run in defiant-storage-postgres's derived image through
@@ -1738,7 +1769,7 @@ ifeq ($(strip $(PG_LIBS)),)
 	@printf '%s\n' "test-scale-postgres: ghoti.io-defiant-storage-postgres was not found by pkg-config. It builds only in its derived image (ghoti-build:gcc16 plus libpq-dev, from defiant-storage-postgres's Containerfile): install it into PREFIX there and run this target through that library's tools/pg-test.sh." >&2; exit 1
 else
 	@GDEFCORE_TEST_SCALE=postgres LD_LIBRARY_PATH="$(TEST_LD_PATH)" $(APP_DIR)/testScale$(EXE_EXTENSION) --gtest_brief=1 --gtest_filter='ScalePostgres.*'
-	@GDEFCORE_TEST_SCALE=postgres tools/check-scale.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX))
+	@GDEFCORE_TEST_SCALE=postgres GHOTI_PLANT_LIB=$(PLANT_LIB) tools/check-scale.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX)) $(PLANT_PATHS)
 endif
 # The purchase-order fixture through core on Postgres (story S10, CAP-S3):
 # the GroupsPo and GroupsRender suites with the store on Postgres, then the
@@ -1750,7 +1781,7 @@ ifeq ($(strip $(PG_LIBS)),)
 	@printf '%s\n' "test-groups-postgres: ghoti.io-defiant-storage-postgres was not found by pkg-config. It builds only in its derived image (ghoti-build:gcc16 plus libpq-dev, from defiant-storage-postgres's Containerfile): install it into PREFIX there and run this target through that library's tools/pg-test.sh." >&2; exit 1
 else
 	@GDEFCORE_TEST_GROUPS=postgres LD_LIBRARY_PATH="$(TEST_LD_PATH)" $(APP_DIR)/testGroups$(EXE_EXTENSION) --gtest_brief=1 --gtest_filter='GroupsPoPostgres.*:GroupsRenderPostgres.*'
-	@GDEFCORE_TEST_GROUPS=postgres tools/check-groups.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX))
+	@GDEFCORE_TEST_GROUPS=postgres GHOTI_PLANT_LIB=$(PLANT_LIB) tools/check-groups.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX)) $(PLANT_PATHS)
 endif
 # The restore through core on Postgres (story S8): a tenant taken on memory
 # restored into the Postgres entity port. A server again, so the same derived
@@ -1767,34 +1798,34 @@ check-form: $(APP_DIR)/testForm$(EXE_EXTENSION) ## A signed submit stores a draf
 check-render: $(APP_DIR)/testRender$(EXE_EXTENSION) ## A tiny scope returns a prefix, with a plant
 	@LD_LIBRARY_PATH="$(TEST_LD_PATH)" tools/check-render.sh "$(APP_DIR)/testRender$(EXE_EXTENSION)"
 check-manifest: $(APP_DIR)/testModule$(EXE_EXTENSION) ## Manifest tables: routes, links, settings, variables, enable order; real-source plants
-	@tools/check-manifest.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX))
+	@GHOTI_PLANT_LIB=$(PLANT_LIB) tools/check-manifest.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX)) $(PLANT_PATHS)
 check-conditions: $(APP_DIR)/testCondition$(EXE_EXTENSION) ## Conditions as data: the language, the evaluator, grants that carry one; real-source plants
-	@tools/check-conditions.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX))
+	@GHOTI_PLANT_LIB=$(PLANT_LIB) tools/check-conditions.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX)) $(PLANT_PATHS)
 check-grants: $(APP_DIR)/testGrants$(EXE_EXTENSION) $(APP_DIR)/testOracle$(EXE_EXTENSION) ## Grants under conditions, module grants, the matrix and its ratings; real-source plants
-	@tools/check-grants.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX))
+	@GHOTI_PLANT_LIB=$(PLANT_LIB) tools/check-grants.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX)) $(PLANT_PATHS)
 check-can: $(APP_DIR)/testCan$(EXE_EXTENSION) $(APP_DIR)/testOracle$(EXE_EXTENSION) ## One can(), memoized, shared by the write, the route, the tab and the editor; real-source plants
-	@tools/check-can.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX))
+	@GHOTI_PLANT_LIB=$(PLANT_LIB) tools/check-can.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX)) $(PLANT_PATHS)
 check-revisions: $(APP_DIR)/testRevisions$(EXE_EXTENSION) ## The entity record: published flag, active revision, version, creator; real-source plants
-	@tools/check-revisions.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX))
+	@GHOTI_PLANT_LIB=$(PLANT_LIB) tools/check-revisions.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX)) $(PLANT_PATHS)
 
 check-paths: $(APP_DIR)/testEntrypaths$(EXE_EXTENSION) ## The entry paths: protection on the path, conditions on the stored entity; real-source plants
-	@tools/check-paths.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX))
+	@GHOTI_PLANT_LIB=$(PLANT_LIB) tools/check-paths.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX)) $(PLANT_PATHS)
 
 check-listplan: $(APP_DIR)/testListplan$(EXE_EXTENSION) ## The compiled list equals the evaluated list; real-source plants
-	@tools/check-listplan.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX))
+	@GHOTI_PLANT_LIB=$(PLANT_LIB) tools/check-listplan.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX)) $(PLANT_PATHS)
 
 check-relations: $(APP_DIR)/testRelations$(EXE_EXTENSION) ## Relations declared by modules, read as the system; real-source plants
-	@tools/check-relations.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX))
+	@GHOTI_PLANT_LIB=$(PLANT_LIB) tools/check-relations.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX)) $(PLANT_PATHS)
 
 check-groups: $(APP_DIR)/testGroups$(EXE_EXTENSION) ## Nested groups, multiples and order (story S6d); real-source plants
-	@tools/check-groups.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX))
+	@GHOTI_PLANT_LIB=$(PLANT_LIB) tools/check-groups.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX)) $(PLANT_PATHS)
 check-personal: $(APP_DIR)/testPersonal$(EXE_EXTENSION) ## Personal data names its subject and decrypts in the read path (story S7); real-source plants
-	@tools/check-personal.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX))
+	@GHOTI_PLANT_LIB=$(PLANT_LIB) tools/check-personal.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX)) $(PLANT_PATHS)
 check-callbacks: $(APP_DIR)/testCallbacks$(EXE_EXTENSION) ## Access callbacks: field and operation scope, fail closed, batched, cacheable, governed fields, the locked indicator (story A6); real-source plants
-	@tools/check-callbacks.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX))
+	@GHOTI_PLANT_LIB=$(PLANT_LIB) tools/check-callbacks.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX)) $(PLANT_PATHS)
 check-restore: $(APP_DIR)/testRestore$(EXE_EXTENSION) $(APP_DIR)/testPersonal$(EXE_EXTENSION) ## A backup pair restored through core in AD-23's order, across backends (story S8); real-source plants
-	@tools/check-restore.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX))
+	@GHOTI_PLANT_LIB=$(PLANT_LIB) tools/check-restore.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX)) $(PLANT_PATHS)
 check-migration: $(APP_DIR)/testRestore$(EXE_EXTENSION) ## Every write carries its component's schema version; a restore and a live upgrade migrate by the same steps (story S11); real-source plants
-	@tools/check-migration.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX))
+	@GHOTI_PLANT_LIB=$(PLANT_LIB) tools/check-migration.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX)) $(PLANT_PATHS)
 check-scale: $(APP_DIR)/testScale$(EXE_EXTENSION) ## List, count and create at 10,000 entities on SQLite cost what they did at 1,000 (CAP-S7); real-source plant
-	@tools/check-scale.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX))
+	@GHOTI_PLANT_LIB=$(PLANT_LIB) tools/check-scale.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX)) $(PLANT_PATHS)

@@ -26,37 +26,36 @@
 
 set -u
 . "$(dirname "$0")/plant-fibers.sh"
-pl_init "$@"
-L=check-contexts
 EXE=testContexts
 GATE='Contexts.*'
+fibers_gate check-contexts "$GATE" "$@"
 
-pl_control "$EXE" "$GATE" "$L"
+plant_control "$EXE" "$GATE"
 
-pl_plant "$L" two-fibers-in-one-context src/render/render_ctx.c "$EXE" "$GATE" \
+plant two-fibers-in-one-context src/render/render_ctx.c "$EXE" \
   'Contexts.OneFiberAtATime' \
   '  return ctx->holder == gcu_fiber_current() &&
       pthread_equal(ctx->holder_thread, pthread_self());' \
   '  (void)ctx;
   return 1;'
 
-pl_plant "$L" reentry src/render/render_ctx.c "$EXE" "$GATE" \
+plant reentry src/render/render_ctx.c "$EXE" \
   'Contexts.HeldContextIsNotReentered' \
   '  if (ctx->running) {' \
   '  if (0) {'
 
-pl_plant "$L" native-depth-unset src/render/render_ctx.c "$EXE" "$GATE" \
+plant native-depth-unset src/render/render_ctx.c "$EXE" \
   'Contexts.DeepRecursionOnMinimumFiber' \
   '  grcore_options_set_native_stack_bytes(options, GDEFCORE_RENDER_NATIVE_STACK);
   grcore_options_set_guest_depth(options, GDEFCORE_RENDER_GUEST_DEPTH);
   grcore_options_set_native_depth(options, GDEFCORE_RENDER_NATIVE_DEPTH);' \
   '  (void)options;'
 
-pl_plant "$L" no-side-stack src/render/render.c "$EXE" "$GATE" \
+plant no-side-stack src/render/render.c "$EXE" \
   'Contexts.DeepNestOnMinimumFiber' \
   '  job.rc = GDEFCORE_ERR_INVALID;
   return side_stack_run(&job);' \
   '  job.rc = GDEFCORE_ERR_INVALID;
   return tang_job_run(&job);'
 
-pl_finish "$L"
+plant_finish

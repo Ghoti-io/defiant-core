@@ -6,7 +6,7 @@
 # rows; a restore refuses a key set older than its data set and replays the
 # ledger before it returns. Runs the named tests on the real tree, then plants
 # each defect in a COPY of the source by an exact text edit and requires the
-# named test to fail (tools/plant-lib.sh):
+# named test to fail (defiant-storage's plant-lib.sh):
 #
 #   key-in-a-data-store         Subject.KeysNeverReachADataStore
 #   blind-rows-before-the-key   Subject.ErasureDestroysTheKeyBeforeTheBlindRows
@@ -38,7 +38,7 @@ MAKE="${1:?usage: check-keystore.sh <make> <build-dir> [make args]}"
 BUILD_DIR="${2:?usage: check-keystore.sh <make> <build-dir> [make args]}"
 shift 2
 
-. tools/plant-lib.sh
+. tools/plant-load.sh
 plant_setup "$MAKE" "$BUILD_DIR" "$@"
 
 plant_control testSubject 'Subject.KeysNeverReachADataStore:Subject.ErasureDestroysTheKeyBeforeTheBlindRows:Subject.ASaveWritesNothingToTheKeyStore:Subject.ARestoreRefusesAnOlderKeySet:Subject.ARestoreReplaysTheLedgerBeforeItReturns:Subject.AnErasureCutShortAfterTheKeyIsFinishedOnTheNextOpen:Subject.ABlindRowIsNeverWrittenForAnErasedSubject:Subject.ADraftNamingAnErasedSubjectIsRefusedAndKept:Subject.BlindEqualityFindsOnlyTheNewValueAfterASaveAndADraftApply:Subject.AReindexPutsBackEveryRowThatCanBeDecrypted:Subject.ARestoreRebuildsTheBlindIndexOfWhatCanBeDecrypted'

@@ -4,7 +4,7 @@
 # create at 10,000 entities of one type cost what they cost at 1,000, counted
 # in rows and steps, never in time (tests/test_scale.cpp). Runs the Scale
 # tests on the real tree, then plants the defect in a COPY of the source by an
-# exact text edit and requires the named tests to fail (tools/plant-lib.sh):
+# exact text edit and requires the named tests to fail (defiant-storage's plant-lib.sh):
 #
 #   field-index-dropped   the list and count tests of the backend's suite
 #
@@ -23,7 +23,7 @@ MAKE="${1:?usage: check-scale.sh <make> <build-dir> [make args]}"
 BUILD_DIR="${2:?usage: check-scale.sh <make> <build-dir> [make args]}"
 shift 2
 
-. tools/plant-lib.sh
+. tools/plant-load.sh
 plant_setup "$MAKE" "$BUILD_DIR" "$@"
 
 SUITE=Scale

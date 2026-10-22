@@ -80,7 +80,7 @@
 
 set -u
 
-. "$(dirname "$0")/plant-lib.sh"
+. "$(dirname "$0")/plant-load.sh"
 plant_setup "$@"
 
 plant_control testRevisions 'Revisions.*:Schedule.*'
