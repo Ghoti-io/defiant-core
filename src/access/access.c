@@ -4809,6 +4809,7 @@ GDEFCORE_Result gdefcore_access_render_key(GDEFCORE_Catalog * catalog,
   const char * principal_text = "-";
   size_t principal_text_len = 1;
   const char * module_text = "-";
+  int time_dependent = 0;
   Eval ev;
   GDEFCORE_Result rc;
   memset(&ev, 0, sizeof ev);
@@ -4853,6 +4854,22 @@ GDEFCORE_Result gdefcore_access_render_key(GDEFCORE_Catalog * catalog,
           (gdefcore_condition_uses(slot->cond) &
               GDEFCORE_CONDITION_USES_PRINCIPAL) != 0) {
         read_principal = 1;
+      }
+      if (slot == NULL || slot->bad ||
+          (gdefcore_condition_uses(slot->cond) &
+              GDEFCORE_CONDITION_USES_TIME) != 0) {
+        time_dependent = 1;
+      }
+    }
+  }
+  /* The acting principal's grants are part of the answer too. */
+  for (i = 0; ev.has_ceiling && i < ev.nceiling; i++) {
+    if (ev.ceiling[i].condition == kCondExpr) {
+      ExprSlot * slot = expr_slot(&ev, &ev.ceiling[i]);
+      if (slot == NULL || slot->bad ||
+          (gdefcore_condition_uses(slot->cond) &
+              GDEFCORE_CONDITION_USES_TIME) != 0) {
+        time_dependent = 1;
       }
     }
   }
@@ -5007,6 +5024,18 @@ GDEFCORE_Result gdefcore_access_render_key(GDEFCORE_Catalog * catalog,
           &acting_len);
       ADD_KEY("\nacting:", 8);
       ADD_KEY(acting, acting_len);
+    }
+    if (time_dependent) {
+      /* The answer changes with the clock, not with anything written. */
+      char time_text[32];
+      int tn = snprintf(time_text, sizeof time_text, "%lld",
+          (long long)gdefcore_request_time(request));
+      if (tn <= 0 || (size_t)tn >= sizeof time_text) {
+        rc = GDEFCORE_ERR_LIMIT;
+        goto done;
+      }
+      ADD_KEY("\ntime:", 6);
+      ADD_KEY(time_text, (size_t)tn);
     }
     ADD_KEY("\nmodule:", 8);
     ADD_KEY(module_text, strlen(module_text));

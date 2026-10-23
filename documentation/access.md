@@ -640,6 +640,14 @@ bytes, not its name. Two principals with the same grants and an `own`
 condition get different keys. Two with the same grants and only `any`
 conditions get the same key.
 
+A grant whose condition reads the time (`now`) makes the key depend on the
+request's time (story A7): the key then carries a `time:` line with it, to the
+second, so a fragment kept while the grant held is not found once it expired.
+(Nothing else moves the key when a clock does; a configuration change moves
+the epoch, a grant revoked changes the permissions' hash, a published flag
+cleared or a changed entity moves what the request read, and a callback's
+answer moves its validity token.)
+
 A request that consulted an access callback depends on its principal, and
 carries what the callback said of the cache (story A6): a validity token, or
 the window of a time to live (the request's time divided by the TTL), one
@@ -666,3 +674,37 @@ it holds for a hypothetical entity of the grant's type (which has no state,
 no creator and no values) or for some entity of that type that exists. So an
 `any` expression is held on a type with no entities yet, and an own
 expression is held when the principal has authored one.
+
+## The conditional access sweep
+
+A value derived from a gated one is gated the same way (access SPEC, "Derived
+values inherit gating", AD-25). `tests/test_sweep.cpp` takes a **canary**, a
+value only an authorized reader may see (a post's body, or the whole post),
+behind each way core has of gating one: a role's field grant, a callback, a
+module's grant, a role's conditional grant, the published flag and the time.
+Three principals stand beside it: A meets the condition and will lose it, B
+meets it another way and keeps it, U never meets it. For every output the
+library derives from the canary, U's answer holds no trace of it and A's and
+B's does (the control: a sweep that cannot see the canary returns clean for
+the wrong reason); then the condition changes, and A's answer holds none of it
+either, while B's still does.
+
+The outputs, and what exists: a read, a tree (and every render that binds it),
+a revision view, a list (a filter on the field, the compiled and the
+evaluated list), a count, the editor's form, the recent-posts summary built
+from a body, an entity rendered through a template, and a fragment kept under
+a render key. An export of a person and a snapshot take no principal (`RA` in
+`tests/gate_surface.h`); the paths that hand them to one are routes that name a
+permission, and the sweep reaches them through such routes: a person's export
+only by the person it is about, a snapshot only by an operator, a snapshot
+holding a personal value only sealed. The rows the store keeps (the current
+tables and the blind index) hold no personal value as it was written, and an
+erased person leaves none. **Core has no search, aggregate, feed or export of
+entities.** `SweepList.EveryDerivedOutputIsListed` fails, naming the function,
+when a public header declares one the sweep does not list, or a read made for a
+principal (`RF`) that it does not list.
+
+A field the principal may not read answers exactly as a field the type does
+not have, in every output (`Oracle.AHiddenFieldAndAMissingFieldAnswerAlike`).
+`tools/check-sweep.sh` plants a defect that makes each output carry the canary
+and requires the named test to fail.
