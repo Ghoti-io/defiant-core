@@ -75,6 +75,7 @@ static const Surface kSurface[] = {
     {"gdefcore_access_permits", "RF"},
     {"gdefcore_access_can", "RF"},
     {"gdefcore_access_can_field", "RF"},
+    {"gdefcore_access_revoke", "W"},
     {"gdefcore_access_can_create", "RF"},
     /* gdefcore_access_route_check decides as a principal, but its request
      * arrives inside the GDEFCORE_Route_Call dispatch hands it, so its

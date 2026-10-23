@@ -81,6 +81,73 @@ TEST_F(Grants, RoleGrantWithCondition) {
   EXPECT_EQ(0, Permits(other, "update"));
 }
 
+/* A grant is taken away from a role: the role keeps the rest and its history,
+ * what the holder could do only through it is gone, and the change moves the
+ * epoch so nothing kept for the holder outlives it. A grant that was made with
+ * a condition is taken away by the name it is stored under. Revoking what is
+ * not held writes nothing; the admin role and an unknown role are refused. */
+TEST_F(Grants, ARevokedGrantIsGoneAndTheRoleKeepsTheRest) {
+  DefinePost();
+  Declare(Perm("Read posts", "read", GDEFCORE_ACCESS_ANY));
+  Declare(Perm("Edit posts", "update", GDEFCORE_ACCESS_ANY));
+  Role("clerk");
+  Grant("clerk", "Read posts");
+  Grant("clerk", "Edit posts");
+  ASSERT_EQ(GDEFCORE_OK, GrantWhen("clerk", "Read posts", "(= field.group \"a\")"));
+  std::string clerk = Principal("clerk");
+  std::string post = Save(Admin(), "A-post", "a");
+  auto held = [&]() {
+    char ** labels = NULL;
+    size_t n = 0;
+    std::vector<std::string> out;
+    EXPECT_EQ(GDEFCORE_OK,
+        gdefcore_access_role_grants(catalog_, "clerk", 5, &labels, &n));
+    for (size_t i = 0; i < n; i++) {
+      out.push_back(labels[i]);
+    }
+    gdefcore_access_free(catalog_, labels, n);
+    std::sort(out.begin(), out.end());
+    return out;
+  };
+  std::vector<std::string> before_labels = held();
+  ASSERT_EQ(3u, before_labels.size());
+  EXPECT_EQ("A-post", Read(clerk, post));
+  EXPECT_EQ(1, Permits(clerk, "update"));
+  uint64_t before = Epoch();
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_access_revoke(catalog_, "clerk", 5, "Read posts", 10));
+  EXPECT_GT(Epoch(), before);
+  /* The unconditional one is gone and the conditional one still holds on its
+   * own, for the post it covers. */
+  EXPECT_EQ(2u, held().size());
+  EXPECT_EQ("A-post", Read(clerk, post));
+  std::string stored;
+  for (const std::string & label : held()) {
+    if (label.find("#when:") != std::string::npos) {
+      stored = label;
+    }
+  }
+  ASSERT_FALSE(stored.empty());
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_access_revoke(catalog_, "clerk", 5, stored.data(),
+                             stored.size()));
+  EXPECT_EQ(std::vector<std::string>({"Edit posts"}), held());
+  EXPECT_EQ("<denied>", Read(clerk, post));
+  EXPECT_EQ(1, Permits(clerk, "update")) << "the other grant went with it";
+  /* Nothing held, nothing written. */
+  before = Epoch();
+  EXPECT_EQ(GDEFCORE_OK, gdefcore_access_revoke(catalog_, "clerk", 5, "Read posts", 10));
+  EXPECT_EQ(before, Epoch());
+  EXPECT_EQ(GDEFCORE_ERR_INVALID,
+      gdefcore_access_revoke(catalog_, "nobody", 6, "Read posts", 10));
+  EXPECT_EQ(GDEFCORE_ERR_INVALID,
+      gdefcore_access_revoke(catalog_, "admin", 5, "Read posts", 10));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_access_revoke(catalog_, "clerk", 5, "Edit posts", 10));
+  EXPECT_TRUE(held().empty());
+  EXPECT_EQ(0, Permits(clerk, "update"));
+  /* And a grant made again is held again. */
+  Grant("clerk", "Read posts");
+  EXPECT_EQ("A-post", Read(clerk, post));
+}
+
 TEST_F(Grants, RoleGrantOnlyNarrows) {
   /* A permission declared `own` stays `own` under a condition of the grant's
    * own: the grant is held where both hold. */

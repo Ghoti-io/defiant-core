@@ -384,6 +384,25 @@ GDEFCORE_API GDEFCORE_Result gdefcore_access_grant(GDEFCORE_Catalog * catalog,
     const char * confirmation, size_t confirmation_len);
 
 /**
+ * @brief Take a grant away from a role.
+ *
+ * @p label is the grant as the role holds it (gdefcore_access_role_grants()):
+ * the permission's label, or, for a grant made with a condition of its own
+ * (gdefcore_access_grant_when()), the stored name that grant carries. The role
+ * keeps its history, as for every change of a role: a new revision holds the
+ * grants that are left. No confirmation is asked, because nothing is widened.
+ * A grant the role does not hold writes nothing and is ::GDEFCORE_OK. The
+ * `admin` role is refused (::GDEFCORE_ERR_INVALID): it holds every permission
+ * by construction. An unknown role is ::GDEFCORE_ERR_INVALID.
+ *
+ * What a person could do only through the grant is gone from the next
+ * decision, and from the next render key (the config epoch moves), so nothing
+ * cached for them outlives it (story A7).
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_access_revoke(GDEFCORE_Catalog * catalog,
+    const char * role, size_t role_len, const char * label, size_t label_len);
+
+/**
  * @brief Grant a declared permission to a role, under a condition of its own.
  *
  * As gdefcore_access_grant(), and the same confirmations. The role holds the

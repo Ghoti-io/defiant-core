@@ -1895,6 +1895,42 @@ static GDEFCORE_Result grant_role(GDEFCORE_Catalog * catalog, const char * role,
   return write_grants(catalog, role_id, existing, nexisting);
 }
 
+/* Take @p label away from one role (story A7). */
+static GDEFCORE_Result revoke_role(GDEFCORE_Catalog * catalog, const char * role,
+    size_t role_len, const char * label, size_t label_len) {
+  char role_id[GDEFCORE_PUBLIC_ID_LEN + 1];
+  Grant existing[kGrantMax];
+  Grant kept[kGrantMax];
+  size_t nexisting = 0;
+  size_t nkept = 0;
+  size_t i;
+  GDEFCORE_Result rc = ensure(catalog);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  if (same(role, role_len, kAdmin, strlen(kAdmin))) {
+    /* Admin holds every permission by construction: nothing takes one away. */
+    return GDEFCORE_ERR_INVALID;
+  }
+  rc = find_role(catalog, role, role_len, role_id);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  rc = load_role_grants(catalog, role_id, existing, kGrantMax, &nexisting);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  for (i = 0; i < nexisting; i++) {
+    if (!same(existing[i].label, existing[i].label_len, label, label_len)) {
+      kept[nkept++] = existing[i];
+    }
+  }
+  if (nkept == nexisting) {
+    return GDEFCORE_OK; /* not held: nothing to take away, nothing written */
+  }
+  return write_grants(catalog, role_id, kept, nkept);
+}
+
 static GDEFCORE_Result admin_holders(GDEFCORE_Catalog * catalog, size_t * out) {
   char ** ids = NULL;
   size_t count = 0;
@@ -2314,6 +2350,14 @@ GDEFCORE_Result gdefcore_access_declare(GDEFCORE_Catalog * catalog,
       canon, canon_len);
   gdefcore_condition_text_free(canon);
   return rc;
+}
+
+GDEFCORE_Result gdefcore_access_revoke(GDEFCORE_Catalog * catalog,
+    const char * role, size_t role_len, const char * label, size_t label_len) {
+  if (catalog == NULL || role == NULL || label == NULL || label_len == 0) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  return revoke_role(catalog, role, role_len, label, label_len);
 }
 
 GDEFCORE_Result gdefcore_access_grant(GDEFCORE_Catalog * catalog,

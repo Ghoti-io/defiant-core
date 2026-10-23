@@ -126,6 +126,7 @@
 #define gdefcore_access_revision_values \
   GHOTIIO_DEFCORE(gdefcore_access_revision_values)
 #define gdefcore_access_can_field GHOTIIO_DEFCORE(gdefcore_access_can_field)
+#define gdefcore_access_revoke GHOTIIO_DEFCORE(gdefcore_access_revoke)
 #define gdefcore_access_can_create GHOTIIO_DEFCORE(gdefcore_access_can_create)
 #define gdefcore_access_matrix GHOTIIO_DEFCORE(gdefcore_access_matrix)
 #define gdefcore_access_matrix_free GHOTIIO_DEFCORE(gdefcore_access_matrix_free)

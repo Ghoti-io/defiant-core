@@ -25,6 +25,7 @@
 #   role-grant-skips-confirmation   Grants.RoleGrantRefusals
 #   matrix-visible-to-everyone      Oracle.MatrixIsForAdministrators (testOracle)
 #   module-grant-seen-hidden        Oracle.ModuleGrant (testOracle)
+#   revoke-keeps-the-grant          Grants.ARevokedGrantIsGoneAndTheRoleKeepsTheRest
 #
 # Every test has a control (the same call that must be allowed, enabled or
 # read is made beside the one that must be refused), so a plant turning one
@@ -249,5 +250,14 @@ plant module-grant-seen-hidden $ACCESS testOracle 'Oracle.ModuleGrant' \
     return 1;
   }
   if (slot == NULL || slot->bad || slot->cond == NULL) {'
+
+# A revoke leaves the grant where it was (story A7).
+plant revoke-keeps-the-grant $ACCESS testGrants 'Grants.ARevokedGrantIsGoneAndTheRoleKeepsTheRest' \
+  '    if (!same(existing[i].label, existing[i].label_len, label, label_len)) {
+      kept[nkept++] = existing[i];
+    }' \
+  '    (void)label;
+    (void)label_len;
+    kept[nkept++] = existing[i];'
 
 plant_finish
