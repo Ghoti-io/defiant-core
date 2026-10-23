@@ -540,7 +540,7 @@ TEST_COMPILE_FLAGS := `PKG_CONFIG_PATH=$(PKG_CONFIG_LOOKUP_PATH) pkg-config --cf
 # coverage target does, because --coverage links the gcov runtime, whose
 # mangle_path check-symbols is right to reject in a shipping library and
 # wrong to reject in an instrumented one. Spelled as text's TEST_GATES is.
-TEST_GATES ?= check-symbols check-aliasing check-seams check-prefix check-labels check-access check-account check-inst check-subject check-keystore check-keystores check-form check-render check-erasure check-oracle check-readpaths check-routes check-tenant check-renderkey check-wait check-contexts check-bus check-defects check-safeout check-templates check-tpermission check-manifest check-conditions check-grants check-can check-revisions check-paths check-listplan check-relations check-groups check-personal check-callbacks check-restore check-migration check-scale
+TEST_GATES ?= check-symbols check-aliasing check-seams check-prefix check-labels check-access check-account check-inst check-subject check-keystore check-keystores check-form check-render check-erasure check-oracle check-readpaths check-routes check-tenant check-renderkey check-wait check-contexts check-bus check-defects check-safeout check-templates check-tpermission check-manifest check-conditions check-grants check-can check-revisions check-paths check-listplan check-relations check-groups check-personal check-callbacks check-restore check-migration check-scale check-sizes
 
 # Valgrind flags (exclude "still reachable" as it's not a leak)
 # --suppressions: see tests/valgrind.supp. It holds allocations that are
@@ -1690,7 +1690,7 @@ $(FUZZ_FLAGS_STAMP): force-flags
 	@printf '%s\n' '$(FUZZ_CC) $(FUZZ_CXX) $(FUZZ_SAN) $(FUZZ_LIB_FLAGS) $(FUZZ_BIN_FLAGS) $(INCLUDE) $(STOR_LIBS) $(CUTIL_LIBS) $(SEC_LIBS) $(TEXT_LIBS) $(REGEX_LIBS) $(LTANG_LIBS) $(ARC_LIBS) $(MEM_LIBS) $(SQL_LIBS)' > $@.new
 	@cmp -s $@.new $@ 2>/dev/null && rm -f $@.new || mv -f $@.new $@
 
-.PHONY: check-seams check-prefix check-labels check-access check-account check-inst check-subject check-keystore check-keystores check-form check-render check-erasure check-oracle check-readpaths check-routes check-tenant check-renderkey check-wait check-contexts check-bus check-defects check-safeout check-templates check-tpermission check-manifest check-conditions check-grants check-can check-revisions check-paths check-listplan check-relations check-groups check-personal check-callbacks check-restore check-migration check-scale
+.PHONY: check-seams check-prefix check-labels check-access check-account check-inst check-subject check-keystore check-keystores check-form check-render check-erasure check-oracle check-readpaths check-routes check-tenant check-renderkey check-wait check-contexts check-bus check-defects check-safeout check-templates check-tpermission check-manifest check-conditions check-grants check-can check-revisions check-paths check-listplan check-relations check-groups check-personal check-callbacks check-restore check-migration check-scale check-sizes
 check-seams: ## Fail if a subsystem includes another's private header
 	@tools/check-seams.sh .
 check-prefix: ## Fail if a derived Defiant prefix collides or a dependency is out of order
@@ -1793,6 +1793,13 @@ ifeq ($(strip $(PG_LIBS)),)
 else
 	@GDEFCORE_TEST_RESTORE=postgres LD_LIBRARY_PATH="$(TEST_LD_PATH)" $(APP_DIR)/testRestore$(EXE_EXTENSION) --gtest_brief=1
 endif
+# Every struct that begins with a size member is in tests/size_structs.h and
+# run by its home test; nothing in src/ reads one by a prefix of its size. The
+# script is defiant-storage's, installed with its conformance suites, and
+# plants each defect it looks for.
+check-sizes: ## Every size-member struct is listed and probed, no size prefix is read in src; real-source plants
+	@$(STOR_CONFORMANCE)/check-size-structs.sh . tests/size_structs.h
+
 check-form: $(APP_DIR)/testForm$(EXE_EXTENSION) ## A signed submit stores a draft, with a plant
 	@LD_LIBRARY_PATH="$(TEST_LD_PATH)" tools/check-form.sh "$(APP_DIR)/testForm$(EXE_EXTENSION)"
 check-render: $(APP_DIR)/testRender$(EXE_EXTENSION) ## A tiny scope returns a prefix, with a plant
