@@ -1304,7 +1304,7 @@ TEST(ListPlan, AnUnpublishedEntityIsNeverListed) {
   }
 }
 
-TEST(ListPlan, TheOldListIsUnchanged) {
+TEST(ListPlan, AListOfAnotherSizeIsRefusedAndTheFullOneListsAsItAlwaysDid) {
   for (int backend : Backends()) {
     Site site(backend);
     site.Role("seer");
@@ -1315,7 +1315,9 @@ TEST(ListPlan, TheOldListIsUnchanged) {
       site.Make(kBlog, "", V({{"title", "t" + std::to_string(i)}, {"group", i < 3 ? "a" : "b"}}));
     }
     GDEFCORE_Request * r = site.Req(p);
-    /* A struct that ends at sort_field_len, as the first version did. */
+    /* A struct that ends at sort_field_len, as the first version did, is a
+     * caller built against another definition: refused, not read as far as
+     * it goes. */
     struct OldList {
       size_t size;
       const char * type_name;
@@ -1331,20 +1333,25 @@ TEST(ListPlan, TheOldListIsUnchanged) {
     } old;
     memset(&old, 0, sizeof old);
     old.size = sizeof old;
-    old.type_name = kBlog;
-    old.type_name_len = strlen(kBlog);
-    old.lang = "en";
-    old.lang_len = 2;
-    old.filter_field = "group";
-    old.filter_field_len = 5;
-    old.filter_text = "b";
-    old.filter_text_len = 1;
-    old.sort_field = "title";
-    old.sort_field_len = 5;
     char ** ids = NULL;
     size_t count = 0;
-    ASSERT_EQ(GDEFCORE_OK,
+    EXPECT_EQ(GDEFCORE_ERR_INVALID,
         gdefcore_access_list(site.catalog, r, (const GDEFCORE_Access_List *)&old, &ids, &count));
+    /* The control: the same list in the full struct. */
+    GDEFCORE_Access_List q;
+    memset(&q, 0, sizeof q);
+    q.size = sizeof q;
+    q.type_name = kBlog;
+    q.type_name_len = strlen(kBlog);
+    q.lang = "en";
+    q.lang_len = 2;
+    q.filter_field = "group";
+    q.filter_field_len = 5;
+    q.filter_text = "b";
+    q.filter_text_len = 1;
+    q.sort_field = "title";
+    q.sort_field_len = 5;
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_access_list(site.catalog, r, &q, &ids, &count));
     std::vector<std::string> got;
     for (size_t i = 0; i < count; i++) {
       got.push_back(ids[i]);

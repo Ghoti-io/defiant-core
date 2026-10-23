@@ -29,6 +29,7 @@
  */
 
 #include "grants_fixture.h"
+#include "size_structs.h"
 
 #include <fstream>
 #include <sstream>
@@ -227,6 +228,34 @@ class Relations : public GrantsFixture {
 };
 
 }  // namespace
+
+/* AD-34: a struct with a size member is accepted at exactly its own size. The
+ * one here is what the host enumerates of a module's relations (size_structs.h
+ * lists every struct); its columns carry a size of their own. */
+TEST_F(Relations, TheStructsHereAreAcceptedAtOnlyTheirOwnSize) {
+  DefinePost();
+  ModDef * m = Declare_t(false);
+  ASSERT_EQ(GDEFCORE_OK, Install(m));
+  ASSERT_EQ(GDEFCORE_OK, Enable("t", {}));
+  size_t tenant_len = 0;
+  const uint8_t * tenant = gdefcore_catalog_tenant(catalog_, &tenant_len);
+  const std::map<std::string, size_structs::Probe> probes = {
+      GDEFCORE_SIZE_PROBE(GDEFCORE_Module_Declared_Relation, {
+        const GDEFCORE_Module_Declared_Relation ** items = NULL;
+        size_t n = 0;
+        EXPECT_EQ(GDEFCORE_OK,
+            gdefcore_module_relations(host_, tenant, tenant_len, NULL, &items, &n));
+        EXPECT_EQ(2u, n);
+        bool filled = n > 0 && items[0]->size == size;
+        EXPECT_TRUE(n > 0 && items[0]->columns[0].size ==
+                                 sizeof(GDEFCORE_Module_Relation_Column))
+            << "a column is filled at its own size";
+        gdefcore_module_declared_free(host_, items);
+        return filled;
+      }),
+  };
+  size_structs::Run("tests/test_relations.cpp", probes);
+}
 
 /* ---- the manifest -------------------------------------------------------- */
 

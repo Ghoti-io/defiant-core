@@ -169,10 +169,12 @@ plant service-version-ignored src/module/decl.c testModule \
   '      if (svcs[i].version != version) {' \
   '      if (0 && svcs[i].version != version) {'
 
-# The manifest is read past the prefix the module filled.
-plant manifest-read-past-size src/module/module.c testModule \
-  'Manifest.APrefixWithoutItsSchemaVersionIsRefused' \
-  '  take_prefix(&man, sizeof man, src);' \
+# The manifest is read whatever size the module says it is.
+plant manifest-read-at-any-size src/module/module.c testModule \
+  'Manifest.AManifestOfAnotherSizeIsRefused' \
+  '  if (!TAKE_EXACT(host, GDEFCORE_Module_Manifest, man, src)) {
+    return GDEFCORE_ERR_INVALID;
+  }' \
   '  memcpy(&man, src, sizeof man);'
 
 # A declared variable is not in the contract's contributions.

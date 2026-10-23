@@ -110,10 +110,12 @@ extern "C" {
  *
  * What the subscriber is told about one template write. Every pointer is
  * borrowed for the call and is not NUL-terminated; a missing value is an
- * empty span. A receiver reads a field only when @ref size covers it.
+ * empty span. @ref size is `sizeof(GDEFCORE_Template_Write_Hook)` of the
+ * core that fired the hook; a receiver compares it with its own before it
+ * reads a field.
  */
 typedef struct GDEFCORE_Template_Write_Hook {
-  size_t size;                  ///< `sizeof` as known to the caller.
+  size_t size;                  ///< `sizeof(GDEFCORE_Template_Write_Hook)`.
   const char * template_id;     ///< The template's public id.
   size_t template_id_len;       ///< Length of @ref template_id.
   const char * name;            ///< The template's name after the write.

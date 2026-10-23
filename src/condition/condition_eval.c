@@ -658,18 +658,15 @@ int gdefcore_condition_eval(GDEFCORE_Catalog * catalog,
   GDEFCORE_Condition_Subject local;
   Ctx ctx;
   int r;
-  size_t ncopy;
   GDEFCORE_Result rc;
   if (out_failed != NULL) {
     *out_failed = 0;
   }
   if (catalog == NULL || request == NULL || condition == NULL ||
-      subject == NULL || subject->size < sizeof(size_t)) {
+      subject == NULL || subject->size != sizeof *subject) {
     return 0;
   }
-  memset(&local, 0, sizeof local);
-  ncopy = subject->size < sizeof local ? subject->size : sizeof local;
-  memcpy(&local, subject, ncopy);
+  local = *subject;
   memset(&ctx, 0, sizeof ctx);
   ctx.catalog = catalog;
   ctx.request = request;

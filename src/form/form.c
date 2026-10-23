@@ -433,7 +433,7 @@ static GDEFCORE_Result bind_values(FormField * fields, size_t nfields,
   for (i = 0; i < value_count; i++) {
     size_t f;
     int found = 0;
-    if (values[i].size < sizeof(GDEFCORE_Value) ||
+    if (values[i].size != sizeof(GDEFCORE_Value) ||
         values[i].count > kMaxValues ||
         (values[i].texts == NULL && values[i].count != 0) ||
         (values[i].text_lens == NULL && values[i].count != 0)) {

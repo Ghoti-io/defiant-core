@@ -56,6 +56,7 @@
 #include <gtest/gtest.h>
 
 #include "keystore_rig.h"
+#include "size_structs.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -1603,6 +1604,59 @@ TEST_F(Migration, CoresOwnDataCarriesCoresVersionAndIsCheckedTheSameWay) {
   EXPECT_NE(std::string::npos, why.find("version 2")) << why;
   EXPECT_NE(std::string::npos, why.find("version 1")) << why;
   EXPECT_EQ("", Dump(d.store));
+}
+
+/* What gdefcore_access_hold_for_confirmation() told its callback. */
+struct HeldSeen {
+  size_t size = 0;
+  int calls = 0;
+};
+
+GDEFCORE_Result OnHeldSize(void * ctx, const GDEFCORE_Access_Held * held) {
+  HeldSeen * seen = static_cast<HeldSeen *>(ctx);
+  seen->size = held->size;
+  seen->calls += 1;
+  return GDEFCORE_OK;
+}
+
+/* AD-34: a struct with a size member is accepted at exactly its own size. The
+ * two here are the restore's: the held grants it reports (size_structs.h lists
+ * every struct). */
+TEST_F(Restore, TheStructsHereAreAcceptedAtOnlyTheirOwnSize) {
+  Populate();
+  ASSERT_FALSE(HasFatalFailure());
+  const char * confirm = GDEFCORE_ACCESS_CONFIRM_ANONYMOUS;
+  auto grant = [&]() {
+    EXPECT_EQ(GDEFCORE_OK, gdefcore_access_grant(catalog_, "anonymous", 9,
+        "Read posts", 10, confirm, strlen(confirm)));
+  };
+  grant();
+  Bytes data = Snapshot();
+  Bytes keys = Keyset();
+  Dest d(Backends()[0]);
+  d.Install(Blog<1>);
+  GDEFCORE_Restore * report = NULL;
+  ASSERT_EQ(GDEFCORE_OK, RestoreInto(&d, data, keys, &report)) << Reason(report);
+  ASSERT_GE(gdefcore_restore_held_count(report), 1u);
+  const std::map<std::string, size_structs::Probe> probes = {
+      GDEFCORE_SIZE_PROBE(GDEFCORE_Restore_Held, {
+        GDEFCORE_Restore_Held h;
+        memset(&h, 0, sizeof h);
+        h.size = size;
+        return gdefcore_restore_held(report, 0, &h) == GDEFCORE_OK;
+      }),
+      /* The core fills it: whether it filled the size asked about. */
+      GDEFCORE_SIZE_PROBE(GDEFCORE_Access_Held, {
+        HeldSeen seen;
+        grant();
+        EXPECT_EQ(GDEFCORE_OK,
+            gdefcore_access_hold_for_confirmation(catalog_, OnHeldSize, &seen));
+        EXPECT_EQ(1, seen.calls);
+        return seen.calls == 1 && seen.size == size;
+      }),
+  };
+  size_structs::Run("tests/test_restore.cpp", probes);
+  gdefcore_restore_free(report);
 }
 
 /* What the Postgres arm needs, else the backends of the default run. */

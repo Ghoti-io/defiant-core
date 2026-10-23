@@ -32,9 +32,10 @@ ends it. templates.md has the rest.
 
 A manifest can declare four tables (and grants, below) besides its hooks, services and permissions:
 **routes**, **menu links**, **settings** and **template variables**. They are
-appended to `GDEFCORE_Module_Manifest` (AD-4): a module built against an older
-header fills a shorter prefix, and the host reads only the prefix, so such a
-module declares none and works as before. Each entry is size-prefixed.
+members of `GDEFCORE_Module_Manifest`; a table a module does not use is NULL
+with a count of 0. The manifest and every entry have a `size` member that must
+be `sizeof` of its struct: any other size refuses the install, and the error
+names the struct and both sizes.
 
 | Table | Entry | What it says |
 | --- | --- | --- |

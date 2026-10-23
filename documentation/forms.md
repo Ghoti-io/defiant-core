@@ -13,9 +13,9 @@ integer inside the bounds, and a pattern is an ECMAScript regex that
 must match the whole value. A pattern that does not compile is refused
 when the type is defined.
 
-Callers whose `GDEFCORE_Field.size` stops before these members impose
-no extra constraint. A field stored before the members existed is read
-the same way.
+A field that sets none of these members (they are zero or NULL) imposes
+no extra constraint. `GDEFCORE_Field.size` must be `sizeof(GDEFCORE_Field)`;
+any other size is `GDEFCORE_ERR_INVALID`.
 
 ## The token
 
@@ -145,7 +145,7 @@ share a path.
 ### Named segments, permission, title, kind and tabs
 
 `gdefcore_route_add()` is unchanged, and a `:` in its path is literal text.
-`gdefcore_route_add_spec()` takes a size-prefixed `GDEFCORE_Route_Spec` with
+`gdefcore_route_add_spec()` takes a `GDEFCORE_Route_Spec` (its `size` must be `sizeof`) with
 the same fields and these:
 
 - **Named segments.** A pattern segment `:name` matches exactly one request

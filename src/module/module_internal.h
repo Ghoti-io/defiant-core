@@ -60,7 +60,8 @@ enum {
   kDeclNoName = 1,
   kDeclNoService = 2,
   kDeclBadVersion = 3,
-  kDeclBadTable = 4
+  kDeclBadTable = 4,
+  kDeclBadSize = 5
 };
 
 typedef struct DeclRoute {

@@ -126,11 +126,11 @@ typedef struct GDEFCORE_Changeset GDEFCORE_Changeset;
 /**
  * @brief A field declaration. The caller owns the name for the call.
  *
- * @ref size is `sizeof(GDEFCORE_Field)`. A value that stops before
- * @ref many is ::GDEFCORE_ERR_INVALID. @ref personal is 0 when @ref size
- * stops before it. Members after @ref personal are absent when @ref size
- * stops before them: no minimum, no maximum, no range and no pattern, a text
- * field, not indexed.
+ * @ref size is `sizeof(GDEFCORE_Field)`; any other size is
+ * ::GDEFCORE_ERR_INVALID, for the field and for every field in @ref children.
+ * A member a field does not use is zero or NULL: no minimum, no maximum, no
+ * range and no pattern, a text field (@ref type 0), not personal, not
+ * indexed.
  *
  * Every field has a logical type (AD-13), which is what the storage port
  * keeps and compares: ::GDEFSTOR_FIELD_TEXT (also @ref type 0), INTEGER,

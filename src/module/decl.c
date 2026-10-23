@@ -31,6 +31,7 @@
 
 #include <ghoti.io/defiant-core/macros.h>
 
+#include "../core/size.h"
 #include "module_internal.h"
 
 #include <ghoti.io/cutil/allocator.h>
@@ -62,18 +63,6 @@ static int span_cmp(const char * a, size_t an, const char * b, size_t bn) {
   return an < bn ? -1 : (an > bn ? 1 : 0);
 }
 
-static void take_prefix(void * dst, size_t dst_n, const void * src) {
-  const size_t * sizep = (const size_t *)src;
-  size_t n = *sizep;
-  memset(dst, 0, dst_n);
-  if (n > dst_n) {
-    n = dst_n;
-  }
-  if (n > 0) {
-    memcpy(dst, src, n);
-  }
-}
-
 /* -------------------------------------------------------------- build */
 
 typedef struct Build {
@@ -101,6 +90,32 @@ static void build_fail(Build * b, GDEFCORE_Result rc, const char * what,
     }
   }
 }
+
+/* Copy one declaration the module handed over. Its size must be this build's;
+ * any other is refused, and the error names the struct and both sizes. */
+static int take_exact(Build * b, void * dst, size_t n, const void * src,
+    const char * name, size_t index) {
+  size_t got;
+  memcpy(&got, src, sizeof got);
+  if (got != n) {
+    memset(dst, 0, n);
+    if (b->rc == GDEFCORE_OK) {
+      b->rc = GDEFCORE_ERR_INVALID;
+      if (b->err != NULL && b->cap > 0) {
+        char said[160];
+        gdefcore_size_say(said, sizeof said, name, got, n);
+        snprintf(b->err, b->cap, "Module %s: %s %zu: %s", b->d->module, name,
+            index + 1, said);
+      }
+    }
+    return 0;
+  }
+  memcpy(dst, src, n);
+  return 1;
+}
+
+#define TAKE_EXACT(b, type, dst, src, index) \
+  take_exact((b), &(dst), sizeof(type), (src), #type, (index))
 
 /* Copy a string into the Decl. A NULL pointer is fine for length 0 only. */
 static const char * dup_str(Build * b, const char * p, size_t n,
@@ -156,16 +171,16 @@ static int resolve(const DeclSvc * svcs, size_t nsvcs, const char * name,
   }
   for (i = 0; i < nsvcs; i++) {
     if (span_is(svcs[i].name, svcs[i].name_len, name, name_len)) {
-      const size_t * sizep;
+      size_t got;
       if (svcs[i].version != version) {
         return kDeclBadVersion;
       }
       if (svcs[i].table == NULL) {
         return kDeclBadTable;
       }
-      sizep = (const size_t *)svcs[i].table;
-      if (*sizep < need) {
-        return kDeclBadTable;
+      memcpy(&got, svcs[i].table, sizeof got);
+      if (got != need) {
+        return kDeclBadSize;
       }
       *table = svcs[i].table;
       return kDeclResolved;
@@ -274,7 +289,9 @@ static void build_routes(Build * b, const GDEFCORE_Module_Manifest * m,
     DeclRoute * dr = &d->routes[i];
     GDEFCORE_Route_Spec * spec = &dr->pub.spec;
     const void * table = NULL;
-    take_prefix(&r, sizeof r, &m->routes[i]);
+    if (!TAKE_EXACT(b, GDEFCORE_Module_Route, r, &m->routes[i], i)) {
+      break;
+    }
     dr->index = i;
     dr->pub.size = sizeof dr->pub;
     dr->pub.module = d->module;
@@ -308,10 +325,10 @@ static void build_routes(Build * b, const GDEFCORE_Module_Manifest * m,
     }
     dr->resolved = resolve(svcs, nsvcs, dr->handler, dr->handler_len,
         GDEFCORE_MODULE_ROUTE_HANDLER_VERSION,
-        offsetof(GDEFCORE_Module_Route_Handler, data), &table);
+        sizeof(GDEFCORE_Module_Route_Handler), &table);
     if (dr->resolved == kDeclResolved) {
       GDEFCORE_Module_Route_Handler h;
-      take_prefix(&h, sizeof h, table);
+      memcpy(&h, table, sizeof h);
       if (h.call_fn == NULL) {
         dr->resolved = kDeclBadTable;
       } else {
@@ -338,7 +355,9 @@ static void build_links(Build * b, const GDEFCORE_Module_Manifest * m) {
   for (i = 0; i < m->nlinks && b->rc == GDEFCORE_OK; i++) {
     GDEFCORE_Module_Link l;
     DeclLink * dl = &d->links[i];
-    take_prefix(&l, sizeof l, &m->links[i]);
+    if (!TAKE_EXACT(b, GDEFCORE_Module_Link, l, &m->links[i], i)) {
+      break;
+    }
     dl->index = i;
     dl->pub.size = sizeof dl->pub;
     dl->pub.module = d->module;
@@ -374,7 +393,9 @@ static void build_settings(Build * b, const GDEFCORE_Module_Manifest * m) {
   for (i = 0; i < m->nsettings && b->rc == GDEFCORE_OK; i++) {
     GDEFCORE_Module_Setting s;
     DeclSetting * ds = &d->settings[i];
-    take_prefix(&s, sizeof s, &m->settings[i]);
+    if (!TAKE_EXACT(b, GDEFCORE_Module_Setting, s, &m->settings[i], i)) {
+      break;
+    }
     ds->index = i;
     ds->pub.size = sizeof ds->pub;
     ds->pub.module = d->module;
@@ -415,7 +436,9 @@ static void build_vars(Build * b, const GDEFCORE_Module_Manifest * m,
     GDEFCORE_Module_Variable v;
     DeclVar * dv = &d->vars[i];
     const void * table = NULL;
-    take_prefix(&v, sizeof v, &m->variables[i]);
+    if (!TAKE_EXACT(b, GDEFCORE_Module_Variable, v, &m->variables[i], i)) {
+      break;
+    }
     dv->index = i;
     dv->pub.size = sizeof dv->pub;
     dv->pub.module = d->module;
@@ -437,12 +460,10 @@ static void build_vars(Build * b, const GDEFCORE_Module_Manifest * m,
     }
     dv->resolved = resolve(svcs, nsvcs, dv->provider, dv->provider_len,
         GDEFCORE_MODULE_VARIABLE_PROVIDER_VERSION,
-        offsetof(GDEFCORE_Module_Variable_Provider, provider) +
-            sizeof(GDEFCORE_Contribution_Fn),
-        &table);
+        sizeof(GDEFCORE_Module_Variable_Provider), &table);
     if (dv->resolved == kDeclResolved) {
       GDEFCORE_Module_Variable_Provider p;
-      take_prefix(&p, sizeof p, table);
+      memcpy(&p, table, sizeof p);
       if (p.provider == NULL) {
         dv->resolved = kDeclBadTable;
       } else {
@@ -469,7 +490,9 @@ static void build_grants(Build * b, const GDEFCORE_Module_Manifest * m) {
   for (i = 0; i < m->ngrants && b->rc == GDEFCORE_OK; i++) {
     GDEFCORE_Module_Grant g;
     DeclGrant * dg = &d->grants[i];
-    take_prefix(&g, sizeof g, &m->grants[i]);
+    if (!TAKE_EXACT(b, GDEFCORE_Module_Grant, g, &m->grants[i], i)) {
+      break;
+    }
     dg->index = i;
     dg->pub.size = sizeof dg->pub;
     dg->pub.module = d->module;
@@ -506,7 +529,9 @@ static void build_relations(Build * b, const GDEFCORE_Module_Manifest * m) {
   for (i = 0; i < m->nrelations && b->rc == GDEFCORE_OK; i++) {
     GDEFCORE_Module_Relation r;
     DeclRelation * dr = &d->relations[i];
-    take_prefix(&r, sizeof r, &m->relations[i]);
+    if (!TAKE_EXACT(b, GDEFCORE_Module_Relation, r, &m->relations[i], i)) {
+      break;
+    }
     dr->index = i;
     dr->pub.size = sizeof dr->pub;
     dr->pub.module = d->module;
@@ -523,7 +548,9 @@ static void build_relations(Build * b, const GDEFCORE_Module_Manifest * m) {
     }
     for (c = 0; b->rc == GDEFCORE_OK && c < r.ncolumns; c++) {
       GDEFCORE_Module_Relation_Column col;
-      take_prefix(&col, sizeof col, &r.columns[c]);
+      if (!TAKE_EXACT(b, GDEFCORE_Module_Relation_Column, col, &r.columns[c], i)) {
+        break;
+      }
       dr->cols[c].size = sizeof dr->cols[c];
       dr->cols[c].name = dup_str(b, col.name, col.name_len, "relation", i);
       dr->cols[c].name_len = col.name_len;
@@ -605,7 +632,9 @@ static void build_callbacks(Build * b, const GDEFCORE_Module_Manifest * m,
     DeclCallback * dc = &d->callbacks[i];
     const void * table = NULL;
     int resolved;
-    take_prefix(&c, sizeof c, &m->callbacks[i]);
+    if (!TAKE_EXACT(b, GDEFCORE_Module_Callback, c, &m->callbacks[i], i)) {
+      break;
+    }
     dc->index = i;
     dc->pub.size = sizeof dc->pub;
     dc->pub.module = d->module;
@@ -685,12 +714,10 @@ static void build_callbacks(Build * b, const GDEFCORE_Module_Manifest * m,
     }
     resolved = resolve(svcs, nsvcs, c.service, c.service_len,
         GDEFCORE_MODULE_ACCESS_CALLBACK_VERSION,
-        offsetof(GDEFCORE_Module_Access_Callback, fn) +
-            sizeof(GDEFCORE_Callback_Fn),
-        &table);
+        sizeof(GDEFCORE_Module_Access_Callback), &table);
     if (resolved == kDeclResolved) {
       GDEFCORE_Module_Access_Callback t;
-      take_prefix(&t, sizeof t, table);
+      memcpy(&t, table, sizeof t);
       if (t.fn == NULL) {
         resolved = kDeclBadTable;
       } else {
@@ -707,8 +734,11 @@ static void build_callbacks(Build * b, const GDEFCORE_Module_Manifest * m,
                         : (resolved == kDeclBadVersion
                                   ? "names a service declared at another "
                                     "version."
-                                  : "names a service whose table does not "
-                                    "carry the function.")));
+                                  : (resolved == kDeclBadSize
+                                            ? "names a service whose table has "
+                                              "another size than this build's."
+                                            : "names a service whose table "
+                                              "does not carry the function."))));
       break;
     }
     for (k = 0; k < i; k++) {
@@ -1081,6 +1111,8 @@ static const char * why_service(int status) {
     return "names a service the module does not declare";
   case kDeclBadVersion:
     return "names a service declared at another version";
+  case kDeclBadSize:
+    return "names a service whose table has another size than this build's";
   default:
     return "names a service whose table does not carry the function";
   }

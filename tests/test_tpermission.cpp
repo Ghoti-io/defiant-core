@@ -32,6 +32,8 @@
 #include <ghoti.io/defiant-core/defiant-core.h>
 #include <ghoti.io/defiant-storage-memory/memory.h>
 
+#include "size_structs.h"
+
 #include <gtest/gtest.h>
 
 #include <stdint.h>
@@ -583,6 +585,26 @@ TEST_F(TPerm, RevertIsChecked) {
   }
 }
 
+/* AD-34: a struct with a size member is accepted at exactly its own size. The
+ * one here is what the decision hook is told of a template write; it is the
+ * core that fills it (size_structs.h lists every struct). */
+TEST_F(TPerm, TheStructsHereAreAcceptedAtOnlyTheirOwnSize) {
+  GDEFCORE_Request * pages = Who("page-editors", {"core.page", "core.pane"});
+  const std::string layout = Field("core.template", "layout", "body");
+  judge_.allowed = "internal";
+  Install(0, JudgeFn, &judge_);
+  ModuleOn("judge");
+  ASSERT_EQ(GDEFCORE_OK,
+      Edit("layout", layout + "<!-- sized -->", "core.page", pages, "internal"));
+  ASSERT_EQ(1, judge_.calls);
+  const std::map<std::string, size_structs::Probe> probes = {
+      GDEFCORE_SIZE_PROBE(GDEFCORE_Template_Write_Hook, {
+        return judge_.size == size;
+      }),
+  };
+  size_structs::Run("tests/test_tpermission.cpp", probes);
+}
+
 /* -------------------------------------------------------------------- */
 /* The decision hook                                                     */
 /* -------------------------------------------------------------------- */
@@ -608,7 +630,7 @@ TEST_F(TPerm, ModuleDeniesPageTemplatesUnlessClassificationMatches) {
       << "the module's name is not part of what the editor is told";
   EXPECT_EQ(layout, Field("core.template", "layout", "body"));
   /* What the hook is told. */
-  EXPECT_GE(judge_.size, sizeof(GDEFCORE_Template_Write_Hook));
+  EXPECT_EQ(sizeof(GDEFCORE_Template_Write_Hook), judge_.size);
   EXPECT_EQ("layout", judge_.name);
   EXPECT_EQ("core.page", judge_.kind);
   EXPECT_EQ("core.page", judge_.old_kind);

@@ -30,6 +30,7 @@
 #include <ghoti.io/defiant-core/access.h>
 #include <ghoti.io/defiant-core/condition.h>
 
+#include "../core/size.h"
 #include "module_internal.h"
 
 #include <ghoti.io/cutil/allocator.h>
@@ -349,22 +350,27 @@ static int cmp_name(const void * a, const void * b) {
   return 0;
 }
 
-static void take_prefix(void * dst, size_t dst_n, const void * src) {
-  const size_t * sizep;
-  size_t n;
-  memset(dst, 0, dst_n);
-  if (src == NULL) {
-    return;
+/* Copy a declaration the module handed over. Its size must be this build's:
+ * a struct of any other size is refused, with an error naming it. */
+static int take_exact(GDEFCORE_Host * host, void * dst, size_t n,
+    const void * src, const char * name) {
+  size_t got = 0;
+  if (src != NULL) {
+    memcpy(&got, src, sizeof got);
   }
-  sizep = (const size_t *)src;
-  n = *sizep;
-  if (n > dst_n) {
-    n = dst_n;
+  if (src == NULL || got != n) {
+    char text[kErrorMax];
+    gdefcore_size_say(text, sizeof text, name, got, n);
+    set_error(host, text);
+    memset(dst, 0, n);
+    return 0;
   }
-  if (n > 0) {
-    memcpy(dst, src, n);
-  }
+  memcpy(dst, src, n);
+  return 1;
 }
+
+#define TAKE_EXACT(host, type, dst, src) \
+  take_exact((host), &(dst), sizeof(type), (src), #type)
 
 static Mod * find_mod(GDEFCORE_Host * host, const char * name, size_t len) {
   size_t i;
@@ -653,11 +659,13 @@ static GDEFCORE_Result copy_manifest(GDEFCORE_Host * host, Mod * mod,
     const GDEFCORE_Module_Manifest * src) {
   GDEFCORE_Module_Manifest man;
   size_t i;
-  if (src == NULL || src->size < sizeof(size_t)) {
+  if (src == NULL) {
     set_error(host, "Module manifest is missing.");
     return GDEFCORE_ERR_INVALID;
   }
-  take_prefix(&man, sizeof man, src);
+  if (!TAKE_EXACT(host, GDEFCORE_Module_Manifest, man, src)) {
+    return GDEFCORE_ERR_INVALID;
+  }
   if (!name_ok(man.name, man.name_len)) {
     set_error(host, "Module name is not lowercase.");
     return GDEFCORE_ERR_INVALID;
@@ -687,8 +695,8 @@ static GDEFCORE_Result copy_manifest(GDEFCORE_Host * host, Mod * mod,
     return GDEFCORE_ERR_INVALID;
   }
   /* The module's stored-data schema version is required (AD-15): a manifest
-   * that leaves it 0, or is too short to hold it, says nothing about what its
-   * data is written in, and is refused. */
+   * that leaves it 0 says nothing about what its data is written in, and is
+   * refused. */
   if (man.schema_version == 0) {
     set_error(host, "Module manifest declares no stored-data schema version; "
                     "its schema_version must be 1 or more.");
@@ -706,7 +714,9 @@ static GDEFCORE_Result copy_manifest(GDEFCORE_Host * host, Mod * mod,
   for (i = 0; i < man.nsteps; i++) {
     GDEFCORE_Module_Step st;
     size_t k;
-    take_prefix(&st, sizeof st, &man.steps[i]);
+    if (!TAKE_EXACT(host, GDEFCORE_Module_Step, st, &man.steps[i])) {
+      return GDEFCORE_ERR_INVALID;
+    }
     if (st.fn == NULL || st.from == 0 || st.from >= mod->schema) {
       set_error(host, "A module's forward step starts from a version that is "
                       "not below its schema version, or has no function.");
@@ -729,7 +739,9 @@ static GDEFCORE_Result copy_manifest(GDEFCORE_Host * host, Mod * mod,
   for (i = 0; i < man.nupcasters; i++) {
     GDEFCORE_Module_Upcaster up;
     size_t k;
-    take_prefix(&up, sizeof up, &man.upcasters[i]);
+    if (!TAKE_EXACT(host, GDEFCORE_Module_Upcaster, up, &man.upcasters[i])) {
+      return GDEFCORE_ERR_INVALID;
+    }
     if (up.fn == NULL || up.from == 0 || up.from >= mod->schema) {
       set_error(host, "A module's upcaster reads a version that is not below "
                       "its schema version, or has no function.");
@@ -758,7 +770,9 @@ static GDEFCORE_Result copy_manifest(GDEFCORE_Host * host, Mod * mod,
   mod->nrels = 0;
   for (i = 0; i < man.nrels; i++) {
     GDEFCORE_Module_Rel rel;
-    take_prefix(&rel, sizeof rel, &man.rels[i]);
+    if (!TAKE_EXACT(host, GDEFCORE_Module_Rel, rel, &man.rels[i])) {
+      return GDEFCORE_ERR_INVALID;
+    }
     if (rel.kind != GDEFCORE_REL_REQUIRES && rel.kind != GDEFCORE_REL_ENHANCES) {
       return GDEFCORE_ERR_INVALID;
     }
@@ -776,7 +790,9 @@ static GDEFCORE_Result copy_manifest(GDEFCORE_Host * host, Mod * mod,
   for (i = 0; i < man.nsubs; i++) {
     GDEFCORE_Module_Sub sub;
     size_t j;
-    take_prefix(&sub, sizeof sub, &man.subs[i]);
+    if (!TAKE_EXACT(host, GDEFCORE_Module_Sub, sub, &man.subs[i])) {
+      return GDEFCORE_ERR_INVALID;
+    }
     if (sub.fn == NULL ||
         (sub.kind != GDEFCORE_HOOK_EVENT && sub.kind != GDEFCORE_HOOK_ALTER &&
             sub.kind != GDEFCORE_HOOK_DECISION) ||
@@ -827,7 +843,9 @@ static GDEFCORE_Result copy_manifest(GDEFCORE_Host * host, Mod * mod,
   mod->nservices = 0;
   for (i = 0; i < man.nservices; i++) {
     GDEFCORE_Module_Service svc;
-    take_prefix(&svc, sizeof svc, &man.services[i]);
+    if (!TAKE_EXACT(host, GDEFCORE_Module_Service, svc, &man.services[i])) {
+      return GDEFCORE_ERR_INVALID;
+    }
     if (!ident_ok(svc.name, svc.name_len)) {
       return GDEFCORE_ERR_INVALID;
     }
@@ -849,7 +867,9 @@ static GDEFCORE_Result copy_manifest(GDEFCORE_Host * host, Mod * mod,
   }
   for (i = 0; i < man.nperms; i++) {
     GDEFCORE_Module_Perm perm;
-    take_prefix(&perm, sizeof perm, &man.perms[i]);
+    if (!TAKE_EXACT(host, GDEFCORE_Module_Perm, perm, &man.perms[i])) {
+      return GDEFCORE_ERR_INVALID;
+    }
     if (perm.label == NULL || perm.label_len == 0 || perm.action == NULL ||
         perm.action_len == 0 || perm.type_name == NULL ||
         perm.type_name_len == 0 ||
@@ -1833,9 +1853,18 @@ GDEFCORE_Result gdefcore_module_contribute(GDEFCORE_Host * host,
   Contrib * slot;
   Mod * mod;
   size_t i;
-  if (host == NULL || c == NULL || c->size < sizeof *c || c->kind == NULL ||
-      c->name == NULL || c->type == NULL || c->provider == NULL ||
-      !name_ok(module, module_len)) {
+  if (host == NULL || c == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  if (c->size != sizeof *c) {
+    char text[kErrorMax];
+    gdefcore_size_say(text, sizeof text, "GDEFCORE_Module_Contribution",
+        c->size, sizeof *c);
+    set_error(host, text);
+    return GDEFCORE_ERR_INVALID;
+  }
+  if (c->kind == NULL || c->name == NULL || c->type == NULL ||
+      c->provider == NULL || !name_ok(module, module_len)) {
     return GDEFCORE_ERR_INVALID;
   }
   mod = find_mod(host, module, module_len);
@@ -3329,10 +3358,6 @@ static Chain * find_chain(GDEFCORE_Host * host, const uint8_t * tenant,
   return NULL;
 }
 
-static int field_covers(size_t size, size_t end) {
-  return size >= end;
-}
-
 static GDEFCORE_Result note_skip(GDEFCORE_Host * host, const char * name,
     size_t name_len) {
   if (host->skipped_n > 0) {
@@ -3405,13 +3430,15 @@ static GDEFCORE_Result call_subscriber(GDEFCORE_Host * host, ChainNode * node,
       gcu_allocator_free(host->alloc, saved);
     }
   }
-  if (field_covers(out.size,
-          offsetof(GDEFCORE_Hook_Out, decision) + sizeof(int))) {
-    reported = out.decision;
+  if (out.size != sizeof out) {
+    char text[kErrorMax];
+    gdefcore_size_say(text, sizeof text, "GDEFCORE_Hook_Out", out.size,
+        sizeof out);
+    set_error(host, text);
+    return GDEFCORE_ERR_INVALID;
   }
-  if (field_covers(out.size, offsetof(GDEFCORE_Hook_Out, access) + sizeof(int))) {
-    access = out.access;
-  }
+  reported = out.decision;
+  access = out.access;
   if (access && !node->access) {
     set_error(host, "Access contribution was not declared.");
     return GDEFCORE_ERR_INVALID;
@@ -3636,6 +3663,13 @@ GDEFCORE_Result gdefcore_module_fire_write(GDEFCORE_Host * host,
   int decision = GDEFCORE_DECISION_NONE;
   GDEFCORE_Result rc;
   if (host == NULL || catalog == NULL || hook == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  if (args != NULL && args->size != sizeof *args) {
+    char text[kErrorMax];
+    gdefcore_size_say(text, sizeof text, "GDEFCORE_Write_Hook", args->size,
+        sizeof *args);
+    set_error(host, text);
     return GDEFCORE_ERR_INVALID;
   }
   if (request == NULL) {

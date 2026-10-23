@@ -1238,10 +1238,13 @@ TEST_F(Can, RouteSpecsKeepTheirMeaning) {
   spec.entity_capture = NULL;
   spec.entity_capture_len = 0;
   EXPECT_EQ(GDEFCORE_OK, gdefcore_route_add_spec(routes_, &spec, NULL, NULL));
-  /* One size: a spec that ends before the entity capture is refused. */
+  /* One size: a spec that ends before the entity capture is refused, and so
+   * is one that claims more than this build has. */
   spec.machine = "c";
   spec.path = "/c/:id";
   spec.size = offsetof(GDEFCORE_Route_Spec, entity_capture);
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, gdefcore_route_add_spec(routes_, &spec, NULL, NULL));
+  spec.size = sizeof spec + sizeof(void *);
   EXPECT_EQ(GDEFCORE_ERR_INVALID, gdefcore_route_add_spec(routes_, &spec, NULL, NULL));
 }
 

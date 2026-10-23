@@ -37,6 +37,7 @@
  */
 
 #include "grants_fixture.h"
+#include "size_structs.h"
 
 namespace {
 
@@ -816,6 +817,72 @@ TEST_F(Grants, OldApiUnchanged) {
   gdefcore_catalog_bind_host(catalog_, NULL);
   EXPECT_EQ("theirs", Read(reader, theirs));
   gdefcore_catalog_bind_host(catalog_, host_);
+}
+
+/* AD-34: a struct with a size member is accepted at exactly its own size. The
+ * four here are the access calls' and a module's grant (size_structs.h lists
+ * every struct). */
+TEST_F(Grants, TheStructsHereAreAcceptedAtOnlyTheirOwnSize) {
+  DefinePost();
+  Declare(Perm("Read posts", "read", GDEFCORE_ACCESS_ANY));
+  Role("editors");
+  Grant("editors", "Read posts");
+  /* A module that grants, enabled, so the host has a grant to enumerate. */
+  ModDef * m = NewMod("blog");
+  m->Perm("blog.read", "read", GDEFCORE_ACCESS_ANY, kPost);
+  m->Grant("blog.read", kPost, kGroupA);
+  ASSERT_EQ(GDEFCORE_OK, Install(m));
+  ASSERT_EQ(GDEFCORE_OK,
+      Enable("blog", {GrantLine("blog", "blog.read", "low", kGroupA)}))
+      << last_error_;
+  size_t tenant_len = 0;
+  const uint8_t * tenant = gdefcore_catalog_tenant(catalog_, &tenant_len);
+  const std::map<std::string, size_structs::Probe> probes = {
+      GDEFCORE_SIZE_PROBE(GDEFCORE_Access_Permission, {
+        GDEFCORE_Access_Permission out;
+        memset(&out, 0, sizeof out);
+        out.size = size;
+        return gdefcore_access_permission_info(catalog_, "Read posts", 10,
+                   &out) == GDEFCORE_OK;
+      }),
+      GDEFCORE_SIZE_PROBE(GDEFCORE_Access_List, {
+        GDEFCORE_Access_List q;
+        char ** ids = NULL;
+        size_t n = 0;
+        memset(&q, 0, sizeof q);
+        q.size = size;
+        q.type_name = kPost;
+        q.type_name_len = strlen(kPost);
+        q.lang = "en";
+        q.lang_len = 2;
+        GDEFCORE_Result rc =
+            gdefcore_access_list(catalog_, Req(Admin()), &q, &ids, &n);
+        gdefcore_access_free(catalog_, ids, n);
+        return rc == GDEFCORE_OK;
+      }),
+      /* The core fills it: whether it filled the size asked about. */
+      GDEFCORE_SIZE_PROBE(GDEFCORE_Module_Declared_Grant, {
+        const GDEFCORE_Module_Declared_Grant ** items = NULL;
+        size_t n = 0;
+        EXPECT_EQ(GDEFCORE_OK,
+            gdefcore_module_grants(host_, tenant, tenant_len, NULL, &items, &n));
+        EXPECT_EQ(1u, n);
+        bool filled = n > 0 && items[0]->size == size;
+        gdefcore_module_declared_free(host_, items);
+        return filled;
+      }),
+      GDEFCORE_SIZE_PROBE(GDEFCORE_Access_Matrix_Row, {
+        GDEFCORE_Access_Matrix_Row * rows = NULL;
+        size_t n = 0;
+        EXPECT_EQ(GDEFCORE_OK,
+            gdefcore_access_matrix(catalog_, Req(Admin()), &rows, &n));
+        EXPECT_GT(n, 0u);
+        bool filled = n > 0 && rows[0].size == size;
+        gdefcore_access_matrix_free(catalog_, rows, n);
+        return filled;
+      }),
+  };
+  size_structs::Run("tests/test_grants.cpp", probes);
 }
 
 int main(int argc, char ** argv) {

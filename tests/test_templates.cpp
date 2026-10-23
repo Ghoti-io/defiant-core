@@ -33,6 +33,8 @@
 #include <ghoti.io/defiant-storage/model.h>
 #include <ghoti.io/defiant-storage-memory/memory.h>
 
+#include "size_structs.h"
+
 #include <gtest/gtest.h>
 
 #include <stdint.h>
@@ -76,6 +78,8 @@ struct Probe {
   std::string text = "seven";
   int64_t integer = 7;
   GDEFCORE_Request * last = NULL;
+  bool set_size = false; /* answer in a block of this size instead */
+  size_t size_value = 0;
 };
 
 extern "C" GDEFCORE_Result Provide(GDEFCORE_Request * request, void * user,
@@ -83,6 +87,9 @@ extern "C" GDEFCORE_Result Provide(GDEFCORE_Request * request, void * user,
   Probe * p = (Probe *)user;
   p->calls += 1;
   p->last = request;
+  if (p->set_size) {
+    out->size = p->size_value;
+  }
   out->kind = p->kind;
   out->text = p->text.c_str();
   out->text_len = p->text.size();
@@ -1339,6 +1346,64 @@ TEST_F(Templates, RevertIsVetted) {
 }
 
 }  // namespace
+
+/* AD-34: a struct with a size member is accepted at exactly its own size. The
+ * four here are the templates': what a contract and a report list (the core
+ * fills them), and what a contribution's provider answers in (a block of
+ * another size gives nothing: the variable reads as not available). See
+ * size_structs.h, which lists every struct. */
+TEST_F(Templates, TheStructsHereAreAcceptedAtOnlyTheirOwnSize) {
+  Install(0);
+  ASSERT_EQ(GDEFCORE_OK,
+      Contribute("m", "core.page", "m.count", "number", &probe_, 1));
+  ASSERT_EQ(GDEFCORE_OK, ModuleOp("m", true));
+  ASSERT_EQ(GDEFCORE_OK,
+      SaveTemplate("layout", "<% use m.count as c; %><i><%= c %></i>",
+          "core.page"));
+  GDEFCORE_Contract * contract = NULL;
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_template_contract_open(catalog_, NULL, "core.pane", 9, &contract,
+          NULL));
+  GDEFCORE_Template_Report * report = NULL;
+  const std::string bad = "<% use title; %><%= titl %>";
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_template_validate(catalog_, NULL, "core.pane", 9, bad.data(),
+          bad.size(), &report));
+  ASSERT_GT(gdefcore_template_report_count(report), 0u);
+  const std::map<std::string, size_structs::Probe> probes = {
+      /* The core fills the first three: whether it filled the size asked. */
+      GDEFCORE_SIZE_PROBE(GDEFCORE_Contract_Var, {
+        GDEFCORE_Contract_Var v;
+        memset(&v, 0, sizeof v);
+        EXPECT_EQ(GDEFCORE_OK, gdefcore_template_contract_var_at(contract, 0, &v));
+        return v.size == size;
+      }),
+      GDEFCORE_SIZE_PROBE(GDEFCORE_Contract_Fn, {
+        GDEFCORE_Contract_Fn f;
+        memset(&f, 0, sizeof f);
+        EXPECT_EQ(GDEFCORE_OK, gdefcore_template_contract_fn_at(contract, 0, &f));
+        return f.size == size;
+      }),
+      GDEFCORE_SIZE_PROBE(GDEFCORE_Template_Issue, {
+        GDEFCORE_Template_Issue issue;
+        memset(&issue, 0, sizeof issue);
+        EXPECT_EQ(GDEFCORE_OK, gdefcore_template_report_at(report, 0, &issue));
+        return issue.size == size;
+      }),
+      GDEFCORE_SIZE_PROBE(GDEFCORE_Contribution_Value, {
+        probe_.set_size = true;
+        probe_.size_value = size;
+        GDEFCORE_Result rc = GDEFCORE_OK;
+        std::string page = Page(anon_, &rc);
+        probe_.set_size = false;
+        EXPECT_EQ(GDEFCORE_OK, rc);
+        return page.find("<i>7</i>") != std::string::npos;
+      }),
+  };
+  size_structs::Run("tests/test_templates.cpp", probes);
+  gdefcore_template_report_free(report);
+  gdefcore_template_contract_close(contract);
+}
 
 int main(int argc, char ** argv) {
   ::testing::InitGoogleTest(&argc, argv);

@@ -29,11 +29,14 @@
 #include <ghoti.io/defiant-storage/model.h>
 #include <ghoti.io/defiant-storage-memory/memory.h>
 
+#include "size_structs.h"
+
 #include <gtest/gtest.h>
 
 #include <stdint.h>
 #include <string.h>
 
+#include <map>
 #include <string>
 #include <vector>
 
@@ -1483,6 +1486,88 @@ TEST_F(Entity, MachineNameDots) {
   EXPECT_EQ(GDEFCORE_ERR_INVALID,
       gdefcore_type_define(catalog_, "site.note.extra", 15, GDEFCORE_TYPE_CONTENT,
           &field, 1));
+}
+
+/* AD-34: a struct with a size member is accepted at exactly its own size, and
+ * the nested ones of a field too. (size_structs.h lists every struct.) */
+TEST_F(Entity, TheStructsHereAreAcceptedAtOnlyTheirOwnSize) {
+  int n = 0;
+  DefineType(catalog_, "site.sized", GDEFCORE_TYPE_CONTENT);
+  const std::map<std::string, size_structs::Probe> probes = {
+      GDEFCORE_SIZE_PROBE(GDEFCORE_Field, {
+        std::string name = "site.f" + std::to_string(n++);
+        GDEFCORE_Field top = TitleField();
+        top.size = size;
+        bool plain = gdefcore_type_define(catalog_, name.data(), name.size(),
+                         GDEFCORE_TYPE_CONTENT, &top, 1) == GDEFCORE_OK;
+        /* The same size on a field inside a group. */
+        GDEFCORE_Field kid = TitleField();
+        kid.size = size;
+        GDEFCORE_Field group = TitleField();
+        group.name = "lines";
+        group.name_len = 5;
+        group.type = GDEFSTOR_FIELD_GROUP;
+        group.children = &kid;
+        group.child_count = 1;
+        name = "site.g" + std::to_string(n++);
+        bool nested = gdefcore_type_define(catalog_, name.data(), name.size(),
+                          GDEFCORE_TYPE_CONTENT, &group, 1) == GDEFCORE_OK;
+        /* A group of the right size over a kid of another is refused alike. */
+        EXPECT_EQ(plain, size == sizeof(GDEFCORE_Field));
+        EXPECT_EQ(plain, nested) << "a nested field is read at another size";
+        return plain;
+      }),
+      GDEFCORE_SIZE_PROBE(GDEFCORE_Value, {
+        char id[GDEFCORE_PUBLIC_ID_LEN + 1];
+        uint64_t row = 0;
+        GDEFCORE_Changeset * changeset = NULL;
+        const char * texts[1] = {"a title"};
+        size_t lens[1] = {7};
+        GDEFCORE_Value value;
+        memset(&value, 0, sizeof value);
+        value.size = size;
+        value.field = "title";
+        value.field_len = 5;
+        value.texts = texts;
+        value.text_lens = lens;
+        value.count = 1;
+        CreateEntity(catalog_, "site.sized", id, &row);
+        EXPECT_EQ(GDEFCORE_OK,
+            gdefcore_changeset_prepare(catalog_, NULL, 0, &changeset));
+        GDEFCORE_Result rc = gdefcore_entity_save(changeset, id, strlen(id), "en",
+            2, &value, 1);
+        gdefcore_changeset_destroy(changeset);
+        return rc == GDEFCORE_OK;
+      }),
+      GDEFCORE_SIZE_PROBE(GDEFCORE_Patch, {
+        GDEFCORE_Field field = TitleField();
+        GDEFCORE_Changeset * changeset = NULL;
+        GDEFCORE_Changeset * parsed = NULL;
+        GDEFCORE_Patch * files = NULL;
+        size_t count = 0;
+        std::string name = "site.p" + std::to_string(n++);
+        EXPECT_EQ(GDEFCORE_OK,
+            gdefcore_changeset_prepare(catalog_, NULL, 0, &changeset));
+        EXPECT_EQ(GDEFCORE_OK,
+            gdefcore_changeset_define(changeset, name.data(), name.size(),
+                GDEFCORE_TYPE_CONTENT, &field, 1));
+        EXPECT_EQ(GDEFCORE_OK,
+            gdefcore_changeset_serialize(changeset, &files, &count));
+        std::vector<GDEFCORE_Patch> sent(files, files + count);
+        for (size_t i = 0; i < count; i++) {
+          EXPECT_EQ(sizeof(GDEFCORE_Patch), files[i].size)
+              << "the core fills a Patch at its own size";
+          sent[i].size = size;
+        }
+        GDEFCORE_Result rc =
+            gdefcore_changeset_parse(catalog_, sent.data(), count, NULL, &parsed);
+        gdefcore_changeset_destroy(parsed);
+        gdefcore_changeset_destroy(changeset);
+        gdefcore_patch_free(catalog_, files, count);
+        return rc == GDEFCORE_OK;
+      }),
+  };
+  size_structs::Run("tests/test_entity.cpp", probes);
 }
 
 int main(int argc, char ** argv) {

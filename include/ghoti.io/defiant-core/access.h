@@ -112,8 +112,9 @@ extern "C" {
  * ::GDEFCORE_ACCESS_OWN) or, newer, @ref condition_text: an expression in the
  * language of condition.h, validated against @ref type_name when the
  * permission is declared and stored in its canonical form. Setting both is
- * ::GDEFCORE_ERR_INVALID, and so is setting neither. A struct from before
- * @ref condition_text existed (a smaller @ref size) has none.
+ * ::GDEFCORE_ERR_INVALID, and so is setting neither. @ref size must be
+ * `sizeof(GDEFCORE_Permission)`; any other size is ::GDEFCORE_ERR_INVALID.
+ * @ref condition_text is NULL when the condition is @ref condition.
  */
 typedef struct GDEFCORE_Permission {
   size_t size;                 ///< Must be `sizeof(GDEFCORE_Permission)`.
@@ -219,9 +220,9 @@ typedef struct GDEFCORE_Access_Matrix_Row {
  *
  * What is listed is the published entities of the type for which some read
  * grant of the principal holds (AD-11), narrowed by the filter and by
- * @ref condition. The members after @ref sort_field are additions: a caller
- * built against the shorter struct sets @ref size to that struct's size and
- * gets the old list exactly (no offset, no limit, no second sort).
+ * @ref condition. @ref size must be `sizeof(GDEFCORE_Access_List)`; any other
+ * size is ::GDEFCORE_ERR_INVALID. A member a list does not use is zero or
+ * NULL (no offset, no limit, no second sort).
  *
  * Order is the sort keys, each the first value of its field in @ref lang
  * (none before any value), compared as bytes, ascending unless asked for the

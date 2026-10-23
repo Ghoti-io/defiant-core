@@ -659,7 +659,8 @@ static bool contrib_factory(void * user, GLTANG_HostValue * out) {
   }
   memset(&v, 0, sizeof v);
   v.size = sizeof v;
-  if (a->item->provider(a->request, a->item->user, &v) != GDEFCORE_OK) {
+  if (a->item->provider(a->request, a->item->user, &v) != GDEFCORE_OK ||
+      v.size != sizeof v) {
     return false;
   }
   memset(out, 0, sizeof *out);

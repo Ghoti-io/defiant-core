@@ -32,6 +32,7 @@
  */
 
 #include "gate_fixture.h"
+#include "size_structs.h"
 
 
 namespace {
@@ -1048,6 +1049,67 @@ TEST_F(Routes, HostilePatternSweep) {
   EXPECT_GT(refused, 200u);
   EXPECT_GT(verified, 50u);
   EXPECT_EQ(made, accepted + refused);
+}
+
+/* What a handler saw when the core called it: whether a copy of its call, given
+ * the size the probe asks about, still reads a capture, and the size the core
+ * filled in. */
+size_t g_size_asked = 0;
+int g_size_read = 0;
+size_t g_size_filled = 0;
+
+void SizeCall(const GDEFCORE_Route_Call * call) {
+  GDEFCORE_Route_Call copy = *call;
+  const char * v = NULL;
+  size_t n = 0;
+  copy.size = g_size_asked;
+  g_size_read = gdefcore_route_call_capture(&copy, "id", 2, &v, &n);
+  g_size_filled = call->size;
+}
+
+/* AD-34: a struct with a size member is accepted at exactly its own size. The
+ * three here are the routes' (size_structs.h lists every struct). */
+TEST_F(Routes, TheStructsHereAreAcceptedAtOnlyTheirOwnSize) {
+  int n = 0;
+  H sized{"sized", false};
+  ASSERT_EQ(GDEFCORE_OK, AddPage("size.page", "/size/:id", &pass_));
+  GDEFCORE_Route_Spec spec = Spec("size.tab", "/size/:id/tab", RunCall, &sized);
+  spec.kind = GDEFCORE_ROUTE_TAB;
+  spec.parent = "size.page";
+  spec.parent_len = 9;
+  spec.is_default = 1;
+  ASSERT_EQ(GDEFCORE_OK, Add(spec));
+  ASSERT_EQ(GDEFCORE_OK,
+      Add(Spec("size.call", "/call/:id", SizeCall, NULL)));
+  const std::map<std::string, size_structs::Probe> probes = {
+      GDEFCORE_SIZE_PROBE(GDEFCORE_Route_Spec, {
+        std::string machine = "size.spec" + std::to_string(n);
+        std::string path = "/spec" + std::to_string(n++);
+        GDEFCORE_Route_Spec s = Spec(machine.c_str(), path.c_str(), RunCall, &pass_);
+        s.size = size;
+        return Add(s) == GDEFCORE_OK;
+      }),
+      /* The core fills it: the handler asks about a copy at the given size. */
+      GDEFCORE_SIZE_PROBE(GDEFCORE_Route_Call, {
+        g_size_asked = size;
+        g_size_read = 0;
+        g_size_filled = 0;
+        Seen seen = ResolveAs("/call/7");
+        EXPECT_EQ(sizeof(GDEFCORE_Route_Call), g_size_filled) << seen.Str();
+        return g_size_read == 1;
+      }),
+      GDEFCORE_SIZE_PROBE(GDEFCORE_Route_Info, {
+        GDEFCORE_Route_Info * info = NULL;
+        size_t count = 0;
+        EXPECT_EQ(GDEFCORE_OK, gdefcore_routes_tabs(routes_, "size.page", 9,
+                                   &info, &count));
+        EXPECT_EQ(1u, count);
+        bool filled = count == 1 && info[0].size == size;
+        gdefcore_routes_free(routes_, info);
+        return filled;
+      }),
+  };
+  size_structs::Run("tests/test_routes.cpp", probes);
 }
 
 }  // namespace

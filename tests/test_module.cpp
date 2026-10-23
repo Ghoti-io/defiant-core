@@ -35,6 +35,8 @@
 #include <ghoti.io/defiant-storage/model.h>
 #include <ghoti.io/defiant-storage-memory/memory.h>
 
+#include "size_structs.h"
+
 #include <gtest/gtest.h>
 
 #include <stddef.h>
@@ -1311,6 +1313,56 @@ extern "C" GDEFCORE_Result GuestHook(GDEFCORE_Request * request,
   return GDEFCORE_OK;
 }
 
+extern "C" GDEFCORE_Result SizeCallback(GDEFCORE_Callback_Call * call,
+    GDEFCORE_Request * request, const GDEFCORE_Callback_Question * question,
+    GDEFCORE_Callback_Answer * answer, void * user) {
+  (void)call;
+  (void)request;
+  (void)question;
+  (void)answer;
+  (void)user;
+  return GDEFCORE_OK;
+}
+
+extern "C" GDEFCORE_Result SizeStep(GDEFCORE_Migration * migration, void * user) {
+  (void)migration;
+  (void)user;
+  return GDEFCORE_OK;
+}
+
+extern "C" GDEFCORE_Result SizeUp(const char * type, size_t type_len,
+    const GDEFSTOR_Type * decl, GDEFSTOR_Tree * tree, void * user) {
+  (void)type;
+  (void)type_len;
+  (void)decl;
+  (void)tree;
+  (void)user;
+  return GDEFCORE_OK;
+}
+
+template <class T>
+T Sized() {
+  T value;
+  memset(&value, 0, sizeof value);
+  value.size = sizeof value;
+  return value;
+}
+
+/** What a manifest declares beyond the tables a Guest builds from its defs:
+ * one of each remaining entry, for the sizes test to mutate. */
+struct Extra {
+  std::vector<GDEFCORE_Module_Rel> rels;
+  std::vector<GDEFCORE_Module_Perm> perms;
+  std::vector<GDEFCORE_Module_Grant> grants;
+  std::vector<GDEFCORE_Module_Relation> relations;
+  std::vector<GDEFCORE_Module_Relation_Column> cols;
+  std::vector<GDEFCORE_Module_Callback> callbacks;
+  GDEFCORE_Module_Access_Callback cbtable;
+  std::vector<GDEFCORE_Module_Step> steps;
+  std::vector<GDEFCORE_Module_Upcaster> ups;
+  std::string cbservice;
+};
+
 /** One guest module: its definitions, and the C tables built from them. */
 struct Guest {
   int slot = 0;
@@ -1334,6 +1386,95 @@ struct Guest {
   GDEFCORE_Module_Variable_Provider provider;
   GDEFCORE_Module_Sub sub;
   GDEFCORE_Module_Manifest man;
+  Extra extra;
+
+  /** Add one entry of every kind the defs do not build (call after Build). */
+  void Extras() {
+    Extra & x = extra;
+    x.rels = {Sized<GDEFCORE_Module_Rel>()};
+    x.rels[0].kind = GDEFCORE_REL_ENHANCES;
+    x.rels[0].name = "other";
+    x.rels[0].name_len = 5;
+    x.perms = {Sized<GDEFCORE_Module_Perm>()};
+    x.perms[0].label = "size probe perm";
+    x.perms[0].label_len = 15;
+    x.perms[0].action = "read";
+    x.perms[0].action_len = 4;
+    x.perms[0].type_name = "t.size";
+    x.perms[0].type_name_len = 6;
+    x.perms[0].condition = GDEFCORE_ACCESS_ANY;
+    x.grants = {Sized<GDEFCORE_Module_Grant>()};
+    x.grants[0].permission = "size probe perm";
+    x.grants[0].permission_len = 15;
+    x.grants[0].type_name = "t.size";
+    x.grants[0].type_name_len = 6;
+    x.grants[0].condition = "true";
+    x.grants[0].condition_len = 4;
+    x.cols = {Sized<GDEFCORE_Module_Relation_Column>(),
+        Sized<GDEFCORE_Module_Relation_Column>()};
+    x.cols[0].name = "a";
+    x.cols[0].name_len = 1;
+    x.cols[0].kind = GDEFCORE_RELATION_ENTITY;
+    x.cols[0].type_name = "t.size";
+    x.cols[0].type_name_len = 6;
+    x.cols[1].name = "b";
+    x.cols[1].name_len = 1;
+    x.cols[1].kind = GDEFCORE_RELATION_TEXT;
+    x.relations = {Sized<GDEFCORE_Module_Relation>()};
+    x.relations[0].name = "link";
+    x.relations[0].name_len = 4;
+    x.relations[0].columns = x.cols.data();
+    x.relations[0].ncolumns = x.cols.size();
+    x.cbtable = Sized<GDEFCORE_Module_Access_Callback>();
+    x.cbtable.fn = SizeCallback;
+    x.cbservice = name + ".cb.paid";
+    {
+      GDEFCORE_Module_Service s = Sized<GDEFCORE_Module_Service>();
+      s.name = x.cbservice.data();
+      s.name_len = x.cbservice.size();
+      s.version = GDEFCORE_MODULE_ACCESS_CALLBACK_VERSION;
+      s.table = &x.cbtable;
+      svcs.push_back(s);
+    }
+    x.callbacks = {Sized<GDEFCORE_Module_Callback>()};
+    x.callbacks[0].name = "paid";
+    x.callbacks[0].name_len = 4;
+    x.callbacks[0].scope = GDEFCORE_CALLBACK_FIELD;
+    x.callbacks[0].permission = "size probe perm";
+    x.callbacks[0].permission_len = 15;
+    x.callbacks[0].type_name = "t.size";
+    x.callbacks[0].type_name_len = 6;
+    x.callbacks[0].field = "body";
+    x.callbacks[0].field_len = 4;
+    x.callbacks[0].service = x.cbservice.data();
+    x.callbacks[0].service_len = x.cbservice.size();
+    x.callbacks[0].fuel = 100;
+    x.callbacks[0].timeout_ms = 500;
+    x.callbacks[0].cache = GDEFCORE_CALLBACK_CACHE_TOKEN;
+    x.steps = {Sized<GDEFCORE_Module_Step>()};
+    x.steps[0].from = 1;
+    x.steps[0].fn = SizeStep;
+    x.ups = {Sized<GDEFCORE_Module_Upcaster>()};
+    x.ups[0].from = 1;
+    x.ups[0].fn = SizeUp;
+    man.schema_version = 2;
+    man.rels = x.rels.data();
+    man.nrels = x.rels.size();
+    man.perms = x.perms.data();
+    man.nperms = x.perms.size();
+    man.grants = x.grants.data();
+    man.ngrants = x.grants.size();
+    man.relations = x.relations.data();
+    man.nrelations = x.relations.size();
+    man.callbacks = x.callbacks.data();
+    man.ncallbacks = x.callbacks.size();
+    man.steps = x.steps.data();
+    man.nsteps = x.steps.size();
+    man.upcasters = x.ups.data();
+    man.nupcasters = x.ups.size();
+    man.services = svcs.data();
+    man.nservices = svcs.size();
+  }
 
   void Build() {
     handler_name = name + ".handler";
@@ -2846,20 +2987,24 @@ TEST_F(Manifest, VariableAndCodeContributionClash) {
   ASSERT_EQ(GDEFCORE_OK, w_.Enable("dup2")) << w_.message;
 }
 
-TEST_F(Manifest, APrefixWithoutItsSchemaVersionIsRefused) {
-  /* A manifest must say the version of its stored-data schema (core story
-   * S11): one too short to hold the member, whatever else it declares, and
-   * one that leaves it 0, are refused at install, in words, and installs
-   * nothing; the full one installs and works. */
+TEST_F(Manifest, AManifestOfAnotherSizeIsRefused) {
+  /* A manifest is accepted at exactly sizeof(GDEFCORE_Module_Manifest): one
+   * that stops before a member, and one that claims more than this build has,
+   * are refused at install, in words that name the struct and both sizes, and
+   * install nothing. A manifest that leaves the schema version 0 is refused
+   * too (core story S11); the full one installs and works. */
   for (size_t size : {offsetof(GDEFCORE_Module_Manifest, services),
            offsetof(GDEFCORE_Module_Manifest, routes),
-           offsetof(GDEFCORE_Module_Manifest, schema_version)}) {
+           offsetof(GDEFCORE_Module_Manifest, schema_version),
+           sizeof(GDEFCORE_Module_Manifest) + sizeof(size_t)}) {
     Guest * g = Rich("zeta");
     g->man.size = size;
     EXPECT_EQ(GDEFCORE_ERR_INVALID,
         gdefcore_module_install_guest(w_.host, kEntries[g->slot]));
     EXPECT_NE(std::string::npos,
-        HostError(w_.host).find("no stored-data schema version"))
+        HostError(w_.host).find("GDEFCORE_Module_Manifest has size " +
+            std::to_string(size) + ", but this build's is " +
+            std::to_string(sizeof(GDEFCORE_Module_Manifest)) + "."))
         << HostError(w_.host);
     uint32_t v = 0;
     EXPECT_EQ(GDEFCORE_ERR_INVALID, gdefcore_module_schema(w_.host, "zeta", 4,
@@ -3114,15 +3259,20 @@ TEST_F(Manifest, ServiceResolution) {
   w_.Install(h);
   ExpectRefused(h, "provider names a service whose table does not carry the "
                    "function");
-  /* The table is read at the size it declares: a handler table that stops
-   * before its data pointer gives data NULL, and still routes. */
+  /* A table is read at exactly its size: a handler table that stops before
+   * its data pointer is refused, and so is one that claims more. */
   Guest * i = Mini("ii");
   i->Build();
   i->handler.size = offsetof(GDEFCORE_Module_Route_Handler, data);
   w_.Install(i);
-  ASSERT_EQ(GDEFCORE_OK, w_.Enable("ii")) << w_.message;
-  EXPECT_NE(std::string::npos, w_.Dump().find("route ii ii.page /ii/:id w=0 "
-      "after=0 perm=- title=- kind=0 parent=- default=0 admin=0 fn=1 data=-\n"));
+  ExpectRefused(i, "handler names a service whose table has another size than "
+                   "this build's");
+  Guest * k = Mini("kk");
+  k->Build();
+  k->handler.size = sizeof(GDEFCORE_Module_Route_Handler) + sizeof(void *);
+  w_.Install(k);
+  ExpectRefused(k, "handler names a service whose table has another size than "
+                   "this build's");
 }
 
 TEST_F(Manifest, VetIsTheAuthority) {
@@ -3593,6 +3743,264 @@ TEST_F(Manifest, Determinism) {
 }
 
 }  // namespace manifest
+
+namespace manifest {
+
+/* What a hook subscriber is asked to do about its out block. */
+struct SizeHookState {
+  bool set = false;
+  size_t out_size = 0;
+};
+
+extern "C" GDEFCORE_Result OnSizeHook(GDEFCORE_Request * request,
+    const void * args, GDEFCORE_Alter * alter, GDEFCORE_Hook_Out * out,
+    void * user) {
+  SizeHookState * state = static_cast<SizeHookState *>(user);
+  (void)request;
+  (void)args;
+  (void)alter;
+  if (state->set) {
+    out->size = state->out_size;
+  }
+  return GDEFCORE_OK;
+}
+
+/* Whether a module of this shape installs, and, when the table is checked at
+ * the enable, stages. A refused size is refused in words that name the struct
+ * and both sizes (or, for a service table, say its size is another). */
+static bool ManifestAccepts(bool stage, bool extras, const char * name, size_t own,
+    size_t size, const std::string & phrase,
+    const std::function<void(Guest *, size_t)> & mutate) {
+  ThePool().Reset();
+  World w;
+  w.Open();
+  Guest * g = Rich("zsz");
+  if (extras) {
+    g->Extras();
+  }
+  mutate(g, size);
+  GDEFCORE_Result rc = gdefcore_module_install_guest(w.host, kEntries[g->slot]);
+  std::string why = HostError(w.host);
+  if (rc == GDEFCORE_OK && stage) {
+    GDEFCORE_Changeset * cs = NULL;
+    EXPECT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(w.catalog, NULL, 0, &cs));
+    gdefcore_changeset_set_request(cs, w.request);
+    rc = gdefcore_module_enable(w.host, cs, "zsz", 3);
+    why = HostError(w.host);
+    gdefcore_changeset_destroy(cs);
+  }
+  if (size != own) {
+    std::string wanted = phrase.empty()
+        ? std::string(name) + " has size " + std::to_string(size) +
+              ", but this build's is " + std::to_string(own) + "."
+        : phrase;
+    EXPECT_NE(std::string::npos, why.find(wanted))
+        << name << " at size " << size << " was refused, but not in words: "
+        << why;
+  }
+  w.Close();
+  ThePool().Reset();
+  return rc == GDEFCORE_OK;
+}
+
+}  // namespace manifest
+
+/* AD-34: a struct with a size member is accepted at exactly its own size. The
+ * module host's are here (size_structs.h lists every struct): the hook blocks,
+ * every entry of a manifest, the tables of services, contributions, and what
+ * the host enumerates. */
+TEST_F(Module, TheStructsHereAreAcceptedAtOnlyTheirOwnSize) {
+  using namespace manifest;
+  SizeHookState state;
+  int named = 0;
+  const char * names[] = {"szhook"};
+  InstallGuest(host_, "szhook", kCoreToken, "demo.size", GDEFCORE_HOOK_EVENT, 0, 0,
+      NULL, OnSizeHook, &state, 0, NULL);
+  ASSERT_EQ(GDEFCORE_OK,
+      ApplyModules(host_, catalog_, request_, names, 1, "szhook"));
+  const std::string table_phrase =
+      "names a service whose table has another size than this build's";
+  /* One entry of a manifest: install it with the size in that entry. */
+  auto entry = [&](const char * struct_name, size_t own,
+                   std::function<void(Guest *, size_t)> mutate) {
+    return [=](size_t size) {
+      return ManifestAccepts(false, true, struct_name, own, size, "", mutate);
+    };
+  };
+  /* A service table is read when the module is enabled. */
+  auto table = [&](size_t own, std::function<void(Guest *, size_t)> mutate) {
+    return [=](size_t size) {
+      return ManifestAccepts(true, false, "", own, size, table_phrase, mutate);
+    };
+  };
+  /* What the host enumerates, once the module is enabled. */
+  auto enabled = [&](std::function<bool(World &, size_t)> look) {
+    return [=](size_t size) {
+      ThePool().Reset();
+      World w;
+      w.Open();
+      Guest * g = Rich("zsz");
+      w.Install(g);
+      EXPECT_EQ(GDEFCORE_OK, w.Enable("zsz")) << w.message;
+      bool filled = look(w, size);
+      w.Close();
+      ThePool().Reset();
+      return filled;
+    };
+  };
+  const uint8_t tenant[] = {'t'};
+  const std::map<std::string, size_structs::Probe> probes = {
+      {"GDEFCORE_Hook_Out", [&](size_t size) {
+         state.set = true;
+         state.out_size = size;
+         GDEFCORE_Result rc = gdefcore_hook_fire(host_, request_, catalog_,
+             "demo.size", 9, GDEFCORE_HOOK_EVENT, NULL, NULL, NULL);
+         state.set = false;
+         if (size != sizeof(GDEFCORE_Hook_Out)) {
+           EXPECT_NE(std::string::npos,
+               HostError(host_).find("GDEFCORE_Hook_Out has size " +
+                   std::to_string(size)))
+               << HostError(host_);
+         }
+         return rc == GDEFCORE_OK;
+       }},
+      {"GDEFCORE_Write_Hook", [&](size_t size) {
+         GDEFCORE_Write_Hook args;
+         memset(&args, 0, sizeof args);
+         args.size = size;
+         return gdefcore_module_fire_write(host_, request_, catalog_,
+                    "demo.size", 9, &args) == GDEFCORE_OK;
+       }},
+      {"GDEFCORE_Module_Manifest", entry("GDEFCORE_Module_Manifest",
+           sizeof(GDEFCORE_Module_Manifest),
+           [](Guest * g, size_t size) { g->man.size = size; })},
+      {"GDEFCORE_Module_Rel", entry("GDEFCORE_Module_Rel",
+           sizeof(GDEFCORE_Module_Rel),
+           [](Guest * g, size_t size) { g->extra.rels[0].size = size; })},
+      {"GDEFCORE_Module_Sub", entry("GDEFCORE_Module_Sub",
+           sizeof(GDEFCORE_Module_Sub),
+           [](Guest * g, size_t size) { g->sub.size = size; })},
+      {"GDEFCORE_Module_Service", entry("GDEFCORE_Module_Service",
+           sizeof(GDEFCORE_Module_Service),
+           [](Guest * g, size_t size) { g->svcs[0].size = size; })},
+      {"GDEFCORE_Module_Perm", entry("GDEFCORE_Module_Perm",
+           sizeof(GDEFCORE_Module_Perm),
+           [](Guest * g, size_t size) { g->extra.perms[0].size = size; })},
+      {"GDEFCORE_Module_Grant", entry("GDEFCORE_Module_Grant",
+           sizeof(GDEFCORE_Module_Grant),
+           [](Guest * g, size_t size) { g->extra.grants[0].size = size; })},
+      {"GDEFCORE_Module_Relation", entry("GDEFCORE_Module_Relation",
+           sizeof(GDEFCORE_Module_Relation),
+           [](Guest * g, size_t size) { g->extra.relations[0].size = size; })},
+      {"GDEFCORE_Module_Relation_Column", entry(
+           "GDEFCORE_Module_Relation_Column",
+           sizeof(GDEFCORE_Module_Relation_Column),
+           [](Guest * g, size_t size) { g->extra.cols[0].size = size; })},
+      {"GDEFCORE_Module_Callback", entry("GDEFCORE_Module_Callback",
+           sizeof(GDEFCORE_Module_Callback),
+           [](Guest * g, size_t size) { g->extra.callbacks[0].size = size; })},
+      {"GDEFCORE_Module_Step", entry("GDEFCORE_Module_Step",
+           sizeof(GDEFCORE_Module_Step),
+           [](Guest * g, size_t size) { g->extra.steps[0].size = size; })},
+      {"GDEFCORE_Module_Upcaster", entry("GDEFCORE_Module_Upcaster",
+           sizeof(GDEFCORE_Module_Upcaster),
+           [](Guest * g, size_t size) { g->extra.ups[0].size = size; })},
+      {"GDEFCORE_Module_Route", entry("GDEFCORE_Module_Route",
+           sizeof(GDEFCORE_Module_Route),
+           [](Guest * g, size_t size) { g->croutes[0].size = size; })},
+      {"GDEFCORE_Module_Link", entry("GDEFCORE_Module_Link",
+           sizeof(GDEFCORE_Module_Link),
+           [](Guest * g, size_t size) { g->clinks[0].size = size; })},
+      {"GDEFCORE_Module_Setting", entry("GDEFCORE_Module_Setting",
+           sizeof(GDEFCORE_Module_Setting),
+           [](Guest * g, size_t size) { g->csettings[0].size = size; })},
+      {"GDEFCORE_Module_Variable", entry("GDEFCORE_Module_Variable",
+           sizeof(GDEFCORE_Module_Variable),
+           [](Guest * g, size_t size) { g->cvars[0].size = size; })},
+      /* The tables a service carries. A callback's is read at install, the
+       * others when the module is enabled. */
+      {"GDEFCORE_Module_Access_Callback", [=](size_t size) {
+         return ManifestAccepts(false, true, "", sizeof(GDEFCORE_Module_Access_Callback),
+             size, table_phrase,
+             [](Guest * g, size_t s) { g->extra.cbtable.size = s; });
+       }},
+      {"GDEFCORE_Module_Route_Handler", table(
+           sizeof(GDEFCORE_Module_Route_Handler),
+           [](Guest * g, size_t size) { g->handler.size = size; })},
+      {"GDEFCORE_Module_Variable_Provider", table(
+           sizeof(GDEFCORE_Module_Variable_Provider),
+           [](Guest * g, size_t size) { g->provider.size = size; })},
+      {"GDEFCORE_Module_Contribution", [&](size_t size) {
+         ThePool().Reset();
+         World w;
+         w.Open();
+         Guest * g = Rich("zsz");
+         w.Install(g);
+         std::string variable = "zsz.c" + std::to_string(named++);
+         GDEFCORE_Module_Contribution c;
+         memset(&c, 0, sizeof c);
+         c.size = size;
+         c.kind = "core.page";
+         c.kind_len = 9;
+         c.name = variable.data();
+         c.name_len = variable.size();
+         c.type = "number";
+         c.type_len = 6;
+         c.provider = GuestProvide;
+         GDEFCORE_Result rc = gdefcore_module_contribute(w.host, "zsz", 3, &c);
+         if (size != sizeof c) {
+           EXPECT_NE(std::string::npos,
+               HostError(w.host).find("GDEFCORE_Module_Contribution has size " +
+                   std::to_string(size)))
+               << HostError(w.host);
+         }
+         w.Close();
+         ThePool().Reset();
+         return rc == GDEFCORE_OK;
+       }},
+      {"GDEFCORE_Module_Contributed", enabled([&](World & w, size_t size) {
+         const GDEFCORE_Module_Contributed ** items = NULL;
+         size_t n = 0;
+         EXPECT_EQ(GDEFCORE_OK,
+             gdefcore_module_variables(w.host, tenant, 1, NULL, &items, &n));
+         EXPECT_GT(n, 0u);
+         bool filled = n > 0 && items[0]->size == size;
+         gdefcore_module_contributions_free(w.host, items);
+         return filled;
+       })},
+      {"GDEFCORE_Module_Declared_Route", enabled([&](World & w, size_t size) {
+         const GDEFCORE_Module_Declared_Route ** items = NULL;
+         size_t n = 0;
+         EXPECT_EQ(GDEFCORE_OK,
+             gdefcore_module_routes(w.host, tenant, 1, NULL, &items, &n));
+         EXPECT_GT(n, 0u);
+         bool filled = n > 0 && items[0]->size == size;
+         gdefcore_module_declared_free(w.host, items);
+         return filled;
+       })},
+      {"GDEFCORE_Module_Declared_Link", enabled([&](World & w, size_t size) {
+         const GDEFCORE_Module_Declared_Link ** items = NULL;
+         size_t n = 0;
+         EXPECT_EQ(GDEFCORE_OK,
+             gdefcore_module_links(w.host, tenant, 1, NULL, &items, &n));
+         EXPECT_GT(n, 0u);
+         bool filled = n > 0 && items[0]->size == size;
+         gdefcore_module_declared_free(w.host, items);
+         return filled;
+       })},
+      {"GDEFCORE_Module_Declared_Setting", enabled([&](World & w, size_t size) {
+         const GDEFCORE_Module_Declared_Setting ** items = NULL;
+         size_t n = 0;
+         EXPECT_EQ(GDEFCORE_OK,
+             gdefcore_module_settings(w.host, tenant, 1, NULL, &items, &n));
+         EXPECT_GT(n, 0u);
+         bool filled = n > 0 && items[0]->size == size;
+         gdefcore_module_declared_free(w.host, items);
+         return filled;
+       })},
+  };
+  size_structs::Run("tests/test_module.cpp", probes);
+}
 
 int main(int argc, char ** argv) {
   ::testing::InitGoogleTest(&argc, argv);

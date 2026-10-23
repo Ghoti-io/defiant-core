@@ -88,12 +88,14 @@ typedef struct GDEFCORE_Alter GDEFCORE_Alter;
 /**
  * @brief What a subscriber may report. Begins with @ref size.
  *
- * A receiver reads @ref decision and @ref access only when @ref size covers
- * them. @ref access set by a subscriber that did not declare itself
+ * The host sets @ref size to `sizeof(GDEFCORE_Hook_Out)` and zeroes the rest
+ * before the call. A subscriber leaves @ref size as it is: a call that returns
+ * with any other size is ::GDEFCORE_ERR_INVALID, and the error names both
+ * sizes. @ref access set by a subscriber that did not declare itself
  * access-relevant is refused.
  */
 typedef struct GDEFCORE_Hook_Out {
-  size_t size;   ///< Must be the prefix the subscriber understands.
+  size_t size;   ///< Set by the host to `sizeof(GDEFCORE_Hook_Out)`; leave it.
   int decision;  ///< ::GDEFCORE_DECISION_ALLOW, DENY, or NONE.
   int access;    ///< Non-zero when this call contributes an access result.
 } GDEFCORE_Hook_Out;
@@ -101,11 +103,12 @@ typedef struct GDEFCORE_Hook_Out {
 /**
  * @brief Argument block for a write-path hook. Begins with @ref size.
  *
- * The request is a separate argument of the subscriber. A receiver reads a
- * field only when @ref size covers it.
+ * The request is a separate argument of the subscriber. @ref size is
+ * `sizeof(GDEFCORE_Write_Hook)`; gdefcore_module_fire_write() refuses any other
+ * with ::GDEFCORE_ERR_INVALID, and the error names both sizes.
  */
 typedef struct GDEFCORE_Write_Hook {
-  size_t size;                 ///< `sizeof` as known to the caller.
+  size_t size;                 ///< Must be `sizeof(GDEFCORE_Write_Hook)`.
   const char * entity_id;      ///< Public id, or NULL.
   size_t entity_id_len;        ///< Length of @ref entity_id.
   const char * type_name;      ///< Entity type, or NULL.
@@ -127,7 +130,8 @@ typedef GDEFCORE_Result (*GDEFCORE_Hook_Fn)(GDEFCORE_Request * request,
 /**
  * @brief One relationship. Begins with @ref size.
  *
- * The host reads @ref kind and @ref name only when @ref size covers them.
+ * @ref size must be `sizeof(GDEFCORE_Module_Rel)`; the install of a manifest
+ * with any other is ::GDEFCORE_ERR_INVALID, and the error names both sizes.
  */
 typedef struct GDEFCORE_Module_Rel {
   size_t size;         ///< `sizeof(GDEFCORE_Module_Rel)` for this build.
@@ -507,10 +511,11 @@ typedef GDEFCORE_Result (*GDEFCORE_Contribution_Fn)(GDEFCORE_Request * request,
 /**
  * @name Declared tables
  *
- * A manifest can declare four tables: routes, menu links, settings and
- * template variables. They are appended to the manifest (AD-4): a module that
- * fills a shorter prefix declares none. The host copies them when the module
- * is installed, validates them when the module is enabled (the enable
+ * A manifest can declare tables: routes, menu links, settings, template
+ * variables, grants, relations and callbacks. A table a module does not use is
+ * NULL with a count of 0, and every entry's @c size is `sizeof` of its struct
+ * (any other size refuses the install, naming the entry and both sizes). The
+ * host copies them when the module is installed, validates them when the module is enabled (the enable
  * changeset is refused, naming the entry and the module), and enumerates what
  * the enabled modules declared, in one total order: the modules in AD-10 order
  * (before and after relationships of their subscriptions, then module name),
@@ -579,7 +584,7 @@ typedef struct GDEFCORE_Module_Route_Handler {
  * and is called as a contribution's is (GDEFCORE_Contribution_Fn).
  */
 typedef struct GDEFCORE_Module_Variable_Provider {
-  size_t size;                     ///< `sizeof(...)` for this build.
+  size_t size;                     ///< `sizeof(GDEFCORE_Module_Variable_Provider)`.
   GDEFCORE_Contribution_Fn provider; ///< The provider. Required.
   void * user;                     ///< Passed back to @ref provider.
 } GDEFCORE_Module_Variable_Provider;
@@ -792,15 +797,15 @@ typedef struct GDEFCORE_Module_Upcaster {
  * both.
  *
  * @ref schema_version is the version of the module's stored-data schema
- * (AD-15): what its data is written in now. It is required: 0, and a manifest
- * too short to hold it, are refused at install, in words. @ref steps and
+ * (AD-15): what its data is written in now. It is required: 0 is refused at
+ * install, in words. @ref steps and
  * @ref upcasters are its forward steps and its read-time upcasters (above),
  * each at most once per version, from 1 to @ref schema_version - 1; a version
  * may have neither (no data of its shape to bring forward, or none to read
  * differently).
  */
 typedef struct GDEFCORE_Module_Manifest {
-  size_t size;                              ///< Prefix the module filled.
+  size_t size;                              ///< `sizeof(GDEFCORE_Module_Manifest)`.
   const char * core_token;                  ///< Running token, borrowed.
   size_t core_token_len;                    ///< Length of @ref core_token.
   const char * name;                        ///< Machine name. Borrowed.

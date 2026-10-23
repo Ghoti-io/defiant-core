@@ -1383,7 +1383,7 @@ static int callback_holds(Eval * ev, const Grant * grant) {
       reason = "out-of-fuel";
     } else if (mono_ms() > deadline) {
       reason = "timed-out";
-    } else if (a.granted != granted || a.count != n ||
+    } else if (a.size != sizeof a || a.granted != granted || a.count != n ||
                a.token_len > GDEFCORE_CALLBACK_TOKEN_MAX ||
                (cb->cache == GDEFCORE_CALLBACK_CACHE_TOKEN &&
                    !token_ok(a.token, a.token_len))) {
@@ -2249,17 +2249,10 @@ GDEFCORE_Result gdefcore_access_declare(GDEFCORE_Catalog * catalog,
   char * canon = NULL;
   size_t canon_len = 0;
   if (catalog == NULL || permission == NULL ||
-      permission->size < sizeof(size_t)) {
+      permission->size != sizeof *permission) {
     return GDEFCORE_ERR_INVALID;
   }
-  memset(&local, 0, sizeof local);
-  {
-    size_t n = permission->size;
-    if (n > sizeof local) {
-      n = sizeof local;
-    }
-    memcpy(&local, permission, n);
-  }
+  local = *permission;
   has_text = local.condition_text != NULL && local.condition_text_len > 0;
   if (!line_ok(local.label, local.label_len) ||
       !line_ok(local.module_name, local.module_name_len) ||
@@ -4144,7 +4137,6 @@ static GDEFCORE_Result list_impl(Eval * ev, GDEFCORE_Catalog * catalog,
     uint64_t * out_total) {
   GDEFCORE_Access_List local;
   ListSpec spec;
-  size_t ncopy;
   Grant grants[kGrantMax];
   Grant decls[kGrantMax];
   size_t ngrants = 0;
@@ -4164,7 +4156,7 @@ static GDEFCORE_Result list_impl(Eval * ev, GDEFCORE_Catalog * catalog,
   int planned = 0;
   GDEFCORE_Result rc;
   if (catalog == NULL || request == NULL || query == NULL || out_ids == NULL ||
-      out_count == NULL || query->size < sizeof(size_t)) {
+      out_count == NULL || query->size != sizeof *query) {
     return GDEFCORE_ERR_INVALID;
   }
   *out_ids = NULL;
@@ -4172,12 +4164,7 @@ static GDEFCORE_Result list_impl(Eval * ev, GDEFCORE_Catalog * catalog,
   if (out_total != NULL) {
     *out_total = 0;
   }
-  memset(&local, 0, sizeof local);
-  ncopy = query->size;
-  if (ncopy > sizeof local) {
-    ncopy = sizeof local;
-  }
-  memcpy(&local, query, ncopy);
+  local = *query;
   if (local.type_name == NULL || local.type_name_len == 0) {
     return GDEFCORE_ERR_INVALID;
   }
@@ -5166,7 +5153,7 @@ GDEFCORE_Result gdefcore_access_permission_info(GDEFCORE_Catalog * catalog,
   size_t module_len = 0;
   GDEFCORE_Result rc;
   if (catalog == NULL || label == NULL || out == NULL ||
-      out->size < sizeof *out) {
+      out->size != sizeof *out) {
     return GDEFCORE_ERR_INVALID;
   }
   rc = ensure(catalog);
@@ -6623,8 +6610,8 @@ int gdefcore_access_route_check(const GDEFCORE_Route_Call * call,
   size_t type_len = 0;
   int allowed = 0;
   GDEFCORE_Result rc;
-  if (catalog == NULL || call == NULL || call->request == NULL ||
-      permission == NULL || permission_len == 0) {
+  if (catalog == NULL || call == NULL || call->size != sizeof *call ||
+      call->request == NULL || permission == NULL || permission_len == 0) {
     return 0;
   }
   if (call->entity_capture_len == 0) {

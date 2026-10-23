@@ -35,6 +35,7 @@
  */
 
 #include "grants_fixture.h"
+#include "size_structs.h"
 
 #include <chrono>
 #include <thread>
@@ -58,6 +59,9 @@ struct BillingState {
   size_t asked = 0;
   GDEFCORE_Catalog * catalog = NULL;
   std::string nested; /* what a read from inside the callback saw */
+  size_t question_size = 0; /* the size of the question the host built */
+  bool set_answer_size = false; /* answer in a block of this size instead */
+  size_t answer_size = 0;
 };
 
 enum {
@@ -80,6 +84,10 @@ extern "C" GDEFCORE_Result PaidCallback(GDEFCORE_Callback_Call * call,
                         ? std::string()
                         : std::string(q->principal, q->principal_len);
   b->calls += 1;
+  b->question_size = q->size;
+  if (b->set_answer_size) {
+    a->size = b->answer_size;
+  }
   b->last_count = q->count;
   b->asked += q->count;
   for (size_t i = 0; i < q->count; i++) {
@@ -288,6 +296,48 @@ class Callbacks : public GrantsFixture {
     return v == NULL ? std::string() : std::string(v, n);
   }
 };
+
+/* AD-34: a struct with a size member is accepted at exactly its own size. The
+ * three here are a callback's: what the host asks, what the callback answers
+ * (an answer in a block of another size is malformed and grants nothing), and
+ * what the host enumerates of the callbacks a module registers
+ * (size_structs.h lists every struct). */
+TEST_F(Callbacks, TheStructsHereAreAcceptedAtOnlyTheirOwnSize) {
+  Install(BillingMod());
+  EnableBilling();
+  std::string a = Article("Tides", "the secret of the tides");
+  g_billing.paid.insert(std::make_pair(payer_, a));
+  size_t tenant_len = 0;
+  const uint8_t * tenant = gdefcore_catalog_tenant(catalog_, &tenant_len);
+  const std::map<std::string, size_structs::Probe> probes = {
+      /* The host fills it: whether it filled the size asked about. */
+      GDEFCORE_SIZE_PROBE(GDEFCORE_Callback_Question, {
+        g_billing.question_size = 0;
+        int before = g_billing.calls;
+        (void)Body(Req(reader_), a);
+        EXPECT_GT(g_billing.calls, before) << "the callback was not asked";
+        return g_billing.question_size == size;
+      }),
+      GDEFCORE_SIZE_PROBE(GDEFCORE_Callback_Answer, {
+        g_billing.set_answer_size = true;
+        g_billing.answer_size = size;
+        std::string body = Body(Req(payer_), a);
+        g_billing.set_answer_size = false;
+        return body == "the secret of the tides";
+      }),
+      GDEFCORE_SIZE_PROBE(GDEFCORE_Module_Declared_Callback, {
+        const GDEFCORE_Module_Declared_Callback ** items = NULL;
+        size_t n = 0;
+        EXPECT_EQ(GDEFCORE_OK, gdefcore_module_callbacks(host_, tenant,
+                                   tenant_len, NULL, &items, &n));
+        EXPECT_EQ(1u, n);
+        bool filled = n > 0 && items[0]->size == size;
+        gdefcore_module_declared_free(host_, items);
+        return filled;
+      }),
+  };
+  size_structs::Run("tests/test_callbacks.cpp", probes);
+}
 
 /* Paywall: the title for everyone who may read the article, the body for the
  * one who paid, and for the one who did not a locked marker and never the

@@ -50,12 +50,14 @@
 #include <gtest/gtest.h>
 
 #include "keystore_rig.h"
+#include "size_structs.h"
 
 #include <stdint.h>
 #include <string.h>
 
 #include <algorithm>
 #include <filesystem>
+#include <map>
 #include <map>
 #include <memory>
 #include <random>
@@ -1672,6 +1674,32 @@ RENDER_TEST(AnOrderTheReaderMayNotSeeIsNotThere) {
   GDEFCORE_Result rc = GDEFCORE_OK;
   Tree(Req(stranger), &rc);
   EXPECT_EQ(GDEFCORE_ERR_INVALID, rc);
+}
+
+/* AD-34: a struct with a size member is accepted at exactly its own size. The
+ * two here are the caller-sized outputs of the field and the item calls. */
+TEST(GroupsDeclare, TheStructsHereAreAcceptedAtOnlyTheirOwnSize) {
+  Site s(kMemory);
+  ASSERT_EQ(GDEFCORE_OK, s.Define(kPo, PurchaseOrder()));
+  GDEFCORE_Tree * tree = NULL;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_tree_create(s.catalog, &tree));
+  const std::map<std::string, size_structs::Probe> probes = {
+      GDEFCORE_SIZE_PROBE(GDEFCORE_FieldInfo, {
+        GDEFCORE_FieldInfo info;
+        memset(&info, 0, sizeof info);
+        info.size = size;
+        return gdefcore_type_tree_field(s.catalog, kPo, strlen(kPo), 0, &info) ==
+               GDEFCORE_OK;
+      }),
+      GDEFCORE_SIZE_PROBE(GDEFCORE_TreeItem, {
+        GDEFCORE_TreeItem item;
+        memset(&item, 0, sizeof item);
+        item.size = size;
+        return gdefcore_tree_item(tree, 0, &item) == GDEFCORE_OK;
+      }),
+  };
+  size_structs::Run("tests/test_groups.cpp", probes);
+  gdefcore_tree_free(tree);
 }
 
 }  // namespace

@@ -36,6 +36,8 @@
 #include <ghoti.io/defiant-core/defiant-core.h>
 #include <ghoti.io/defiant-storage-memory/memory.h>
 
+#include "size_structs.h"
+
 #include <gtest/gtest.h>
 
 #include <stdint.h>
@@ -1557,7 +1559,8 @@ TEST(CondAccess, DeclareRefusals) {
     std::string e = env.Make(kBlog, "", V({{"title", "T"}, {"group", "x"}}));
     EXPECT_EQ("No error|1|T", env.Read(env.Req(p), e, "title"));
   }
-  /* A struct from before condition_text existed: its size stops short. */
+  /* A struct whose size stops short of condition_text is refused, and the
+   * text it carries is never read. */
   {
     GDEFCORE_Permission p;
     memset(&p, 0, sizeof p);
@@ -1573,7 +1576,12 @@ TEST(CondAccess, DeclareRefusals) {
     p.type_name_len = strlen(kBlog);
     p.condition_text = "garbage that must not be read";
     p.condition_text_len = 29;
-    EXPECT_EQ(GDEFCORE_OK, gdefcore_access_declare(env.catalog, &p));
+    EXPECT_EQ(GDEFCORE_ERR_INVALID, gdefcore_access_declare(env.catalog, &p));
+    p.size = sizeof p;
+    p.condition_text = NULL;
+    p.condition_text_len = 0;
+    EXPECT_EQ(GDEFCORE_OK, gdefcore_access_declare(env.catalog, &p))
+        << "the control: the full size, the same permission";
   }
 }
 
@@ -2794,6 +2802,53 @@ TEST(CondSweep, BoundaryValuesAreExact) {
       EXPECT_EQ(c, Canon(c));
     }
   }
+}
+
+/* AD-34: a struct with a size member is accepted at exactly its own size.
+ * The three below are the conditions' (size_structs.h lists every one). */
+TEST(Cond, TheStructsHereAreAcceptedAtOnlyTheirOwnSize) {
+  AEnv env;
+  int declared = 0;
+  const std::map<std::string, size_structs::Probe> probes = {
+      GDEFCORE_SIZE_PROBE(GDEFCORE_Permission, {
+        std::string label = "size probe " + std::to_string(declared++);
+        GDEFCORE_Permission p;
+        memset(&p, 0, sizeof p);
+        p.size = size;
+        p.label = label.data();
+        p.label_len = label.size();
+        p.module_name = "notes";
+        p.module_name_len = 5;
+        p.action = "read";
+        p.action_len = 4;
+        p.condition = GDEFCORE_ACCESS_ANY;
+        p.type_name = kBlog;
+        p.type_name_len = strlen(kBlog);
+        return gdefcore_access_declare(env.catalog, &p) == GDEFCORE_OK;
+      }),
+      /* The core fills it: whether it filled the size asked about. */
+      GDEFCORE_SIZE_PROBE(GDEFCORE_Condition_Error, {
+        GDEFCORE_Condition_Error e;
+        memset(&e, 0, sizeof e);
+        e.size = size;
+        EXPECT_EQ(GDEFCORE_ERR_INVALID,
+            gdefcore_condition_parse("(", 1, NULL, &e));
+        return e.size == size && e.message != NULL;
+      }),
+      GDEFCORE_SIZE_PROBE(GDEFCORE_Condition_Subject, {
+        GDEFCORE_Condition * c = P("(= type \"t.blog\")");
+        GDEFCORE_Condition_Subject s;
+        int failed = 9;
+        memset(&s, 0, sizeof s);
+        s.size = size;
+        s.type_name = kBlog;
+        s.type_name_len = strlen(kBlog);
+        int holds = gdefcore_condition_eval(env.catalog, env.req, c, &s, &failed);
+        gdefcore_condition_free(c);
+        return holds == 1 && failed == 0;
+      }),
+  };
+  size_structs::Run("tests/test_condition.cpp", probes);
 }
 
 int main(int argc, char ** argv) {

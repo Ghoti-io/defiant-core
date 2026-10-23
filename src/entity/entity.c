@@ -1000,46 +1000,18 @@ static GDEFCORE_Result type_subjects_of(GDEFCORE_Catalog * cat,
 }
 
 static int field_personal(const GDEFCORE_Field * field) {
-  if (field->size < offsetof(GDEFCORE_Field, personal) + sizeof(int)) {
-    return 0;
-  }
   return field->personal ? 1 : 0;
-}
-
-static int field_covers(const GDEFCORE_Field * field, size_t end) {
-  return field->size >= end;
 }
 
 static GDEFCORE_Result copy_constraints(const GDEFCORE_Allocator * alloc,
     const GDEFCORE_Field * field, GDEFCORE_Decl * decl) {
-  size_t min_end = offsetof(GDEFCORE_Field, min_len) + sizeof(size_t);
-  size_t max_end = offsetof(GDEFCORE_Field, max_len) + sizeof(size_t);
-  size_t range_end = offsetof(GDEFCORE_Field, range_max) + sizeof(int64_t);
-  size_t pat_end = offsetof(GDEFCORE_Field, pattern_len) + sizeof(size_t);
-  decl->min_len = 0;
-  decl->max_len = 0;
-  decl->has_range = 0;
-  decl->range_min = 0;
-  decl->range_max = 0;
-  decl->pattern.p = NULL;
-  decl->pattern.n = 0;
-  if (!field_covers(field, min_end)) {
-    return GDEFCORE_OK;
-  }
   decl->min_len = field->min_len;
-  if (!field_covers(field, max_end)) {
-    return GDEFCORE_OK;
-  }
   decl->max_len = field->max_len;
-  if (!field_covers(field, range_end)) {
-    return GDEFCORE_OK;
-  }
   decl->has_range = field->has_range ? 1 : 0;
   decl->range_min = field->range_min;
   decl->range_max = field->range_max;
-  if (!field_covers(field, pat_end)) {
-    return GDEFCORE_OK;
-  }
+  decl->pattern.p = NULL;
+  decl->pattern.n = 0;
   if (field->pattern_len == 0) {
     return GDEFCORE_OK;
   }
@@ -1071,44 +1043,25 @@ static GDEFCORE_Result pattern_compiles(const char * pattern, size_t len) {
 }
 
 static int field_type_of(const GDEFCORE_Field * field) {
-  if (!field_covers(field, offsetof(GDEFCORE_Field, type) + sizeof(int)) ||
-      field->type == 0) {
-    return GDEFSTOR_FIELD_TEXT;
-  }
-  return field->type;
+  return field->type == 0 ? GDEFSTOR_FIELD_TEXT : field->type;
 }
 
 static int field_scale_of(const GDEFCORE_Field * field) {
-  if (!field_covers(field, offsetof(GDEFCORE_Field, scale) + sizeof(int))) {
-    return 0;
-  }
   return field->scale;
 }
 
 static int field_indexed_of(const GDEFCORE_Field * field) {
-  if (!field_covers(field, offsetof(GDEFCORE_Field, indexed) + sizeof(int))) {
-    return 0;
-  }
   return field->indexed ? 1 : 0;
-}
-
-static int field_has_tree(const GDEFCORE_Field * field) {
-  return field_covers(field,
-      offsetof(GDEFCORE_Field, subject_len) + sizeof(size_t));
 }
 
 static const GDEFCORE_Field * field_children(const GDEFCORE_Field * field,
     size_t * out_count) {
-  if (!field_has_tree(field)) {
-    *out_count = 0;
-    return NULL;
-  }
   *out_count = field->child_count;
   return field->children;
 }
 
 static size_t field_subject(const GDEFCORE_Field * field, const char ** out) {
-  if (!field_has_tree(field) || field->subject_len == 0) {
+  if (field->subject_len == 0) {
     *out = NULL;
     return 0;
   }
@@ -1133,7 +1086,7 @@ static GDEFCORE_Result check_level(const GDEFCORE_Field * fields, size_t count,
     size_t nkids = 0;
     const char * subject = NULL;
     size_t subject_len;
-    if (fields[i].size < offsetof(GDEFCORE_Field, many) + sizeof(int) ||
+    if (fields[i].size != sizeof(GDEFCORE_Field) ||
         !field_name_ok(fields[i].name, fields[i].name_len)) {
       return GDEFCORE_ERR_INVALID;
     }
@@ -1148,7 +1101,6 @@ static GDEFCORE_Result check_level(const GDEFCORE_Field * fields, size_t count,
     /* A logical type of the port's. A scale is a decimal's. A group holds
      * fields, and needs the members that say which. */
     if (type < GDEFSTOR_FIELD_TEXT || type > GDEFSTOR_FIELD_GROUP ||
-        (type == GDEFSTOR_FIELD_GROUP && !field_has_tree(&fields[i])) ||
         (type == GDEFSTOR_FIELD_DECIMAL
                 ? (scale < 0 || scale > GDEFSTOR_MODEL_MAX_SCALE)
                 : scale != 0)) {
@@ -1159,10 +1111,8 @@ static GDEFCORE_Result check_level(const GDEFCORE_Field * fields, size_t count,
       /* A group has no value: nothing personal, indexed or constrained. */
       if (kids == NULL || nkids == 0 || field_personal(&fields[i]) ||
           field_indexed_of(&fields[i]) || subject_len != 0 ||
-          (field_covers(&fields[i],
-               offsetof(GDEFCORE_Field, pattern_len) + sizeof(size_t)) &&
-              (fields[i].min_len != 0 || fields[i].max_len != 0 ||
-                  fields[i].has_range || fields[i].pattern_len != 0))) {
+          fields[i].min_len != 0 || fields[i].max_len != 0 ||
+          fields[i].has_range || fields[i].pattern_len != 0) {
         return GDEFCORE_ERR_INVALID;
       }
       if (depth + 1 > GDEFSTOR_MODEL_MAX_DEPTH) {
@@ -1208,9 +1158,7 @@ static GDEFCORE_Result check_level(const GDEFCORE_Field * fields, size_t count,
        * be nobody's to say. */
       return GDEFCORE_ERR_INVALID;
     }
-    if (field_covers(&fields[i],
-            offsetof(GDEFCORE_Field, pattern_len) + sizeof(size_t)) &&
-        fields[i].pattern_len > 0) {
+    if (fields[i].pattern_len > 0) {
       GDEFCORE_Result pr;
       if (fields[i].pattern == NULL ||
           fields[i].pattern_len > limits->max_value_bytes) {
@@ -2327,7 +2275,7 @@ static GDEFCORE_Result stage_values(GDEFCORE_Changeset * changeset,
   for (i = 0; i < value_count; i++) {
     const GDEFCORE_Decl * decl;
     size_t v;
-    if (values[i].size < offsetof(GDEFCORE_Value, count) + sizeof(size_t) ||
+    if (values[i].size != sizeof(GDEFCORE_Value) ||
         values[i].count > cat->limits.max_values ||
         (values[i].texts == NULL && values[i].count != 0) ||
         (values[i].text_lens == NULL && values[i].count != 0)) {
@@ -5807,7 +5755,7 @@ GDEFCORE_Result gdefcore_changeset_parse(GDEFCORE_Catalog * catalog,
     return GDEFCORE_ERR_LIMIT;
   }
   for (i = 0; i < count; i++) {
-    if (files[i].size < sizeof(GDEFCORE_Patch) || files[i].path == NULL ||
+    if (files[i].size != sizeof(GDEFCORE_Patch) || files[i].path == NULL ||
         (files[i].bytes == NULL && files[i].len != 0)) {
       return GDEFCORE_ERR_INVALID;
     }

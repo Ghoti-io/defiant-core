@@ -93,12 +93,13 @@ ceiling too, AD-12), narrowed by the list's own filter, sorts and condition.
 `gdefcore_access_list_page()` also returns the total, and
 `gdefcore_access_count()` only the total: **the number of entities the
 principal may see that match, whatever the page**. A principal who may see 3 of
-10 has a total of 3. `GDEFCORE_Access_List` is size-prefixed and grew by
-appending: `offset`, `limit`, a second sort key, a descending flag for each
-key, `condition` (a condition of condition.h, validated against the type, ANDed
-with the access filter: it narrows and never widens) and `flags`. A caller
-built against the shorter struct sets `size` to its size and gets the old list
-exactly: the single equality filter, the single ascending sort, every row.
+10 has a total of 3. `GDEFCORE_Access_List` has a `size` member, which must be
+`sizeof(GDEFCORE_Access_List)`; any other size is `GDEFCORE_ERR_INVALID`. Its
+members are the filter, `offset`, `limit`, a second sort key, a descending flag
+for each key, `condition` (a condition of condition.h, validated against the
+type, ANDed with the access filter: it narrows and never widens) and `flags`.
+A member the list does not use is zero or NULL: a single equality filter, a
+single ascending sort, every row.
 
 Order is the sort keys (the first value of the field in the call's language,
 none before any value, compared as bytes), and last the order the entities
