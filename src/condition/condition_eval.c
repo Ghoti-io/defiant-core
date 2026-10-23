@@ -84,6 +84,8 @@ typedef struct Ctx {
   int state_loaded;
   int state;
   int failed;
+  const GDEFCORE_Condition_Value * values;  /* read in place of the stored ones */
+  size_t nvalues;
 } Ctx;
 
 static const char kEmpty[] = "";
@@ -124,6 +126,16 @@ static int read_field(Ctx * ctx, const CNode * node, Vals * vals) {
     /* A personal value is ciphertext: never compare it. A field an access
      * callback decides is never compared either (story A6). */
     return ctx_fail(ctx);
+  }
+  /* A value the caller gave for this field (gdefcore_condition_eval_with()):
+   * the first named wins. Asked after the field was checked, so a personal or
+   * governed field is refused whatever is given for it. */
+  for (i = 0; i < ctx->nvalues; i++) {
+    if (ctx->values[i].field_len == name_len &&
+        memcmp(ctx->values[i].field, name, name_len) == 0) {
+      vals_one(vals, ctx->values[i].text, ctx->values[i].text_len);
+      return 1;
+    }
   }
   if (!ctx->real) {
     vals_one(vals, kEmpty, 0);
@@ -652,9 +664,10 @@ static int eval_node(Ctx * ctx, int idx) {
   }
 }
 
-int gdefcore_condition_eval(GDEFCORE_Catalog * catalog,
+int gdefcore_condition_eval_with(GDEFCORE_Catalog * catalog,
     GDEFCORE_Request * request, const GDEFCORE_Condition * condition,
-    const GDEFCORE_Condition_Subject * subject, int * out_failed) {
+    const GDEFCORE_Condition_Subject * subject,
+    const GDEFCORE_Condition_Value * values, size_t nvalues, int * out_failed) {
   GDEFCORE_Condition_Subject local;
   Ctx ctx;
   int r;
@@ -666,8 +679,26 @@ int gdefcore_condition_eval(GDEFCORE_Catalog * catalog,
       subject == NULL || subject->size != sizeof *subject) {
     return 0;
   }
+  if (nvalues > 0 && values == NULL) {
+    if (out_failed != NULL) {
+      *out_failed = 1;
+    }
+    return 0;
+  }
+  for (r = 0; (size_t)r < nvalues; r++) {
+    if (values[r].size != sizeof values[r] || values[r].field == NULL ||
+        values[r].field_len == 0 ||
+        (values[r].text == NULL && values[r].text_len != 0)) {
+      if (out_failed != NULL) {
+        *out_failed = 1;
+      }
+      return 0;
+    }
+  }
   local = *subject;
   memset(&ctx, 0, sizeof ctx);
+  ctx.values = values;
+  ctx.nvalues = nvalues;
   ctx.catalog = catalog;
   ctx.request = request;
   ctx.c = condition;
@@ -708,4 +739,11 @@ int gdefcore_condition_eval(GDEFCORE_Catalog * catalog,
   gdefcore_text_free(catalog, ctx.actor);
   gdefcore_text_free(catalog, ctx.creator);
   return r != 0;
+}
+
+int gdefcore_condition_eval(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Request * request, const GDEFCORE_Condition * condition,
+    const GDEFCORE_Condition_Subject * subject, int * out_failed) {
+  return gdefcore_condition_eval_with(catalog, request, condition, subject, NULL,
+      0, out_failed);
 }

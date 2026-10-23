@@ -28,6 +28,8 @@
 #   list-lists-unpublished               Can.AnUnpublishedEntityIsNotThereForReaders
 #   reader-sees-everything               Can.AnUnpublishedEntityIsNotThereForReaders
 #   list-lists-unpublished-oracle        Oracle.Unpublished
+#   can-with-ignores-the-values          Can.AsAWriteWouldLeaveIt
+#   can-with-is-remembered               Can.AsAWriteWouldLeaveIt
 #
 # Every test has a control (the same call that must be a yes is made beside
 # the one that must be a no, and the sweep counts both outcomes of every
@@ -95,12 +97,12 @@ plant failure-reads-as-a-clean-no $ACCESS testCan 'Can.ACorruptConditionIsAFailu
 # Plant 4b: any failure of the decision is a yes.
 plant decision-failure-grants $ACCESS testCan 'CanFailures.AnAllocationThatFailsNeverGrants' \
   '  rc = can_decide(catalog, request, permission, permission_len, type, type_len,
-      entity_id == NULL ? NULL : canon, &allowed, dec);
+      entity_id == NULL ? NULL : canon, &allowed, dec, values, nvalues);
   if (rc != GDEFCORE_OK) {
     return rc;
   }' \
   '  rc = can_decide(catalog, request, permission, permission_len, type, type_len,
-      entity_id == NULL ? NULL : canon, &allowed, dec);
+      entity_id == NULL ? NULL : canon, &allowed, dec, values, nvalues);
   if (rc != GDEFCORE_OK) {
     *out_allowed = 1;
     return rc;
@@ -170,9 +172,9 @@ plant memo-unbounded src/request/request.c testCan 'Can.MemoIsBounded' \
 # Plant 10: the type-level question is asked where an entity was given.
 plant type-level-used-for-an-entity $ACCESS testCan 'Can.TypeLevelIsNotTheEntityQuestion' \
   '  rc = can_decide(catalog, request, permission, permission_len, type, type_len,
-      entity_id == NULL ? NULL : canon, &allowed, dec);' \
+      entity_id == NULL ? NULL : canon, &allowed, dec, values, nvalues);' \
   '  rc = can_decide(catalog, request, permission, permission_len, type, type_len,
-      NULL, &allowed, dec);'
+      NULL, &allowed, dec, values, nvalues);'
 
 # Plant 11: the template editor reads the roles' grants and not the modules'.
 plant template-authorize-skips-modules src/template/template.c testCan 'Can.TemplateSaveIsTheDecision' \
@@ -308,6 +310,22 @@ plant reader-sees-everything $ACCESS testCan 'Can.AnUnpublishedEntityIsNotThereF
 }' \
   '  return state == GDEFCORE_STATE_PUBLISHED || state != 0;
 }'
+
+# Plant 22: asking about an entity as a write would leave it reads the stored
+# values after all.
+plant can-with-ignores-the-values $ACCESS testCan 'Can.AsAWriteWouldLeaveIt' \
+  '  ev.values = values;
+  ev.nvalues = nvalues;' \
+  '  ev.values = NULL;
+  ev.nvalues = 0;
+  (void)values;
+  (void)nvalues;'
+
+# Plant 23: the answer about a written entity is remembered under a key that
+# knows nothing of the values, and served to the next question.
+plant can-with-is-remembered $ACCESS testCan 'Can.AsAWriteWouldLeaveIt' \
+  '  memo = key_len > 0 && nvalues == 0;' \
+  '  memo = key_len > 0;'
 
 # Plant 21: the same, seen by the oracle sweep: an `any` reader's list of
 # posts names a draft and an unpublished post that every other surface hides.

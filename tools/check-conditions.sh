@@ -28,6 +28,10 @@
 #   condition-reads-published  Cond.TheNewestRevisionIsWhatIsRead
 #   actor-still-written        Cond.ActorIsRefusedNamingTheWordsThatSayEachMeaning
 #
+#   values-ignored             Cond.ValuesAreReadInPlaceOfTheStoredOnes
+#   value-feeds-a-refused-field Cond.ValuesAreReadInPlaceOfTheStoredOnes
+#   value-size-unchecked       Cond.ValuesAreReadInPlaceOfTheStoredOnes
+#
 # Every test has a control (the condition that matches DOES grant, the same
 # input with no failure DOES hold, a valid sibling of every refused text is
 # accepted, the allocation one past the last is the one that does not fail), so
@@ -252,5 +256,21 @@ plant actor-still-written $PARSE testCondition 'Cond.ActorIsRefusedNamingTheWord
   '    (void)kMsgRenamed;
     return new_node(p, kRevCreator, start);'
 
+
+# Plant 23: a value given for a field is not looked at; the stored one is read.
+plant values-ignored $EVAL testCondition 'Cond.ValuesAreReadInPlaceOfTheStoredOnes' \
+  '    if (ctx->values[i].field_len == name_len &&' \
+  '    if (0 && ctx->values[i].field_len == name_len &&'
+
+# Plant 24: a value makes a field readable that is not (unknown, personal).
+plant value-feeds-a-refused-field $EVAL testCondition 'Cond.ValuesAreReadInPlaceOfTheStoredOnes' \
+  '      !vals->f.found || vals->f.personal || vals->f.governed) {' \
+  '      ((!vals->f.found || vals->f.personal || vals->f.governed) &&
+       ctx->nvalues == 0)) {'
+
+# Plant 25: a value of another size is accepted.
+plant value-size-unchecked $EVAL testCondition 'Cond.ValuesAreReadInPlaceOfTheStoredOnes' \
+  '    if (values[r].size != sizeof values[r] || values[r].field == NULL ||' \
+  '    if (values[r].field == NULL ||'
 
 plant_finish

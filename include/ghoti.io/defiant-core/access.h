@@ -34,6 +34,7 @@
 
 #include <ghoti.io/defiant-core/macros.h>
 #include <ghoti.io/defiant-core/allocator.h>
+#include <ghoti.io/defiant-core/condition.h>
 #include <ghoti.io/defiant-core/core.h>
 #include <ghoti.io/defiant-core/entity.h>
 #include <ghoti.io/defiant-core/form.h>
@@ -814,6 +815,30 @@ GDEFCORE_API GDEFCORE_Result gdefcore_access_can(GDEFCORE_Catalog * catalog,
     GDEFCORE_Request * request, const char * permission, size_t permission_len,
     const char * type, size_t type_len, const char * entity_id,
     int * out_allowed);
+
+/**
+ * @brief gdefcore_access_can() about an entity as a write would leave it.
+ *
+ * The same decision, with each field named in @p values read as the text given
+ * for it and every other as it is stored (gdefcore_condition_eval_with()). It
+ * is for a write whose destination is part of the question: a template moved
+ * to another kind is asked here about the kind it becomes, and, separately and
+ * by gdefcore_access_can(), about the kind it was. A caller asks both for an
+ * entity that has been stored, so that no value it is given can widen the
+ * answer of what is stored; for one that has not (a new template) there is
+ * nothing else to ask. @p entity_id is required.
+ *
+ * Not remembered: the memo's key has no place for the values, so each call is
+ * decided, costs ::GDEFCORE_ACCESS_CAN_FUEL_MISS, and is otherwise as
+ * gdefcore_access_can() is, the principal-dependent mark and the failure rule
+ * included. A grant decided by an access callback is asked about the entity
+ * as stored, as the callback has no other view of it.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_access_can_with(
+    GDEFCORE_Catalog * catalog, GDEFCORE_Request * request,
+    const char * permission, size_t permission_len, const char * type,
+    size_t type_len, const char * entity_id,
+    const GDEFCORE_Condition_Value * values, size_t nvalues, int * out_allowed);
 
 /**
  * @brief Whether a permission that limits one field lets the principal act on

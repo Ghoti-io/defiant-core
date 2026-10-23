@@ -963,9 +963,26 @@ inline std::string CondLine(World & w, const std::string & who,
   Note("gdefcore_condition_eval");
   allow = gdefcore_condition_eval(w.site.catalog, fresh.req, cond, &subject,
       &failed);
-  gdefcore_condition_free(cond);
-  return "allow=" + std::to_string(allow) + " failed=" + std::to_string(failed) +
-         Diag(w, fresh.req);
+  /* The same with a value given for a field. The value is one the condition
+   * does not look for, so a hidden entity and a missing one answer alike. */
+  {
+    GDEFCORE_Condition_Value value;
+    int with_failed = 99;
+    int with_allow;
+    memset(&value, 0, sizeof value);
+    value.size = sizeof value;
+    value.field = "title";
+    value.field_len = 5;
+    value.text = "x";
+    value.text_len = 1;
+    Note("gdefcore_condition_eval_with");
+    with_allow = gdefcore_condition_eval_with(w.site.catalog, fresh.req, cond,
+        &subject, &value, 1, &with_failed);
+    gdefcore_condition_free(cond);
+    return "allow=" + std::to_string(allow) + " failed=" +
+           std::to_string(failed) + " with=" + std::to_string(with_allow) +
+           " with-failed=" + std::to_string(with_failed) + Diag(w, fresh.req);
+  }
 }
 
 /** gdefcore_access_can for one permission of one type, on an id (or none). */
@@ -978,8 +995,25 @@ inline std::string CanLine(World & w, const std::string & who,
   rc = gdefcore_access_can(w.site.catalog, fresh.req, permission,
       strlen(permission), type, strlen(type), id.empty() ? NULL : id.c_str(),
       &allowed);
-  return "rc=" + Rc(rc) + " allowed=" + std::to_string(allowed) +
-         Diag(w, fresh.req);
+  std::string out = "rc=" + Rc(rc) + " allowed=" + std::to_string(allowed);
+  if (!id.empty()) {
+    /* About the entity as a write would leave it: a hidden entity and a
+     * missing one are the same refusal. */
+    GDEFCORE_Condition_Value value;
+    int with_allowed = 99;
+    memset(&value, 0, sizeof value);
+    value.size = sizeof value;
+    value.field = "title";
+    value.field_len = 5;
+    value.text = "x";
+    value.text_len = 1;
+    Note("gdefcore_access_can_with");
+    rc = gdefcore_access_can_with(w.site.catalog, fresh.req, permission,
+        strlen(permission), type, strlen(type), id.c_str(), &value, 1,
+        &with_allowed);
+    out += " with=" + Rc(rc) + "/" + std::to_string(with_allowed);
+  }
+  return out + Diag(w, fresh.req);
 }
 
 /** The field-limited and the create questions, as a principal is answered. */

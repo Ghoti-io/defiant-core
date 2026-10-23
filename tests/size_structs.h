@@ -59,6 +59,7 @@
   X(GDEFCORE_Access_Decision, "tests/test_suspend.cpp") \
   X(GDEFCORE_Condition_Error, "tests/test_condition.cpp") \
   X(GDEFCORE_Condition_Subject, "tests/test_condition.cpp") \
+  X(GDEFCORE_Condition_Value, "tests/test_condition.cpp") \
   X(GDEFCORE_Field, "tests/test_entity.cpp") \
   X(GDEFCORE_Value, "tests/test_entity.cpp") \
   X(GDEFCORE_Patch, "tests/test_entity.cpp") \

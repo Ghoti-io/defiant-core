@@ -1033,6 +1033,10 @@ typedef struct Eval {
   ExprSlot slots[kSlotMax];
   size_t nslots;
   int failed;
+  /* Values read in place of the stored ones, for a question about an entity as
+   * a write would leave it (gdefcore_access_can_with()); NULL otherwise. */
+  const GDEFCORE_Condition_Value * values;
+  size_t nvalues;
   /* The ceiling of an acting principal (AD-12): a decision needs a grant of
    * the principal's AND one of the acting principal's for the same
    * permission, each holding on the entity. Heap, because it is rare. */
@@ -1051,6 +1055,8 @@ static void eval_init(Eval * ev, GDEFCORE_Catalog * catalog,
   ev->id = NULL;
   ev->nslots = 0;
   ev->failed = 0;
+  ev->values = NULL;
+  ev->nvalues = 0;
   ev->has_ceiling = 0;
   ev->ceiling = NULL;
   ev->nceiling = 0;
@@ -1283,8 +1289,8 @@ static int expr_holds(Eval * ev, const Grant * grant, const char * id,
   subject.type_name_len = grant->type_len;
   subject.lang = ev->lang;
   subject.lang_len = ev->lang_len;
-  r = gdefcore_condition_eval(ev->catalog, ev->request, slot->cond, &subject,
-      &failed);
+  r = gdefcore_condition_eval_with(ev->catalog, ev->request, slot->cond, &subject,
+      ev->values, ev->nvalues, &failed);
   if (failed) {
     ev->failed = 1;
     return 0;
@@ -6872,7 +6878,8 @@ static int can_key(char * out, size_t cap, const GDEFCORE_Request * request,
 static GDEFCORE_Result can_decide(GDEFCORE_Catalog * catalog,
     GDEFCORE_Request * request, const char * permission, size_t permission_len,
     const char * type, size_t type_len, const char * canon, int * out_allowed,
-    GDEFCORE_Access_Decision * dec) {
+    GDEFCORE_Access_Decision * dec, const GDEFCORE_Condition_Value * values,
+    size_t nvalues) {
   Grant grants[kGrantMax];
   size_t ngrants = 0;
   int read_principal = 0;
@@ -6894,6 +6901,8 @@ static GDEFCORE_Result can_decide(GDEFCORE_Catalog * catalog,
   }
   principal = gdefcore_request_principal(request, &principal_len);
   eval_init(&ev, catalog, request, NULL, 0);
+  ev.values = values;
+  ev.nvalues = nvalues;
   (void)setup_ceiling(&ev);
   if (canon == NULL) {
     win = permits_at(&ev, grants, ngrants, permission, permission_len, type,
@@ -6952,11 +6961,14 @@ static GDEFCORE_Result can_decide(GDEFCORE_Catalog * catalog,
 
 /* gdefcore_access_can(), and gdefcore_access_decide() when @p dec is not
  * NULL: the same question, asked afresh (an answer remembered carries no
- * source), the source that allowed it named in @p dec. */
+ * source), the source that allowed it named in @p dec. With @p values the
+ * entity is read as a write would leave it, and nothing is remembered: the
+ * memo's key knows nothing of them. */
 static GDEFCORE_Result can_impl(GDEFCORE_Catalog * catalog,
     GDEFCORE_Request * request, const char * permission, size_t permission_len,
     const char * type, size_t type_len, const char * entity_id,
-    int * out_allowed, GDEFCORE_Access_Decision * dec) {
+    int * out_allowed, GDEFCORE_Access_Decision * dec,
+    const GDEFCORE_Condition_Value * values, size_t nvalues) {
   char canon[GDEFCORE_PUBLIC_ID_LEN + 1];
   char key[1024];
   int key_len;
@@ -7031,7 +7043,7 @@ static GDEFCORE_Result can_impl(GDEFCORE_Catalog * catalog,
   }
   key_len = can_key(key, sizeof key, request, permission, permission_len, type,
       type_len, entity_id == NULL ? NULL : canon, version);
-  memo = key_len > 0;
+  memo = key_len > 0 && nvalues == 0;
   if (memo && dec == NULL &&
       gdefcore_request_memo_get(request, key, (size_t)key_len, &allowed)) {
     *out_allowed = allowed != 0;
@@ -7043,7 +7055,7 @@ static GDEFCORE_Result can_impl(GDEFCORE_Catalog * catalog,
     return rc;
   }
   rc = can_decide(catalog, request, permission, permission_len, type, type_len,
-      entity_id == NULL ? NULL : canon, &allowed, dec);
+      entity_id == NULL ? NULL : canon, &allowed, dec, values, nvalues);
   if (rc != GDEFCORE_OK) {
     return rc;
   }
@@ -7059,7 +7071,23 @@ GDEFCORE_Result gdefcore_access_can(GDEFCORE_Catalog * catalog,
     const char * type, size_t type_len, const char * entity_id,
     int * out_allowed) {
   return can_impl(catalog, request, permission, permission_len, type, type_len,
-      entity_id, out_allowed, NULL);
+      entity_id, out_allowed, NULL, NULL, 0);
+}
+
+GDEFCORE_Result gdefcore_access_can_with(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Request * request, const char * permission, size_t permission_len,
+    const char * type, size_t type_len, const char * entity_id,
+    const GDEFCORE_Condition_Value * values, size_t nvalues, int * out_allowed) {
+  if (out_allowed != NULL) {
+    *out_allowed = 0;
+  }
+  /* The values are for one entity: a type-level question has none to read
+   * them on, and a question with no values is gdefcore_access_can()'s. */
+  if (entity_id == NULL || nvalues == 0 || values == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  return can_impl(catalog, request, permission, permission_len, type, type_len,
+      entity_id, out_allowed, NULL, values, nvalues);
 }
 
 /* Whether a field-level grant of @p action for @p field holds. Asked of one
@@ -7235,7 +7263,7 @@ GDEFCORE_Result gdefcore_access_decide(GDEFCORE_Catalog * catalog,
         entity_id, field, field_len, &allowed, out);
   } else {
     rc = can_impl(catalog, request, action, action_len, type, type_len,
-        entity_id, &allowed, out);
+        entity_id, &allowed, out, NULL, 0);
   }
   if (rc != GDEFCORE_OK) {
     memset(out, 0, sizeof *out);

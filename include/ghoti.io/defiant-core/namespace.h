@@ -41,6 +41,7 @@
 #define GDEFCORE_Condition GHOTIIO_DEFCORE(GDEFCORE_Condition)
 #define GDEFCORE_Condition_Error GHOTIIO_DEFCORE(GDEFCORE_Condition_Error)
 #define GDEFCORE_Condition_Subject GHOTIIO_DEFCORE(GDEFCORE_Condition_Subject)
+#define GDEFCORE_Condition_Value GHOTIIO_DEFCORE(GDEFCORE_Condition_Value)
 #define GDEFCORE_Field GHOTIIO_DEFCORE(GDEFCORE_Field)
 #define GDEFCORE_FieldInfo GHOTIIO_DEFCORE(GDEFCORE_FieldInfo)
 #define GDEFCORE_Form GHOTIIO_DEFCORE(GDEFCORE_Form)
@@ -141,6 +142,7 @@
   GHOTIIO_DEFCORE(gdefcore_access_field_governed)
 #define gdefcore_access_row_action GHOTIIO_DEFCORE(gdefcore_access_row_action)
 #define gdefcore_access_can GHOTIIO_DEFCORE(gdefcore_access_can)
+#define gdefcore_access_can_with GHOTIIO_DEFCORE(gdefcore_access_can_with)
 #define gdefcore_access_route_check \
   GHOTIIO_DEFCORE(gdefcore_access_route_check)
 #define gdefcore_access_stage_module_permission                                \
@@ -173,6 +175,8 @@
   GHOTIIO_DEFCORE(gdefcore_condition_explain)
 #define gdefcore_condition_eval \
   GHOTIIO_DEFCORE(gdefcore_condition_eval)
+#define gdefcore_condition_eval_with \
+  GHOTIIO_DEFCORE(gdefcore_condition_eval_with)
 #define gdefcore_access_tree GHOTIIO_DEFCORE(gdefcore_access_tree)
 #define gdefcore_account_bind GHOTIIO_DEFCORE(gdefcore_account_bind)
 #define gdefcore_account_check GHOTIIO_DEFCORE(gdefcore_account_check)

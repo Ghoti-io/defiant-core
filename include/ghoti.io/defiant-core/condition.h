@@ -140,6 +140,22 @@ typedef struct GDEFCORE_Condition_Subject {
 } GDEFCORE_Condition_Subject;
 
 /**
+ * @brief A value gdefcore_condition_eval_with() reads in place of the stored
+ * one. Begins with @ref size.
+ *
+ * @ref field names a field of the entity's type; the single text @ref text is
+ * what a condition reads for it. A field that is personal, or that an access
+ * callback decides, is never read, whatever is given for it.
+ */
+typedef struct GDEFCORE_Condition_Value {
+  size_t size;               ///< Must be `sizeof(GDEFCORE_Condition_Value)`.
+  const char * field;        ///< The field's name.
+  size_t field_len;          ///< Length of @ref field.
+  const char * text;         ///< Its one value; may be empty.
+  size_t text_len;           ///< Length of @ref text.
+} GDEFCORE_Condition_Value;
+
+/**
  * @brief Parse condition text. Pure: no catalog, no request.
  *
  * @param text Condition text. Need not be NUL-terminated.
@@ -306,6 +322,28 @@ GDEFCORE_API GDEFCORE_Result gdefcore_condition_explain(
 GDEFCORE_API int gdefcore_condition_eval(GDEFCORE_Catalog * catalog,
     GDEFCORE_Request * request, const GDEFCORE_Condition * condition,
     const GDEFCORE_Condition_Subject * subject, int * out_failed);
+
+/**
+ * @brief Whether @p condition holds on one entity as a write would leave it.
+ *
+ * As gdefcore_condition_eval(), except that each field named in @p values
+ * reads as the one text given for it and every other field as it is stored.
+ * This is the one place a value that is not stored enters an evaluation, and
+ * it is not a path a route, a form or a list can reach: it exists so that a
+ * write whose destination is part of the question (a template that changes
+ * kind) can be asked of the grants as well as of what is stored. A caller
+ * asks it in addition to the question about the stored entity, never instead
+ * of it, for an entity that has been stored: the stored answer is what keeps
+ * a submitted value from widening anything. A value whose @ref
+ * GDEFCORE_Condition_Value::size is not exactly `sizeof` is a failure
+ * (@p out_failed 1, and the condition does not hold).
+ *
+ * @return 1 when the condition holds, else 0. Never an error.
+ */
+GDEFCORE_API int gdefcore_condition_eval_with(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Request * request, const GDEFCORE_Condition * condition,
+    const GDEFCORE_Condition_Subject * subject,
+    const GDEFCORE_Condition_Value * values, size_t nvalues, int * out_failed);
 
 #ifdef __cplusplus
 }

@@ -74,6 +74,7 @@ static const Surface kSurface[] = {
     {"gdefcore_access_shared_cache", "P"},
     {"gdefcore_access_permits", "RF"},
     {"gdefcore_access_can", "RF"},
+    {"gdefcore_access_can_with", "RF"},
     {"gdefcore_access_can_field", "RF"},
     {"gdefcore_access_decide", "RF"},
     {"gdefcore_access_revoke", "W"},
@@ -126,6 +127,7 @@ static const Surface kSurface[] = {
      * do say that an entity exists, so it is a host function: the condition
      * and the id are the host's, never a principal's. */
     {"gdefcore_condition_eval", "RF"},
+    {"gdefcore_condition_eval_with", "RF"},
     {"gdefcore_keyring_create", "P"},
     {"gdefcore_keyring_destroy", "P"},
     {"gdefcore_keyring_export", "P"},

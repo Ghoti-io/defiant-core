@@ -101,6 +101,16 @@ draft) or a cleared one has no fields: a field condition cannot hold on it. Valu
 in the language of the call, with no fallback to another language, as the
 filter reads them. A many-valued field is all its values (at most 64).
 
+One function reads a value that is not stored. `gdefcore_condition_eval_with()`
+takes a few `GDEFCORE_Condition_Value`s (a field and its one text) and reads each
+named field as the text given; every other field is read as stored. It exists for
+a write whose destination is part of the question, such as a template that changes
+kind, and the caller asks it *in addition to* the question about the stored
+entity, never instead of it, so a value it supplies can only narrow what is
+stored. A field that is personal, governed or not on the type is a failure
+whatever is given for it, and a value of the wrong size is a failure. Routes,
+forms, lists and every other path leave it alone.
+
 The request clock is `gdefcore_request_set_time()`. A request that never set
 it reads the wall clock once, at the first use, and keeps that value, so it is
 fixed for the life of the request. Tests set it.

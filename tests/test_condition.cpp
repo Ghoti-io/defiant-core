@@ -1251,6 +1251,104 @@ TEST(Cond, HypotheticalEntity) {
   gdefcore_condition_free(c);
 }
 
+/** Parse (which must succeed) and evaluate with @p values read in place of the
+ * stored ones. Without an @p id the entity is a hypothetical one of kBlog. */
+Answer EvalWith(Env & env, const std::string & text, const std::string & id,
+    const GDEFCORE_Condition_Value * values, size_t nvalues) {
+  GDEFCORE_Condition * cond = NULL;
+  GDEFCORE_Condition_Subject subject;
+  Answer a = {-1, -1};
+  EXPECT_EQ(GDEFCORE_OK,
+      gdefcore_condition_parse(text.data(), text.size(), &cond, NULL))
+      << text;
+  if (cond == NULL) {
+    return a;
+  }
+  memset(&subject, 0, sizeof subject);
+  subject.size = sizeof subject;
+  if (!id.empty()) {
+    subject.entity = id.data();
+    subject.entity_len = id.size();
+  } else {
+    subject.type_name = kBlog;
+    subject.type_name_len = strlen(kBlog);
+  }
+  a.failed = 7;
+  a.allow = gdefcore_condition_eval_with(env.catalog, env.req, cond, &subject,
+      values, nvalues, &a.failed);
+  gdefcore_condition_free(cond);
+  return a;
+}
+
+GDEFCORE_Condition_Value Given(const char * field, const char * text) {
+  GDEFCORE_Condition_Value v;
+  memset(&v, 0, sizeof v);
+  v.size = sizeof v;
+  v.field = field;
+  v.field_len = strlen(field);
+  v.text = text;
+  v.text_len = strlen(text);
+  return v;
+}
+
+/* A value given for a field is what a condition reads for it: the way a write
+ * is asked about before it is stored. Every other field is as stored, and
+ * nothing is written. */
+TEST(Cond, ValuesAreReadInPlaceOfTheStoredOnes) {
+  Env env;
+  std::string e = env.Make(kBlog, "", V({{"title", "T"}, {"group", "a"}}));
+  std::string v = env.Make(kVault, "", V({{"name", "N"}}));
+  const GDEFCORE_Condition_Value to_b[] = {Given("group", "b")};
+  const std::string is_a = "(= field.group \"a\")";
+  const std::string is_b = "(= field.group \"b\")";
+  /* Control: with nothing given, what is stored is read. */
+  EXPECT_EQ((Answer{1, 0}), EvalWith(env, is_a, e, NULL, 0));
+  EXPECT_EQ((Answer{0, 0}), EvalWith(env, is_b, e, NULL, 0));
+  /* The given value is read, and the stored one is not. */
+  EXPECT_EQ((Answer{0, 0}), EvalWith(env, is_a, e, to_b, 1));
+  EXPECT_EQ((Answer{1, 0}), EvalWith(env, is_b, e, to_b, 1));
+  EXPECT_EQ((Answer{1, 0}), EvalWith(env, "(!= field.group \"a\")", e, to_b, 1));
+  /* A field not named is read as stored. */
+  EXPECT_EQ((Answer{1, 0}), EvalWith(env, "(and (= field.title \"T\") (= field.group \"b\"))", e, to_b, 1));
+  /* The first value named for a field wins. */
+  {
+    const GDEFCORE_Condition_Value twice[] = {Given("group", "c"), Given("group", "b")};
+    EXPECT_EQ((Answer{1, 0}), EvalWith(env, "(= field.group \"c\")", e, twice, 2));
+    EXPECT_EQ((Answer{0, 0}), EvalWith(env, is_b, e, twice, 2));
+  }
+  /* An empty text is a value, and the field's absence. */
+  {
+    const GDEFCORE_Condition_Value none[] = {Given("group", "")};
+    EXPECT_EQ((Answer{1, 0}), EvalWith(env, "(= field.group \"\")", e, none, 1));
+    EXPECT_EQ((Answer{0, 0}), EvalWith(env, is_a, e, none, 1));
+  }
+  /* A hypothetical entity has the values and nothing else. */
+  EXPECT_EQ((Answer{1, 0}), EvalWith(env, is_b, "", to_b, 1));
+  EXPECT_EQ((Answer{0, 0}), EvalWith(env, is_a, "", to_b, 1));
+  /* Nothing was written: what is stored is still what it was. */
+  EXPECT_EQ((Answer{1, 0}), Eval(env, is_a, e));
+  /* A field the type lacks, and a personal one, are failures whatever is
+   * given for them: a value cannot make a field readable. */
+  {
+    const GDEFCORE_Condition_Value nope[] = {Given("nope", "x")};
+    const GDEFCORE_Condition_Value ssn[] = {Given("ssn", "x")};
+    EXPECT_EQ((Answer{0, 1}), EvalWith(env, "(= field.nope \"x\")", e, nope, 1));
+    EXPECT_EQ((Answer{0, 1}), EvalWith(env, "(= field.ssn \"x\")", v, ssn, 1));
+  }
+  /* A value of the wrong size, or a missing array, is a failure and holds
+   * nothing, `not` included. */
+  {
+    GDEFCORE_Condition_Value bad[] = {Given("group", "b")};
+    bad[0].size = sizeof bad[0] + 1;
+    EXPECT_EQ((Answer{0, 1}), EvalWith(env, is_b, e, bad, 1));
+    EXPECT_EQ((Answer{0, 1}), EvalWith(env, "(not (= field.group \"z\"))", e, bad, 1));
+    bad[0] = Given("group", "b");
+    bad[0].field_len = 0;
+    EXPECT_EQ((Answer{0, 1}), EvalWith(env, is_b, e, bad, 1));
+    EXPECT_EQ((Answer{0, 1}), EvalWith(env, is_b, e, NULL, 1));
+  }
+}
+
 TEST(Cond, FailureNeverGrants) {
   Env env;
   std::string e = env.Make(kBlog, "", V({{"title", "T"}, {"group", "a"}}));
@@ -2834,6 +2932,14 @@ TEST(Cond, TheStructsHereAreAcceptedAtOnlyTheirOwnSize) {
         EXPECT_EQ(GDEFCORE_ERR_INVALID,
             gdefcore_condition_parse("(", 1, NULL, &e));
         return e.size == size && e.message != NULL;
+      }),
+      GDEFCORE_SIZE_PROBE(GDEFCORE_Condition_Value, {
+        Env own;
+        std::string e = own.Make(kBlog, "", V({{"group", "a"}}));
+        GDEFCORE_Condition_Value v = Given("group", "b");
+        v.size = size;
+        Answer a = EvalWith(own, "(= field.group \"b\")", e, &v, 1);
+        return a.allow == 1 && a.failed == 0;
       }),
       GDEFCORE_SIZE_PROBE(GDEFCORE_Condition_Subject, {
         GDEFCORE_Condition * c = P("(= type \"t.blog\")");

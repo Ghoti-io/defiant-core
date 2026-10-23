@@ -547,6 +547,91 @@ TEST_F(Can, MemoServesTheSecondQuestion) {
   EXPECT_EQ(2u, hits);
 }
 
+/* The same decision about an entity as a write would leave it: the values
+ * given are read in place of the stored ones, nothing is remembered, and the
+ * stored entity is untouched. A caller asks the stored question as well. */
+TEST_F(Can, AsAWriteWouldLeaveIt) {
+  DefinePost();
+  Declare(Perm("Edit posts", "update", GDEFCORE_ACCESS_ANY));
+  Role("group-a");
+  ASSERT_EQ(GDEFCORE_OK, GrantWhen("group-a", "Edit posts", kGroupA));
+  std::string grp = Principal("group-a");
+  std::string nobody = Principal();
+  std::string a1 = Save(Admin(), "a1", "a");
+  std::string b1 = Save(Admin(), "b1", "b");
+  auto with = [&](GDEFCORE_Request * req, const std::string & id, const char * group,
+                  int * allowed) {
+    GDEFCORE_Condition_Value v;
+    memset(&v, 0, sizeof v);
+    v.size = sizeof v;
+    v.field = "group";
+    v.field_len = 5;
+    v.text = group;
+    v.text_len = strlen(group);
+    return gdefcore_access_can_with(catalog_, req, "update", 6, kPost,
+        strlen(kPost), id.c_str(), &v, 1, allowed);
+  };
+  GDEFCORE_Request * req = Req(grp);
+  int allowed = -1;
+  /* Control: as stored, the grant covers group a and not group b. */
+  EXPECT_TRUE(Yes(req, "update", a1));
+  EXPECT_FALSE(Yes(req, "update", b1));
+  /* What is written is what is read: a post of group a written as group b is
+   * no longer covered, and one of group b written as group a is. */
+  ASSERT_EQ(GDEFCORE_OK, with(req, a1, "a", &allowed));
+  EXPECT_EQ(1, allowed);
+  ASSERT_EQ(GDEFCORE_OK, with(req, a1, "b", &allowed));
+  EXPECT_EQ(0, allowed);
+  ASSERT_EQ(GDEFCORE_OK, with(req, b1, "a", &allowed));
+  EXPECT_EQ(1, allowed);
+  /* Nothing is remembered: the next question, with other values, is decided,
+   * and so is the stored one that follows it. */
+  ASSERT_EQ(GDEFCORE_OK, with(req, b1, "b", &allowed));
+  EXPECT_EQ(0, allowed);
+  EXPECT_FALSE(Yes(req, "update", b1));
+  /* The principal still needs a grant at all. */
+  ASSERT_EQ(GDEFCORE_OK, with(Req(nobody), a1, "a", &allowed));
+  EXPECT_EQ(0, allowed);
+  /* An entity that is not there, one of another type and a permission nobody
+   * declared are one answer: no. */
+  ASSERT_EQ(GDEFCORE_OK, with(req, FreshIdText(), "a", &allowed));
+  EXPECT_EQ(0, allowed);
+  {
+    GDEFCORE_Condition_Value v;
+    memset(&v, 0, sizeof v);
+    v.size = sizeof v;
+    v.field = "group";
+    v.field_len = 5;
+    v.text = "a";
+    v.text_len = 1;
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_access_can_with(catalog_, req, "update", 6, "site.page", 9,
+            a1.c_str(), &v, 1, &allowed));
+    EXPECT_EQ(0, allowed);
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_access_can_with(catalog_, req, "nothing", 7, kPost, strlen(kPost),
+            a1.c_str(), &v, 1, &allowed));
+    EXPECT_EQ(0, allowed);
+    /* No entity, no values, or a value of the wrong size is a bad call. */
+    EXPECT_EQ(GDEFCORE_ERR_INVALID,
+        gdefcore_access_can_with(catalog_, req, "update", 6, kPost, strlen(kPost),
+            NULL, &v, 1, &allowed));
+    EXPECT_EQ(0, allowed);
+    EXPECT_EQ(GDEFCORE_ERR_INVALID,
+        gdefcore_access_can_with(catalog_, req, "update", 6, kPost, strlen(kPost),
+            a1.c_str(), NULL, 0, &allowed));
+    v.size += 1;
+    allowed = 1;
+    EXPECT_NE(GDEFCORE_OK,
+        gdefcore_access_can_with(catalog_, req, "update", 6, kPost, strlen(kPost),
+            a1.c_str(), &v, 1, &allowed));
+    EXPECT_EQ(0, allowed);
+  }
+  /* Nothing was written. */
+  EXPECT_TRUE(Yes(Req(grp), "update", a1));
+  EXPECT_FALSE(Yes(Req(grp), "update", b1));
+}
+
 TEST_F(Can, AWriteInTheRequestIsANewQuestion) {
   DefinePost();
   Declare(Perm("Edit posts", "update", GDEFCORE_ACCESS_ANY));

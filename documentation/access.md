@@ -497,6 +497,11 @@ ceiling.
   conditions.md), so a grant on `update` over group a holds for an unpublished
   group a entity, and `own` matches its creator: its author can edit it while
   readers cannot see it.
+- **As a write would leave it**: `gdefcore_access_can_with()` is the same
+  decision about an entity, with some of its fields read as the text given
+  (conditions.md). It is for a write whose destination is part of the question
+  (a template moved to another kind), it is not remembered, and a caller asks
+  the stored question as well so that no value can widen the answer.
 - **With no entity** (type level): whether the principal could hold it for some
   entity of the type, the question `gdefcore_access_permits()` asks. It is not
   safe for deciding an operation on a specific entity and says nothing about
