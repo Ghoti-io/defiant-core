@@ -1760,17 +1760,10 @@ TEST_F(Can, TemplateSaveIsTheDecision) {
   ASSERT_EQ(GDEFCORE_OK, gdefcore_render_kit(catalog_, &bytes, &n));
   ASSERT_EQ(GDEFCORE_OK, gdefcore_render_install(catalog_, bytes, n));
   gdefcore_text_free(catalog_, (char *)bytes);
-  char * label = NULL;
-  size_t label_len = 0;
-  ASSERT_EQ(GDEFCORE_OK,
-      gdefcore_template_edit_label(catalog_, "core.pane", 9, &label, &label_len));
-  std::string pane_label(label, label_len);
-  gdefcore_text_free(catalog_, label);
-  char name[300];
-  size_t name_len = gdefcore_template_edit_name("core.pane", 9, name, sizeof name);
-  ASSERT_GT(name_len, 0u);
+  const std::string edit_label = GDEFCORE_TEMPLATE_EDIT_LABEL;
   Role("pane-editors");
-  Grant("pane-editors", pane_label.c_str());
+  ASSERT_EQ(GDEFCORE_OK,
+      GrantWhen("pane-editors", edit_label.c_str(), "(= field.kind \"core.pane\")"));
   std::string editor = Principal("pane-editors");
   std::string nobody = Principal();
   std::string agent_ok = Principal("pane-editors");
@@ -1789,9 +1782,10 @@ TEST_F(Can, TemplateSaveIsTheDecision) {
     GDEFCORE_Result rc;
     EXPECT_EQ(GDEFCORE_OK,
         gdefcore_entity_create(catalog_, "core.template", 13, id, NULL));
+    /* The decision about this template, left of the kind it is to be: it has
+     * no stored kind to be asked about. */
     EXPECT_EQ(GDEFCORE_OK,
-        gdefcore_access_can(catalog_, req, name, name_len, "core.template", 13, id,
-            &want));
+        gdefcore_template_can_edit(catalog_, req, id, "core.pane", 9, &want));
     memset(values, 0, sizeof values);
     for (int i = 0; i < 3; i++) {
       values[i].size = sizeof values[i];
@@ -1823,10 +1817,10 @@ TEST_F(Can, TemplateSaveIsTheDecision) {
   /* A module may grant the kernel's permission, and that is an editor too:
    * for everyone it applies to, the decision and the editor say yes. */
   ModDef * m = NewMod("panes");
-  m->Grant(pane_label, "core.template", "(= type \"core.template\")");
+  m->Grant(edit_label, "core.template", "(= type \"core.template\")");
   ASSERT_EQ(GDEFCORE_OK, Install(m));
   ASSERT_EQ(GDEFCORE_OK,
-      Enable("panes", {GrantLine("panes", pane_label, "high",
+      Enable("panes", {GrantLine("panes", edit_label, "high",
                            "(= type \"core.template\")")}))
       << last_error_;
   EXPECT_TRUE(Try(nobody, "", "p6"));

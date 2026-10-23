@@ -21,113 +21,71 @@
 /**
  * @file
  *
- * Who may edit a template (site-admin story 3): the permission each kind
- * declares, the decision hook a module refines it through, and the render of
- * an edited body that no shared cache may keep.
+ * Who may edit a template (access-conditions story A8): one permission,
+ * `core.template.edit`, granted by roles with a condition on the template's
+ * kind and by modules with a condition on its classification, decided by the
+ * one can(). Nothing denies: no module can take away what a grant allows. The
+ * render of an edited body that no shared cache may keep is here too.
  *
  * Every refusal has a control that makes the same write succeed, so a test
  * that cannot see the thing it looks for is not passing by accident.
  */
 
-#include <ghoti.io/defiant-core/defiant-core.h>
-#include <ghoti.io/defiant-storage-memory/memory.h>
+#include "grants_fixture.h"
 
-#include "size_structs.h"
-
-#include <gtest/gtest.h>
-
-#include <stdint.h>
-#include <stdlib.h>
-#include <string.h>
-
-#include <string>
-#include <vector>
-
-#define TP_STR2(x) #x
-#define TP_STR(x) TP_STR2(x)
+#include <set>
 
 namespace {
 
-const char kCoreToken[] = TP_STR(GHOTIIO_DEFCORE_NAME);
+using namespace gfx;
+
 const char kNotAllowed[] = "That edit is not allowed.";
+const char kEdit[] = GDEFCORE_TEMPLATE_EDIT;
 
-/* The test modules: each needs an entry of its own. */
-GDEFCORE_Module_Manifest g_man[3];
-GDEFCORE_Module_Sub g_sub[3];
-const char * g_names[3] = {"judge", "mute", "broken"};
+/* The example module's grant: the pages classified internal, for the people
+ * its relation lists. */
+const char kDeskCondition[] =
+    "(and (= field.kind \"core.page\") (= field.classification \"internal\") "
+    "(related \"desk.reviewer\" (principal)))";
 
-template <int I>
-const GDEFCORE_Module_Manifest * Entry() {
-  return &g_man[I];
+const std::string kPaneBody = "<% use title; %><h2><%= title %></h2>";
+
+/* The hook the veto was fired through, named without spelling the name out:
+ * nothing in this tree names it, and a gate keeps it so. */
+std::string FormerHook() { return std::string("template") + "-write"; }
+
+/* A subscriber that denies, as the veto's subscribers did. */
+extern "C" GDEFCORE_Result DenyFn(GDEFCORE_Request * request, const void * args,
+    GDEFCORE_Alter * alter, GDEFCORE_Hook_Out * out, void * user) {
+  (void)request;
+  (void)args;
+  (void)alter;
+  *(int *)user += 1;
+  out->decision = GDEFCORE_DECISION_DENY;
+  return GDEFCORE_OK;
 }
-extern "C" const GDEFCORE_Module_Manifest * Entry0(void) { return Entry<0>(); }
-extern "C" const GDEFCORE_Module_Manifest * Entry1(void) { return Entry<1>(); }
-extern "C" const GDEFCORE_Module_Manifest * Entry2(void) { return Entry<2>(); }
-GDEFCORE_Module_Entry g_entries[3] = {Entry0, Entry1, Entry2};
 
-/* What the judge saw, and the classification it lets a principal edit. */
-struct Judge {
+/* An operation callback of the gate module: grants every entity, or fails
+ * after writing grants (a callback that fails is thrown away, not trusted). */
+struct Gate {
   int calls = 0;
-  std::string allowed;       /* the classification this principal may edit */
-  std::string name;
-  std::string kind;
-  std::string old_kind;
-  std::string attached;
-  std::string attached_type;
-  std::string classification;
-  size_t size = 0;
+  bool fail = false;
 };
+Gate g_gate;
 
-std::string Span(const char * p, size_t n) { return std::string(p, n); }
-
-/*
- * The refining module of the story: it denies edits of core.page templates
- * unless the template's classification matches the principal's grant, and has
- * no opinion about any other kind.
- */
-extern "C" GDEFCORE_Result JudgeFn(GDEFCORE_Request * request, const void * args,
-    GDEFCORE_Alter * alter, GDEFCORE_Hook_Out * out, void * user) {
-  Judge * j = (Judge *)user;
-  const GDEFCORE_Template_Write_Hook * a =
-      (const GDEFCORE_Template_Write_Hook *)args;
+extern "C" GDEFCORE_Result GateFn(GDEFCORE_Callback_Call * call,
+    GDEFCORE_Request * request, const GDEFCORE_Callback_Question * q,
+    GDEFCORE_Callback_Answer * a, void * user) {
+  Gate * g = static_cast<Gate *>(user);
+  (void)call;
   (void)request;
-  (void)alter;
-  j->calls += 1;
-  j->size = a->size;
-  j->name = Span(a->name, a->name_len);
-  j->kind = Span(a->kind, a->kind_len);
-  j->old_kind = Span(a->old_kind, a->old_kind_len);
-  j->attached = Span(a->attached, a->attached_len);
-  j->attached_type = Span(a->attached_type, a->attached_type_len);
-  j->classification = Span(a->classification, a->classification_len);
-  out->decision = GDEFCORE_DECISION_NONE;
-  if (j->kind == "core.page") {
-    out->decision = j->classification == j->allowed ? GDEFCORE_DECISION_ALLOW
-                                                    : GDEFCORE_DECISION_DENY;
+  g->calls += 1;
+  for (size_t i = 0; i < q->count; i++) {
+    a->granted[i] = 1;
   }
-  return GDEFCORE_OK;
-}
-
-/* A subscriber with no opinion at all. */
-extern "C" GDEFCORE_Result MuteFn(GDEFCORE_Request * request, const void * args,
-    GDEFCORE_Alter * alter, GDEFCORE_Hook_Out * out, void * user) {
-  (void)request;
-  (void)args;
-  (void)alter;
-  (void)out;
-  *(int *)user += 1;
-  return GDEFCORE_OK;
-}
-
-/* A subscriber that fails. */
-extern "C" GDEFCORE_Result BrokenFn(GDEFCORE_Request * request, const void * args,
-    GDEFCORE_Alter * alter, GDEFCORE_Hook_Out * out, void * user) {
-  (void)request;
-  (void)args;
-  (void)alter;
-  (void)out;
-  *(int *)user += 1;
-  return GDEFCORE_ERR_INTERNAL;
+  snprintf(a->token, sizeof a->token, "%s", "t");
+  a->token_len = 1;
+  return g->fail ? GDEFCORE_ERR_INTERNAL : GDEFCORE_OK;
 }
 
 void OneValue(GDEFCORE_Value * value, const char * field, const char ** slot,
@@ -141,24 +99,17 @@ void OneValue(GDEFCORE_Value * value, const char * field, const char ** slot,
   value->count = count;
 }
 
-class TPerm : public ::testing::Test {
+std::string KindIs(const std::string & kind) {
+  return "(= field.kind \"" + kind + "\")";
+}
+
+class TPerm : public GrantsFixture {
  protected:
-  GDEFSTOR_Store * store_ = NULL;
-  GDEFCORE_Host * host_ = NULL;
-  GDEFCORE_Catalog * catalog_ = NULL;
-  std::vector<GDEFCORE_Request *> requests_;
-  Judge judge_;
-  int mute_calls_ = 0;
-  int broken_calls_ = 0;
   std::string refusal_;
-  uint8_t tenant_[1] = {'t'};
 
   void SetUp() override {
-    ASSERT_EQ(GDEFSMEMORY_OK, gdefsmemory_store_create(NULL, NULL, &store_));
-    ASSERT_EQ(GDEFCORE_OK, gdefcore_host_open(store_, NULL, &host_));
-    ASSERT_EQ(GDEFCORE_OK,
-        gdefcore_catalog_open(store_, tenant_, 1, NULL, NULL, &catalog_));
-    gdefcore_catalog_bind_host(catalog_, host_);
+    GrantsFixture::SetUp();
+    g_gate = Gate();
     uint8_t * bytes = NULL;
     size_t n = 0;
     ASSERT_EQ(GDEFCORE_OK, gdefcore_render_kit(catalog_, &bytes, &n));
@@ -166,102 +117,77 @@ class TPerm : public ::testing::Test {
     gdefcore_text_free(catalog_, (char *)bytes);
   }
 
-  void TearDown() override {
-    for (GDEFCORE_Request * r : requests_) {
-      gdefcore_request_destroy(r);
-    }
-    gdefcore_catalog_bind_host(catalog_, NULL);
-    gdefcore_catalog_destroy(catalog_);
-    gdefcore_host_destroy(host_);
-    gdefstor_store_destroy(store_);
-  }
-
   /* People ------------------------------------------------------------- */
 
-  /* A request for a new principal who holds one role with these labels. */
+  /* A request for a new principal whose one role is granted the permission to
+   * edit templates of each of these kinds, and of no other. */
   GDEFCORE_Request * Who(const char * role, std::vector<std::string> kinds) {
-    char principal[GDEFCORE_PUBLIC_ID_LEN + 1];
-    GDEFCORE_Request * request = NULL;
-    EXPECT_EQ(GDEFCORE_OK,
-        gdefcore_access_role_create(catalog_, role, strlen(role), NULL));
+    Role(role);
     for (const std::string & kind : kinds) {
-      char * label = NULL;
-      size_t label_len = 0;
       EXPECT_EQ(GDEFCORE_OK,
-          gdefcore_template_edit_label(catalog_, kind.c_str(), kind.size(), &label,
-              &label_len));
-      EXPECT_EQ(GDEFCORE_OK,
-          gdefcore_access_grant(catalog_, role, strlen(role), label, label_len,
-              "core.role", 9));
-      gdefcore_text_free(catalog_, label);
+          GrantWhen(role, GDEFCORE_TEMPLATE_EDIT_LABEL, KindIs(kind)));
     }
-    EXPECT_EQ(GDEFCORE_OK, gdefcore_access_principal_create(catalog_, principal));
-    EXPECT_EQ(GDEFCORE_OK,
-        gdefcore_access_principal_add_role(catalog_, principal,
-            GDEFCORE_PUBLIC_ID_LEN, role, strlen(role)));
-    EXPECT_EQ(GDEFCORE_OK,
-        gdefcore_request_create(tenant_, 1, 0, 0, NULL, &request));
-    EXPECT_EQ(GDEFCORE_OK,
-        gdefcore_request_set_principal(request, principal,
-            GDEFCORE_PUBLIC_ID_LEN));
-    requests_.push_back(request);
-    return request;
+    return Req(Principal(role));
   }
 
-  GDEFCORE_Request * Anonymous() {
-    GDEFCORE_Request * request = NULL;
-    EXPECT_EQ(GDEFCORE_OK,
-        gdefcore_request_create(tenant_, 1, 0, 0, NULL, &request));
-    requests_.push_back(request);
-    return request;
+  GDEFCORE_Request * Anonymous() { return Req(); }
+
+  GDEFCORE_Request * AdminReq() { return Req(Admin()); }
+
+  /* A principal on the desk module's list of reviewers, with no role. The
+   * module must be enabled. */
+  std::string Reviewer(const char * role = NULL) {
+    std::string who = Principal(role);
+    ListReviewer(who);
+    return who;
   }
 
-  GDEFCORE_Request * Admin() {
-    char admin[GDEFCORE_PUBLIC_ID_LEN + 1];
-    GDEFCORE_Request * request = Anonymous();
-    EXPECT_EQ(GDEFCORE_OK, gdefcore_access_admin_principal(catalog_, admin));
+  /* Put a principal on the list (a second time changes nothing). */
+  void ListReviewer(const std::string & who) {
+    const char * values[1] = {who.c_str()};
+    size_t lens[1] = {who.size()};
+    int added = 0;
     EXPECT_EQ(GDEFCORE_OK,
-        gdefcore_request_set_principal(request, admin, GDEFCORE_PUBLIC_ID_LEN));
-    return request;
+        gdefcore_relation_add(catalog_, "desk", 4, "desk.reviewer", 13, values,
+            lens, 1, NULL, 0, &added));
   }
 
   /* Modules ------------------------------------------------------------ */
 
-  void Install(int slot, GDEFCORE_Hook_Fn fn, void * user) {
-    memset(&g_man[slot], 0, sizeof g_man[slot]);
-    memset(&g_sub[slot], 0, sizeof g_sub[slot]);
-    g_sub[slot].size = sizeof g_sub[slot];
-    g_sub[slot].hook = GDEFCORE_HOOK_TEMPLATE_WRITE;
-    g_sub[slot].hook_len = strlen(GDEFCORE_HOOK_TEMPLATE_WRITE);
-    g_sub[slot].kind = GDEFCORE_HOOK_DECISION;
-    g_sub[slot].fn = fn;
-    g_sub[slot].user = user;
-    g_man[slot].size = sizeof g_man[slot];
-    g_man[slot].core_token = kCoreToken;
-    g_man[slot].core_token_len = strlen(kCoreToken);
-    g_man[slot].schema_version = 1;
-    g_man[slot].name = g_names[slot];
-    g_man[slot].name_len = strlen(g_names[slot]);
-    g_man[slot].label = g_names[slot];
-    g_man[slot].label_len = strlen(g_names[slot]);
-    g_man[slot].subs = &g_sub[slot];
-    g_man[slot].nsubs = 1;
-    ASSERT_EQ(GDEFCORE_OK, gdefcore_module_install_guest(host_, g_entries[slot]));
+  /* The example module: it grants the permission to edit templates for the
+   * pages classified internal, to the people on its list. */
+  void InstallDesk() {
+    ModDef * m = NewMod("desk");
+    m->Relation("desk.reviewer", {{"who", GDEFCORE_RELATION_ENTITY, ""}});
+    m->Grant(GDEFCORE_TEMPLATE_EDIT_LABEL, GDEFCORE_TEMPLATE_TYPE, kDeskCondition);
+    ASSERT_EQ(GDEFCORE_OK, Install(m));
   }
 
-  void ModuleOn(const char * name, bool enable = true) {
-    GDEFCORE_Changeset * cs = NULL;
-    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
-    ASSERT_EQ(GDEFCORE_OK,
-        enable ? gdefcore_module_enable(host_, cs, name, strlen(name))
-               : gdefcore_module_disable(host_, cs, name, strlen(name)));
-    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, name, strlen(name)));
-    gdefcore_changeset_destroy(cs);
+  /* How the enable rates a module's grant of this permission on @p condition. */
+  std::string RiskOf(const char * condition) {
+    GDEFCORE_Condition * c = NULL;
+    EXPECT_EQ(GDEFCORE_OK,
+        gdefcore_condition_parse(condition, strlen(condition), &c, NULL));
+    bool anonymous = (gdefcore_condition_uses(c) & GDEFCORE_CONDITION_USES_PRINCIPAL) == 0;
+    gdefcore_condition_free(c);
+    return gdefcore_access_risk_name(gdefcore_access_grant_risk_on(kEdit,
+        strlen(kEdit), "", 0, condition, strlen(condition), anonymous));
+  }
+
+  std::string DeskLine() {
+    return GrantLine("desk", GDEFCORE_TEMPLATE_EDIT_LABEL,
+               RiskOf(kDeskCondition).c_str(), kDeskCondition) +
+           " Its breadth depends on who may add rows to the relation "
+           "desk.reviewer: anyone who can add a row widens this grant.";
+  }
+
+  void EnableDesk() {
+    ASSERT_EQ(GDEFCORE_OK, Enable("desk", {DeskLine()})) << last_error_;
   }
 
   /* Entities ----------------------------------------------------------- */
 
-  bool Find(const char * type, const char * name,
+  bool FindEntity(const char * type, const char * name,
       char id[GDEFCORE_PUBLIC_ID_LEN + 1]) {
     char ** ids = NULL;
     size_t n = 0;
@@ -289,6 +215,12 @@ class TPerm : public ::testing::Test {
     return have;
   }
 
+  std::string TemplateId(const char * name) {
+    char id[GDEFCORE_PUBLIC_ID_LEN + 1];
+    EXPECT_TRUE(FindEntity("core.template", name, id)) << name;
+    return std::string(id);
+  }
+
   std::string FieldOf(const char * id, const char * field) {
     char ** vals = NULL;
     size_t * lens = NULL;
@@ -305,7 +237,7 @@ class TPerm : public ::testing::Test {
 
   std::string Field(const char * type, const char * name, const char * field) {
     char id[GDEFCORE_PUBLIC_ID_LEN + 1];
-    if (!Find(type, name, id)) {
+    if (!FindEntity(type, name, id)) {
       return "!";
     }
     return FieldOf(id, field);
@@ -314,7 +246,7 @@ class TPerm : public ::testing::Test {
   size_t Revisions(const char * name) {
     char id[GDEFCORE_PUBLIC_ID_LEN + 1];
     size_t count = 0;
-    if (!Find("core.template", name, id) ||
+    if (!FindEntity("core.template", name, id) ||
         gdefcore_entity_revision_count(catalog_, id, GDEFCORE_PUBLIC_ID_LEN,
             &count) != GDEFCORE_OK) {
       return 0;
@@ -324,7 +256,8 @@ class TPerm : public ::testing::Test {
 
   /*
    * Save a template (new or existing) by changeset. With a request it is the
-   * principal's write; with NULL it is the operator's.
+   * principal's write; with NULL it is the operator's. A field left NULL is
+   * not staged, as the editor leaves out the ones it does not show.
    */
   GDEFCORE_Result Edit(const char * name, const std::string & body,
       const char * kind, GDEFCORE_Request * request,
@@ -338,7 +271,7 @@ class TPerm : public ::testing::Test {
         attached == NULL ? 0 : strlen(attached)};
     size_t n = 3;
     GDEFCORE_Result rc;
-    if (!Find("core.template", name, id)) {
+    if (!FindEntity("core.template", name, id)) {
       rc = gdefcore_entity_create(catalog_, "core.template", 13, id, NULL);
       if (rc != GDEFCORE_OK) {
         return rc;
@@ -367,6 +300,42 @@ class TPerm : public ::testing::Test {
     refusal_.assign(r == NULL ? "" : r, rn);
     gdefcore_changeset_destroy(cs);
     return rc;
+  }
+
+  /* gdefcore_template_authorize() on a save of template @p id with this name,
+   * body and kind (an entity that has none yet is created, empty). */
+  GDEFCORE_Result Authorize(const std::string & id, const char * name,
+      const char * kind, GDEFCORE_Request * request) {
+    GDEFCORE_Changeset * cs = NULL;
+    GDEFCORE_Value values[3];
+    const char * slots[3] = {name, "<p>x</p>", kind};
+    size_t lens[3] = {strlen(name), 8, strlen(kind)};
+    OneValue(&values[0], "name", &slots[0], &lens[0]);
+    OneValue(&values[1], "body", &slots[1], &lens[1]);
+    OneValue(&values[2], "kind", &slots[2], &lens[2]);
+    EXPECT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
+    EXPECT_EQ(GDEFCORE_OK,
+        gdefcore_entity_save(cs, id.c_str(), GDEFCORE_PUBLIC_ID_LEN, "en", 2,
+            values, 3));
+    GDEFCORE_Result rc = gdefcore_template_authorize(cs, request);
+    size_t rn = 0;
+    const char * r = gdefcore_changeset_refusal(cs, &rn);
+    refusal_.assign(r == NULL ? "" : r, rn);
+    gdefcore_changeset_destroy(cs);
+    return rc;
+  }
+
+  /* gdefcore_template_can_edit(), 1 or 0 (-1 when it failed). */
+  int CanEdit(GDEFCORE_Request * request, const std::string & id,
+      const char * kind = NULL) {
+    int allowed = -7;
+    GDEFCORE_Result rc = gdefcore_template_can_edit(catalog_, request, id.c_str(),
+        kind, kind == NULL ? 0 : strlen(kind), &allowed);
+    return rc == GDEFCORE_OK ? allowed : -1;
+  }
+
+  int MayEdit(GDEFCORE_Request * request, const char * kind) {
+    return gdefcore_template_may_edit(catalog_, request, kind, strlen(kind));
   }
 
   /* Define a kind by changeset. */
@@ -398,98 +367,97 @@ class TPerm : public ::testing::Test {
     return rc;
   }
 
-  /* The module a declared permission is grouped under, or "!". */
-  std::string PermissionModule(const std::string & label) {
-    char ** ids = NULL;
-    size_t n = 0;
-    std::string out = "!";
-    if (gdefcore_entity_ids(catalog_, "core.permission", 15, &ids, &n) !=
-        GDEFCORE_OK) {
-      return out;
-    }
-    for (size_t i = 0; i < n; i++) {
-      if (FieldOf(ids[i], "label") == label) {
-        out = FieldOf(ids[i], "module");
-      }
-    }
-    gdefcore_ids_free(catalog_, ids, n);
-    return out;
+  bool Declared(const char * label) {
+    GDEFCORE_Access_Permission info;
+    memset(&info, 0, sizeof info);
+    info.size = sizeof info;
+    return gdefcore_access_permission_info(catalog_, label, strlen(label),
+               &info) == GDEFCORE_OK;
   }
 };
-
-const std::string kPaneBody = "<% use title; %><h2><%= title %></h2>";
 
 }  // namespace
 
 /* -------------------------------------------------------------------- */
-/* The permission a kind declares                                        */
+/* The permission                                                        */
 /* -------------------------------------------------------------------- */
 
-TEST_F(TPerm, KindDeclaresItsPermission) {
-  char * label = NULL;
-  size_t label_len = 0;
-  char name[300];
-  GDEFCORE_Request * admin = Admin();
-  /* The built-in kinds have theirs, with a plain-language label. */
+TEST_F(TPerm, EditPermissionIsDeclaredOnce) {
+  GDEFCORE_Access_Permission info;
+  GDEFCORE_Request * admin = AdminReq();
+  memset(&info, 0, sizeof info);
+  info.size = sizeof info;
+  /* One permission, the kernel's, on the template type. */
   ASSERT_EQ(GDEFCORE_OK,
-      gdefcore_template_edit_label(catalog_, "core.pane", 9, &label, &label_len));
-  EXPECT_EQ("Edit templates of kind Pane", Span(label, label_len));
-  EXPECT_EQ(std::string("core"), PermissionModule("Edit templates of kind Pane"));
-  gdefcore_text_free(catalog_, label);
-  EXPECT_EQ(std::string("core"),
-      PermissionModule("Edit templates of kind Page layout"));
-  ASSERT_GT(gdefcore_template_edit_name("core.pane", 9, name, sizeof name), 0u);
-  EXPECT_STREQ("core.template.edit.core.pane", name);
-  /* Granted to nobody, admin included. */
-  EXPECT_EQ(0, gdefcore_template_may_edit(catalog_, admin, "core.pane", 9));
-  EXPECT_EQ(0, gdefcore_template_may_edit(catalog_, admin, "core.page", 9));
-  EXPECT_EQ(0, gdefcore_access_permits(catalog_, admin, name, strlen(name)));
-  /* A kind defined later by changeset declares its own, under its module. */
+      gdefcore_access_permission_info(catalog_, GDEFCORE_TEMPLATE_EDIT_LABEL,
+          strlen(GDEFCORE_TEMPLATE_EDIT_LABEL), &info));
+  EXPECT_STREQ("core", info.module);
+  EXPECT_STREQ("core.template.edit", info.action);
+  EXPECT_STREQ("core.template", info.type_name);
+  EXPECT_STREQ("", info.field);
+  /* The permission of a kind is gone, for the kit's kinds and for a kind
+   * defined later. */
+  EXPECT_FALSE(Declared("Edit templates of kind Pane"));
   ASSERT_EQ(GDEFCORE_OK, PutKind("blog.card", "Blog card"));
-  ASSERT_EQ(GDEFCORE_OK,
-      gdefcore_template_edit_label(catalog_, "blog.card", 9, &label, &label_len));
-  EXPECT_EQ("Edit templates of kind Blog card", Span(label, label_len));
-  EXPECT_EQ(std::string("blog"), PermissionModule(Span(label, label_len)));
-  gdefcore_text_free(catalog_, label);
-  /* A kind that does not exist has no permission to hold. */
-  EXPECT_EQ(GDEFCORE_ERR_INVALID,
-      gdefcore_template_edit_label(catalog_, "no.such", 7, &label, &label_len));
-  EXPECT_EQ(GDEFCORE_ERR_INVALID,
-      gdefcore_template_kind_declare(catalog_, "no.such", 7));
+  EXPECT_FALSE(Declared("Edit templates of kind Blog card"));
   /* Declaring again changes nothing. */
-  EXPECT_EQ(GDEFCORE_OK, gdefcore_template_kind_declare(catalog_, "core.pane", 9));
+  EXPECT_EQ(GDEFCORE_OK, gdefcore_template_edit_declare(catalog_));
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, gdefcore_template_edit_declare(NULL));
+  /* Granted to nobody, admin included. */
+  EXPECT_EQ(0, gdefcore_access_permits(catalog_, admin, kEdit, strlen(kEdit)));
+  EXPECT_EQ(0, MayEdit(admin, "core.pane"));
+  EXPECT_EQ(0, MayEdit(admin, "core.page"));
 }
 
-TEST_F(TPerm, GrantFlow) {
+TEST_F(TPerm, KindGrantEditsOnlyThatKind) {
   /* The control for every "not allowed" below: a grant is what changes it. */
   GDEFCORE_Request * pane = Who("pane-editors", {"core.pane"});
   GDEFCORE_Request * nobody = Who("nobody", {});
-  GDEFCORE_Request * admin = Admin();
-  char name[300];
-  EXPECT_EQ(1, gdefcore_template_may_edit(catalog_, pane, "core.pane", 9));
-  EXPECT_EQ(0, gdefcore_template_may_edit(catalog_, pane, "core.page", 9));
-  EXPECT_EQ(0, gdefcore_template_may_edit(catalog_, pane, "no.such", 7));
-  EXPECT_EQ(0, gdefcore_template_may_edit(catalog_, nobody, "core.pane", 9));
-  EXPECT_EQ(0, gdefcore_template_may_edit(catalog_, Anonymous(), "core.pane", 9));
+  GDEFCORE_Request * both = Who("both", {"core.pane", "core.page"});
+  GDEFCORE_Request * admin = AdminReq();
+  const std::string recent = TemplateId("recent");  /* a pane */
+  const std::string layout = TemplateId("layout");  /* a page layout */
+  /* A principal granted for kind core.pane edits panes and is refused pages. */
+  EXPECT_EQ(1, CanEdit(pane, recent));
+  EXPECT_EQ(0, CanEdit(pane, layout));
+  EXPECT_EQ(1, MayEdit(pane, "core.pane"));
+  EXPECT_EQ(0, MayEdit(pane, "core.page"));
+  EXPECT_EQ(0, MayEdit(pane, "no.such"));
+  /* Both kinds, both. */
+  EXPECT_EQ(1, CanEdit(both, recent));
+  EXPECT_EQ(1, CanEdit(both, layout));
+  /* No grant, no request, no principal: no. */
+  EXPECT_EQ(0, CanEdit(nobody, recent));
+  EXPECT_EQ(0, CanEdit(Anonymous(), recent));
+  EXPECT_EQ(0, MayEdit(nobody, "core.pane"));
+  EXPECT_EQ(0, MayEdit(Anonymous(), "core.pane"));
   EXPECT_EQ(0, gdefcore_template_may_edit(catalog_, NULL, "core.pane", 9));
-  EXPECT_EQ(0, gdefcore_template_may_edit(catalog_, admin, "core.pane", 9));
-  /* The admin role is granted it by a changeset like anyone's, and then holds
-   * it. */
+  EXPECT_EQ(0, MayEdit(admin, "core.pane"));
+  /* The decision is the one every other write asks. */
   {
-    char * label = NULL;
-    size_t label_len = 0;
+    int allowed = -1;
     ASSERT_EQ(GDEFCORE_OK,
-        gdefcore_template_edit_label(catalog_, "core.pane", 9, &label,
-            &label_len));
+        gdefcore_access_can(catalog_, pane, kEdit, strlen(kEdit),
+            "core.template", 13, recent.c_str(), &allowed));
+    EXPECT_EQ(1, allowed);
     ASSERT_EQ(GDEFCORE_OK,
-        gdefcore_access_grant(catalog_, "admin", 5, label, label_len, "core.role",
-            9));
-    gdefcore_text_free(catalog_, label);
+        gdefcore_access_can(catalog_, pane, kEdit, strlen(kEdit),
+            "core.template", 13, layout.c_str(), &allowed));
+    EXPECT_EQ(0, allowed);
   }
-  EXPECT_EQ(1, gdefcore_template_may_edit(catalog_, admin, "core.pane", 9));
-  EXPECT_EQ(0, gdefcore_template_may_edit(catalog_, admin, "core.page", 9));
-  ASSERT_GT(gdefcore_template_edit_name("core.pane", 9, name, sizeof name), 0u);
-  EXPECT_EQ(1, gdefcore_access_permits(catalog_, admin, name, strlen(name)));
+  /* A template that is not there, and bad arguments. */
+  EXPECT_EQ(0, CanEdit(pane, std::string("0123456789012345678901234567890123456")));
+  EXPECT_EQ(GDEFCORE_ERR_INVALID,
+      gdefcore_template_can_edit(catalog_, pane, NULL, NULL, 0, NULL));
+  /* The admin role is granted it by a changeset like anyone's, and then holds
+   * it, for the kind the condition names. */
+  ASSERT_EQ(GDEFCORE_OK,
+      GrantWhen("admin", GDEFCORE_TEMPLATE_EDIT_LABEL, KindIs("core.pane")));
+  /* (A request remembers its answers, so the next question is a new request's.) */
+  admin = AdminReq();
+  EXPECT_EQ(1, MayEdit(admin, "core.pane"));
+  EXPECT_EQ(0, MayEdit(admin, "core.page"));
+  EXPECT_EQ(1, gdefcore_access_permits(catalog_, admin, kEdit, strlen(kEdit)));
   EXPECT_EQ(0, gdefcore_access_permits(catalog_, admin, "core.template.edit.", 19));
   EXPECT_EQ(0, gdefcore_access_permits(catalog_, admin, "read", 4));
 }
@@ -529,7 +497,7 @@ TEST_F(TPerm, NewTemplateNeedsThePermissionOfItsKind) {
   GDEFCORE_Request * denied = Who("page-editors", {"core.page"});
   char id[GDEFCORE_PUBLIC_ID_LEN + 1];
   EXPECT_EQ(GDEFCORE_ERR_INVALID, Edit("card", kPaneBody, "core.pane", denied));
-  EXPECT_FALSE(Find("core.template", "card", id) &&
+  EXPECT_FALSE(FindEntity("core.template", "card", id) &&
                Field("core.template", "card", "body") != "");
   ASSERT_EQ(GDEFCORE_OK, Edit("card", kPaneBody, "core.pane", allowed));
   EXPECT_EQ(kPaneBody, Field("core.template", "card", "body"));
@@ -547,7 +515,12 @@ TEST_F(TPerm, MovingNeedsBothKinds) {
   EXPECT_EQ("core.pane", Field("core.template", "recent", "kind"));
   EXPECT_EQ(GDEFCORE_ERR_INVALID, Edit("recent", plain, "core.page", only_old));
   EXPECT_EQ("core.pane", Field("core.template", "recent", "kind"));
+  EXPECT_EQ(kNotAllowed, refusal_);
+  /* The same question, asked of the decision. */
+  EXPECT_EQ(0, CanEdit(only_new, TemplateId("recent"), "core.page"));
+  EXPECT_EQ(0, CanEdit(only_old, TemplateId("recent"), "core.page"));
   /* Control: with both, the move happens... */
+  EXPECT_EQ(1, CanEdit(both, TemplateId("recent"), "core.page"));
   ASSERT_EQ(GDEFCORE_OK, Edit("recent", plain, "core.page", both));
   EXPECT_EQ("core.page", Field("core.template", "recent", "kind"));
   EXPECT_EQ(plain, Field("core.template", "recent", "body"));
@@ -563,7 +536,7 @@ TEST_F(TPerm, RevertIsChecked) {
   char id[GDEFCORE_PUBLIC_ID_LEN + 1];
   const std::string original = Field("core.template", "recent", "body");
   ASSERT_EQ(GDEFCORE_OK, Edit("recent", kPaneBody, "core.pane", allowed));
-  ASSERT_TRUE(Find("core.template", "recent", id));
+  ASSERT_TRUE(FindEntity("core.template", "recent", id));
   for (int pass = 0; pass < 2; pass++) {
     GDEFCORE_Changeset * cs = NULL;
     GDEFCORE_Request * r = pass == 0 ? denied : allowed;
@@ -585,154 +558,362 @@ TEST_F(TPerm, RevertIsChecked) {
   }
 }
 
-/* AD-34: a struct with a size member is accepted at exactly its own size. The
- * one here is what the decision hook is told of a template write; it is the
- * core that fills it (size_structs.h lists every struct). */
-TEST_F(TPerm, TheStructsHereAreAcceptedAtOnlyTheirOwnSize) {
-  GDEFCORE_Request * pages = Who("page-editors", {"core.page", "core.pane"});
-  const std::string layout = Field("core.template", "layout", "body");
-  judge_.allowed = "internal";
-  Install(0, JudgeFn, &judge_);
-  ModuleOn("judge");
-  ASSERT_EQ(GDEFCORE_OK,
-      Edit("layout", layout + "<!-- sized -->", "core.page", pages, "internal"));
-  ASSERT_EQ(1, judge_.calls);
-  const std::map<std::string, size_structs::Probe> probes = {
-      GDEFCORE_SIZE_PROBE(GDEFCORE_Template_Write_Hook, {
-        return judge_.size == size;
-      }),
-  };
-  size_structs::Run("tests/test_tpermission.cpp", probes);
-}
-
 /* -------------------------------------------------------------------- */
-/* The decision hook                                                     */
+/* A module's grant, and nothing that denies                             */
 /* -------------------------------------------------------------------- */
 
-TEST_F(TPerm, ModuleDeniesPageTemplatesUnlessClassificationMatches) {
-  GDEFCORE_Request * pages = Who("page-editors", {"core.page", "core.pane"});
+TEST_F(TPerm, ClassificationGrantComesFromTheModuleAndGoesWithIt) {
   const std::string layout = Field("core.template", "layout", "body");
   const std::string edited = layout + "<!-- edit -->";
-  char post[GDEFCORE_PUBLIC_ID_LEN + 1];
-  /* Before the module is on, the permission alone decides (the control). */
-  judge_.allowed = "public";
-  Install(0, JudgeFn, &judge_);
-  ASSERT_EQ(GDEFCORE_OK, Edit("layout", edited, "core.page", pages, "internal"));
-  EXPECT_EQ(0, judge_.calls) << "an installed but disabled module is not asked";
-  ASSERT_EQ(GDEFCORE_OK, Edit("layout", layout, "core.page", pages, "internal"));
-  ModuleOn("judge");
-  /* The classification does not match the principal's grant: refused. */
-  EXPECT_EQ(GDEFCORE_ERR_INVALID,
-      Edit("layout", edited, "core.page", pages, "internal"));
-  EXPECT_EQ(1, judge_.calls);
-  EXPECT_EQ(kNotAllowed, refusal_);
-  EXPECT_EQ(std::string::npos, refusal_.find("judge"))
-      << "the module's name is not part of what the editor is told";
+  ASSERT_EQ(GDEFCORE_OK, Edit("layout", layout, "core.page", NULL, "internal"));
+  ASSERT_EQ(GDEFCORE_OK, Edit("entity", Field("core.template", "entity", "body"),
+                              "core.pane", NULL, "internal"));
+  InstallDesk();
+  std::string person = Principal();
+  std::string stranger = Principal();
+  /* Listed and not enabled: it grants nothing. */
+  EnableDesk();
+  ListReviewer(person);
+  ASSERT_EQ(GDEFCORE_OK, Disable("desk"));
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, Edit("layout", edited, "core.page", Req(person)));
   EXPECT_EQ(layout, Field("core.template", "layout", "body"));
-  /* What the hook is told. */
-  EXPECT_EQ(sizeof(GDEFCORE_Template_Write_Hook), judge_.size);
-  EXPECT_EQ("layout", judge_.name);
-  EXPECT_EQ("core.page", judge_.kind);
-  EXPECT_EQ("core.page", judge_.old_kind);
-  EXPECT_EQ("internal", judge_.classification);
-  EXPECT_EQ("", judge_.attached);
-  /* Control: when it matches, the same edit is allowed. */
-  judge_.allowed = "internal";
-  ASSERT_EQ(GDEFCORE_OK, Edit("layout", edited, "core.page", pages, "internal"));
+  EXPECT_EQ(0, CanEdit(Req(person), TemplateId("layout")));
+  /* Enabled, it grants the pages classified internal to the people it lists,
+   * and nothing else. */
+  EnableDesk();
+  ListReviewer(person);
+  EXPECT_EQ(1, CanEdit(Req(person), TemplateId("layout")));
+  ASSERT_EQ(GDEFCORE_OK, Edit("layout", edited, "core.page", Req(person)));
   EXPECT_EQ(edited, Field("core.template", "layout", "body"));
-  EXPECT_EQ(2, judge_.calls);
-  /* Control: a kind the module has no opinion about is not touched by it. */
-  ASSERT_EQ(GDEFCORE_OK, Edit("recent", kPaneBody, "core.pane", pages));
-  EXPECT_EQ("core.pane", judge_.kind);
-  EXPECT_EQ(3, judge_.calls) << "the hook is asked about every template write";
-  /* The entity a template is attached to is in the arguments. */
-  ASSERT_EQ(GDEFCORE_OK,
-      gdefcore_entity_create(catalog_, "site.post", 9, post, NULL));
-  ASSERT_EQ(GDEFCORE_OK,
-      Edit("recent", kPaneBody + " ", "core.pane", pages, "", post));
-  EXPECT_EQ(post, judge_.attached);
-  EXPECT_EQ("site.post", judge_.attached_type);
-}
-
-TEST_F(TPerm, AnyDenyWinsAndNoOpinionStands) {
-  GDEFCORE_Request * pages = Who("page-editors", {"core.page", "core.pane"});
-  const std::string layout = Field("core.template", "layout", "body");
-  judge_.allowed = "public";
-  Install(0, JudgeFn, &judge_);
-  Install(1, MuteFn, &mute_calls_);
-  ModuleOn("mute");
-  /* Control: a subscriber with no opinion leaves the write standing. */
-  ASSERT_EQ(GDEFCORE_OK,
-      Edit("layout", layout + "<!-- 1 -->", "core.page", pages, "public"));
-  EXPECT_EQ(1, mute_calls_);
-  /* A second subscriber that denies wins over the one with no opinion, and
-   * over an allow. */
-  ModuleOn("judge");
+  /* Not a person it does not list. */
   EXPECT_EQ(GDEFCORE_ERR_INVALID,
-      Edit("layout", layout + "<!-- 2 -->", "core.page", pages, "internal"));
-  EXPECT_EQ(layout + "<!-- 1 -->", Field("core.template", "layout", "body"));
-  /* Control: the judge allowing is not a deny. */
-  ASSERT_EQ(GDEFCORE_OK,
-      Edit("layout", layout + "<!-- 3 -->", "core.page", pages, "public"));
+      Edit("layout", edited + " ", "core.page", Req(stranger)));
+  EXPECT_EQ(edited, Field("core.template", "layout", "body"));
+  /* Not a pane, though the pane is classified internal too. */
+  EXPECT_EQ(GDEFCORE_ERR_INVALID,
+      Edit("entity", kPaneBody, "core.pane", Req(person)));
+  /* Not a page that is classified otherwise. */
+  ASSERT_EQ(GDEFCORE_OK, Edit("layout", edited, "core.page", NULL, "public"));
+  EXPECT_EQ(0, CanEdit(Req(person), TemplateId("layout")));
+  EXPECT_EQ(GDEFCORE_ERR_INVALID,
+      Edit("layout", edited + " ", "core.page", Req(person)));
+  /* ...and an internal page cannot be written into another classification:
+   * the grant covers the page as it is and as it would be left. */
+  ASSERT_EQ(GDEFCORE_OK, Edit("layout", edited, "core.page", NULL, "internal"));
+  EXPECT_EQ(GDEFCORE_ERR_INVALID,
+      Edit("layout", edited + " ", "core.page", Req(person), "public"));
+  EXPECT_EQ("internal", Field("core.template", "layout", "classification"));
+  /* The module goes away, and so does the grant: its people can no longer
+   * edit those pages. */
+  ASSERT_EQ(GDEFCORE_OK, Disable("desk"));
+  EXPECT_EQ(0, CanEdit(Req(person), TemplateId("layout")));
+  EXPECT_EQ(GDEFCORE_ERR_INVALID,
+      Edit("layout", edited + " ", "core.page", Req(person)));
+  EXPECT_EQ(kNotAllowed, refusal_);
+  EXPECT_EQ(edited, Field("core.template", "layout", "body"));
+  /* Control: enabled again, the same write is allowed. */
+  EnableDesk();
+  ListReviewer(person);
+  ASSERT_EQ(GDEFCORE_OK, Edit("layout", edited + " ", "core.page", Req(person)));
 }
 
-TEST_F(TPerm, FailingSubscriberFailsTheRequest) {
-  GDEFCORE_Request * pane = Who("pane-editors", {"core.pane"});
-  Install(2, BrokenFn, &broken_calls_);
-  /* The control: the module is installed and not enabled, so it is not asked. */
-  ASSERT_EQ(GDEFCORE_OK, Edit("recent", kPaneBody, "core.pane", pane));
-  EXPECT_EQ(0, broken_calls_);
-  ModuleOn("broken");
-  GDEFCORE_Result rc = Edit("recent", kPaneBody + " ", "core.pane", pane);
-  EXPECT_NE(GDEFCORE_OK, rc);
-  EXPECT_EQ(1, broken_calls_);
-  EXPECT_EQ(kPaneBody, Field("core.template", "recent", "body"));
-  /* The operator's changeset has no request and no principal to ask about. */
-  EXPECT_EQ(GDEFCORE_OK, Edit("recent", kPaneBody + " ", "core.pane", NULL));
-  EXPECT_EQ(1, broken_calls_);
-}
-
-TEST_F(TPerm, ASaveThatOmitsAFieldKeepsIt) {
+TEST_F(TPerm, ASaveThatOmitsAFieldIsAskedAboutWithTheStoredOne) {
   /* What an editor relies on: it saves name, body and kind, and the template's
-   * classification, which it does not show, is still there afterwards. */
+   * classification, which it does not show, is still there afterwards and is
+   * what a classification grant is decided on. */
   GDEFCORE_Request * pane = Who("pane-editors", {"core.pane"});
+  const std::string layout = Field("core.template", "layout", "body");
   ASSERT_EQ(GDEFCORE_OK, Edit("recent", kPaneBody, "core.pane", NULL, "secret"));
   EXPECT_EQ("secret", Field("core.template", "recent", "classification"));
-  ASSERT_EQ(GDEFCORE_OK,
-      Edit("recent", kPaneBody + " ", "core.pane", pane));
+  ASSERT_EQ(GDEFCORE_OK, Edit("recent", kPaneBody + " ", "core.pane", pane));
   EXPECT_EQ("secret", Field("core.template", "recent", "classification"));
+  /* The module's people edit an internal page without saying so. */
+  ASSERT_EQ(GDEFCORE_OK, Edit("layout", layout, "core.page", NULL, "internal"));
+  InstallDesk();
+  EnableDesk();
+  std::string person = Reviewer();
+  ASSERT_EQ(GDEFCORE_OK,
+      Edit("layout", layout + "<!-- 1 -->", "core.page", Req(person)));
+  EXPECT_EQ("internal", Field("core.template", "layout", "classification"));
+  /* A draft is asked about the same way as a save. */
+  {
+    char id[GDEFCORE_PUBLIC_ID_LEN + 1];
+    GDEFCORE_Changeset * cs = NULL;
+    GDEFCORE_Value values[3];
+    const std::string body = layout + "<!-- draft -->";
+    const char * slots[3] = {"layout", body.c_str(), "core.page"};
+    size_t lens[3] = {6, body.size(), 9};
+    ASSERT_TRUE(FindEntity("core.template", "layout", id));
+    OneValue(&values[0], "name", &slots[0], &lens[0]);
+    OneValue(&values[1], "body", &slots[1], &lens[1]);
+    OneValue(&values[2], "kind", &slots[2], &lens[2]);
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_entity_save_draft(cs, id, GDEFCORE_PUBLIC_ID_LEN, "en", 2, values,
+            3));
+    EXPECT_EQ(GDEFCORE_OK, gdefcore_template_authorize(cs, Req(person)));
+    EXPECT_EQ(GDEFCORE_ERR_INVALID, gdefcore_template_authorize(cs, Req(Principal())));
+    gdefcore_changeset_destroy(cs);
+  }
+  /* The control: the same save of a page classified otherwise is refused. */
+  ASSERT_EQ(GDEFCORE_OK, Edit("layout", layout, "core.page", NULL, "public"));
+  EXPECT_EQ(GDEFCORE_ERR_INVALID,
+      Edit("layout", layout + "<!-- 2 -->", "core.page", Req(person)));
 }
+
+/* A grant that names no one, supplied by a module, is held by whoever its
+ * condition covers while the module is enabled, and by no one after: nothing
+ * of it is left behind. */
+TEST_F(TPerm, AGrantWithNoRelationGoesWithItsModuleToo) {
+  static const char kBadge[] =
+      "(and (= field.kind \"core.page\") (= field.classification \"internal\"))";
+  const std::string layout = Field("core.template", "layout", "body");
+  ASSERT_EQ(GDEFCORE_OK, Edit("layout", layout, "core.page", NULL, "internal"));
+  ModDef * m = NewMod("badge");
+  m->Grant(GDEFCORE_TEMPLATE_EDIT_LABEL, GDEFCORE_TEMPLATE_TYPE, kBadge);
+  ASSERT_EQ(GDEFCORE_OK, Install(m));
+  std::string anyone = Principal();
+  const std::string id = TemplateId("layout");
+  /* Installed, not enabled: it grants nothing. */
+  EXPECT_EQ(0, CanEdit(Req(anyone), id));
+  ASSERT_EQ(GDEFCORE_OK,
+      Enable("badge", {GrantLine("badge", GDEFCORE_TEMPLATE_EDIT_LABEL,
+                           RiskOf(kBadge).c_str(), kBadge)}))
+      << last_error_;
+  EXPECT_EQ(1, CanEdit(Req(anyone), id));
+  EXPECT_EQ(1, CanEdit(Anonymous(), id)) << "it names no principal, so it reaches all";
+  ASSERT_EQ(GDEFCORE_OK,
+      Edit("layout", layout + "<!-- 1 -->", "core.page", Req(anyone)));
+  /* A page classified otherwise is not covered. */
+  ASSERT_EQ(GDEFCORE_OK, Edit("layout", layout, "core.page", NULL, "public"));
+  EXPECT_EQ(0, CanEdit(Req(anyone), id));
+  ASSERT_EQ(GDEFCORE_OK, Edit("layout", layout, "core.page", NULL, "internal"));
+  EXPECT_EQ(1, CanEdit(Req(anyone), id));
+  /* Disabled, it is gone from the very next answer. */
+  ASSERT_EQ(GDEFCORE_OK, Disable("badge"));
+  EXPECT_EQ(0, CanEdit(Req(anyone), id));
+  EXPECT_EQ(0, CanEdit(Anonymous(), id));
+  EXPECT_EQ(GDEFCORE_ERR_INVALID,
+      Edit("layout", layout + "<!-- 2 -->", "core.page", Req(anyone)));
+  EXPECT_EQ(kNotAllowed, refusal_);
+}
+
+TEST_F(TPerm, NothingDeniesWhatAGrantAllows) {
+  GDEFCORE_Request * pages = Who("page-editors", {"core.page", "core.pane"});
+  const std::string layout = Field("core.template", "layout", "body");
+  /* The module that used to refuse every page not classified as its people
+   * were: now it grants for them and has no opinion about anyone else. */
+  InstallDesk();
+  EnableDesk();
+  ASSERT_EQ(GDEFCORE_OK, Edit("layout", layout, "core.page", NULL, "public"));
+  EXPECT_EQ(1, CanEdit(pages, TemplateId("layout")));
+  ASSERT_EQ(GDEFCORE_OK,
+      Edit("layout", layout + "<!-- 1 -->", "core.page", pages));
+  ASSERT_EQ(GDEFCORE_OK,
+      Edit("layout", layout + "<!-- 2 -->", "core.page", pages, "internal"));
+  /* A role's grant and a module's both hold, and either is enough. */
+  std::string person = Reviewer("page-editors");
+  ASSERT_EQ(GDEFCORE_OK,
+      Edit("layout", layout + "<!-- 3 -->", "core.page", Req(person), "public"));
+}
+
+TEST_F(TPerm, NoModuleHookCanRefuseAWrite) {
+  GDEFCORE_Request * pane = Who("pane-editors", {"core.pane"});
+  int calls = 0;
+  ModDef * m = NewMod("former");
+  m->Sub(FormerHook(), GDEFCORE_HOOK_DECISION, DenyFn, &calls);
+  ASSERT_EQ(GDEFCORE_OK, Install(m));
+  ASSERT_EQ(GDEFCORE_OK, Enable("former", {})) << last_error_;
+  /* A subscriber to the hook the veto was fired through, denying every time,
+   * is never asked and cannot cancel a role's allow. */
+  ASSERT_EQ(GDEFCORE_OK, Edit("recent", kPaneBody, "core.pane", pane));
+  EXPECT_EQ(kPaneBody, Field("core.template", "recent", "body"));
+  ASSERT_EQ(GDEFCORE_OK, Edit("recent", kPaneBody + " ", "core.pane", pane));
+  EXPECT_EQ(0, calls);
+  EXPECT_EQ(1, CanEdit(pane, TemplateId("recent")));
+}
+
+TEST_F(TPerm, AFailingCallbackGrantsNothingAndTakesNothingAway) {
+  GDEFCORE_Request * pane = Who("pane-editors", {"core.pane"});
+  GDEFCORE_Request * nobody = Who("nobody", {});
+  ModDef * m = NewMod("gate");
+  m->Callback("pass", GDEFCORE_CALLBACK_OPERATION, GDEFCORE_TEMPLATE_EDIT_LABEL,
+      GDEFCORE_TEMPLATE_TYPE, "", GateFn, &g_gate);
+  ASSERT_EQ(GDEFCORE_OK, Install(m));
+  ASSERT_EQ(GDEFCORE_OK,
+      Enable("gate", {"Module gate decides Edit templates per entity with its "
+                      "callback pass (operation scope, high risk): its breadth "
+                      "cannot be judged."}))
+      << last_error_;
+  /* It fails: the principal a role allows is allowed (and it is not asked),
+   * and the one nothing allows is refused. */
+  g_gate.fail = true;
+  ASSERT_EQ(GDEFCORE_OK, Edit("recent", kPaneBody, "core.pane", pane));
+  EXPECT_EQ(0, g_gate.calls) << "a source is asked only when no earlier one allowed";
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, Edit("recent", kPaneBody + " ", "core.pane", nobody));
+  EXPECT_EQ(kNotAllowed, refusal_);
+  EXPECT_GT(g_gate.calls, 0);
+  EXPECT_EQ(kPaneBody, Field("core.template", "recent", "body"));
+  /* Control: the same callback, not failing, is one more source that grants. */
+  g_gate.fail = false;
+  Gate fresh;
+  g_gate = fresh;
+  GDEFCORE_Request * other = Req(Principal());
+  ASSERT_EQ(GDEFCORE_OK, Edit("recent", kPaneBody + " ", "core.pane", other));
+  EXPECT_GT(g_gate.calls, 0);
+}
+
+/* A grant whose condition cannot be decided (it rests on a relation of a
+ * module that has since been disabled) grants nothing: the principal it was
+ * the only grant of is refused like any other, with the one sentence and no
+ * error, and the principal another grant allows is allowed. */
+TEST_F(TPerm, AFailingConditionGrantsNothingAndTakesNothingAway) {
+  InstallDesk();
+  EnableDesk();
+  Role("watchers");
+  Role("pane-editors");
+  ASSERT_EQ(GDEFCORE_OK,
+      GrantWhen("watchers", GDEFCORE_TEMPLATE_EDIT_LABEL,
+          "(related \"desk.reviewer\" (principal))"));
+  ASSERT_EQ(GDEFCORE_OK,
+      GrantWhen("pane-editors", GDEFCORE_TEMPLATE_EDIT_LABEL, KindIs("core.pane")));
+  std::string only = Principal("watchers");
+  std::string both = Principal("watchers");
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_access_principal_add_role(catalog_, both.c_str(), both.size(),
+          "pane-editors", 12));
+  /* While the relation exists, the watchers' grant is one that can hold (it
+   * does not: nobody is listed). */
+  EXPECT_EQ(0, CanEdit(Req(only), TemplateId("recent")));
+  ASSERT_EQ(GDEFCORE_OK, Disable("desk"));
+  /* Now it cannot be decided. */
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, Edit("recent", kPaneBody, "core.pane", Req(only)));
+  EXPECT_EQ(kNotAllowed, refusal_);
+  EXPECT_EQ(GDEFCORE_OK, Edit("recent", kPaneBody, "core.pane", Req(both)));
+  EXPECT_EQ(kPaneBody, Field("core.template", "recent", "body"));
+}
+
+/* -------------------------------------------------------------------- */
+/* One decision                                                          */
+/* -------------------------------------------------------------------- */
 
 TEST_F(TPerm, AuthorizeCanBeAskedFirst) {
   GDEFCORE_Request * allowed = Who("pane-editors", {"core.pane"});
   GDEFCORE_Request * denied = Who("nobody", {});
-  char id[GDEFCORE_PUBLIC_ID_LEN + 1];
-  GDEFCORE_Changeset * cs = NULL;
-  GDEFCORE_Value values[3];
-  const char * body = "<p>x</p>";
-  const char * kind = "core.pane";
-  const char * name = "recent";
-  const char * slots[3] = {name, body, kind};
-  size_t lens[3] = {strlen(name), strlen(body), strlen(kind)};
-  ASSERT_TRUE(Find("core.template", "recent", id));
-  OneValue(&values[0], "name", &slots[0], &lens[0]);
-  OneValue(&values[1], "body", &slots[1], &lens[1]);
-  OneValue(&values[2], "kind", &slots[2], &lens[2]);
-  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
-  ASSERT_EQ(GDEFCORE_OK,
-      gdefcore_entity_save(cs, id, GDEFCORE_PUBLIC_ID_LEN, "en", 2, values, 3));
-  EXPECT_EQ(GDEFCORE_OK, gdefcore_template_authorize(cs, allowed));
-  EXPECT_EQ(GDEFCORE_ERR_INVALID, gdefcore_template_authorize(cs, denied));
-  size_t n = 0;
-  const char * r = gdefcore_changeset_refusal(cs, &n);
-  ASSERT_NE(nullptr, r);
-  EXPECT_EQ(kNotAllowed, Span(r, n));
-  EXPECT_EQ(GDEFCORE_ERR_INVALID, gdefcore_template_authorize(cs, NULL));
-  gdefcore_changeset_destroy(cs);
+  const std::string recent = TemplateId("recent");
+  EXPECT_EQ(GDEFCORE_OK, Authorize(recent, "recent", "core.pane", allowed));
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, Authorize(recent, "recent", "core.pane", denied));
+  EXPECT_EQ(kNotAllowed, refusal_);
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, Authorize(recent, "recent", "core.pane", NULL));
   /* A changeset that writes no template is nobody's business. */
+  GDEFCORE_Changeset * cs = NULL;
   ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
   EXPECT_EQ(GDEFCORE_OK, gdefcore_template_authorize(cs, denied));
   gdefcore_changeset_destroy(cs);
+}
+
+/* The editor's tab, its button and the write agree for every principal of a
+ * fixture, against a model written apart from the library: a grant of a kind,
+ * and the module's grant of the pages classified internal for its people. */
+TEST_F(TPerm, TheEditorsAnswersAreTheWritesForEveryPrincipal) {
+  struct Person {
+    const char * name;
+    GDEFCORE_Request * request;
+    std::set<std::string> kinds;
+    bool reviewer;
+  };
+  const std::string layout_body = Field("core.template", "layout", "body");
+  ASSERT_EQ(GDEFCORE_OK, Edit("layout", layout_body, "core.page", NULL, "internal"));
+  InstallDesk();
+  EnableDesk();
+  std::vector<Person> people;
+  people.push_back({"pane", Who("pane-editors", {"core.pane"}), {"core.pane"}, false});
+  people.push_back({"page", Who("page-editors", {"core.page"}), {"core.page"}, false});
+  people.push_back({"both", Who("both", {"core.pane", "core.page"}),
+      {"core.pane", "core.page"}, false});
+  people.push_back({"nobody", Who("nobody", {}), {}, false});
+  people.push_back({"anonymous", Anonymous(), {}, false});
+  people.push_back({"reviewer", Req(Reviewer()), {}, true});
+  {
+    Role("pane-reviewers");
+    EXPECT_EQ(GDEFCORE_OK,
+        GrantWhen("pane-reviewers", GDEFCORE_TEMPLATE_EDIT_LABEL, KindIs("core.pane")));
+    people.push_back({"pane-reviewer", Req(Reviewer("pane-reviewers")),
+        {"core.pane"}, true});
+  }
+  struct Tpl {
+    const char * name;
+    const char * kind;
+    const char * classification;
+  };
+  const Tpl templates[] = {{"recent", "core.pane", ""}, {"entity", "core.pane", ""},
+      {"field", "core.pane", ""}, {"layout", "core.page", "internal"}};
+  /* The model: the permission is held for a template of this kind and
+   * classification by a kind grant, or by the module for its people. */
+  auto held = [](const Person & p, const std::string & kind,
+                  const std::string & classification) {
+    return p.kinds.count(kind) > 0 ||
+           (p.reviewer && kind == "core.page" && classification == "internal");
+  };
+  int yes = 0;
+  int no = 0;
+  for (const Person & p : people) {
+    for (const Tpl & t : templates) {
+      std::string id = TemplateId(t.name);
+      for (const char * dest : {"", "core.pane", "core.page"}) {
+        std::string to = dest[0] == '\0' ? t.kind : dest;
+        /* The template is stored, so the grant must hold on it as it is and
+         * as it would be left. */
+        bool want = held(p, t.kind, t.classification) &&
+                    held(p, to, t.classification);
+        SCOPED_TRACE(std::string(p.name) + " " + t.name + " -> " + to);
+        /* The decision. */
+        EXPECT_EQ(want ? 1 : 0, CanEdit(p.request, id, dest[0] == '\0' ? NULL : dest));
+        /* The write's check, on a save that leaves it of this kind. */
+        EXPECT_EQ(want ? GDEFCORE_OK : GDEFCORE_ERR_INVALID,
+            Authorize(id, t.name, to.c_str(), p.request));
+        EXPECT_EQ(want ? "" : kNotAllowed, refusal_);
+        if (dest[0] == '\0') {
+          /* The write itself, which changes nothing but a revision. */
+          std::string body = Field("core.template", t.name, "body");
+          EXPECT_EQ(want ? GDEFCORE_OK : GDEFCORE_ERR_INVALID,
+              Edit(t.name, body, t.kind, p.request));
+          /* The route's question. */
+          int allowed = -1;
+          ASSERT_EQ(GDEFCORE_OK,
+              gdefcore_access_can(catalog_, p.request, kEdit, strlen(kEdit),
+                  "core.template", 13, id.c_str(), &allowed));
+          EXPECT_EQ(want ? 1 : 0, allowed);
+        }
+        yes += want;
+        no += !want;
+      }
+    }
+    /* The list of kinds: some template of the kind may be edited. */
+    for (const char * kind : {"core.pane", "core.page"}) {
+      bool some = false;
+      for (const Tpl & t : templates) {
+        some = some || (std::string(t.kind) == kind &&
+                        held(p, t.kind, t.classification));
+      }
+      EXPECT_EQ(some ? 1 : 0, MayEdit(p.request, kind)) << p.name << " " << kind;
+    }
+    /* A new template has no stored kind: the kind it is to be is the question. */
+    for (const char * kind : {"core.pane", "core.page"}) {
+      char fresh[GDEFCORE_PUBLIC_ID_LEN + 1];
+      ASSERT_EQ(GDEFCORE_OK,
+          gdefcore_entity_create(catalog_, "core.template", 13, fresh, NULL));
+      bool want = held(p, kind, "");
+      EXPECT_EQ(want ? GDEFCORE_OK : GDEFCORE_ERR_INVALID,
+          Authorize(fresh, "brand-new", kind, p.request))
+          << p.name << " new " << kind;
+      EXPECT_EQ(want ? 1 : 0, CanEdit(p.request, fresh, kind));
+      yes += want;
+      no += !want;
+    }
+  }
+  EXPECT_GT(yes, 10);
+  EXPECT_GT(no, 10);
 }
 
 /* -------------------------------------------------------------------- */
@@ -740,7 +921,7 @@ TEST_F(TPerm, AuthorizeCanBeAskedFirst) {
 /* -------------------------------------------------------------------- */
 
 TEST_F(TPerm, SampleRenderIsGatedAndNeverShared) {
-  GDEFCORE_Request * allowed = Who("pane-editors", {"core.pane", "core.page"});
+  GDEFCORE_Request * allowed = Who("editors", {"core.pane", "core.page"});
   GDEFCORE_Request * denied = Who("nobody", {});
   char * out = NULL;
   size_t out_len = 0;
@@ -751,7 +932,7 @@ TEST_F(TPerm, SampleRenderIsGatedAndNeverShared) {
       gdefcore_render_sample(catalog_, allowed, "core.pane", 9, kPaneBody.c_str(),
           kPaneBody.size(), "preview", 7, GDEFCORE_RENDER_PAGE_FUEL, &out,
           &out_len, &shareable));
-  EXPECT_EQ("<h2>Sample title</h2>", Span(out, out_len));
+  EXPECT_EQ("<h2>Sample title</h2>", std::string(out, out_len));
   EXPECT_EQ(0, shareable);
   gdefcore_text_free(catalog_, out);
   /* A page layout gets a stand-in for each region. */
@@ -761,10 +942,10 @@ TEST_F(TPerm, SampleRenderIsGatedAndNeverShared) {
         gdefcore_render_sample(catalog_, allowed, "core.page", 9, page.c_str(),
             page.size(), "preview", 7, GDEFCORE_RENDER_PAGE_FUEL, &out, &out_len,
             NULL));
-    EXPECT_NE(std::string::npos, Span(out, out_len).find("Sample region main"));
+    EXPECT_NE(std::string::npos,
+        std::string(out, out_len).find("Sample region main"));
     gdefcore_text_free(catalog_, out);
   }
-  /* The value is bound escaped: sample text is inert like any bound value. */
   /* The principal who may not edit the kind gets what a missing kind gets. */
   out = NULL;
   EXPECT_EQ(GDEFCORE_ERR_INVALID,

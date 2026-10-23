@@ -62,10 +62,10 @@ extern "C" {
 #define GDEFCORE_TEMPLATE_KIND_TYPE "core.template-kind"
 /** The entity type that holds a template. */
 #define GDEFCORE_TEMPLATE_TYPE "core.template"
-/** The prefix of the permission to edit templates of a kind. */
-#define GDEFCORE_TEMPLATE_EDIT_PREFIX "core.template.edit."
-/** The decision hook a template write runs; any subscriber's deny wins. */
-#define GDEFCORE_HOOK_TEMPLATE_WRITE "template-write"
+/** The action of the permission to edit a template. */
+#define GDEFCORE_TEMPLATE_EDIT "core.template.edit"
+/** The label of that permission: what a role is granted by. */
+#define GDEFCORE_TEMPLATE_EDIT_LABEL "Edit templates"
 /** The word that marks an unsafe construct on its line (AD-18). */
 #define GDEFCORE_TEMPLATE_MARKER "unsafe"
 
@@ -103,34 +103,6 @@ extern "C" {
 #define GDEFCORE_ISSUE_BREAKS 8
 /** Syntax the validator cannot see through, so it refuses it. */
 #define GDEFCORE_ISSUE_SYNTAX 9
-
-/**
- * @brief The argument block of ::GDEFCORE_HOOK_TEMPLATE_WRITE. Begins with
- * @ref size.
- *
- * What the subscriber is told about one template write. Every pointer is
- * borrowed for the call and is not NUL-terminated; a missing value is an
- * empty span. @ref size is `sizeof(GDEFCORE_Template_Write_Hook)` of the
- * core that fired the hook; a receiver compares it with its own before it
- * reads a field.
- */
-typedef struct GDEFCORE_Template_Write_Hook {
-  size_t size;                  ///< `sizeof(GDEFCORE_Template_Write_Hook)`.
-  const char * template_id;     ///< The template's public id.
-  size_t template_id_len;       ///< Length of @ref template_id.
-  const char * name;            ///< The template's name after the write.
-  size_t name_len;              ///< Length of @ref name.
-  const char * kind;            ///< Its kind after the write.
-  size_t kind_len;              ///< Length of @ref kind.
-  const char * old_kind;        ///< Its kind before; empty for a new template.
-  size_t old_kind_len;          ///< Length of @ref old_kind.
-  const char * attached;        ///< Public id of the entity it is attached to.
-  size_t attached_len;          ///< Length of @ref attached; 0 when none.
-  const char * attached_type;   ///< That entity's type, or empty.
-  size_t attached_type_len;     ///< Length of @ref attached_type.
-  const char * classification;  ///< The template's classification, or empty.
-  size_t classification_len;    ///< Length of @ref classification.
-} GDEFCORE_Template_Write_Hook;
 
 /** An effective contract. Opaque. */
 typedef struct GDEFCORE_Contract GDEFCORE_Contract;
@@ -174,74 +146,74 @@ typedef struct GDEFCORE_Template_Issue {
 } GDEFCORE_Template_Issue;
 
 /**
- * @brief `core.template.edit.<kind>` into @p out, NUL-terminated.
+ * @brief Declare the permission to edit a template.
  *
- * @return The length, or 0 when @p cap is too small or @p kind is empty.
+ * There is one: ::GDEFCORE_TEMPLATE_EDIT, labelled ::GDEFCORE_TEMPLATE_EDIT_LABEL,
+ * on the type ::GDEFCORE_TEMPLATE_TYPE, under the module `core`. It is granted
+ * to nobody, admin included, and a second call changes nothing. Which
+ * templates a grant covers is its condition: a role is granted it for the
+ * templates of a kind by `(= field.kind "core.pane")`, and a module may grant
+ * it for the templates of a classification the same way (access.md). Nothing
+ * denies; a principal edits a template when one grant, from a role, a module
+ * or a callback, holds on it.
+ *
+ * Installing the render kit (gdefcore_render_install()) calls this.
  */
-GDEFCORE_API size_t gdefcore_template_edit_name(const char * kind,
-    size_t kind_len, char * out, size_t cap);
+GDEFCORE_API GDEFCORE_Result gdefcore_template_edit_declare(
+    GDEFCORE_Catalog * catalog);
 
 /**
- * @brief The plain-language label of the edit permission of @p kind:
- * "Edit templates of kind <label>". This is what a role is granted by.
+ * @brief Whether the request's principal may edit some template of @p kind.
  *
- * Free @p out_label with gdefcore_text_free(). ::GDEFCORE_ERR_INVALID when the
- * kind does not exist.
- */
-GDEFCORE_API GDEFCORE_Result gdefcore_template_edit_label(
-    GDEFCORE_Catalog * catalog, const char * kind, size_t kind_len,
-    char ** out_label, size_t * out_len);
-
-/**
- * @brief Declare the edit permission of the stored kind @p kind.
+ * True when gdefcore_access_can() allows ::GDEFCORE_TEMPLATE_EDIT on a stored
+ * template whose kind is @p kind. A kind with no template, one that does not
+ * exist, and one nobody was granted are the same answer. It is the question
+ * a list of kinds and a preview under a kind's contract ask, where no one
+ * template is in hand; the editor of one template asks
+ * gdefcore_template_can_edit().
  *
- * It is granted to nobody, admin included. A second call changes nothing.
- * Apply calls gdefcore_template_declare_touched() for every kind a changeset
- * saves, so a kind defined by changeset has its permission as it is defined.
- *
- * @return ::GDEFCORE_OK, or ::GDEFCORE_ERR_INVALID when the kind does not
- *   exist.
- */
-GDEFCORE_API GDEFCORE_Result gdefcore_template_kind_declare(
-    GDEFCORE_Catalog * catalog, const char * kind, size_t kind_len);
-
-/**
- * @brief Declare the permission of every kind @p changeset saved.
- *
- * Called by apply after the write commits. A changeset that saves no kind
- * does nothing.
- */
-GDEFCORE_API GDEFCORE_Result gdefcore_template_declare_touched(
-    GDEFCORE_Changeset * changeset);
-
-/**
- * @brief Whether the request's principal holds the edit permission of @p kind.
- *
- * Not the decision hook: that is per write and needs the template. A kind
- * that does not exist, and one nobody granted, are the same answer.
- *
- * @return 1 when held, else 0.
+ * @return 1 when it may, else 0.
  */
 GDEFCORE_API int gdefcore_template_may_edit(GDEFCORE_Catalog * catalog,
     GDEFCORE_Request * request, const char * kind, size_t kind_len);
 
 /**
+ * @brief May the request's principal edit the template @p template_id, leaving
+ * it of kind @p kind?
+ *
+ * The one decision a template edit is held to, which gdefcore_template_authorize()
+ * asks for each template it is given. The principal must be allowed
+ * ::GDEFCORE_TEMPLATE_EDIT by gdefcore_access_can() on the template as it is
+ * stored (when it has been stored), and by gdefcore_access_can_with() on the
+ * template as the edit would leave it: its kind @p kind (the stored kind when
+ * @p kind is NULL), and its name, attached entity and classification as
+ * stored. A move to another kind therefore needs the grant for the kind the
+ * template is and for the kind it becomes, and a new template, which has no
+ * stored kind, needs the grant for the kind it is to be.
+ *
+ * A template that does not exist, one the principal may not edit and a failure
+ * are @p out_allowed 0; only an allocation failure is returned as such.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_template_can_edit(
+    GDEFCORE_Catalog * catalog, GDEFCORE_Request * request,
+    const char * template_id, const char * kind, size_t kind_len,
+    int * out_allowed);
+
+/**
  * @brief Check that @p request may make every `core.template` write in
  * @p changeset.
  *
- * For each template the changeset saves, drafts, publishes or clears: the
- * principal must hold the edit permission of its kind after the write and of
- * its kind before it (a move needs both), and then
- * ::GDEFCORE_HOOK_TEMPLATE_WRITE is fired as a veto
- * (gdefcore_module_fire_veto()): any subscriber's deny refuses the write. A
+ * For each template the changeset saves, drafts, publishes or clears, the
+ * decision of gdefcore_template_can_edit() about the template as the write
+ * leaves it: the fields it stages as staged and the others as stored. A
  * template with no kind is refused. A changeset that writes no template is
- * success.
+ * success. Nothing but a grant allows, and nothing but the absence of one
+ * refuses: no module can take away what a role grants.
  *
  * A refusal returns ::GDEFCORE_ERR_INVALID, which is also what an id the
  * principal may not see gets, sets the changeset's refusal to the fixed
- * sentence "That edit is not allowed." (never the module's reason), and
- * writes nothing. A subscriber that fails returns its failure and the same
- * sentence. Apply calls this when the changeset has a request; an editor may
+ * sentence "That edit is not allowed." (never a module's reason), and writes
+ * nothing. Apply calls this when the changeset has a request; an editor may
  * call it first to tell a refusal from a conflict.
  */
 GDEFCORE_API GDEFCORE_Result gdefcore_template_authorize(

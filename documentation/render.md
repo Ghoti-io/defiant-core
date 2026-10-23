@@ -120,7 +120,8 @@ validation and the `unsafe` marker are in templates.md.
 kind, against sample data, under an overlay that no shared cache may keep. See
 "Previewing an edited body" in templates.md. A `core.template` also carries
 two optional fields, `attached` (a public id) and `classification` (text),
-which a module's `template-write` decision can refine edits by.
+which a module's grant of `core.template.edit` can be conditioned on
+(templates.md, "Who may edit a template").
 
 ## An entity in the context
 

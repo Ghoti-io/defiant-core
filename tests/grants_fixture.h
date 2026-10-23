@@ -72,6 +72,7 @@ struct ModDef {
   std::list<GDEFCORE_Module_Access_Callback> callback_tables;
   std::vector<GDEFCORE_Module_Service> services;
   std::vector<GDEFCORE_Module_Callback> callbacks;
+  std::vector<GDEFCORE_Module_Sub> subs;
   GDEFCORE_Module_Manifest man;
 
   const char * S(const std::string & s) {
@@ -115,6 +116,19 @@ struct ModDef {
     g.condition = S(condition);
     g.condition_len = condition.size();
     grants.push_back(g);
+  }
+
+  /** A subscription to a hook. */
+  void Sub(const std::string & hook, int kind, GDEFCORE_Hook_Fn fn, void * user) {
+    GDEFCORE_Module_Sub sub;
+    memset(&sub, 0, sizeof sub);
+    sub.size = sizeof sub;
+    sub.hook = S(hook);
+    sub.hook_len = hook.size();
+    sub.kind = kind;
+    sub.fn = fn;
+    sub.user = user;
+    subs.push_back(sub);
   }
 
   /** A relation: its columns as (name, kind, type). */
@@ -215,6 +229,8 @@ struct ModDef {
     man.nservices = services.size();
     man.callbacks = callbacks.empty() ? NULL : &callbacks[0];
     man.ncallbacks = callbacks.size();
+    man.subs = subs.empty() ? NULL : &subs[0];
+    man.nsubs = subs.size();
   }
 };
 

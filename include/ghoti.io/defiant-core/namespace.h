@@ -347,7 +347,6 @@
 #define gdefcore_module_enable GHOTIIO_DEFCORE(gdefcore_module_enable)
 #define gdefcore_module_enabled GHOTIIO_DEFCORE(gdefcore_module_enabled)
 #define gdefcore_module_error GHOTIIO_DEFCORE(gdefcore_module_error)
-#define gdefcore_module_fire_veto GHOTIIO_DEFCORE(gdefcore_module_fire_veto)
 #define gdefcore_module_fire_write GHOTIIO_DEFCORE(gdefcore_module_fire_write)
 #define gdefcore_module_install_guest                                          \
   GHOTIIO_DEFCORE(gdefcore_module_install_guest)
@@ -582,12 +581,9 @@
 #define gdefcore_template_preview GHOTIIO_DEFCORE(gdefcore_template_preview)
 #define gdefcore_template_vet GHOTIIO_DEFCORE(gdefcore_template_vet)
 #define gdefcore_template_authorize GHOTIIO_DEFCORE(gdefcore_template_authorize)
-#define gdefcore_template_declare_touched \
-  GHOTIIO_DEFCORE(gdefcore_template_declare_touched)
-#define gdefcore_template_edit_label GHOTIIO_DEFCORE(gdefcore_template_edit_label)
-#define gdefcore_template_edit_name GHOTIIO_DEFCORE(gdefcore_template_edit_name)
-#define gdefcore_template_kind_declare \
-  GHOTIIO_DEFCORE(gdefcore_template_kind_declare)
+#define gdefcore_template_can_edit GHOTIIO_DEFCORE(gdefcore_template_can_edit)
+#define gdefcore_template_edit_declare \
+  GHOTIIO_DEFCORE(gdefcore_template_edit_declare)
 #define gdefcore_template_may_edit GHOTIIO_DEFCORE(gdefcore_template_may_edit)
 #define gdefcore_template_report_count \
   GHOTIIO_DEFCORE(gdefcore_template_report_count)

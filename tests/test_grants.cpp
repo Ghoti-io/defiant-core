@@ -782,7 +782,7 @@ TEST_F(Grants, RiskRatings) {
       /* High: anonymous, and not a read. */
       {"update", 0, "(and (= type \"t\") (= field.group \"a\"))", 1,
           GDEFCORE_ACCESS_RISK_HIGH},
-      {"core.template.edit.core.pane", 0, "(= type \"t\")", 1,
+      {"core.template.edit", 0, "(= type \"t\")", 1,
           GDEFCORE_ACCESS_RISK_HIGH},
       /* High: a strong action nothing narrows. */
       {"delete", 0, "(= type \"t\")", 0, GDEFCORE_ACCESS_RISK_HIGH},
@@ -792,7 +792,7 @@ TEST_F(Grants, RiskRatings) {
       {"read", 0, "(= type", 0, GDEFCORE_ACCESS_RISK_HIGH},   /* unreadable */
       /* Medium: an edit nothing narrows, a read nothing narrows, a field. */
       {"update", 0, "(= type \"t\")", 0, GDEFCORE_ACCESS_RISK_MEDIUM},
-      {"core.template.edit.core.pane", 0, "(= type \"t\")", 0,
+      {"core.template.edit", 0, "(= type \"t\")", 0,
           GDEFCORE_ACCESS_RISK_MEDIUM},
       {"read", 0, "(= type \"t\")", 0, GDEFCORE_ACCESS_RISK_MEDIUM},
       {"read", 1, "(= type \"t\")", 0, GDEFCORE_ACCESS_RISK_MEDIUM},

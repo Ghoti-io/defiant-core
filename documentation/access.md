@@ -556,8 +556,10 @@ them), with both outcomes counted.
 
 One exception remains, and is not this rule's to fix: `gdefcore_changeset_apply()`
 still calls `gdefcore_template_authorize()` for a changeset that has a request
-(templates.md). It is a permission check inside a library function that story A8
-retires with the template veto.
+(templates.md). It is a permission check inside a library function, and it asks
+the one decision (`gdefcore_template_can_edit()`, which is `can()` about the
+template as stored and `can_with()` about it as the write leaves it): a template
+move or a new template has a destination that no stored entity can answer for.
 
 **A condition is evaluated only on the stored entity the path names, never on
 submitted data (SPEC decision 8).** The evaluator has no parameter for values and
@@ -669,8 +671,9 @@ permission, named by its action. Granting does not change: the declared
 permission is granted to a role by its label, and a principal holds what the
 roles it has, `authenticated` and `anonymous` hold. A name nobody declared and
 a permission nobody was granted are both "not held", admin included. The
-permission to edit templates of a kind, `core.template.edit.<kind>`, is
-declared this way (templates.md).
+permission to edit templates, `core.template.edit`, is declared this way and
+narrowed to a kind or a classification by the condition of the grant
+(templates.md).
 
 For a grant whose condition is an integer, held means a role was granted a
 permission with that action, as it always did: the permission is not about one

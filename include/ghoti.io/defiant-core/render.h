@@ -92,7 +92,7 @@ GDEFCORE_API GDEFCORE_Result gdefcore_render_scope(GDEFCORE_Catalog * catalog,
  * one may, and gdefcore_render_shareable_count() counts the ones that may. An
  * editor passes an overlay of its own, `preview`.
  *
- * A principal who does not hold the edit permission of @p kind
+ * A principal who may edit no template of @p kind
  * (gdefcore_template_may_edit()) gets ::GDEFCORE_ERR_INVALID, the same as a
  * kind that does not exist. A body that does not parse, or that fails at run
  * time, returns the error and writes no bytes.

@@ -16,7 +16,7 @@
 #   fuel-exhaustion-grants               Can.NoFuelIsNotAYes
 #   memo-unbounded                       Can.MemoIsBounded
 #   type-level-used-for-an-entity        Can.TypeLevelIsNotTheEntityQuestion
-#   template-authorize-skips-modules     Can.TemplateSaveIsTheDecision
+#   template-authorize-never-refuses     Can.TemplateSaveIsTheDecision
 #   route-check-skips-can                Can.TheDecisionIsTheOperation
 #   ceiling-not-set-up                   Can.AnAgentIsBoundByItsCeiling
 #   draft-readable                       Can.TheDecisionIsTheOperation, Oracle.Entities
@@ -176,42 +176,14 @@ plant type-level-used-for-an-entity $ACCESS testCan 'Can.TypeLevelIsNotTheEntity
   '  rc = can_decide(catalog, request, permission, permission_len, type, type_len,
       NULL, &allowed, dec, values, nvalues);'
 
-# Plant 11: the template editor reads the roles' grants and not the modules'.
-plant template-authorize-skips-modules src/template/template.c testCan 'Can.TemplateSaveIsTheDecision' \
-  '    allowed = kind_len > 0 && template_can(catalog, request, kind, kind_len, canon);' \
-  '    allowed = 0;
-    if (kind_len > 0) {
-      char * lab = NULL;
-      size_t lab_len = 0;
-      size_t who_len = 0;
-      const char * who = gdefcore_request_principal(request, &who_len);
-      char ** roles = NULL;
-      size_t nroles = 0;
-      size_t r;
-      if (gdefcore_template_edit_label(catalog, kind, kind_len, &lab, &lab_len) ==
-              GDEFCORE_OK) {
-        if (who != NULL &&
-            gdefcore_access_principal_roles(catalog, who, who_len, &roles,
-                &nroles) == GDEFCORE_OK) {
-          for (r = 0; r < nroles && !allowed; r++) {
-            char ** labels = NULL;
-            size_t nl = 0;
-            size_t g;
-            if (gdefcore_access_role_grants(catalog, roles[r], strlen(roles[r]),
-                    &labels, &nl) == GDEFCORE_OK) {
-              for (g = 0; g < nl; g++) {
-                if (strlen(labels[g]) == lab_len &&
-                    memcmp(labels[g], lab, lab_len) == 0) {
-                  allowed = 1;
-                }
-              }
-              gdefcore_access_free(catalog, labels, nl);
-            }
-          }
-          gdefcore_access_free(catalog, roles, nroles);
-        }
-        gdefcore_text_free(catalog, lab);
-      }
+# Plant 11: the write of a template is never refused, though the decision the
+# editor shows says no.
+plant template-authorize-never-refuses src/template/template.c testCan 'Can.TemplateSaveIsTheDecision' \
+  '    if (!allowed) {
+      return refuse_edit(changeset, GDEFCORE_ERR_INVALID);
+    }' \
+  '    if (!allowed && 0) {
+      return refuse_edit(changeset, GDEFCORE_ERR_INVALID);
     }'
 
 # Plant 12: the ready-made route check lets any entity capture through, so a

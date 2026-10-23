@@ -100,7 +100,6 @@
   X(GDEFCORE_Module_Declared_Callback, "tests/test_callbacks.cpp") \
   X(GDEFCORE_Module_Declared_Relation, "tests/test_relations.cpp") \
   X(GDEFCORE_Restore_Held, "tests/test_restore.cpp") \
-  X(GDEFCORE_Template_Write_Hook, "tests/test_tpermission.cpp") \
   X(GDEFCORE_Contract_Var, "tests/test_templates.cpp") \
   X(GDEFCORE_Contract_Fn, "tests/test_templates.cpp") \
   X(GDEFCORE_Template_Issue, "tests/test_templates.cpp")

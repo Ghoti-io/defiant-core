@@ -2568,6 +2568,10 @@ static GDEFCORE_Result write_kit(GDEFCORE_Catalog * catalog) {
     rc = ensure_display(catalog, "post", "main entity entity");
   }
   if (rc == GDEFCORE_OK) {
+    /* The one permission to edit a template, granted to nobody. */
+    rc = gdefcore_template_edit_declare(catalog);
+  }
+  if (rc == GDEFCORE_OK) {
     rc = grant_posts(catalog);
   }
   return rc;

@@ -1159,7 +1159,7 @@ inline Obs Observe(World & w, const std::string & who, const Ask & ask) {
   {
     /* The permission to edit templates is held by nobody here, and a preview
      * of a body is the answer a missing kind gets. */
-    static const char kEdit[] = "core.template.edit.core.pane";
+    static const char kEdit[] = "core.template.edit";
     static const char kBody[] = "<p>sweep</p>";
     char * bytes = (char *)0x1;
     size_t n = 99;
@@ -1174,6 +1174,33 @@ inline Obs Observe(World & w, const std::string & who, const Ask & ask) {
     o.kv["g:may-edit"] = "held=" +
         std::to_string(gdefcore_template_may_edit(w.site.catalog, f.req,
             "core.pane", 9)) + Diag(w, f.req);
+    {
+      /* May this one be edited, left of another kind: a template that is not
+       * there and one that is are the same refusal to a principal with no
+       * grant. */
+      char fresh_id[GDEFCORE_PUBLIC_ID_LEN + 1];
+      int allowed_real = 99;
+      int allowed_missing = 99;
+      char ** tids = NULL;
+      size_t ntids = 0;
+      Note("gdefcore_template_can_edit");
+      EXPECT_EQ(GDEFCORE_OK, gdefcore_id_generate(fresh_id));
+      EXPECT_EQ(GDEFCORE_OK,
+          gdefcore_template_can_edit(w.site.catalog, f.req, fresh_id, "core.pane",
+              9, &allowed_missing));
+      if (gdefcore_entity_ids(w.site.catalog, "core.template", 13, &tids, &ntids) ==
+              GDEFCORE_OK &&
+          ntids > 0) {
+        EXPECT_EQ(GDEFCORE_OK,
+            gdefcore_template_can_edit(w.site.catalog, f.req, tids[0], "core.pane",
+                9, &allowed_real));
+        gdefcore_ids_free(w.site.catalog, tids, ntids);
+      } else {
+        allowed_real = allowed_missing;
+      }
+      o.kv["g:can-edit"] = "real=" + std::to_string(allowed_real) + " missing=" +
+          std::to_string(allowed_missing) + Diag(w, f.req);
+    }
     Note("gdefcore_render_sample");
     rc = gdefcore_render_sample(w.site.catalog, f.req, "core.pane", 9, kBody,
         strlen(kBody), "preview", 7, GDEFCORE_RENDER_PAGE_FUEL, &bytes, &n,

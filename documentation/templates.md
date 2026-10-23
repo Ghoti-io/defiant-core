@@ -188,69 +188,71 @@ added later is keyed by the render key and by the template's revision.
 
 ## Who may edit a template
 
-Editing a template needs two things, and both must hold.
+There is one permission, `core.template.edit`, labelled "Edit templates", on
+the type `core.template` and declared by the kit (`gdefcore_template_edit_declare()`).
+It is granted to nobody, admin included, until a changeset grants it. What it
+covers is the grant's **condition**, written about the template (conditions.md):
 
-**The permission of its kind.** Defining a kind declares the permission
-`core.template.edit.<kind>` (`core.template.edit.core.pane`), labelled in
-plain words, "Edit templates of kind Pane", from the kind's own label, and
-grouped under the module that owns the kind: the part of its machine name
-before the first dot. A kind that a changeset saves has its permission declared
-as that changeset commits, and the kit's two kinds have theirs. It is granted
-to nobody, admin included, until a changeset grants it, like any permission
-(`gdefcore_access_grant()` with the label). Kind labels should be unique: the
-permission's label is how it is granted, and a second kind with the same label
-shares the first one's grant. Moving a template to another kind needs the
-permission of both kinds, and the template is validated against the new
-kind's contract.
+```
+(= field.kind "core.pane")                        panes, and not pages
+(and (= field.kind "core.page")
+     (= field.classification "internal"))         the pages classified internal
+```
 
-**No subscriber denies.** The write of a `core.template` runs the decision
-hook `template-write`. A module subscribes as a decision and is handed a
-`GDEFCORE_Template_Write_Hook`: the template's id and name, its kind after the
-write and before it, the entity it is attached to and that entity's type, and
-its classification. It answers allow, deny or no opinion. Any deny refuses the
-write (AD-10). The permission is the allow: a hook set with no deny, or only
-no opinions, leaves the write standing, which is how AD-10's "otherwise deny"
-is met. A subscriber that fails or traps fails the request; it is not
-skipped. The refusal is the fixed sentence `That edit is not allowed.`, never
-the module's reason, so a refusal does not teach an editor what the module
-knows.
+A role is granted it for a kind with `gdefcore_access_grant_when()` and the
+first condition. A module supplies the second as a grant in its manifest, which
+the matrix shows as "also granted by module X when ..." and the enable
+confirms, and which goes when the module is disabled. The fields a condition
+on a template can be about are `kind`, `name`, `attached` and `classification`
+of the template, and any other it has, as stored.
+
+**Nothing denies.** There is no hook a module can subscribe to in order to
+refuse a template write. A principal edits a template when one grant holds on
+it, whether it comes from a role, from a module, or from an access callback
+(access.md); a source that grants nothing, or fails, takes nothing from
+another. A restriction is written by not granting.
 
 ```c
-/* deny edits of page templates unless the classification is the principal's */
-static GDEFCORE_Result judge(GDEFCORE_Request * request, const void * args,
-    GDEFCORE_Alter * alter, GDEFCORE_Hook_Out * out, void * user) {
-  const GDEFCORE_Template_Write_Hook * a = args;
-  out->decision = GDEFCORE_DECISION_NONE;
-  if (a->kind_len == 9 && memcmp(a->kind, "core.page", 9) == 0 &&
-      !classification_granted(request, a->classification, a->classification_len)) {
-    out->decision = GDEFCORE_DECISION_DENY;
-  }
-  return GDEFCORE_OK;
-}
+/* The pages classified internal, for the people the desk module lists. */
+static const GDEFCORE_Module_Grant kDeskGrant = {
+    sizeof(GDEFCORE_Module_Grant), "Edit templates", 14, "core.template", 13,
+    NULL, 0,
+    "(and (= field.kind \"core.page\") (= field.classification \"internal\")"
+    " (related \"desk.reviewer\" (principal)))", 106};
 ```
+
+**One decision.** `gdefcore_template_can_edit()` is the question: may this
+principal edit this template, leaving it of this kind? It asks
+`gdefcore_access_can()` about the template as it is stored (when it has been
+stored) and `gdefcore_access_can_with()` about the template as the edit leaves
+it: the kind it becomes (or the stored one), and the name, attached entity and
+classification a write stages or, if it stages none, as stored. Both must say
+yes, which is what makes a move between kinds need the grant for the kind the
+template is and for the kind it becomes, and what makes a new template, which has no
+stored kind, need the grant for the kind it is to be. Because the stored
+question is asked too, a value in the write can only narrow what is stored.
+The editor's tab, its button and the write ask this one function.
 
 **Where it is checked.** `gdefcore_changeset_apply()` calls
 `gdefcore_template_authorize()` before it does anything else, for a changeset
 that has a request (`gdefcore_changeset_set_request()`): the principal is the
-request's. The permission is asked of `gdefcore_access_can()` about the
-template entity being written, for the kind it will be and the kind it was, so
-the editor's answer is the route's and the tab's: roles, the grants of enabled
-modules, conditions, and an acting principal's ceiling all count. (The
-decision hook below is still consulted after it, until it is retired. This is
-the one permission check left inside a library function: SPEC decision 7 puts
-protection on the path, and story A8 moves this one there with the veto.) A changeset with no request is the operator's, such as the kit
-install or a tool run with the changeset API, and is not asked. A refusal is
-`GDEFCORE_ERR_INVALID`, the code a principal gets for an id it may not see,
-and writes nothing. It is checked before the confirmation, the conflict check
-and validation, so what a principal may not edit says the same thing whatever
-it holds. A revert (`gdefcore_changeset_revert()`) is a changeset and is
-checked the same way.
+request's. It asks `gdefcore_template_can_edit()` for each template the
+changeset writes, so roles, the grants of enabled modules, conditions, and an
+acting principal's ceiling all count. (This is the one permission check left
+inside a library function; access.md says why.) A changeset with no request is
+the operator's, such as the kit install or a tool run with the changeset API,
+and is not asked. A refusal is `GDEFCORE_ERR_INVALID`, the code a principal
+gets for an id it may not see, with the fixed sentence `That edit is not
+allowed.`, never a module's reason, and writes nothing. It is checked before the
+confirmation, the conflict check and validation, so what a principal may not
+edit says the same thing whatever it holds. A revert
+(`gdefcore_changeset_revert()`) is a changeset and is checked the same way.
 
 **Which kinds a principal may see.** `gdefcore_template_may_edit()` answers
-whether the principal holds a kind's permission; a kind that does not exist,
-and one nobody granted, give the same answer. An editor lists only kinds for
-which it is true, and answers for any other kind's templates as it answers for
-a missing one (AD-11).
+whether the principal may edit some stored template of a kind; a kind that
+does not exist, one with no template, and one nobody granted give the same
+answer. An editor lists only kinds for which it is true, and answers for any
+template it may not edit as it answers for a missing one (AD-11).
 
 ## Previewing an edited body
 
@@ -281,9 +283,9 @@ instrument that shows a host's cache what it may keep.
 | `gdefcore_module_contribute`, `gdefcore_module_contributions(_free)` | A module's contributions. |
 | `gdefcore_request_mark_principal_dependent`, `gdefcore_request_principal_dependent` | The observed dependence the render key reads. |
 | `gdefcore_changeset_touched_count/_at`, `gdefcore_changeset_refusal`, `gdefcore_changeset_set_refusal`, `gdefcore_catalog_host` | Reading a changeset and its refusal. |
-| `gdefcore_template_edit_name/_label`, `gdefcore_template_kind_declare`, `gdefcore_template_declare_touched` | The permission a kind declares. |
-| `gdefcore_template_may_edit`, `gdefcore_template_authorize` | Who may edit; what apply asks. |
-| `gdefcore_module_fire_veto` | A decision hook as a veto: any deny wins, no opinion stands. |
+| `gdefcore_template_edit_declare` | The one permission to edit a template. |
+| `gdefcore_template_can_edit`, `gdefcore_template_may_edit`, `gdefcore_template_authorize` | Who may edit this template; some template of this kind; what apply asks. |
+| `gdefcore_access_can_with` | `can()` about an entity as a write would leave it. |
 | `gdefcore_access_permits` | Whether a request's principal holds a permission by its action. |
 | `gdefcore_access_can` | The one decision: may the principal do this to this entity. What authorize asks. |
 | `gdefcore_render_sample`, `gdefcore_render_shareable_count` | The editor's preview, and the shared-cache count. |

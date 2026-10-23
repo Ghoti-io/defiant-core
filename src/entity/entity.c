@@ -4761,13 +4761,6 @@ GDEFCORE_Result gdefcore_changeset_apply(GDEFCORE_Changeset * changeset,
   {
     GDEFCORE_Result grant_rc = gdefcore_access_commit_staged(changeset);
     GDEFCORE_Result first = grant_rc;
-    {
-      /* A kind this changeset defined has its edit permission as it exists. */
-      GDEFCORE_Result declared = gdefcore_template_declare_touched(changeset);
-      if (declared != GDEFCORE_OK && first == GDEFCORE_OK) {
-        first = declared;
-      }
-    }
     if (changeset->catalog->host != NULL) {
       GDEFCORE_Result hook_rc = GDEFCORE_OK;
       if (gdefcore_changeset_module_count(changeset) > 0) {

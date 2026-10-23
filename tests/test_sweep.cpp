@@ -1306,6 +1306,7 @@ const Listed kListed[] = {
     {"gdefcore_module_service", "a module's own service, not an entity value"},
     {"gdefcore_hook_fire", "a hook, not an entity value"},
     {"gdefcore_template_may_edit", "decision: yes or no"},
+    {"gdefcore_template_can_edit", "decision: yes or no"},
     {"gdefcore_render_sample", "sample data, no entity value"},
 };
 

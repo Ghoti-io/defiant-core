@@ -2011,167 +2011,32 @@ GDEFCORE_Result gdefcore_template_vet(GDEFCORE_Changeset * changeset) {
 }
 
 /*
- * Who may edit a template (site-admin story 3)
+ * Who may edit a template (access-conditions story A8)
+ *
+ * One permission, ::GDEFCORE_TEMPLATE_EDIT, granted by roles and modules with
+ * conditions on the template, and decided by the one gdefcore_access_can().
+ * Nothing denies: no module is asked, and a failing source grants nothing.
  */
 
-static const char kEditLabelPrefix[] = "Edit templates of kind ";
 static const char kNotAllowed[] = "That edit is not allowed.";
 
-size_t gdefcore_template_edit_name(const char * kind, size_t kind_len, char * out,
-    size_t cap) {
-  size_t pre = sizeof GDEFCORE_TEMPLATE_EDIT_PREFIX - 1;
-  if (kind == NULL || out == NULL || kind_len == 0 || kind_len > 255 ||
-      pre + kind_len + 1 > cap) {
-    return 0;
-  }
-  memcpy(out, GDEFCORE_TEMPLATE_EDIT_PREFIX, pre);
-  memcpy(out + pre, kind, kind_len);
-  out[pre + kind_len] = '\0';
-  return pre + kind_len;
-}
-
-GDEFCORE_Result gdefcore_template_edit_label(GDEFCORE_Catalog * catalog,
-    const char * kind, size_t kind_len, char ** out_label, size_t * out_len) {
-  char id[GDEFCORE_PUBLIC_ID_LEN + 1];
-  char * label = NULL;
-  size_t label_len = 0;
-  char * text;
-  size_t pre = sizeof kEditLabelPrefix - 1;
-  GDEFCORE_Result rc;
-  if (catalog == NULL || kind == NULL || kind_len == 0 || out_label == NULL ||
-      out_len == NULL) {
-    return GDEFCORE_ERR_INVALID;
-  }
-  rc = find_named(catalog, NULL, GDEFCORE_TEMPLATE_KIND_TYPE, kind, kind_len, id);
-  if (rc != GDEFCORE_OK) {
-    return rc;
-  }
-  rc = read_one(catalog, NULL, GDEFCORE_VIEW_PUBLISHED, id, "label", &label,
-      &label_len);
-  if (rc == GDEFCORE_ERR_INVALID || (rc == GDEFCORE_OK && label_len == 0)) {
-    /* A kind with no label is called by its machine name. */
-    free(label);
-    label = dup_span(kind, kind_len);
-    label_len = kind_len;
-    rc = label == NULL ? GDEFCORE_ERR_OOM : GDEFCORE_OK;
-  }
-  if (rc != GDEFCORE_OK) {
-    return rc;
-  }
-  text = (char *)malloc(pre + label_len + 1);
-  if (text == NULL) {
-    free(label);
-    return GDEFCORE_ERR_OOM;
-  }
-  memcpy(text, kEditLabelPrefix, pre);
-  memcpy(text + pre, label, label_len);
-  text[pre + label_len] = '\0';
-  free(label);
-  rc = gdefcore_text_dup(catalog, text, pre + label_len, out_label);
-  free(text);
-  if (rc == GDEFCORE_OK) {
-    *out_len = pre + label_len;
-  }
-  return rc;
-}
-
-GDEFCORE_Result gdefcore_template_kind_declare(GDEFCORE_Catalog * catalog,
-    const char * kind, size_t kind_len) {
+GDEFCORE_Result gdefcore_template_edit_declare(GDEFCORE_Catalog * catalog) {
   GDEFCORE_Permission perm;
-  char name[300];
-  size_t name_len;
-  char * label = NULL;
-  size_t label_len = 0;
-  const char * dot;
-  GDEFCORE_Result rc;
-  if (catalog == NULL || kind == NULL || kind_len == 0) {
+  if (catalog == NULL) {
     return GDEFCORE_ERR_INVALID;
-  }
-  name_len = gdefcore_template_edit_name(kind, kind_len, name, sizeof name);
-  if (name_len == 0) {
-    return GDEFCORE_ERR_INVALID;
-  }
-  rc = gdefcore_template_edit_label(catalog, kind, kind_len, &label, &label_len);
-  if (rc != GDEFCORE_OK) {
-    return rc;
   }
   memset(&perm, 0, sizeof perm);
   perm.size = sizeof perm;
-  perm.label = label;
-  perm.label_len = label_len;
-  /* The module that owns the kind: the part of its machine name before the
-   * first dot (AD-35). */
-  dot = (const char *)memchr(kind, '.', kind_len);
-  perm.module_name = kind;
-  perm.module_name_len = dot == NULL ? kind_len : (size_t)(dot - kind);
-  perm.action = name;
-  perm.action_len = name_len;
+  perm.label = GDEFCORE_TEMPLATE_EDIT_LABEL;
+  perm.label_len = sizeof GDEFCORE_TEMPLATE_EDIT_LABEL - 1;
+  perm.module_name = "core";
+  perm.module_name_len = 4;
+  perm.action = GDEFCORE_TEMPLATE_EDIT;
+  perm.action_len = sizeof GDEFCORE_TEMPLATE_EDIT - 1;
   perm.condition = GDEFCORE_ACCESS_ANY;
   perm.type_name = GDEFCORE_TEMPLATE_TYPE;
   perm.type_name_len = sizeof GDEFCORE_TEMPLATE_TYPE - 1;
-  rc = gdefcore_access_declare(catalog, &perm);
-  gdefcore_text_free(catalog, label);
-  return rc;
-}
-
-GDEFCORE_Result gdefcore_template_declare_touched(
-    GDEFCORE_Changeset * changeset) {
-  GDEFCORE_Catalog * catalog;
-  size_t i;
-  size_t n;
-  GDEFCORE_Result first = GDEFCORE_OK;
-  if (changeset == NULL) {
-    return GDEFCORE_ERR_INVALID;
-  }
-  catalog = gdefcore_changeset_catalog(changeset);
-  n = gdefcore_changeset_touched_count(changeset);
-  for (i = 0; i < n; i++) {
-    const char * id = NULL;
-    size_t id_len = 0;
-    const char * type = NULL;
-    size_t type_len = 0;
-    int op = 0;
-    char canon[GDEFCORE_PUBLIC_ID_LEN + 1];
-    char * kname = NULL;
-    size_t kname_len = 0;
-    GDEFCORE_Result rc;
-    if (gdefcore_changeset_touched_at(changeset, i, &id, &id_len, &type,
-            &type_len, &op) != GDEFCORE_OK ||
-        type == NULL ||
-        !span_eq(type, type_len, GDEFCORE_TEMPLATE_KIND_TYPE,
-            sizeof GDEFCORE_TEMPLATE_KIND_TYPE - 1) ||
-        (op != GDEFCORE_TOUCH_SAVE && op != GDEFCORE_TOUCH_PUBLISH) ||
-        gdefcore_id_canonical(id, id_len, canon) != GDEFCORE_OK) {
-      continue;
-    }
-    /* The changeset has been applied: read the kind as it now is. */
-    rc = read_one(catalog, NULL, GDEFCORE_VIEW_PUBLISHED, canon, "name", &kname,
-        &kname_len);
-    if (rc == GDEFCORE_OK) {
-      rc = gdefcore_template_kind_declare(catalog, kname, kname_len);
-      free(kname);
-    } else if (rc == GDEFCORE_ERR_INVALID) {
-      rc = GDEFCORE_OK;
-    }
-    if (rc != GDEFCORE_OK && first == GDEFCORE_OK) {
-      first = rc;
-    }
-  }
-  return first;
-}
-
-int gdefcore_template_may_edit(GDEFCORE_Catalog * catalog,
-    GDEFCORE_Request * request, const char * kind, size_t kind_len) {
-  char name[300];
-  size_t name_len;
-  if (catalog == NULL || request == NULL || kind == NULL || kind_len == 0) {
-    return 0;
-  }
-  name_len = gdefcore_template_edit_name(kind, kind_len, name, sizeof name);
-  if (name_len == 0) {
-    return 0;
-  }
-  return gdefcore_access_permits(catalog, request, name, name_len);
+  return gdefcore_access_declare(catalog, &perm);
 }
 
 /* One value of a template field as the write leaves it; absent is empty. */
@@ -2194,36 +2059,188 @@ static GDEFCORE_Result refuse_edit(GDEFCORE_Changeset * changeset,
   return rc;
 }
 
-/* May the request edit this template as a template of @p kind? Asked of
- * gdefcore_access_can(), about this template entity, so the editor's answer is
- * the route's and the tab's. A failure is a no. */
-static int template_can(GDEFCORE_Catalog * catalog, GDEFCORE_Request * request,
-    const char * kind, size_t kind_len, const char * template_id) {
-  char name[300];
-  size_t name_len = gdefcore_template_edit_name(kind, kind_len, name, sizeof name);
-  int allowed = 0;
-  if (name_len == 0) {
-    return 0;
+/* The fields of a template a grant's condition can be about when it is
+ * asked about a write: the kind first, which a template must have. */
+enum { kShapeFields = 4 };
+static const char * const kShapeName[kShapeFields] = {"kind", "name",
+    "attached", "classification"};
+
+/* A template as an edit leaves it. */
+typedef struct Shape {
+  char * text[kShapeFields];
+  size_t len[kShapeFields];
+} Shape;
+
+static void shape_free(Shape * shape) {
+  size_t i;
+  for (i = 0; i < kShapeFields; i++) {
+    free(shape->text[i]);
+    shape->text[i] = NULL;
+    shape->len[i] = 0;
   }
-  if (gdefcore_access_can(catalog, request, name, name_len, GDEFCORE_TEMPLATE_TYPE,
-          sizeof GDEFCORE_TEMPLATE_TYPE - 1, template_id, &allowed) !=
+}
+
+/* The template @p canon as @p cs would leave it, read in @p view. A changeset
+ * that writes the template holds the whole document it would leave (a save
+ * that omits a field keeps it), so a field the write does not mention is read
+ * as stored. A field with no value is the empty text. */
+static GDEFCORE_Result shape_load(GDEFCORE_Catalog * catalog,
+    const GDEFCORE_Changeset * cs, int view, const char * canon, Shape * shape) {
+  size_t i;
+  memset(shape, 0, sizeof *shape);
+  for (i = 0; i < kShapeFields; i++) {
+    GDEFCORE_Result rc = read_or_empty(catalog, cs, view, canon, kShapeName[i],
+        &shape->text[i], &shape->len[i]);
+    if (rc != GDEFCORE_OK) {
+      shape_free(shape);
+      return rc;
+    }
+  }
+  return GDEFCORE_OK;
+}
+
+/* gdefcore_access_can() about the template @p canon as stored, 0 on any
+ * failure but an allocation's. */
+static GDEFCORE_Result can_as_stored(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Request * request, const char * canon, int * allowed) {
+  GDEFCORE_Result rc = gdefcore_access_can(catalog, request,
+      GDEFCORE_TEMPLATE_EDIT, sizeof GDEFCORE_TEMPLATE_EDIT - 1,
+      GDEFCORE_TEMPLATE_TYPE, sizeof GDEFCORE_TEMPLATE_TYPE - 1, canon, allowed);
+  if (rc != GDEFCORE_OK) {
+    *allowed = 0;
+  }
+  return rc == GDEFCORE_ERR_OOM ? rc : GDEFCORE_OK;
+}
+
+/* The decision about the template @p canon left as @p shape: allowed when a
+ * grant holds on the template as the edit leaves it and, if it has been
+ * stored, on the template as it is stored too. Both, so that a value in
+ * @p shape can only narrow what is stored (a move needs the grant for the
+ * kind it was and for the kind it becomes). A failure is a no; only an
+ * allocation failure is returned. */
+static GDEFCORE_Result decide_edit(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Request * request, const char * canon, const Shape * shape,
+    int * allowed) {
+  GDEFCORE_Condition_Value values[kShapeFields];
+  size_t revisions = 0;
+  int ok = 0;
+  size_t i;
+  GDEFCORE_Result rc;
+  *allowed = 0;
+  if (shape->len[0] == 0) {
+    return GDEFCORE_OK;  /* a template with no kind */
+  }
+  for (i = 0; i < kShapeFields; i++) {
+    memset(&values[i], 0, sizeof values[i]);
+    values[i].size = sizeof values[i];
+    values[i].field = kShapeName[i];
+    values[i].field_len = strlen(kShapeName[i]);
+    values[i].text = shape->text[i];
+    values[i].text_len = shape->len[i];
+  }
+  rc = gdefcore_access_can_with(catalog, request, GDEFCORE_TEMPLATE_EDIT,
+      sizeof GDEFCORE_TEMPLATE_EDIT - 1, GDEFCORE_TEMPLATE_TYPE,
+      sizeof GDEFCORE_TEMPLATE_TYPE - 1, canon, values, kShapeFields, &ok);
+  if (rc != GDEFCORE_OK) {
+    return rc == GDEFCORE_ERR_OOM ? rc : GDEFCORE_OK;
+  }
+  if (!ok) {
+    return GDEFCORE_OK;
+  }
+  rc = gdefcore_entity_revision_count(catalog, canon, GDEFCORE_PUBLIC_ID_LEN,
+      &revisions);
+  if (rc != GDEFCORE_OK) {
+    return rc == GDEFCORE_ERR_OOM ? rc : GDEFCORE_OK;
+  }
+  if (revisions > 0) {
+    rc = can_as_stored(catalog, request, canon, &ok);
+    if (rc != GDEFCORE_OK) {
+      return rc;
+    }
+  }
+  *allowed = ok;
+  return GDEFCORE_OK;
+}
+
+GDEFCORE_Result gdefcore_template_can_edit(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Request * request, const char * template_id, const char * kind,
+    size_t kind_len, int * out_allowed) {
+  char canon[GDEFCORE_PUBLIC_ID_LEN + 1];
+  Shape shape;
+  GDEFCORE_Result rc;
+  if (out_allowed != NULL) {
+    *out_allowed = 0;
+  }
+  if (catalog == NULL || request == NULL || template_id == NULL ||
+      out_allowed == NULL || (kind == NULL && kind_len != 0)) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  if (gdefcore_id_canonical(template_id, strlen(template_id), canon) !=
       GDEFCORE_OK) {
+    return GDEFCORE_OK;
+  }
+  rc = shape_load(catalog, NULL, GDEFCORE_VIEW_CURRENT, canon, &shape);
+  if (rc != GDEFCORE_OK) {
+    return rc == GDEFCORE_ERR_OOM ? rc : GDEFCORE_OK;
+  }
+  if (kind != NULL) {
+    char * moved = dup_span(kind, kind_len);
+    if (moved == NULL) {
+      shape_free(&shape);
+      return GDEFCORE_ERR_OOM;
+    }
+    free(shape.text[0]);
+    shape.text[0] = moved;
+    shape.len[0] = kind_len;
+  }
+  rc = decide_edit(catalog, request, canon, &shape, out_allowed);
+  shape_free(&shape);
+  return rc;
+}
+
+int gdefcore_template_may_edit(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Request * request, const char * kind, size_t kind_len) {
+  char ** ids = NULL;
+  size_t count = 0;
+  size_t i;
+  int found = 0;
+  if (catalog == NULL || request == NULL || kind == NULL || kind_len == 0) {
     return 0;
   }
-  return allowed;
+  if (gdefcore_entity_ids(catalog, GDEFCORE_TEMPLATE_TYPE,
+          sizeof GDEFCORE_TEMPLATE_TYPE - 1, &ids, &count) != GDEFCORE_OK) {
+    return 0;
+  }
+  for (i = 0; i < count && !found; i++) {
+    char * stored = NULL;
+    size_t stored_len = 0;
+    int ok = 0;
+    if (strlen(ids[i]) != GDEFCORE_PUBLIC_ID_LEN) {
+      continue;
+    }
+    if (read_or_empty(catalog, NULL, GDEFCORE_VIEW_CURRENT, ids[i], "kind",
+            &stored, &stored_len) != GDEFCORE_OK) {
+      continue;
+    }
+    if (span_eq(stored, stored_len, kind, kind_len) &&
+        can_as_stored(catalog, request, ids[i], &ok) == GDEFCORE_OK) {
+      found = ok;
+    }
+    free(stored);
+  }
+  gdefcore_ids_free(catalog, ids, count);
+  return found;
 }
 
 GDEFCORE_Result gdefcore_template_authorize(GDEFCORE_Changeset * changeset,
     GDEFCORE_Request * request) {
   GDEFCORE_Catalog * catalog;
-  GDEFCORE_Host * host;
   size_t touched;
   size_t i;
   if (changeset == NULL || request == NULL) {
     return GDEFCORE_ERR_INVALID;
   }
   catalog = gdefcore_changeset_catalog(changeset);
-  host = gdefcore_catalog_host(catalog);
   touched = gdefcore_changeset_touched_count(changeset);
   for (i = 0; i < touched; i++) {
     const char * id = NULL;
@@ -2232,20 +2249,11 @@ GDEFCORE_Result gdefcore_template_authorize(GDEFCORE_Changeset * changeset,
     size_t type_len = 0;
     int op = 0;
     char canon[GDEFCORE_PUBLIC_ID_LEN + 1];
-    char * name = NULL;
-    char * kind = NULL;
-    char * old_kind = NULL;
-    char * attached = NULL;
-    char * classification = NULL;
-    char * attached_type = NULL;
-    size_t name_len = 0;
-    size_t kind_len = 0;
-    size_t old_len = 0;
-    size_t attached_len = 0;
-    size_t class_len = 0;
-    size_t atype_len = 0;
-    GDEFCORE_Result rc = GDEFCORE_OK;
-    int allowed = 1;
+    Shape shape;
+    const GDEFCORE_Changeset * through;
+    int view;
+    int allowed = 0;
+    GDEFCORE_Result rc;
     if (gdefcore_changeset_touched_at(changeset, i, &id, &id_len, &type,
             &type_len, &op) != GDEFCORE_OK ||
         type == NULL ||
@@ -2256,103 +2264,21 @@ GDEFCORE_Result gdefcore_template_authorize(GDEFCORE_Changeset * changeset,
     if (gdefcore_id_canonical(id, id_len, canon) != GDEFCORE_OK) {
       return refuse_edit(changeset, GDEFCORE_ERR_INVALID);
     }
-    /* Before the write: what is stored. */
-    rc = read_or_empty(catalog, NULL, GDEFCORE_VIEW_PUBLISHED, canon, "kind",
-        &old_kind, &old_len);
-    /* After it: the staged values win; a clear leaves the template's kind. */
-    if (rc == GDEFCORE_OK) {
-      const GDEFCORE_Changeset * through = op == GDEFCORE_TOUCH_CLEAR ? NULL
-                                                                       : changeset;
-      int view = op == GDEFCORE_TOUCH_PUBLISH ? GDEFCORE_VIEW_DRAFT
-                                               : GDEFCORE_VIEW_PUBLISHED;
-      if (op == GDEFCORE_TOUCH_PUBLISH) {
-        through = NULL;
-      }
-      rc = read_or_empty(catalog, through, view, canon, "kind", &kind, &kind_len);
-      if (rc == GDEFCORE_OK) {
-        rc = read_or_empty(catalog, through, view, canon, "name", &name,
-            &name_len);
-      }
-      if (rc == GDEFCORE_OK) {
-        rc = read_or_empty(catalog, through, view, canon, "attached", &attached,
-            &attached_len);
-      }
-      if (rc == GDEFCORE_OK) {
-        rc = read_or_empty(catalog, through, view, canon, "classification",
-            &classification, &class_len);
-      }
-    }
+    /* The template as the write leaves it: what the write stages, else what
+     * is stored. A clear leaves the stored one, and a publish makes the draft
+     * the template. */
+    through = op == GDEFCORE_TOUCH_CLEAR || op == GDEFCORE_TOUCH_PUBLISH
+                  ? NULL
+                  : changeset;
+    view = op == GDEFCORE_TOUCH_PUBLISH ? GDEFCORE_VIEW_DRAFT
+                                         : GDEFCORE_VIEW_CURRENT;
+    rc = shape_load(catalog, through, view, canon, &shape);
     if (rc != GDEFCORE_OK) {
-      free(name);
-      free(kind);
-      free(old_kind);
-      free(attached);
-      free(classification);
       return refuse_edit(changeset, rc);
     }
-    if (kind_len == 0 && old_len > 0) {
-      /* A clear, or a write that leaves the kind alone, keeps the stored one. */
-      free(kind);
-      kind = dup_span(old_kind, old_len);
-      kind_len = old_len;
-      if (kind == NULL) {
-        free(name);
-        free(old_kind);
-        free(attached);
-        free(classification);
-        return refuse_edit(changeset, GDEFCORE_ERR_OOM);
-      }
-    }
-    /* Permission first: the kind it is, and the kind it was. The one
-     * decision every caller asks, about this template. */
-    allowed = kind_len > 0 && template_can(catalog, request, kind, kind_len, canon);
-    if (allowed && old_len > 0 && !span_eq(kind, kind_len, old_kind, old_len)) {
-      allowed = template_can(catalog, request, old_kind, old_len, canon);
-    }
-    if (allowed && host != NULL) {
-      GDEFCORE_Template_Write_Hook args;
-      int vetoed = 0;
-      if (attached_len > 0) {
-        char * t = NULL;
-        size_t tn = 0;
-        if (gdefcore_entity_type(catalog, attached, attached_len, &t, &tn) ==
-            GDEFCORE_OK) {
-          attached_type = dup_span(t, tn);
-          atype_len = tn;
-          gdefcore_text_free(catalog, t);
-        }
-      }
-      memset(&args, 0, sizeof args);
-      args.size = sizeof args;
-      args.template_id = canon;
-      args.template_id_len = GDEFCORE_PUBLIC_ID_LEN;
-      args.name = name;
-      args.name_len = name_len;
-      args.kind = kind;
-      args.kind_len = kind_len;
-      args.old_kind = old_kind;
-      args.old_kind_len = old_len;
-      args.attached = attached;
-      args.attached_len = attached_len;
-      args.attached_type = attached_type == NULL ? "" : attached_type;
-      args.attached_type_len = atype_len;
-      args.classification = classification;
-      args.classification_len = class_len;
-      rc = gdefcore_module_fire_veto(host, request, catalog,
-          GDEFCORE_HOOK_TEMPLATE_WRITE, sizeof GDEFCORE_HOOK_TEMPLATE_WRITE - 1,
-          &args, &vetoed);
-      if (rc == GDEFCORE_OK && vetoed) {
-        allowed = 0;
-      }
-    }
-    free(name);
-    free(kind);
-    free(old_kind);
-    free(attached);
-    free(classification);
-    free(attached_type);
+    rc = decide_edit(catalog, request, canon, &shape, &allowed);
+    shape_free(&shape);
     if (rc != GDEFCORE_OK) {
-      /* A subscriber that fails fails the request (AD-10). */
       return refuse_edit(changeset, rc);
     }
     if (!allowed) {
