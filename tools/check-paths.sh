@@ -70,9 +70,9 @@ plant field-limit-ignored $ACCESS testEntrypaths \
 plant field-grant-ignores-entity $ACCESS testEntrypaths \
   'EntryPath.AFieldGrantOnAnEntityIsDecidedOnTheStoredEntity' \
   '      entity_id == NULL);
-  if (allowed && entity_id == NULL && ev.has_ceiling) {' \
+  allowed = win >= 0;' \
   '      1);
-  if (allowed && entity_id == NULL && ev.has_ceiling) {'
+  allowed = win >= 0;'
 
 # Plant 5: the signed-form path does not ask the decision.
 plant authorize-skips-can $FORM testEntrypaths \

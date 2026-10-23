@@ -119,6 +119,79 @@ const GDEFCORE_Module_Manifest * Blog() {
   return &m;
 }
 
+/* ---- the module `paywall`: a callback that decides a post's group -------- */
+
+extern "C" GDEFCORE_Result PaywallAnswer(GDEFCORE_Callback_Call *,
+    GDEFCORE_Request *, const GDEFCORE_Callback_Question * q,
+    GDEFCORE_Callback_Answer * a, void *) {
+  for (size_t i = 0; i < q->count; i++) {
+    a->granted[i] = 0;
+  }
+  snprintf(a->token, sizeof a->token, "v1");
+  a->token_len = 2;
+  return GDEFCORE_OK;
+}
+
+const GDEFCORE_Module_Manifest * Paywall() {
+  static GDEFCORE_Module_Manifest m;
+  static GDEFCORE_Module_Perm perm;
+  static GDEFCORE_Module_Access_Callback table;
+  static GDEFCORE_Module_Service svc;
+  static GDEFCORE_Module_Callback cb;
+  memset(&perm, 0, sizeof perm);
+  perm.size = sizeof perm;
+  perm.label = "Read group";
+  perm.label_len = 10;
+  perm.action = "read";
+  perm.action_len = 4;
+  perm.condition = GDEFCORE_ACCESS_ANY;
+  perm.type_name = kPost;
+  perm.type_name_len = strlen(kPost);
+  perm.field = "group";
+  perm.field_len = 5;
+  memset(&table, 0, sizeof table);
+  table.size = sizeof table;
+  table.fn = PaywallAnswer;
+  memset(&svc, 0, sizeof svc);
+  svc.size = sizeof svc;
+  svc.name = "paywall.paid";
+  svc.name_len = 12;
+  svc.version = GDEFCORE_MODULE_ACCESS_CALLBACK_VERSION;
+  svc.table = &table;
+  memset(&cb, 0, sizeof cb);
+  cb.size = sizeof cb;
+  cb.name = "paid";
+  cb.name_len = 4;
+  cb.scope = GDEFCORE_CALLBACK_FIELD;
+  cb.permission = "Read group";
+  cb.permission_len = 10;
+  cb.type_name = kPost;
+  cb.type_name_len = strlen(kPost);
+  cb.field = "group";
+  cb.field_len = 5;
+  cb.service = "paywall.paid";
+  cb.service_len = 12;
+  cb.fuel = 10;
+  cb.timeout_ms = 50;
+  cb.cache = GDEFCORE_CALLBACK_CACHE_TOKEN;
+  memset(&m, 0, sizeof m);
+  m.size = sizeof m;
+  m.core_token = kCoreToken;
+  m.core_token_len = strlen(kCoreToken);
+  m.schema_version = 1;
+  m.name = "paywall";
+  m.name_len = 7;
+  m.label = "Paywall";
+  m.label_len = 7;
+  m.perms = &perm;
+  m.nperms = 1;
+  m.services = &svc;
+  m.nservices = 1;
+  m.callbacks = &cb;
+  m.ncallbacks = 1;
+  return &m;
+}
+
 enum { kMemory = 0, kSqlite = 1, kPostgres = 2 };
 
 const char * BackendName(int b) {
@@ -994,6 +1067,94 @@ TEST_F(Restore, ARestoredGrantToAStateIsHeldForItsTypedConfirmation) {
   EXPECT_TRUE(RoleGrants(dc, "anonymous").empty());
   gdefcore_catalog_bind_subjects(dc, NULL);
   gdefcore_catalog_destroy(dc);
+}
+
+/* A grant whose condition names a field an enabled module decides per entity
+ * holds nothing (access-conditions story A7). What a restore brings in is
+ * not applied silently: it is taken out of its role, reported in words and
+ * applied only when someone grants it again; the role keeps the rest. */
+TEST_F(Restore, ARestoredGrantNamingAGovernedFieldIsHeldAndReportedInWords) {
+  Populate();
+  ASSERT_FALSE(HasFatalFailure());
+  static const char kCond[] = "(= field.group \"a\")";
+  char * base = NULL;
+  size_t base_len = 0;
+  GDEFCORE_Condition * parsed = NULL;
+  char * words = NULL;
+  size_t words_len = 0;
+  GDEFCORE_Changeset * cs = NULL;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_access_grant_when(catalog_, "editors", 7,
+      "Read posts", 10, kCond, strlen(kCond), "core.role", 9));
+  /* The grant's own words: the permission's condition and the one it was
+   * given, held together. */
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_condition_builtin(
+      GDEFCORE_CONDITION_BUILTIN_ANY, kPost, strlen(kPost), &base, &base_len));
+  const std::string composite =
+      "(and " + std::string(base, base_len) + " " + kCond + ")";
+  gdefcore_condition_text_free(base);
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_condition_parse(composite.data(),
+      composite.size(), &parsed, NULL));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_condition_explain(parsed, &words, &words_len));
+  const std::string explain(words, words_len);
+  gdefcore_condition_text_free(words);
+  gdefcore_condition_free(parsed);
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_module_install_guest(host_, Paywall));
+  const std::string confirm =
+      "paywall\nModule paywall decides Read group per entity with its callback "
+      "paid (field scope, high risk): its breadth cannot be judged.\n"
+      "Module paywall suspends role editors's grant Read posts (" + explain +
+      "): its condition names field group of site.post, which that module "
+      "decides per entity with its callback paid, so the grant holds nothing "
+      "until no enabled module decides that field.\nRead group";
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_module_enable(host_, cs, "paywall", 7));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_changeset_apply(cs, confirm.data(), confirm.size()));
+  gdefcore_changeset_destroy(cs);
+  Bytes data = Snapshot();
+  Bytes keys = Keyset();
+  for (int backend : Backends()) {
+    SCOPED_TRACE(BackendName(backend));
+    Dest d(backend);
+    d.Install(Blog<1>);
+    d.Install(Paywall);
+    GDEFCORE_Restore * report = NULL;
+    ASSERT_EQ(GDEFCORE_OK, RestoreInto(&d, data, keys, &report))
+        << Reason(report);
+    ASSERT_EQ(1u, gdefcore_restore_held_count(report));
+    GDEFCORE_Restore_Held h;
+    memset(&h, 0, sizeof h);
+    h.size = sizeof h;
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_restore_held(report, 0, &h));
+    const std::string role(h.role, h.role_len);
+    const std::string perm(h.permission, h.permission_len);
+    const std::string confirmation(h.confirmation, h.confirmation_len);
+    const std::string sentence(h.sentence, h.sentence_len);
+    EXPECT_EQ("editors", role);
+    EXPECT_NE(std::string::npos, sentence.find("Read posts")) << sentence;
+    EXPECT_NE(std::string::npos, sentence.find("paywall")) << sentence;
+    EXPECT_NE(std::string::npos, sentence.find("decides per entity")) << sentence;
+    EXPECT_NE(std::string::npos, sentence.find("it would hold nothing")) << sentence;
+    EXPECT_NE(std::string::npos, sentence.find("it was not applied")) << sentence;
+    EXPECT_EQ("core.role", confirmation);
+    gdefcore_restore_free(report);
+    GDEFCORE_Catalog * dc = OpenCatalog(d.store);
+    ASSERT_NE(nullptr, dc);
+    /* Held: the role carries no conditional grant, and keeps the others. */
+    std::vector<std::string> grants = RoleGrants(dc, "editors");
+    EXPECT_EQ(2u, grants.size());
+    for (const std::string & g : grants) {
+      EXPECT_EQ(std::string::npos, g.find("#when:")) << g;
+    }
+    EXPECT_EQ("Charlie", ReadTitle(dc, editor_, posts_[0]));
+    /* Applied only when granted again, which the role's own confirmation
+     * does; the report says how. */
+    EXPECT_EQ(GDEFCORE_OK, gdefcore_access_grant(dc, "editors", 7, perm.data(),
+        perm.size(), confirmation.data(), confirmation.size()));
+    EXPECT_EQ(3u, RoleGrants(dc, "editors").size());
+    gdefcore_catalog_bind_subjects(dc, NULL);
+    gdefcore_catalog_destroy(dc);
+  }
 }
 
 /* ---- the version a module says ------------------------------------------ */

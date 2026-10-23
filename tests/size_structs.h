@@ -56,6 +56,7 @@
   X(GDEFCORE_Access_Matrix_Row, "tests/test_grants.cpp") \
   X(GDEFCORE_Access_List, "tests/test_grants.cpp") \
   X(GDEFCORE_Access_Held, "tests/test_restore.cpp") \
+  X(GDEFCORE_Access_Decision, "tests/test_suspend.cpp") \
   X(GDEFCORE_Condition_Error, "tests/test_condition.cpp") \
   X(GDEFCORE_Condition_Subject, "tests/test_condition.cpp") \
   X(GDEFCORE_Field, "tests/test_entity.cpp") \

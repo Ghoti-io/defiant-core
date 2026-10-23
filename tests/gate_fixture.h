@@ -991,6 +991,27 @@ inline std::string CanFieldLine(World & w, const std::string & who,
          Diag(w, fresh.req);
 }
 
+/** The same decision with the source that allowed it (story A7): for a
+ * hidden entity and a missing one it is the same refusal, with no source. */
+inline std::string DecideLine(World & w, const std::string & who,
+    const std::string & id, const char * action, const char * type,
+    const char * field) {
+  Fresh fresh(w, who);
+  GDEFCORE_Access_Decision d;
+  GDEFCORE_Result rc;
+  memset(&d, 0x5a, sizeof d);
+  d.size = sizeof d;
+  Note("gdefcore_access_decide");
+  rc = gdefcore_access_decide(w.site.catalog, fresh.req, action, strlen(action),
+      type, strlen(type), id.empty() ? NULL : id.c_str(), field,
+      field == NULL ? 0 : strlen(field), &d);
+  return "rc=" + Rc(rc) + " allowed=" + std::to_string(d.allowed) +
+         " source=" + std::to_string(d.source) + " holder=" +
+         std::string(d.holder, d.holder_len) + " permission=" +
+         std::string(d.permission, d.permission_len) + " callback=" +
+         std::string(d.callback, d.callback_len) + Diag(w, fresh.req);
+}
+
 inline std::string CanCreateLine(World & w, const std::string & who,
     const std::string & container, const char * type) {
   Fresh fresh(w, who);
@@ -1041,6 +1062,10 @@ inline Obs Observe(World & w, const std::string & who, const Ask & ask) {
     o.kv[pre + "can.update"] = CanLine(w, who, target, "update", "site.note");
     o.kv[pre + "can-field.update.title"] =
         CanFieldLine(w, who, target, "update", "site.note", "title");
+    o.kv[pre + "decide.read"] =
+        DecideLine(w, who, target, "read", "site.note", NULL);
+    o.kv[pre + "decide-field.read.secret"] =
+        DecideLine(w, who, target, "read", "site.note", "secret");
     o.kv[pre + "can-create.container"] =
         CanCreateLine(w, who, target, "site.note");
     o.kv[pre + "resolve.guard"] =

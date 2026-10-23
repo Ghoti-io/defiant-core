@@ -131,6 +131,9 @@ typedef struct Grant {
   size_t expr_len;
   /* kSrcCallback: the callback, borrowed from the module host as expr is. */
   const GDEFCORE_Module_Declared_Callback * cb;
+  /* kSrcRole: the role entity that holds it, so a decision can say which role
+   * allowed it (story A7). Empty for the others. */
+  char role_id[GDEFCORE_PUBLIC_ID_LEN + 1];
 } Grant;
 
 static StageSlot g_stage[kStageSlots];
@@ -791,6 +794,7 @@ static GDEFCORE_Result load_effective_for(GDEFCORE_Catalog * catalog,
         return rc;
       }
       for (g = 0; g < got; g++) {
+        memcpy(grants[*out_n + g].role_id, role_id, sizeof role_id);
         if (grants[*out_n + g].condition == GDEFCORE_ACCESS_OWN) {
           *read_principal = 1;
         }
@@ -813,6 +817,7 @@ static GDEFCORE_Result load_effective_for(GDEFCORE_Catalog * catalog,
       return GDEFCORE_ERR_INVALID;
     }
     for (g = 0; g < got; g++) {
+      memcpy(grants[g].role_id, role_id, sizeof role_id);
       if (grants[g].condition == GDEFCORE_ACCESS_OWN) {
         *read_principal = 1;
       }
@@ -963,7 +968,20 @@ typedef struct ExprSlot {
   size_t expr_len;
   GDEFCORE_Condition * cond;
   int bad;
+  /* The condition names a field an enabled module's callback decides, so the
+   * grant holds nothing for now (story A7): decided from the enabled set each
+   * time, never stored. */
+  int suspended;
 } ExprSlot;
+
+/* The field callbacks of the enabled modules, loaded once per call, to find
+ * the grants whose condition names a field one of them decides. Borrowed from
+ * the module host. */
+typedef struct Governed {
+  const GDEFCORE_Module_Declared_Callback ** items;
+  size_t n;
+  int loaded;
+} Governed;
 
 /*
  * What a grant's condition needs to be decided: the entity now being asked
@@ -986,6 +1004,7 @@ typedef struct Eval {
   int has_ceiling;
   Grant * ceiling;
   size_t nceiling;
+  Governed gov;
 } Eval;
 
 static void eval_init(Eval * ev, GDEFCORE_Catalog * catalog,
@@ -1000,6 +1019,107 @@ static void eval_init(Eval * ev, GDEFCORE_Catalog * catalog,
   ev->has_ceiling = 0;
   ev->ceiling = NULL;
   ev->nceiling = 0;
+  memset(&ev->gov, 0, sizeof ev->gov);
+}
+
+/* The enabled modules' field callbacks (or, with @p projection, those of the
+ * set a changeset would leave). */
+static GDEFCORE_Result gov_load(GDEFCORE_Catalog * catalog,
+    const GDEFCORE_Changeset * projection, Governed * gov) {
+  GDEFCORE_Host * host = gdefcore_catalog_host(catalog);
+  const uint8_t * tenant;
+  size_t tenant_len = 0;
+  GDEFCORE_Result rc;
+  memset(gov, 0, sizeof *gov);
+  if (host == NULL) {
+    gov->loaded = 1;
+    return GDEFCORE_OK;
+  }
+  tenant = gdefcore_catalog_tenant(catalog, &tenant_len);
+  rc = gdefcore_module_callbacks(host, tenant, tenant_len, projection,
+      &gov->items, &gov->n);
+  if (rc != GDEFCORE_OK) {
+    memset(gov, 0, sizeof *gov);
+    return rc;
+  }
+  gov->loaded = 1;
+  return GDEFCORE_OK;
+}
+
+static void gov_free(GDEFCORE_Catalog * catalog, Governed * gov) {
+  GDEFCORE_Host * host = catalog == NULL ? NULL : gdefcore_catalog_host(catalog);
+  if (host != NULL && gov->items != NULL) {
+    gdefcore_module_declared_free(host, gov->items);
+  }
+  memset(gov, 0, sizeof *gov);
+}
+
+enum { kGovMax = 32, kSuspBuf = kGovMax * (kPart + 2) + 1 };
+
+/* The modules whose field callbacks decide a field that @p cond names on
+ * @p type, once each, in the order of their names; the callback that names
+ * each is returned in @p out (at most kGovMax). A module that decides several
+ * such fields is one module. */
+static size_t gov_modules(const Governed * gov, const GDEFCORE_Condition * cond,
+    const char * type, size_t type_len,
+    const GDEFCORE_Module_Declared_Callback ** out) {
+  size_t n = 0;
+  size_t i;
+  for (i = 0; i < gov->n; i++) {
+    const GDEFCORE_Module_Declared_Callback * c = gov->items[i];
+    size_t k;
+    size_t at;
+    int seen = 0;
+    if (c->scope != GDEFCORE_CALLBACK_FIELD || c->field_len == 0 ||
+        !same(c->type_name, c->type_name_len, type, type_len) ||
+        !gdefcore_condition_tests_field(cond, c->field, c->field_len)) {
+      continue;
+    }
+    for (k = 0; k < n; k++) {
+      seen = seen || same(out[k]->module, out[k]->module_len, c->module,
+                         c->module_len);
+    }
+    if (seen || n >= kGovMax) {
+      continue;
+    }
+    /* Insert in the order of the module names, bytewise. */
+    at = n;
+    while (at > 0) {
+      size_t m = out[at - 1]->module_len < c->module_len
+                     ? out[at - 1]->module_len
+                     : c->module_len;
+      int cmp = memcmp(out[at - 1]->module, c->module, m);
+      if (cmp < 0 || (cmp == 0 && out[at - 1]->module_len < c->module_len)) {
+        break;
+      }
+      out[at] = out[at - 1];
+      at -= 1;
+    }
+    out[at] = c;
+    n += 1;
+  }
+  return n;
+}
+
+/* "billing, ledger": the module names of @p mods, for a sentence. */
+static int gov_names(const GDEFCORE_Module_Declared_Callback * const * mods,
+    size_t n, char * buf, size_t cap) {
+  size_t at = 0;
+  size_t i;
+  for (i = 0; i < n; i++) {
+    size_t need = mods[i]->module_len + (i > 0 ? 2 : 0);
+    if (at + need + 1 > cap) {
+      return -1;
+    }
+    if (i > 0) {
+      memcpy(buf + at, ", ", 2);
+      at += 2;
+    }
+    memcpy(buf + at, mods[i]->module, mods[i]->module_len);
+    at += mods[i]->module_len;
+  }
+  buf[at] = '\0';
+  return (int)at;
 }
 
 /* Frees the slots. A failure leaves a note on the request, which is how the
@@ -1010,6 +1130,7 @@ static void eval_done(Eval * ev) {
     gdefcore_condition_free(ev->slots[i].cond);
   }
   ev->nslots = 0;
+  gov_free(ev->catalog, &ev->gov);
   gcu_allocator_free(alloc_default(), ev->ceiling);
   ev->ceiling = NULL;
   ev->nceiling = 0;
@@ -1018,6 +1139,29 @@ static void eval_done(Eval * ev) {
     (void)gdefcore_request_set_note(ev->request, kFailedNote,
         strlen(kFailedNote), "1", 1);
   }
+}
+
+/*
+ * A grant whose condition names a field an enabled module's callback decides
+ * holds nothing (story A7): the condition cannot be evaluated on a value only
+ * the callback may read, and a list cannot compile it. This is derived from
+ * the set of enabled modules each time a condition is read, not stored, so a
+ * grant is suspended exactly as long as some enabled module decides the field
+ * and resumes when the last one is disabled. It is no failure: nothing is
+ * reported, because the state is shown in the matrix and was confirmed at the
+ * enable that brought it about. The evaluator's own refusal of a governed
+ * field (condition_eval.c) stays behind it as the backstop.
+ */
+static void slot_suspend(Eval * ev, ExprSlot * slot, const Grant * grant) {
+  const GDEFCORE_Module_Declared_Callback * mods[kGovMax];
+  if (!ev->gov.loaded && gov_load(ev->catalog, NULL, &ev->gov) != GDEFCORE_OK) {
+    /* Unknown is governed: not decided, never probed. */
+    slot->bad = 1;
+    return;
+  }
+  slot->suspended =
+      gov_modules(&ev->gov, slot->cond, grant->type_name, grant->type_len,
+          mods) > 0;
 }
 
 static ExprSlot * expr_slot(Eval * ev, const Grant * grant) {
@@ -1030,9 +1174,12 @@ static ExprSlot * expr_slot(Eval * ev, const Grant * grant) {
   int by_expr = grant->source == kSrcModule;
   for (i = 0; i < ev->nslots; i++) {
     if (by_expr) {
+      /* The label too: the same text on another permission is another type. */
       if (ev->slots[i].expr != NULL &&
           same(ev->slots[i].expr, ev->slots[i].expr_len, grant->expr,
-              grant->expr_len)) {
+              grant->expr_len) &&
+          same(ev->slots[i].label, ev->slots[i].label_len, grant->label,
+              grant->label_len)) {
         return &ev->slots[i];
       }
     } else if (ev->slots[i].expr == NULL &&
@@ -1057,6 +1204,7 @@ static ExprSlot * expr_slot(Eval * ev, const Grant * grant) {
         gdefcore_condition_parse(grant->expr, grant->expr_len, &slot->cond,
             NULL) == GDEFCORE_OK) {
       slot->bad = 0;
+      slot_suspend(ev, slot, grant);
     }
     return slot;
   }
@@ -1070,6 +1218,7 @@ static ExprSlot * expr_slot(Eval * ev, const Grant * grant) {
     if (gdefcore_condition_parse(texts[0], lens[0], &slot->cond, NULL) ==
         GDEFCORE_OK) {
       slot->bad = 0;
+      slot_suspend(ev, slot, grant);
     }
   }
   gdefcore_values_free(ev->catalog, texts, lens, n);
@@ -1086,6 +1235,9 @@ static int expr_holds(Eval * ev, const Grant * grant, const char * id,
   int r;
   if (slot == NULL || slot->bad || slot->cond == NULL) {
     ev->failed = 1;
+    return 0;
+  }
+  if (slot->suspended) {
     return 0;
   }
   memset(&subject, 0, sizeof subject);
@@ -3727,6 +3879,10 @@ static const GDEFSTOR_QueryNode * grant_base(Eval * ev, GDEFCORE_Plan * plan,
     ev->failed = 1;
     return gdefcore_plan_constant(plan, 0);
   }
+  if (slot->suspended) {
+    /* Suspended by a governed field (story A7): it covers nothing. */
+    return gdefcore_plan_constant(plan, 0);
+  }
   return gdefcore_plan_condition(plan, slot->cond);
 }
 
@@ -4624,7 +4780,10 @@ GDEFCORE_Result gdefcore_access_render_key(GDEFCORE_Catalog * catalog,
   for (i = 0; i < ngrants; i++) {
     if (grants[i].condition == kCondExpr) {
       /* An expression that reads the principal, or that cannot be read at
-       * all, makes the render depend on who is asking. */
+       * all, makes the render depend on who is asking. One that reads the
+       * time (`now`), or cannot be read, makes it depend on when (story A7:
+       * a grant that expires must not be served from a fragment kept before
+       * it did). */
       ExprSlot * slot = expr_slot(&ev, &grants[i]);
       if (slot == NULL || slot->bad ||
           (gdefcore_condition_uses(slot->cond) &
@@ -4850,7 +5009,7 @@ static int expr_could_apply(Eval * ev, const Grant * grant) {
 /* Whether one of @p grants for @p permission holds, or could. An int
  * condition is held as it always was: the permission is not about one entity.
  * An expression is held when it could apply to something. */
-static int permits_in(Eval * ev, const Grant * grants, size_t ngrants,
+static long permits_at(Eval * ev, const Grant * grants, size_t ngrants,
     const char * permission, size_t permission_len, const char * type,
     size_t type_len) {
   size_t i;
@@ -4868,10 +5027,17 @@ static int permits_in(Eval * ev, const Grant * grants, size_t ngrants,
       continue;
     }
     if (grants[i].condition != kCondExpr || expr_could_apply(ev, &grants[i])) {
-      return 1;
+      return (long)i;
     }
   }
-  return 0;
+  return -1;
+}
+
+static int permits_in(Eval * ev, const Grant * grants, size_t ngrants,
+    const char * permission, size_t permission_len, const char * type,
+    size_t type_len) {
+  return permits_at(ev, grants, ngrants, permission, permission_len, type,
+             type_len) >= 0;
 }
 
 int gdefcore_access_permits(GDEFCORE_Catalog * catalog,
@@ -5552,6 +5718,192 @@ GDEFCORE_Result gdefcore_access_stage_module_callback(
   return rc == GDEFCORE_OK ? GDEFCORE_OK : rc;
 }
 
+/* ---- grants a module's callback would suspend, offered at enable (A7) --- */
+
+static size_t shown_label_len(const char * label, size_t len);
+
+/* One line of the preview: @p grant (held by @p who) names @p field of
+ * @p type, which @p cb decides. The words are plain text on one line. */
+static GDEFCORE_Result suspension_line(GDEFCORE_Changeset * changeset,
+    const char * who, size_t who_len, const char * label, size_t label_len,
+    const GDEFCORE_Condition * cond, const GDEFCORE_Module_Declared_Callback * cb) {
+  char * words = NULL;
+  size_t words_len = 0;
+  char * text;
+  size_t cap;
+  size_t i;
+  int n;
+  GDEFCORE_Result rc = gdefcore_condition_explain(cond, &words, &words_len);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  cap = who_len + label_len + words_len + cb->module_len * 2 + cb->name_len +
+        cb->field_len + cb->type_name_len + 300;
+  text = (char *)gcu_allocator_malloc(alloc_default(), cap);
+  if (text == NULL) {
+    gdefcore_condition_text_free(words);
+    return GDEFCORE_ERR_OOM;
+  }
+  n = snprintf(text, cap,
+      "Module %.*s suspends %.*s grant %.*s (%.*s): its condition names field "
+      "%.*s of %.*s, which that module decides per entity with its callback "
+      "%.*s, so the grant holds nothing until no enabled module decides that "
+      "field.",
+      (int)cb->module_len, cb->module, (int)who_len, who,
+      (int)shown_label_len(label, label_len), label, (int)words_len, words,
+      (int)cb->field_len, cb->field, (int)cb->type_name_len, cb->type_name,
+      (int)cb->name_len, cb->name);
+  gdefcore_condition_text_free(words);
+  if (n <= 0 || (size_t)n >= cap) {
+    gcu_allocator_free(alloc_default(), text);
+    return GDEFCORE_ERR_LIMIT;
+  }
+  for (i = 0; i < (size_t)n; i++) {
+    if ((unsigned char)text[i] < 0x20 || text[i] == 0x7f) {
+      text[i] = '?';
+    }
+  }
+  rc = gdefcore_changeset_add_confirm_line(changeset, text, (size_t)n);
+  gcu_allocator_free(alloc_default(), text);
+  return rc;
+}
+
+/* Every callback of @p module in @p gov that decides a field @p cond names on
+ * @p type: a line each. */
+static GDEFCORE_Result suspension_lines_for(GDEFCORE_Changeset * changeset,
+    const Governed * gov, const char * module, size_t module_len,
+    const char * who, size_t who_len, const char * label, size_t label_len,
+    const char * type, size_t type_len, const GDEFCORE_Condition * cond) {
+  size_t i;
+  GDEFCORE_Result rc = GDEFCORE_OK;
+  for (i = 0; rc == GDEFCORE_OK && i < gov->n; i++) {
+    const GDEFCORE_Module_Declared_Callback * c = gov->items[i];
+    if (c->scope == GDEFCORE_CALLBACK_FIELD && c->field_len > 0 &&
+        same(c->module, c->module_len, module, module_len) &&
+        same(c->type_name, c->type_name_len, type, type_len) &&
+        gdefcore_condition_tests_field(cond, c->field, c->field_len)) {
+      rc = suspension_line(changeset, who, who_len, label, label_len, cond, c);
+    }
+  }
+  return rc;
+}
+
+GDEFCORE_Result gdefcore_access_stage_module_suspensions(
+    GDEFCORE_Changeset * changeset, const char * module_name,
+    size_t module_name_len) {
+  GDEFCORE_Catalog * catalog;
+  GDEFCORE_Host * host;
+  Governed gov;
+  Eval ev;
+  char ** ids = NULL;
+  size_t count = 0;
+  const GDEFCORE_Module_Declared_Grant ** items = NULL;
+  size_t nitems = 0;
+  size_t own = 0;
+  size_t i;
+  GDEFCORE_Result rc;
+  if (changeset == NULL || !line_ok(module_name, module_name_len)) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  catalog = gdefcore_changeset_catalog(changeset);
+  host = catalog == NULL ? NULL : gdefcore_catalog_host(catalog);
+  if (host == NULL) {
+    return GDEFCORE_OK;
+  }
+  /* The set the changeset would leave: the module is in it. */
+  rc = gov_load(catalog, changeset, &gov);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  for (i = 0; i < gov.n; i++) {
+    own += gov.items[i]->scope == GDEFCORE_CALLBACK_FIELD &&
+           same(gov.items[i]->module, gov.items[i]->module_len, module_name,
+               module_name_len);
+  }
+  if (own == 0) {
+    gov_free(catalog, &gov);
+    return GDEFCORE_OK;
+  }
+  eval_init(&ev, catalog, NULL, NULL, 0);
+  /* A tenant nothing has asked about yet has no role and no grant. */
+  rc = gdefcore_entity_ids(catalog, kRoleType, strlen(kRoleType), &ids, &count);
+  if (rc == GDEFCORE_ERR_INVALID) {
+    rc = GDEFCORE_OK;
+    count = 0;
+  }
+  for (i = 0; rc == GDEFCORE_OK && i < count; i++) {
+    Grant grants[kGrantMax];
+    size_t ngrants = 0;
+    char ** names = NULL;
+    size_t * name_lens = NULL;
+    size_t nnames = 0;
+    size_t g;
+    int retired = 1;
+    rc = retired_state(catalog, ids[i], &retired);
+    if (rc != GDEFCORE_OK || retired) {
+      continue;
+    }
+    rc = read_values(catalog, ids[i], "name", &names, &name_lens, &nnames);
+    if (rc == GDEFCORE_OK && nnames > 0) {
+      rc = load_role_grants(catalog, ids[i], grants, kGrantMax, &ngrants);
+      for (g = 0; rc == GDEFCORE_OK && g < ngrants; g++) {
+        ExprSlot * slot;
+        char holder[kPart + 16];
+        int hn;
+        if (grants[g].condition != kCondExpr) {
+          continue;
+        }
+        slot = expr_slot(&ev, &grants[g]);
+        if (slot == NULL || slot->bad || slot->cond == NULL) {
+          continue;
+        }
+        hn = snprintf(holder, sizeof holder, "role %.*s's", (int)name_lens[0],
+            names[0]);
+        if (hn <= 0 || (size_t)hn >= sizeof holder) {
+          rc = GDEFCORE_ERR_LIMIT;
+          break;
+        }
+        rc = suspension_lines_for(changeset, &gov, module_name, module_name_len,
+            holder, (size_t)hn, grants[g].label, grants[g].label_len,
+            grants[g].type_name, grants[g].type_len, slot->cond);
+      }
+    }
+    gdefcore_values_free(catalog, names, name_lens, nnames);
+  }
+  gdefcore_ids_free(catalog, ids, count);
+  if (rc == GDEFCORE_OK) {
+    size_t tenant_len = 0;
+    const uint8_t * tenant = gdefcore_catalog_tenant(catalog, &tenant_len);
+    rc = gdefcore_module_grants(host, tenant, tenant_len, changeset, &items,
+        &nitems);
+  }
+  for (i = 0; i < nitems && rc == GDEFCORE_OK; i++) {
+    const GDEFCORE_Module_Declared_Grant * item = items[i];
+    GDEFCORE_Condition * parsed = NULL;
+    char holder[kPart + 24];
+    int hn = snprintf(holder, sizeof holder, "module %.*s's",
+        (int)item->module_len, item->module);
+    if (hn <= 0 || (size_t)hn >= sizeof holder) {
+      rc = GDEFCORE_ERR_LIMIT;
+      break;
+    }
+    if (gdefcore_condition_parse(item->condition, item->condition_len, &parsed,
+            NULL) != GDEFCORE_OK) {
+      continue;
+    }
+    rc = suspension_lines_for(changeset, &gov, module_name, module_name_len,
+        holder, (size_t)hn, item->permission, item->permission_len,
+        item->type_name, item->type_name_len, parsed);
+    gdefcore_condition_free(parsed);
+  }
+  if (items != NULL) {
+    gdefcore_module_declared_free(host, items);
+  }
+  eval_done(&ev);
+  gov_free(catalog, &gov);
+  return rc;
+}
+
 /* ---- the matrix -------------------------------------------------------- */
 
 typedef struct MatrixBuild {
@@ -5587,6 +5939,7 @@ static void mx_free_row(GDEFCORE_Catalog * catalog,
   gdefcore_text_free(catalog, (char *)row->field);
   gdefcore_text_free(catalog, (char *)row->condition);
   gdefcore_text_free(catalog, (char *)row->explain);
+  gdefcore_text_free(catalog, (char *)row->suspended_by);
   memset(row, 0, sizeof *row);
 }
 
@@ -5689,7 +6042,8 @@ static GDEFCORE_Result mx_add(MatrixBuild * b, const char * source,
     size_t source_len, int from_module, const char * label, size_t label_len,
     const char * action, size_t action_len, const char * type_name,
     size_t type_len, const char * field, size_t field_len, const char * cond,
-    size_t cond_len, int reaches_anonymous) {
+    size_t cond_len, int reaches_anonymous, const char * suspended_by,
+    size_t suspended_by_len) {
   GDEFCORE_Access_Matrix_Row * row;
   GDEFCORE_Condition * parsed = NULL;
   char * explain = NULL;
@@ -5779,12 +6133,56 @@ static GDEFCORE_Result mx_add(MatrixBuild * b, const char * source,
       row->explain_len = joined_len;
     }
   }
+  if (rc == GDEFCORE_OK && suspended_by_len > 0) {
+    /* Story A7: said in words beside the condition, and as data. */
+    char note[kSuspBuf + 256];
+    char * joined = NULL;
+    size_t joined_len = 0;
+    int nn = snprintf(note, sizeof note,
+        " This grant is suspended by %.*s: its condition names a field that "
+        "module decides per entity with a callback, so it grants nothing "
+        "until no enabled module decides that field.",
+        (int)suspended_by_len, suspended_by);
+    if (nn <= 0 || (size_t)nn >= sizeof note) {
+      rc = GDEFCORE_ERR_LIMIT;
+    } else {
+      rc = mx_join(b->catalog, row->explain, row->explain_len, note,
+          (size_t)nn, &joined, &joined_len);
+    }
+    if (rc == GDEFCORE_OK) {
+      gdefcore_text_free(b->catalog, (char *)row->explain);
+      row->explain = joined;
+      row->explain_len = joined_len;
+      row->suspended = 1;
+      rc = mx_text(b->catalog, suspended_by, suspended_by_len,
+          &row->suspended_by, &row->suspended_by_len);
+    }
+  }
   if (rc != GDEFCORE_OK) {
     mx_free_row(b->catalog, row);
     return rc;
   }
   b->n += 1;
   return GDEFCORE_OK;
+}
+
+/* The enabled modules that decide a field @p cond names on @p type, sorted
+ * and joined, into @p buf: its length, or 0 for none (story A7). */
+static size_t suspended_by_of(Eval * ev, const GDEFCORE_Condition * cond,
+    const char * type, size_t type_len, char * buf, size_t cap) {
+  const GDEFCORE_Module_Declared_Callback * mods[kGovMax];
+  size_t n;
+  int len;
+  buf[0] = '\0';
+  if (!ev->gov.loaded && gov_load(ev->catalog, NULL, &ev->gov) != GDEFCORE_OK) {
+    return 0;
+  }
+  n = gov_modules(&ev->gov, cond, type, type_len, mods);
+  if (n == 0) {
+    return 0;
+  }
+  len = gov_names(mods, n, buf, cap);
+  return len < 0 ? 0 : (size_t)len;
 }
 
 static int mx_span_cmp(const char * a, size_t an, const char * b, size_t bn) {
@@ -5867,12 +6265,19 @@ static GDEFCORE_Result mx_role(MatrixBuild * b, Eval * ev, const char * role_id)
     const char * cond = text;
     char * canon = NULL;
     size_t canon_len = 0;
+    char susp[kSuspBuf];
+    size_t susp_len = 0;
+    susp[0] = '\0';
     if (grants[i].condition == kCondExpr) {
       ExprSlot * slot = expr_slot(ev, &grants[i]);
       if (slot == NULL || slot->bad) {
         return GDEFCORE_ERR_CORRUPT;
       }
       rc = gdefcore_condition_canonical(slot->cond, &canon, &canon_len);
+      if (slot->suspended) {
+        susp_len = suspended_by_of(ev, slot->cond, grants[i].type_name,
+            grants[i].type_len, susp, sizeof susp);
+      }
     } else {
       rc = gdefcore_condition_builtin(
           grants[i].condition == GDEFCORE_ACCESS_ANY
@@ -5893,7 +6298,7 @@ static GDEFCORE_Result mx_role(MatrixBuild * b, Eval * ev, const char * role_id)
     rc = mx_add(b, source, source_len, 0, grants[i].label, grants[i].label_len,
         grants[i].action, grants[i].action_len, grants[i].type_name,
         grants[i].type_len, grants[i].field, grants[i].field_len, cond,
-        text_len, anonymous);
+        text_len, anonymous, susp, susp_len);
   }
   return rc;
 }
@@ -6071,6 +6476,9 @@ GDEFCORE_Result gdefcore_access_matrix(GDEFCORE_Catalog * catalog,
     const char * action = "";
     size_t action_len = 0;
     int anonymous = 1;
+    char susp[kSuspBuf];
+    size_t susp_len = 0;
+    susp[0] = '\0';
     if (item->module_len + 8 >= sizeof source) {
       rc = GDEFCORE_ERR_CORRUPT;
       break;
@@ -6087,6 +6495,8 @@ GDEFCORE_Result gdefcore_access_matrix(GDEFCORE_Catalog * catalog,
             &parsed, NULL) == GDEFCORE_OK) {
       anonymous = (gdefcore_condition_uses(parsed) &
                       GDEFCORE_CONDITION_USES_PRINCIPAL) == 0;
+      susp_len = suspended_by_of(&ev, parsed, item->type_name,
+          item->type_name_len, susp, sizeof susp);
       if (gdefcore_condition_canonical(parsed, &canon, &canon_len) !=
           GDEFCORE_OK) {
         canon = NULL;
@@ -6097,7 +6507,8 @@ GDEFCORE_Result gdefcore_access_matrix(GDEFCORE_Catalog * catalog,
         item->permission_len, action, action_len, item->type_name,
         item->type_name_len, item->field, item->field_len,
         canon != NULL ? canon : item->condition,
-        canon != NULL ? canon_len : item->condition_len, anonymous);
+        canon != NULL ? canon_len : item->condition_len, anonymous, susp,
+        susp_len);
     gdefcore_condition_text_free(canon);
   }
   if (host != NULL) {
@@ -6127,21 +6538,31 @@ typedef struct HeldGrant {
   char * cond; /* its condition, canonical; alloc_default() */
   size_t cond_len;
   int risk;
+  char * by;   /* the enabled modules that suspend it (story A7), or NULL */
+  size_t by_len;
+  int keep;    /* a grant to an ordinary role that nothing suspends */
 } HeldGrant;
 
 /* Take back every grant of one role that is a state, then say what each was.
- * The role is written first: a report that fails leaves nothing applied. */
+ * The role is written first: a report that fails leaves nothing applied.
+ * With @p suspended_only (an ordinary role, story A7) it takes back only the
+ * grants a governed field suspends and leaves the rest as they are. */
 static GDEFCORE_Result hold_role(GDEFCORE_Catalog * catalog, Eval * ev,
     const char * role_id, const char * name, size_t name_len,
-    GDEFCORE_Access_Held_Fn fn, void * ctx) {
+    int suspended_only, GDEFCORE_Access_Held_Fn fn, void * ctx) {
   Grant grants[kGrantMax];
+  Grant kept[kGrantMax];
   HeldGrant * held = NULL;
   size_t ngrants = 0;
+  size_t nkept = 0;
+  size_t nheld = 0;
   size_t i;
   int anonymous = same(name, name_len, kAnonymous, strlen(kAnonymous));
-  const char * confirmation = anonymous
-                                  ? GDEFCORE_ACCESS_CONFIRM_ANONYMOUS
-                                  : GDEFCORE_ACCESS_CONFIRM_AUTHENTICATED;
+  const char * confirmation = suspended_only
+                                  ? kRoleConfirm
+                                  : (anonymous
+                                            ? GDEFCORE_ACCESS_CONFIRM_ANONYMOUS
+                                            : GDEFCORE_ACCESS_CONFIRM_AUTHENTICATED);
   GDEFCORE_Result rc = load_role_grants(catalog, role_id, grants, kGrantMax,
       &ngrants);
   if (rc != GDEFCORE_OK || ngrants == 0) {
@@ -6163,6 +6584,21 @@ static GDEFCORE_Result hold_role(GDEFCORE_Catalog * catalog, Eval * ev,
                ? GDEFCORE_ERR_CORRUPT
                : gdefcore_condition_canonical(slot->cond, &held[i].cond,
                      &held[i].cond_len);
+      if (rc == GDEFCORE_OK && slot->suspended) {
+        /* Named in the report: the enabled modules that decide the field. */
+        char names[kSuspBuf];
+        size_t nl = suspended_by_of(ev, slot->cond, grants[i].type_name,
+            grants[i].type_len, names, sizeof names);
+        if (nl > 0) {
+          held[i].by = (char *)gcu_allocator_malloc(alloc_default(), nl + 1);
+          if (held[i].by == NULL) {
+            rc = GDEFCORE_ERR_OOM;
+          } else {
+            memcpy(held[i].by, names, nl + 1);
+            held[i].by_len = nl;
+          }
+        }
+      }
     } else {
       rc = gdefcore_condition_builtin(
           grants[i].condition == GDEFCORE_ACCESS_ANY
@@ -6176,15 +6612,24 @@ static GDEFCORE_Result hold_role(GDEFCORE_Catalog * catalog, Eval * ev,
           grants[i].action_len, grants[i].field, grants[i].field_len,
           held[i].cond, held[i].cond_len, anonymous);
     }
+    held[i].keep = suspended_only && held[i].by == NULL;
+    if (held[i].keep) {
+      kept[nkept++] = grants[i];
+    } else {
+      nheld += 1;
+    }
   }
-  if (rc == GDEFCORE_OK) {
-    /* None of them is applied: the role keeps its history, and its newest
-     * revision grants nothing. */
-    rc = write_grants(catalog, role_id, NULL, 0);
+  if (rc == GDEFCORE_OK && nheld > 0) {
+    /* None of the held is applied: the role keeps its history, and its newest
+     * revision grants only what was left. */
+    rc = write_grants(catalog, role_id, kept, nkept);
   }
-  for (i = 0; rc == GDEFCORE_OK && i < ngrants; i++) {
+  for (i = 0; rc == GDEFCORE_OK && nheld > 0 && i < ngrants; i++) {
     GDEFCORE_Access_Held out;
     const Grant * g = &held[i].grant;
+    if (held[i].keep) {
+      continue;
+    }
     memset(&out, 0, sizeof out);
     out.size = sizeof out;
     out.role = name;
@@ -6204,10 +6649,13 @@ static GDEFCORE_Result hold_role(GDEFCORE_Catalog * catalog, Eval * ev,
     out.risk = held[i].risk;
     out.confirmation = confirmation;
     out.confirmation_len = strlen(confirmation);
+    out.suspended_by = held[i].by != NULL ? held[i].by : "";
+    out.suspended_by_len = held[i].by_len;
     rc = fn(ctx, &out);
   }
   for (i = 0; i < ngrants; i++) {
     gdefcore_condition_text_free(held[i].cond);
+    gcu_allocator_free(alloc_default(), held[i].by);
   }
   gcu_allocator_free(alloc_default(), held);
   return rc;
@@ -6239,11 +6687,14 @@ GDEFCORE_Result gdefcore_access_hold_for_confirmation(GDEFCORE_Catalog * catalog
       continue;
     }
     rc = read_values(catalog, ids[i], "name", &names, &name_lens, &nnames);
-    if (rc == GDEFCORE_OK && nnames > 0 &&
-        (same(names[0], name_lens[0], kAnonymous, strlen(kAnonymous)) ||
-            same(names[0], name_lens[0], kAuthenticated,
-                strlen(kAuthenticated)))) {
-      rc = hold_role(catalog, &ev, ids[i], names[0], name_lens[0], fn, ctx);
+    if (rc == GDEFCORE_OK && nnames > 0) {
+      int is_state =
+          same(names[0], name_lens[0], kAnonymous, strlen(kAnonymous)) ||
+          same(names[0], name_lens[0], kAuthenticated, strlen(kAuthenticated));
+      /* A state's grants are all taken back; any other role's only those a
+       * governed field suspends (story A7). */
+      rc = hold_role(catalog, &ev, ids[i], names[0], name_lens[0], !is_state,
+          fn, ctx);
     }
     gdefcore_values_free(catalog, names, name_lens, nnames);
   }
@@ -6253,6 +6704,54 @@ GDEFCORE_Result gdefcore_access_hold_for_confirmation(GDEFCORE_Catalog * catalog
 }
 
 /* ---- one can() --------------------------------------------------------- */
+
+/* ---- which source allowed a decision (story A7) ------------------------- */
+
+static void source_text(char * dst, size_t cap, size_t * dst_len,
+    const char * src, size_t n) {
+  if (n >= cap) {
+    n = cap - 1;
+  }
+  if (n > 0) {
+    memcpy(dst, src, n);
+  }
+  dst[n] = '\0';
+  *dst_len = n;
+}
+
+/* Say, in @p dec, that @p grant allowed the decision: a role's grant (the
+ * role named), an enabled module's grant, or a module's named callback. The
+ * permission is as the matrix shows it. */
+static void source_fill(GDEFCORE_Catalog * catalog, const Grant * grant,
+    GDEFCORE_Access_Decision * dec) {
+  dec->allowed = 1;
+  source_text(dec->permission, sizeof dec->permission, &dec->permission_len,
+      grant->label, shown_label_len(grant->label, grant->label_len));
+  if (grant->source == kSrcCallback && grant->cb != NULL) {
+    dec->source = GDEFCORE_ACCESS_SOURCE_CALLBACK;
+    source_text(dec->holder, sizeof dec->holder, &dec->holder_len,
+        grant->cb->module, grant->cb->module_len);
+    source_text(dec->callback, sizeof dec->callback, &dec->callback_len,
+        grant->cb->name, grant->cb->name_len);
+  } else if (grant->source == kSrcModule) {
+    dec->source = GDEFCORE_ACCESS_SOURCE_MODULE;
+    source_text(dec->holder, sizeof dec->holder, &dec->holder_len,
+        grant->module_name, grant->module_len);
+  } else {
+    char ** names = NULL;
+    size_t * lens = NULL;
+    size_t n = 0;
+    dec->source = GDEFCORE_ACCESS_SOURCE_ROLE;
+    if (grant->role_id[0] != '\0' &&
+        read_values(catalog, grant->role_id, "name", &names, &lens, &n) ==
+            GDEFCORE_OK &&
+        n > 0) {
+      source_text(dec->holder, sizeof dec->holder, &dec->holder_len, names[0],
+          lens[0]);
+    }
+    gdefcore_values_free(catalog, names, lens, n);
+  }
+}
 
 /* The memo key: who asks (and for whom), what, of which entity at which
  * revision. At type level the entity is "*" and the revision is the epoch of
@@ -6275,16 +6774,19 @@ static int can_key(char * out, size_t cap, const GDEFCORE_Request * request,
 }
 
 /* One decision, not remembered. @p canon is the entity's canonical id, or
- * NULL for the type-level question. */
+ * NULL for the type-level question. A grant that allows it is named in
+ * @p dec when that is not NULL (story A7). */
 static GDEFCORE_Result can_decide(GDEFCORE_Catalog * catalog,
     GDEFCORE_Request * request, const char * permission, size_t permission_len,
-    const char * type, size_t type_len, const char * canon, int * out_allowed) {
+    const char * type, size_t type_len, const char * canon, int * out_allowed,
+    GDEFCORE_Access_Decision * dec) {
   Grant grants[kGrantMax];
   size_t ngrants = 0;
   int read_principal = 0;
   Eval ev;
   size_t i;
   int allowed = 0;
+  long win = -1;
   int failed;
   char * actor = NULL;
   size_t actor_len = 0;
@@ -6301,8 +6803,9 @@ static GDEFCORE_Result can_decide(GDEFCORE_Catalog * catalog,
   eval_init(&ev, catalog, request, NULL, 0);
   (void)setup_ceiling(&ev);
   if (canon == NULL) {
-    allowed = permits_in(&ev, grants, ngrants, permission, permission_len, type,
+    win = permits_at(&ev, grants, ngrants, permission, permission_len, type,
         type_len);
+    allowed = win >= 0;
     if (allowed && ev.has_ceiling) {
       allowed = permits_in(&ev, ev.ceiling, ev.nceiling, permission,
           permission_len, type, type_len);
@@ -6326,6 +6829,7 @@ static GDEFCORE_Result can_decide(GDEFCORE_Catalog * catalog,
       }
       allowed = condition_ok(&ev, &grants[i], actor, actor_len, principal,
           principal_len);
+      win = allowed ? (long)i : win;
     }
     gdefcore_text_free(catalog, actor);
     if (allowed && same(permission, permission_len, "read", 4)) {
@@ -6337,20 +6841,29 @@ static GDEFCORE_Result can_decide(GDEFCORE_Catalog * catalog,
     }
   }
   failed = ev.failed;
+  if (allowed && dec != NULL && win >= 0) {
+    source_fill(catalog, &grants[win], dec);
+  }
   eval_done(&ev);
-  if (failed) {
+  if (failed && !allowed) {
     /* A condition that could not be decided is not a no that can be
-     * remembered, and not a yes. */
+     * remembered, and not a yes. One that failed beside a grant that holds
+     * is neither: the sources combine by union, a source that fails grants
+     * nothing and cancels the allow of no other source (story A7). The
+     * failure is reported on the request (eval_done). */
     return GDEFCORE_ERR_INTERNAL;
   }
   *out_allowed = allowed;
   return GDEFCORE_OK;
 }
 
-GDEFCORE_Result gdefcore_access_can(GDEFCORE_Catalog * catalog,
+/* gdefcore_access_can(), and gdefcore_access_decide() when @p dec is not
+ * NULL: the same question, asked afresh (an answer remembered carries no
+ * source), the source that allowed it named in @p dec. */
+static GDEFCORE_Result can_impl(GDEFCORE_Catalog * catalog,
     GDEFCORE_Request * request, const char * permission, size_t permission_len,
     const char * type, size_t type_len, const char * entity_id,
-    int * out_allowed) {
+    int * out_allowed, GDEFCORE_Access_Decision * dec) {
   char canon[GDEFCORE_PUBLIC_ID_LEN + 1];
   char key[1024];
   int key_len;
@@ -6426,8 +6939,8 @@ GDEFCORE_Result gdefcore_access_can(GDEFCORE_Catalog * catalog,
   key_len = can_key(key, sizeof key, request, permission, permission_len, type,
       type_len, entity_id == NULL ? NULL : canon, version);
   memo = key_len > 0;
-  if (memo && gdefcore_request_memo_get(request, key, (size_t)key_len,
-                  &allowed)) {
+  if (memo && dec == NULL &&
+      gdefcore_request_memo_get(request, key, (size_t)key_len, &allowed)) {
     *out_allowed = allowed != 0;
     return GDEFCORE_OK;
   }
@@ -6437,7 +6950,7 @@ GDEFCORE_Result gdefcore_access_can(GDEFCORE_Catalog * catalog,
     return rc;
   }
   rc = can_decide(catalog, request, permission, permission_len, type, type_len,
-      entity_id == NULL ? NULL : canon, &allowed);
+      entity_id == NULL ? NULL : canon, &allowed, dec);
   if (rc != GDEFCORE_OK) {
     return rc;
   }
@@ -6448,12 +6961,20 @@ GDEFCORE_Result gdefcore_access_can(GDEFCORE_Catalog * catalog,
   return GDEFCORE_OK;
 }
 
+GDEFCORE_Result gdefcore_access_can(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Request * request, const char * permission, size_t permission_len,
+    const char * type, size_t type_len, const char * entity_id,
+    int * out_allowed) {
+  return can_impl(catalog, request, permission, permission_len, type, type_len,
+      entity_id, out_allowed, NULL);
+}
+
 /* Whether a field-level grant of @p action for @p field holds. Asked of one
  * entity, a grant holds when its condition does on that entity as stored.
  * Asked with none (a create: there is no stored entity), a grant holds when
  * the permission is the kind that is not about one entity, or when its
  * expression could apply to something; no value being written is consulted. */
-static int field_grant_holds(Eval * ev, const Grant * grants, size_t ngrants,
+static long field_grant_at(Eval * ev, const Grant * grants, size_t ngrants,
     const char * action, size_t action_len, const char * type, size_t type_len,
     const char * field, size_t field_len, const char * actor, size_t actor_len,
     const char * principal, size_t principal_len, int type_level) {
@@ -6471,20 +6992,23 @@ static int field_grant_holds(Eval * ev, const Grant * grants, size_t ngrants,
         continue;
       }
       if (grants[i].condition != kCondExpr || expr_could_apply(ev, &grants[i])) {
-        return 1;
+        return (long)i;
       }
     } else if (condition_ok(ev, &grants[i], actor, actor_len, principal,
                    principal_len)) {
-      return 1;
+      return (long)i;
     }
   }
-  return 0;
+  return -1;
 }
 
-GDEFCORE_Result gdefcore_access_can_field(GDEFCORE_Catalog * catalog,
+/* gdefcore_access_can_field(), the source that allowed it named in @p dec
+ * when that is not NULL (story A7). */
+static GDEFCORE_Result can_field_impl(GDEFCORE_Catalog * catalog,
     GDEFCORE_Request * request, const char * action, size_t action_len,
     const char * type, size_t type_len, const char * entity_id,
-    const char * field, size_t field_len, int * out_allowed) {
+    const char * field, size_t field_len, int * out_allowed,
+    GDEFCORE_Access_Decision * dec) {
   char canon[GDEFCORE_PUBLIC_ID_LEN + 1];
   Grant grants[kGrantMax];
   Grant decls[kGrantMax];
@@ -6493,6 +7017,7 @@ GDEFCORE_Result gdefcore_access_can_field(GDEFCORE_Catalog * catalog,
   int read_principal = 0;
   int restricted = 0;
   int allowed = 0;
+  long win = -1;
   char * actor = NULL;
   size_t actor_len = 0;
   const char * principal;
@@ -6565,23 +7090,67 @@ GDEFCORE_Result gdefcore_access_can_field(GDEFCORE_Catalog * catalog,
   eval_init(&ev, catalog, request, NULL, 0);
   (void)setup_ceiling(&ev);
   ev.id = entity_id == NULL ? NULL : canon;
-  allowed = field_grant_holds(&ev, grants, ngrants, action, action_len, type,
+  win = field_grant_at(&ev, grants, ngrants, action, action_len, type,
       type_len, field, field_len, actor, actor_len, principal, principal_len,
       entity_id == NULL);
+  allowed = win >= 0;
   if (allowed && entity_id == NULL && ev.has_ceiling) {
     /* condition_ok applies the ceiling per entity; with none, the acting
      * principal must hold a grant of its own. */
-    allowed = field_grant_holds(&ev, ev.ceiling, ev.nceiling, action,
-        action_len, type, type_len, field, field_len, actor, actor_len,
-        principal, principal_len, 1);
+    allowed = field_grant_at(&ev, ev.ceiling, ev.nceiling, action, action_len,
+                  type, type_len, field, field_len, actor, actor_len,
+                  principal, principal_len, 1) >= 0;
   }
   gdefcore_text_free(catalog, actor);
-  rc = ev.failed ? GDEFCORE_ERR_INTERNAL : GDEFCORE_OK;
+  if (allowed && dec != NULL) {
+    source_fill(catalog, &grants[win], dec);
+  }
+  /* A condition that could not be decided is neither a yes nor a no; one that
+   * failed beside a grant that holds is a yes (story A7). */
+  rc = ev.failed && !allowed ? GDEFCORE_ERR_INTERNAL : GDEFCORE_OK;
   eval_done(&ev);
   if (rc != GDEFCORE_OK) {
     return rc;
   }
   *out_allowed = allowed != 0;
+  return GDEFCORE_OK;
+}
+
+GDEFCORE_Result gdefcore_access_can_field(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Request * request, const char * action, size_t action_len,
+    const char * type, size_t type_len, const char * entity_id,
+    const char * field, size_t field_len, int * out_allowed) {
+  return can_field_impl(catalog, request, action, action_len, type, type_len,
+      entity_id, field, field_len, out_allowed, NULL);
+}
+
+GDEFCORE_Result gdefcore_access_decide(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Request * request, const char * action, size_t action_len,
+    const char * type, size_t type_len, const char * entity_id,
+    const char * field, size_t field_len, GDEFCORE_Access_Decision * out) {
+  int allowed = 0;
+  GDEFCORE_Result rc;
+  if (out == NULL || out->size != sizeof *out) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  memset(out, 0, sizeof *out);
+  out->size = sizeof *out;
+  if (field != NULL && field_len > 0) {
+    rc = can_field_impl(catalog, request, action, action_len, type, type_len,
+        entity_id, field, field_len, &allowed, out);
+  } else {
+    rc = can_impl(catalog, request, action, action_len, type, type_len,
+        entity_id, &allowed, out);
+  }
+  if (rc != GDEFCORE_OK) {
+    memset(out, 0, sizeof *out);
+    out->size = sizeof *out;
+    return rc;
+  }
+  out->allowed = allowed != 0;
+  if (!out->allowed) {
+    out->source = GDEFCORE_ACCESS_SOURCE_NONE;
+  }
   return GDEFCORE_OK;
 }
 

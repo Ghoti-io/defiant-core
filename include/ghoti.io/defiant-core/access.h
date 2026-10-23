@@ -184,6 +184,14 @@ typedef struct GDEFCORE_Access_Matrix_Row {
    * <module>.<name>`, @ref explain says so in words, and @ref risk is
    * ::GDEFCORE_ACCESS_RISK_HIGH: its breadth cannot be judged. */
   int callback;
+  /** Non-zero: the grant holds nothing for now, because its condition names a
+   * field an enabled module's access callback decides per entity (story A7).
+   * It is derived from the enabled modules each time, not stored: it resumes
+   * when no enabled module decides the field any more. */
+  int suspended;
+  const char * suspended_by;  ///< The enabled modules that decide such a field,
+                              ///< sorted, joined by ", "; "" when not suspended.
+  size_t suspended_by_len;    ///< Length of @ref suspended_by.
 } GDEFCORE_Access_Matrix_Row;
 
 /** A revision's field: the values were returned. */
@@ -507,7 +515,9 @@ GDEFCORE_API const char * gdefcore_access_risk_name(int risk);
  */
 typedef struct GDEFCORE_Access_Held {
   size_t size;                  ///< `sizeof(GDEFCORE_Access_Held)`.
-  const char * role;            ///< `anonymous` or `authenticated`.
+  const char * role;            ///< The role: `anonymous` or `authenticated`, or,
+                                ///< for a grant a governed field suspends, any
+                                ///< other role.
   size_t role_len;              ///< Length of @ref role.
   const char * permission;      ///< The permission as the role held it: what
                                 ///< gdefcore_access_grant() grants again.
@@ -525,8 +535,14 @@ typedef struct GDEFCORE_Access_Held {
   int risk;                     ///< As the matrix rates it: ::GDEFCORE_ACCESS_RISK_LOW, _MEDIUM or _HIGH.
   const char * confirmation;    ///< The typed confirmation granting it asks
                                 ///< for (::GDEFCORE_ACCESS_CONFIRM_ANONYMOUS or
-                                ///< ::GDEFCORE_ACCESS_CONFIRM_AUTHENTICATED).
+                                ///< ::GDEFCORE_ACCESS_CONFIRM_AUTHENTICATED; for
+                                ///< another role `core.role`).
   size_t confirmation_len;      ///< Length of @ref confirmation.
+  const char * suspended_by;    ///< The enabled modules that decide a field its
+                                ///< condition names (sorted, joined by ", "), so
+                                ///< that granting it again holds nothing until no
+                                ///< enabled module decides it; "" when none does.
+  size_t suspended_by_len;      ///< Length of @ref suspended_by.
 } GDEFCORE_Access_Held;
 
 /** Told of each grant gdefcore_access_hold_for_confirmation() took back. A
@@ -536,8 +552,9 @@ typedef GDEFCORE_Result (*GDEFCORE_Access_Held_Fn)(void * ctx,
 
 /**
  * @brief Take back, as the system, every grant that a role which is a state
- * (`anonymous`, `authenticated`) holds, telling @p fn what each was (AD-11,
- * AD-37; story S8).
+ * (`anonymous`, `authenticated`) holds, and every grant of any role that a
+ * governed field suspends, telling @p fn what each was (AD-11, AD-37; stories
+ * S8 and A7).
  *
  * For data that came in without the admin edit (a restored snapshot,
  * gdefcore_subject_restore()): a grant to a state is what that edit asks a
@@ -548,7 +565,16 @@ typedef GDEFCORE_Result (*GDEFCORE_Access_Held_Fn)(void * ctx,
  * GDEFCORE_Access_Held::permission. Every role entity named for a state is
  * visited, not only the first. A role with grants gets one new revision that
  * holds none, written before @p fn hears of them; its history keeps them.
- * Grants to any other role are left as they are.
+ *
+ * Grants to any other role are left as they are, except those whose condition
+ * names a field an enabled module's access callback decides per entity
+ * (::GDEFCORE_Access_Matrix_Row::suspended): such a grant holds nothing, and
+ * data that came in without the admin edit that enabled the module is not
+ * applied silently. It is taken out of its role (the role keeps its other
+ * grants), and @p fn is told, with GDEFCORE_Access_Held::suspended_by naming
+ * the modules. That is judged by the modules enabled in the store, so the
+ * catalog must be bound to the host that has them installed
+ * (gdefcore_catalog_bind_host()); a catalog with no host decides no field.
  */
 GDEFCORE_API GDEFCORE_Result gdefcore_access_hold_for_confirmation(
     GDEFCORE_Catalog * catalog, GDEFCORE_Access_Held_Fn fn, void * ctx);
@@ -795,7 +821,8 @@ GDEFCORE_API GDEFCORE_Result gdefcore_access_can(GDEFCORE_Catalog * catalog,
  * ::GDEFCORE_Permission). A field that no declared permission of @p action
  * limits is not limited by this question, and the answer is 1: the entity or
  * the container decides. A field that one does limit needs a grant of that
- * permission that holds, and this is 0 without one.
+ * permission that holds, and this is 0 without one. A field the type does not
+ * have is 0 too, so that it cannot be told from a field that is limited.
  *
  * With @p entity_id the grant's condition is evaluated on that entity as it
  * is stored. With NULL (a create: there is no stored entity) a grant holds
@@ -808,6 +835,61 @@ GDEFCORE_API GDEFCORE_Result gdefcore_access_can_field(
     GDEFCORE_Catalog * catalog, GDEFCORE_Request * request, const char * action,
     size_t action_len, const char * type, size_t type_len, const char * entity_id,
     const char * field, size_t field_len, int * out_allowed);
+
+/** Decision source: nothing allowed it (it was refused), or nothing limited
+ * what was asked (a field no permission limits). */
+#define GDEFCORE_ACCESS_SOURCE_NONE 0
+/** Decision source: a grant a role holds. */
+#define GDEFCORE_ACCESS_SOURCE_ROLE 1
+/** Decision source: a grant an enabled module declares in its manifest. */
+#define GDEFCORE_ACCESS_SOURCE_MODULE 2
+/** Decision source: an access callback an enabled module registered. */
+#define GDEFCORE_ACCESS_SOURCE_CALLBACK 3
+/** The size of each text in a ::GDEFCORE_Access_Decision, with its NUL. */
+#define GDEFCORE_ACCESS_DECISION_TEXT 160
+
+/**
+ * @brief A decision and the source that allowed it. Begins with @ref size,
+ * which the caller sets to `sizeof(GDEFCORE_Access_Decision)` (any other size
+ * is ::GDEFCORE_ERR_INVALID). The texts are NUL-terminated copies.
+ */
+typedef struct GDEFCORE_Access_Decision {
+  size_t size;                ///< `sizeof(GDEFCORE_Access_Decision)`.
+  int allowed;                ///< 1 when allowed, else 0.
+  int source;                 ///< A `GDEFCORE_ACCESS_SOURCE_` value; NONE
+                              ///< unless @ref allowed and a grant allowed it.
+  char holder[GDEFCORE_ACCESS_DECISION_TEXT];     ///< The role's name, or the
+                              ///< module's name; "" for NONE.
+  size_t holder_len;          ///< Length of @ref holder.
+  char permission[GDEFCORE_ACCESS_DECISION_TEXT]; ///< The permission's label as
+                              ///< the matrix shows it; "" for NONE.
+  size_t permission_len;      ///< Length of @ref permission.
+  char callback[GDEFCORE_ACCESS_DECISION_TEXT];   ///< For a callback its name
+                              ///< in its module, else "".
+  size_t callback_len;        ///< Length of @ref callback.
+} GDEFCORE_Access_Decision;
+
+/**
+ * @brief The decision of gdefcore_access_can() (with @p field NULL or empty) or
+ * of gdefcore_access_can_field() (with a field), and which source allowed it.
+ *
+ * Grants combine by union (access SPEC, "The model"): a role's grant, an
+ * enabled module's grant and an enabled module's access callback each may
+ * allow; any one that does allows; one that has no opinion adds nothing; one
+ * that fails, traps or times out grants nothing and cancels no other source's
+ * allow. The sources are asked in that order, and a source is asked only when
+ * none before it allowed (a callback is called only when no grant holds), so
+ * the source named is the first that allows. This names it, so that a later
+ * view can say why a person may do something; it builds no such view and
+ * changes no decision. @p out is the same answer as the two functions give,
+ * asked afresh each time (an answer remembered on the request holds no
+ * source), with the same cost, errors and refusals. A field no permission
+ * limits is allowed with ::GDEFCORE_ACCESS_SOURCE_NONE.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_access_decide(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Request * request, const char * action, size_t action_len,
+    const char * type, size_t type_len, const char * entity_id,
+    const char * field, size_t field_len, GDEFCORE_Access_Decision * out);
 
 /**
  * @brief May the principal create an entity of @p type, supplying these fields?
@@ -909,6 +991,29 @@ GDEFCORE_API GDEFCORE_Result gdefcore_access_stage_module_callback(
     const char * label, size_t label_len, const char * action,
     size_t action_len, const char * type_name, size_t type_name_len,
     const char * field, size_t field_len);
+
+/**
+ * @brief Remember, for the enable confirmation, every stored grant the module
+ * would suspend (story A7).
+ *
+ * A grant whose condition names a field an enabled module's access callback
+ * decides per entity holds nothing while any enabled module does (see
+ * ::GDEFCORE_Access_Matrix_Row::suspended): its condition cannot be evaluated
+ * on a value only the callback may read, and a list cannot compile it. Enabling
+ * a module that registers a field callback can therefore take away what a role
+ * grant, or another module's grant, gave. This finds those grants (every role's
+ * grants whose condition names a field the module decides, and the grants of
+ * the modules the changeset would leave enabled, the module's own included)
+ * and adds one line each to the changeset's confirmation, naming the module,
+ * the grant, whose it is, the field and the callback, so that applying the
+ * enable means having been told. A module that decides no field adds nothing.
+ * Writes nothing; the suspension itself is derived from the enabled modules
+ * each time a condition is read, so disabling the last module that decides the
+ * field resumes the grant with nothing to undo.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_access_stage_module_suspensions(
+    GDEFCORE_Changeset * changeset, const char * module_name,
+    size_t module_name_len);
 
 /** @brief Grant staged module permissions to admin. A changeset with none is success. */
 GDEFCORE_API GDEFCORE_Result gdefcore_access_commit_staged(

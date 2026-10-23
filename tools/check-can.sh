@@ -75,26 +75,32 @@ plant memo-ignores-principal $ACCESS testCan 'Can.MemoIsPerPrincipal' \
 # Plant 4a: a condition that could not be decided is reported as a plain no, as
 # if nothing had gone wrong.
 plant failure-reads-as-a-clean-no $ACCESS testCan 'Can.ACorruptConditionIsAFailureNotAYes' \
-  '  if (failed) {
+  '  if (failed && !allowed) {
     /* A condition that could not be decided is not a no that can be
-     * remembered, and not a yes. */
+     * remembered, and not a yes. One that failed beside a grant that holds
+     * is neither: the sources combine by union, a source that fails grants
+     * nothing and cancels the allow of no other source (story A7). The
+     * failure is reported on the request (eval_done). */
     return GDEFCORE_ERR_INTERNAL;
   }' \
   '  if (0 && failed) {
     /* A condition that could not be decided is not a no that can be
-     * remembered, and not a yes. */
+     * remembered, and not a yes. One that failed beside a grant that holds
+     * is neither: the sources combine by union, a source that fails grants
+     * nothing and cancels the allow of no other source (story A7). The
+     * failure is reported on the request (eval_done). */
     return GDEFCORE_ERR_INTERNAL;
   }'
 
 # Plant 4b: any failure of the decision is a yes.
 plant decision-failure-grants $ACCESS testCan 'CanFailures.AnAllocationThatFailsNeverGrants' \
   '  rc = can_decide(catalog, request, permission, permission_len, type, type_len,
-      entity_id == NULL ? NULL : canon, &allowed);
+      entity_id == NULL ? NULL : canon, &allowed, dec);
   if (rc != GDEFCORE_OK) {
     return rc;
   }' \
   '  rc = can_decide(catalog, request, permission, permission_len, type, type_len,
-      entity_id == NULL ? NULL : canon, &allowed);
+      entity_id == NULL ? NULL : canon, &allowed, dec);
   if (rc != GDEFCORE_OK) {
     *out_allowed = 1;
     return rc;
@@ -164,9 +170,9 @@ plant memo-unbounded src/request/request.c testCan 'Can.MemoIsBounded' \
 # Plant 10: the type-level question is asked where an entity was given.
 plant type-level-used-for-an-entity $ACCESS testCan 'Can.TypeLevelIsNotTheEntityQuestion' \
   '  rc = can_decide(catalog, request, permission, permission_len, type, type_len,
-      entity_id == NULL ? NULL : canon, &allowed);' \
+      entity_id == NULL ? NULL : canon, &allowed, dec);' \
   '  rc = can_decide(catalog, request, permission, permission_len, type, type_len,
-      NULL, &allowed);'
+      NULL, &allowed, dec);'
 
 # Plant 11: the template editor reads the roles' grants and not the modules'.
 plant template-authorize-skips-modules src/template/template.c testCan 'Can.TemplateSaveIsTheDecision' \

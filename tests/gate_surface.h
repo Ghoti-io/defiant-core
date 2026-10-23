@@ -75,6 +75,7 @@ static const Surface kSurface[] = {
     {"gdefcore_access_permits", "RF"},
     {"gdefcore_access_can", "RF"},
     {"gdefcore_access_can_field", "RF"},
+    {"gdefcore_access_decide", "RF"},
     {"gdefcore_access_revoke", "W"},
     {"gdefcore_access_can_create", "RF"},
     /* gdefcore_access_route_check decides as a principal, but its request
@@ -97,6 +98,7 @@ static const Surface kSurface[] = {
     {"gdefcore_access_stage_module_grant", "W"},
     {"gdefcore_access_stage_module_permission", "W"},
     {"gdefcore_access_stage_module_callback", "W"},
+    {"gdefcore_access_stage_module_suspensions", "W"},
     {"gdefcore_access_field_governed", "RA"},
     {"gdefcore_access_row_action", "P"},
     {"gdefcore_access_commit_staged", "W"},

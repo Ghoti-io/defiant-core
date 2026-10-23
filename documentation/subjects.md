@@ -210,7 +210,11 @@ both versions), with the manifest and the records it carries agreeing
    it and reported in words (`gdefcore_restore_held`); the role gets one new
    revision that holds none. The caller applies one with
    `gdefcore_access_grant` and the same typed confirmation. Grants to other
-   roles are restored as they were;
+   roles are restored as they were, except one whose condition names a field
+   an enabled module decides per entity (access.md, "A grant that names a
+   governed field is suspended"): it would hold nothing and nobody confirmed
+   that, so it is taken out of its role and reported in words too, and
+   applied only when it is granted again;
 3. it runs the forward migrations, `gdefcore_schema_migrate`, the one path a
    live upgrade takes too: every component whose data is at an older version
    than the installed one is brought forward by its steps, dated by the time

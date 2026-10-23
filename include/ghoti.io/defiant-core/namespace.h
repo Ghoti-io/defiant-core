@@ -126,6 +126,7 @@
 #define gdefcore_access_revision_values \
   GHOTIIO_DEFCORE(gdefcore_access_revision_values)
 #define gdefcore_access_can_field GHOTIIO_DEFCORE(gdefcore_access_can_field)
+#define gdefcore_access_decide GHOTIIO_DEFCORE(gdefcore_access_decide)
 #define gdefcore_access_revoke GHOTIIO_DEFCORE(gdefcore_access_revoke)
 #define gdefcore_access_can_create GHOTIIO_DEFCORE(gdefcore_access_can_create)
 #define gdefcore_access_matrix GHOTIIO_DEFCORE(gdefcore_access_matrix)
@@ -134,6 +135,8 @@
   GHOTIIO_DEFCORE(gdefcore_access_stage_module_grant)
 #define gdefcore_access_stage_module_callback \
   GHOTIIO_DEFCORE(gdefcore_access_stage_module_callback)
+#define gdefcore_access_stage_module_suspensions \
+  GHOTIIO_DEFCORE(gdefcore_access_stage_module_suspensions)
 #define gdefcore_access_field_governed \
   GHOTIIO_DEFCORE(gdefcore_access_field_governed)
 #define gdefcore_access_row_action GHOTIIO_DEFCORE(gdefcore_access_row_action)

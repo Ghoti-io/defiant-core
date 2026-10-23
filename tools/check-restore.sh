@@ -10,6 +10,8 @@
 #   restored-grant-applied-unrated Restore.ARestoredGrantToAStateIsHeldForItsTypedConfirmation
 #   newer-module-schema-imported   Restore.ADataSetNewerThanAModuleHereIsRefusedNamingItsVersions
 #   draft-missing-from-the-export  Personal.EverythingAboutThisPersonListsEveryDraftsValues
+#   restore-ignores-the-modules-enabled
+#                                  Restore.ARestoredGrantNamingAGovernedFieldIsHeldAndReportedInWords
 #
 # The restore tests go into memory and SQLite here; `make
 # test-restore-postgres` runs them, unplanted, into Postgres. S5b's
@@ -75,5 +77,15 @@ plant draft-missing-from-the-export "$SUB" testPersonal \
   'Personal.EverythingAboutThisPersonListsEveryDraftsValues' \
   '    rc = export_drafts(subjects, catalog, sid, raw, &buf);' \
   '    buf_add(&buf, ",\"drafts\":[]", 12);'
+
+# 6. A restore that does not know which modules are enabled where it lands:
+#    a grant naming a field one of them decides is applied, not held (story A7).
+plant restore-ignores-the-modules-enabled "$SUB" testRestore \
+  'Restore.ARestoredGrantNamingAGovernedFieldIsHeldAndReportedInWords' \
+  '    gdefcore_catalog_bind_host(catalog, host);
+    rc = gdefcore_access_hold_for_confirmation(catalog, on_held, report);' \
+  '    (void)host;
+    gdefcore_catalog_bind_host(catalog, NULL);
+    rc = gdefcore_access_hold_for_confirmation(catalog, on_held, report);'
 
 plant_finish

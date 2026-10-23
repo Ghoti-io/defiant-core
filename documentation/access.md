@@ -280,6 +280,62 @@ never returned. Without the flag a refused field is absent, as any other.
 Templates bind the filtered tree as before, so a locked field is absent from
 a render until the template contract can carry it (deferred D2).
 
+### A grant that names a governed field is suspended
+
+A grant's condition may name a field (`field.body`). When an enabled module's
+field callback decides that field, the condition cannot be tested (above), so
+the grant holds nothing: it is **suspended**. Enabling the module therefore
+can take away what a role's grant, or another module's grant, gave. Three
+rules keep that from happening quietly:
+
+- **The enable lists it.** `gdefcore_module_enable()` finds every grant that
+  names a field the module decides (every role's grants, and the grants of
+  the modules the changeset leaves enabled, the module's own included) and
+  adds a line each to the typed confirmation
+  (`gdefcore_access_stage_module_suspensions()`): `Module billing suspends
+  role clerk's grant View articles (<condition in words>): its condition
+  names field body of news.article, which that module decides per entity with
+  its callback paid, so the grant holds nothing until no enabled module
+  decides that field.` An enable confirmed without those lines enables
+  nothing.
+- **The matrix shows it.** Its row is marked
+  (`GDEFCORE_Access_Matrix_Row::suspended`), names every enabled module that
+  decides such a field (`suspended_by`, sorted, `billing, ledger`) and says
+  in its words that it is suspended by them. Only a grant whose condition
+  names a governed field is marked; the others of the same role are not.
+- **It resumes by itself.** Suspension is derived from the set of enabled
+  modules each time a condition is read; nothing is stored. Disabling one of
+  two modules that decide a field leaves the grant suspended by the other;
+  disabling the last resumes it. The evaluator's refusal of a governed field
+  stays behind it as the backstop: a suspended grant that were evaluated would
+  fail closed, and be reported as a failure, which a state the enable
+  confirmed must not be.
+
+A restore holds such a grant too. `gdefcore_access_hold_for_confirmation()`
+takes, from a role that is not a state, the grants that a governed field
+suspends (the role keeps the rest) and tells its callback, with
+`GDEFCORE_Access_Held::suspended_by`, so that
+`gdefcore_subject_restore()` reports it in words and applies it only when
+someone grants it again (`core.role`). That is judged by the modules enabled
+in the store being restored, so the restore binds the catalog to the host.
+
+### Several sources, and which one allowed it
+
+Grants combine by union (access SPEC, "The model"): a role's grants, an
+enabled module's grants and the callbacks of enabled modules, in that order.
+Any one that allows allows; one with no opinion adds nothing; one that fails,
+traps or times out grants nothing and cancels no other source's allow. The
+order is also what is asked: a callback is called only when no grant before it
+holds. A condition that cannot be decided beside a grant that holds does not
+make the decision an error (`gdefcore_access_can()` is a yes, and the request
+carries `defiant.condition.failed`); with nothing else to allow it, it is an
+undecided question, as it always was.
+
+`gdefcore_access_decide()` is the same decision, and names the source that
+allowed it: `GDEFCORE_ACCESS_SOURCE_ROLE` (and the role), `_MODULE` (and the
+module) or `_CALLBACK` (the module and the callback's name), with the
+permission's label. It builds no view; it is what an explain view will read.
+
 ## Acting for a person
 
 A request can name an acting principal (an agent or a delegate) besides its
@@ -404,7 +460,9 @@ grants nothing, so its history keeps what the snapshot said. A held grant is
 applied with `gdefcore_access_grant()`, its stored label and the typed
 confirmation, as any other grant to a state is. Grants to every other role are
 restored as they were: the admin edit asks nothing of those beyond the role
-change itself. A restore calls it after its import, before it returns
+change itself, except a grant whose condition names a field an enabled module
+decides (below, "A grant that names a governed field is suspended"), which is
+held and reported too. A restore calls it after its import, before it returns
 (subjects.md, "Backups").
 
 ## One can()

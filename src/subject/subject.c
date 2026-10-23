@@ -2880,13 +2880,29 @@ static GDEFCORE_Result on_held(void * ctx, const GDEFCORE_Access_Held * h) {
   shown(action, sizeof action, h->action, h->action_len);
   shown(type, sizeof type, h->type_name, h->type_name_len);
   shown(field, sizeof field, h->field, h->field_len);
-  n = snprintf(text, sizeof text,
-      "The snapshot grants \"%s\" (%s on %s%s%s, %s risk) to %s, and it was not "
-      "applied: granting anything to %s needs a typed confirmation. To apply "
-      "it, grant it to %s again with the confirmation \"%.*s\".",
-      label, action, type, field[0] != '\0' ? ", field " : "", field,
-      gdefcore_access_risk_name(h->risk), role, role, role,
-      (int)h->confirmation_len, h->confirmation);
+  if (h->suspended_by_len > 0) {
+    /* Story A7: a grant whose condition names a field an enabled module
+     * decides per entity would hold nothing, and nobody confirmed that. */
+    char by[256];
+    shown(by, sizeof by, h->suspended_by, h->suspended_by_len);
+    n = snprintf(text, sizeof text,
+        "The snapshot grants \"%s\" (%s on %s%s%s, %s risk) to %s, but its "
+        "condition names a field that %s decides per entity with an access "
+        "callback, so it would hold nothing, and it was not applied. To apply "
+        "it anyway, grant it to %s again with the confirmation \"%.*s\"; it "
+        "then stays suspended until no enabled module decides that field.",
+        label, action, type, field[0] != '\0' ? ", field " : "", field,
+        gdefcore_access_risk_name(h->risk), role, by, role,
+        (int)h->confirmation_len, h->confirmation);
+  } else {
+    n = snprintf(text, sizeof text,
+        "The snapshot grants \"%s\" (%s on %s%s%s, %s risk) to %s, and it was "
+        "not applied: granting anything to %s needs a typed confirmation. To "
+        "apply it, grant it to %s again with the confirmation \"%.*s\".",
+        label, action, type, field[0] != '\0' ? ", field " : "", field,
+        gdefcore_access_risk_name(h->risk), role, role, role,
+        (int)h->confirmation_len, h->confirmation);
+  }
   if (n <= 0) {
     return GDEFCORE_ERR_INTERNAL;
   }
@@ -2919,10 +2935,12 @@ static GDEFCORE_Result on_held(void * ctx, const GDEFCORE_Access_Held * h) {
 /* Step 2: the data set into the empty tenant, and every grant it gives a
  * state held back for its confirmation (AD-11, AD-37): imported data passes
  * the rating the admin edit does, and what that edit would ask to confirm is
- * not applied by a restore nobody is watching. */
+ * not applied by a restore nobody is watching. A grant to any role whose
+ * condition names a field an enabled module decides per entity is held too
+ * (story A7): it would hold nothing, and nobody confirmed that. */
 static GDEFCORE_Result import_data(GDEFCORE_Subjects * subjects,
-    GDEFSTOR_Store * tenant_store, const uint8_t * data, size_t data_len,
-    GDEFCORE_Restore * report) {
+    struct GDEFCORE_Host * host, GDEFSTOR_Store * tenant_store,
+    const uint8_t * data, size_t data_len, GDEFCORE_Restore * report) {
   GDEFCORE_Catalog * catalog = NULL;
   char * why = NULL;
   size_t why_len = 0;
@@ -2940,7 +2958,12 @@ static GDEFCORE_Result import_data(GDEFCORE_Subjects * subjects,
   rc = gdefcore_catalog_open(tenant_store, subjects->tenant,
       subjects->tenant_len, NULL, subjects->alloc, &catalog);
   if (rc == GDEFCORE_OK) {
+    /* Bound to the host that has the modules installed, so that a grant whose
+     * condition names a field an enabled module decides is found (story A7):
+     * which modules are enabled is in the data that was just imported. */
+    gdefcore_catalog_bind_host(catalog, host);
     rc = gdefcore_access_hold_for_confirmation(catalog, on_held, report);
+    gdefcore_catalog_bind_host(catalog, NULL);
   }
   gdefcore_catalog_destroy(catalog);
   return rc;
@@ -3078,7 +3101,7 @@ GDEFCORE_Result gdefcore_subject_restore(GDEFCORE_Subjects * subjects,
       (const char *)subjects->tenant, subjects->tenant_len, keys, keys_len));
   if (rc == GDEFCORE_OK) {
     /* 2. The data set, its grants to a state held back. */
-    rc = import_data(subjects, tenant_store, data, data_len, report);
+    rc = import_data(subjects, host, tenant_store, data, data_len, report);
   }
   if (rc == GDEFCORE_OK) {
     /* 3. The forward migrations. */

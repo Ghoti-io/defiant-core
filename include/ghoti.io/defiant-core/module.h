@@ -903,6 +903,13 @@ GDEFCORE_API GDEFCORE_Result gdefcore_module_install_guest(
  * Enabling is high risk. The module must already be installed. A native
  * module is installed by the operator; this call does not install one.
  *
+ * The changeset's typed confirmation names what the module brings: a line for
+ * each permission, each grant (rated), each access callback (rated high), and,
+ * for a module whose field callbacks decide a field that a stored grant's
+ * condition names, a line for each grant that would hold nothing from then on
+ * (gdefcore_access_stage_module_suspensions()). An enable confirmed without
+ * those lines enables nothing.
+ *
  * @param host The host.
  * @param changeset The changeset. Required.
  * @param name Module name.

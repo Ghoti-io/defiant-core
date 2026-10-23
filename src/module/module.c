@@ -1627,6 +1627,11 @@ GDEFCORE_Result gdefcore_module_enable(GDEFCORE_Host * host,
       return rc;
     }
   }
+  /* The grants this module's field callbacks would suspend (story A7). */
+  rc = gdefcore_access_stage_module_suspensions(changeset, name, name_len);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
   for (i = 0; i < mod->nperms; i++) {
     rc = gdefcore_access_stage_module_permission(changeset, name, name_len,
         mod->perms[i].label, mod->perms[i].label_len, mod->perms[i].action,
