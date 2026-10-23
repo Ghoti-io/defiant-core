@@ -507,8 +507,14 @@ inline void BuildT(World * w, bool variant_x) {
   s.Declare(Perm("Read notes", "read", GDEFCORE_ACCESS_ANY, "site.note", NULL));
   s.Declare(Perm("Read secret", "read", GDEFCORE_ACCESS_ANY, "site.note",
       "secret"));
+  /* The history of their own notes (story A7): the revision view's field
+   * filter is then reached, and a field the principal may not read can be
+   * paired with one the type does not have. */
+  s.Declare(Perm("View own note history", "revisions.read", GDEFCORE_ACCESS_OWN,
+      "site.note", NULL));
   s.Role("writers");
   s.Grant("writers", "Read own notes");
+  s.Grant("writers", "View own note history");
   s.Role("all");
   s.Grant("all", "Read notes");
   s.Grant("all", "Read secret");
@@ -1055,6 +1061,7 @@ inline Obs Observe(World & w, const std::string & who, const Ask & ask) {
     o.kv[pre + "render-entity"] = RenderEntityLine(w, who, target, "entity");
     o.kv[pre + "revisions.title"] = RevisionLine(w, who, target, 1, "title");
     o.kv[pre + "revisions.secret"] = RevisionLine(w, who, target, 1, "secret");
+    o.kv[pre + "revisions.nope"] = RevisionLine(w, who, target, 1, "nope");
     o.kv[pre + "resolve.echo"] =
         ResolveLine(w, who, true, "/echo/" + name, true);
     o.kv[pre + "cond.false"] = CondLine(w, who, target, false);
@@ -1066,6 +1073,12 @@ inline Obs Observe(World & w, const std::string & who, const Ask & ask) {
         DecideLine(w, who, target, "read", "site.note", NULL);
     o.kv[pre + "decide-field.read.secret"] =
         DecideLine(w, who, target, "read", "site.note", "secret");
+    o.kv[pre + "decide-field.read.nope"] =
+        DecideLine(w, who, target, "read", "site.note", "nope");
+    o.kv[pre + "can-field.read.secret"] =
+        CanFieldLine(w, who, target, "read", "site.note", "secret");
+    o.kv[pre + "can-field.read.nope"] =
+        CanFieldLine(w, who, target, "read", "site.note", "nope");
     o.kv[pre + "can-create.container"] =
         CanCreateLine(w, who, target, "site.note");
     o.kv[pre + "resolve.guard"] =
@@ -1258,6 +1271,44 @@ inline std::vector<std::string> HiddenVsMissing(const World & w, const Obs & o) 
       } else if (at->second != it->second) {
         out.push_back(it->first + ": {" + it->second + "} vs missing {" +
                       at->second + "}");
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Within one probe: every answer about the field `secret`, which the principal
+ * may not read, equals the answer about the field `nope`, which the type does
+ * not have, for every target and every output that takes a field (story A7).
+ * The count of the pairs compared is returned in @p pairs, so a sweep that
+ * found none can be told from a clean one.
+ */
+inline std::vector<std::string> HiddenVsMissingField(const Obs & o,
+    size_t * pairs) {
+  static const char * const kKinds[] = {"read", "revisions", "can-field.read",
+      "decide-field.read"};
+  std::vector<std::string> out;
+  std::map<std::string, std::string>::const_iterator it;
+  *pairs = 0;
+  for (it = o.kv.begin(); it != o.kv.end(); ++it) {
+    size_t k;
+    for (k = 0; k < sizeof kKinds / sizeof kKinds[0]; k++) {
+      std::string tail = std::string(kKinds[k]) + ".secret";
+      const std::string & key = it->first;
+      if (key.size() > tail.size() &&
+          key.compare(key.size() - tail.size(), tail.size(), tail) == 0) {
+        std::string twin = key.substr(0, key.size() - 6) + "nope";
+        std::map<std::string, std::string>::const_iterator at = o.kv.find(twin);
+        if (at == o.kv.end()) {
+          out.push_back(key + ": no answer about a missing field to compare with");
+          continue;
+        }
+        *pairs += 1;
+        if (at->second != it->second) {
+          out.push_back(key + ": {" + it->second + "} vs a missing field {" +
+                        at->second + "}");
+        }
       }
     }
   }

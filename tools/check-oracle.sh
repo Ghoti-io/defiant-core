@@ -76,11 +76,49 @@ plant read-skips-filter src/access/access.c testOracle 'Oracle.Entities' \
 # A revision view that tells an entity the principal may not look at (one that
 # exists) from one that does not exist.
 plant revision-view-tells-hidden-from-missing src/access/access.c testOracle 'Oracle.Entities' \
-  '    /* No permission, no such entity and no such field answer alike. */
+  '    /* No permission and no such entity answer alike. */
     gdefcore_text_free(catalog, type_name);
     return GDEFCORE_ERR_INVALID;' \
-  '    /* No permission, no such entity and no such field answer alike. */
+  '    /* No permission and no such entity answer alike. */
     gdefcore_text_free(catalog, type_name);
     return may_view ? GDEFCORE_ERR_INVALID : GDEFCORE_ERR_LIMIT;'
+
+# A hidden field and a missing one answer alike (story A7): each of the three
+# places that used to tell them apart is planted back, and the sweep that pairs
+# the field `secret` with the field `nope` must fail by name.
+plant read-tells-a-hidden-field-from-a-missing-one src/access/access.c testOracle \
+  'Oracle.AHiddenFieldAndAMissingFieldAnswerAlike' \
+  '    gdefcore_text_free(catalog, type_name);
+    gdefcore_text_free(catalog, actor);
+    if (rc == GDEFCORE_OK) {
+      *out_texts = NULL;
+      *out_lens = NULL;
+      *out_count = 0;
+    }
+    return rc;
+  }
+  if (!granted) {' \
+  '    gdefcore_text_free(catalog, type_name);
+    gdefcore_text_free(catalog, actor);
+    return GDEFCORE_ERR_INVALID;
+  }
+  if (!granted) {'
+
+plant revision-view-tells-a-hidden-field-from-a-missing-one src/access/access.c testOracle \
+  'Oracle.AHiddenFieldAndAMissingFieldAnswerAlike' \
+  '    /* A field the type does not have answers as one the principal may not
+     * read, or one with no value in that revision: absent. */
+    gdefcore_text_free(catalog, type_name);
+    return revision_answer(out_status, GDEFCORE_REVISION_ABSENT, out_texts,
+        out_lens, out_count);' \
+  '    gdefcore_text_free(catalog, type_name);
+    return GDEFCORE_ERR_INVALID;'
+
+plant field-limit-tells-a-hidden-field-from-a-missing-one src/access/access.c testOracle \
+  'Oracle.AHiddenFieldAndAMissingFieldAnswerAlike' \
+  '    return type_has_field_rc(catalog, type, type_len, field, field_len,
+        out_allowed);' \
+  '    *out_allowed = 1;
+    return GDEFCORE_OK;'
 
 plant_finish

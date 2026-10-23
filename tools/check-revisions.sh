@@ -409,8 +409,8 @@ plant matrix-silent-on-self-reference $ACC testActions \
 # Plant 30: the revision view does not ask `revisions.read`.
 plant revision-view-skips-permission $ACC testActions \
   'Actions.RevisionViewNeedsThePermissionAndNotTheFlag' \
-  '  if (rc != GDEFCORE_OK || !may_view ||' \
-  '  if (rc != GDEFCORE_OK ||'
+  '  if (rc != GDEFCORE_OK || !may_view) {' \
+  '  if (rc != GDEFCORE_OK) {'
 
 # Plant 31: the revision view takes any sequence for a revision.
 plant revision-view-skips-sequence-check $ACC testActions \

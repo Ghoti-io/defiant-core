@@ -960,6 +960,41 @@ static int type_has_field(GDEFCORE_Catalog * catalog, const char * type,
   return 0;
 }
 
+/* Whether the type has the field, with a failure to find out told as one: a
+ * field that cannot be looked up is not a field that is not there (story A7:
+ * a missing field is answered as an absent one, and a failure never is). */
+static GDEFCORE_Result type_has_field_rc(GDEFCORE_Catalog * catalog,
+    const char * type, size_t type_len, const char * field, size_t field_len,
+    int * out_has) {
+  size_t count = 0;
+  size_t i;
+  GDEFCORE_Result rc = gdefcore_type_field_count(catalog, type, type_len,
+      &count);
+  *out_has = 0;
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  for (i = 0; i < count; i++) {
+    char * name = NULL;
+    size_t name_len = 0;
+    int required = 0;
+    int many = 0;
+    int match;
+    rc = gdefcore_type_field(catalog, type, type_len, i, &name, &name_len,
+        &required, &many);
+    if (rc != GDEFCORE_OK) {
+      return rc;
+    }
+    match = same(name, name_len, field, field_len);
+    gdefcore_text_free(catalog, name);
+    if (match) {
+      *out_has = 1;
+      return GDEFCORE_OK;
+    }
+  }
+  return GDEFCORE_OK;
+}
+
 /* One parsed expression, by the label of the permission that carries it. */
 typedef struct ExprSlot {
   char label[kPart];
@@ -3014,6 +3049,7 @@ GDEFCORE_Result gdefcore_access_read(GDEFCORE_Catalog * catalog,
   int visible;
   int granted = 1;
   int personal = 0;
+  int has_field = 0;
   GDEFCORE_Result rc;
   if (out_locked != NULL) {
     *out_locked = 0;
@@ -3068,11 +3104,26 @@ GDEFCORE_Result gdefcore_access_read(GDEFCORE_Catalog * catalog,
   /* A condition that could not be decided has not granted: it reads as the
    * entity being hidden, which is also what a missing one reads as. */
   eval_done(&ev);
-  if (!visible || !type_has_field(catalog, type_name, type_len, field,
-                      field_len)) {
+  if (!visible) {
     gdefcore_text_free(catalog, type_name);
     gdefcore_text_free(catalog, actor);
     return GDEFCORE_ERR_INVALID;
+  }
+  rc = type_has_field_rc(catalog, type_name, type_len, field, field_len,
+      &has_field);
+  if (rc != GDEFCORE_OK || !has_field) {
+    /* A field the type does not have answers as one the principal may not
+     * read, or one with no value: absent (AD-11, AD-25: the answer must not
+     * tell a hidden field from a missing one). A failure to find out is an
+     * error, never that. */
+    gdefcore_text_free(catalog, type_name);
+    gdefcore_text_free(catalog, actor);
+    if (rc == GDEFCORE_OK) {
+      *out_texts = NULL;
+      *out_lens = NULL;
+      *out_count = 0;
+    }
+    return rc;
   }
   if (!granted) {
     *out_texts = NULL;
@@ -3536,6 +3587,7 @@ GDEFCORE_Result gdefcore_access_revision_values(GDEFCORE_Catalog * catalog,
   Eval ev;
   int may_view = 0;
   int granted = 1;
+  int has_field = 0;
   GDEFCORE_Result rc;
   if (catalog == NULL || request == NULL || out_status == NULL ||
       out_texts == NULL || out_lens == NULL || out_count == NULL ||
@@ -3560,9 +3612,8 @@ GDEFCORE_Result gdefcore_access_revision_values(GDEFCORE_Catalog * catalog,
   rc = gdefcore_access_can(catalog, request, GDEFCORE_ACTION_REVISIONS_READ,
       strlen(GDEFCORE_ACTION_REVISIONS_READ), type_name, type_len, canon,
       &may_view);
-  if (rc != GDEFCORE_OK || !may_view ||
-      !type_has_field(catalog, type_name, type_len, field, field_len)) {
-    /* No permission, no such entity and no such field answer alike. */
+  if (rc != GDEFCORE_OK || !may_view) {
+    /* No permission and no such entity answer alike. */
     gdefcore_text_free(catalog, type_name);
     return GDEFCORE_ERR_INVALID;
   }
@@ -3573,6 +3624,19 @@ GDEFCORE_Result gdefcore_access_revision_values(GDEFCORE_Catalog * catalog,
       gdefcore_text_free(catalog, type_name);
       return GDEFCORE_ERR_INVALID;
     }
+  }
+  rc = type_has_field_rc(catalog, type_name, type_len, field, field_len,
+      &has_field);
+  if (rc != GDEFCORE_OK) {
+    gdefcore_text_free(catalog, type_name);
+    return rc;
+  }
+  if (!has_field) {
+    /* A field the type does not have answers as one the principal may not
+     * read, or one with no value in that revision: absent. */
+    gdefcore_text_free(catalog, type_name);
+    return revision_answer(out_status, GDEFCORE_REVISION_ABSENT, out_texts,
+        out_lens, out_count);
   }
   rc = gdefcore_entity_creator(catalog, canon, GDEFCORE_PUBLIC_ID_LEN, &actor,
       &actor_len);
@@ -7049,9 +7113,11 @@ static GDEFCORE_Result can_field_impl(GDEFCORE_Catalog * catalog,
   }
   if (!restricted) {
     /* No permission limits this field for this action: the question the
-     * caller asked at the entity or the container decides. */
-    *out_allowed = 1;
-    return GDEFCORE_OK;
+     * caller asked at the entity or the container decides. A field the type
+     * does not have is refused, as a field the principal may not act on is
+     * (story A7: the answer must not tell the two apart). */
+    return type_has_field_rc(catalog, type, type_len, field, field_len,
+        out_allowed);
   }
   if (entity_id != NULL) {
     char * actual = NULL;

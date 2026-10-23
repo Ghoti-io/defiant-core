@@ -267,6 +267,62 @@ TEST(Oracle, Fields) {
   y.Close();
 }
 
+/* A field the principal may not read answers exactly as a field the type does
+ * not have, in every output that takes a field: a read, a revision view, the
+ * field-limited question and its decision (story A7). The principal may read
+ * the entity, so only the field differs; the control is the principal who may
+ * read the field, who sees the two differ. */
+TEST(Oracle, AHiddenFieldAndAMissingFieldAnswerAlike) {
+  World x;
+  BuildT(&x, true);
+  {
+    Ask ask = AskEverything(false, {"mine", "mine2", "theirs1", "missing"});
+    Obs a = Observe(x, x.principal["writer"], ask);
+    size_t pairs = 0;
+    std::vector<std::string> diffs = HiddenVsMissingField(a, &pairs);
+    EXPECT_GE(pairs, 16u) << "the sweep compared too little to mean anything";
+    EXPECT_TRUE(diffs.empty())
+        << "a hidden field answers unlike a missing one:" << Join(diffs);
+    /* A list's filter and its sort, which name a field too: refused alike. */
+    EXPECT_NE(std::string::npos,
+        a.kv["g:list.notes.secret=alpha"].find("rc=Invalid"))
+        << a.kv["g:list.notes.secret=alpha"];
+    EXPECT_EQ(a.kv["g:list.notes.secret=alpha"], a.kv["g:list.notes.filter-nope"]);
+    EXPECT_NE(std::string::npos, a.kv["g:list.notes.sort-secret"].find("rc=Invalid"))
+        << a.kv["g:list.notes.sort-secret"];
+    EXPECT_EQ(a.kv["g:list.notes.sort-secret"], a.kv["g:list.notes.sort-nope"]);
+    /* The principal does see the entity: the answers are not both refusals of
+     * the entity. */
+    EXPECT_NE(std::string::npos, a.kv["t:mine:read.title"].find("count=1"))
+        << a.kv["t:mine:read.title"];
+    EXPECT_NE(std::string::npos, a.kv["t:mine:read.nope"].find("rc=No error"))
+        << a.kv["t:mine:read.nope"];
+    /* The revision view is reached too: the principal may see the history of
+     * their own notes, and of nobody else's. */
+    EXPECT_NE(std::string::npos,
+        a.kv["t:mine:revisions.nope"].find("rc=No error"))
+        << a.kv["t:mine:revisions.nope"];
+    EXPECT_NE(std::string::npos,
+        a.kv["t:mine:revisions.title"].find("rc=No error"))
+        << a.kv["t:mine:revisions.title"];
+    EXPECT_NE(std::string::npos,
+        a.kv["t:theirs1:revisions.title"].find("rc=Invalid"))
+        << a.kv["t:theirs1:revisions.title"];
+  }
+  {
+    /* Control: a principal who may read the field is told the two differ. */
+    Ask ask = AskEverything(false, {"mine", "mine2"});
+    Obs a = Observe(x, x.principal["all"], ask);
+    size_t pairs = 0;
+    std::vector<std::string> diffs = HiddenVsMissingField(a, &pairs);
+    EXPECT_GE(pairs, 8u);
+    EXPECT_FALSE(diffs.empty());
+    EXPECT_NE(std::string::npos, a.kv["t:mine:read.secret"].find("count=1"))
+        << a.kv["t:mine:read.secret"];
+  }
+  x.Close();
+}
+
 TEST(Oracle, Control) {
   /* The same sweep, as principals who may read what the others may not. The
    * worlds must now differ, on the lines that carry the difference. A sweep

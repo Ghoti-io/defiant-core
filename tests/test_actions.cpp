@@ -400,7 +400,9 @@ TEST_F(Actions, RevisionViewRefusalsAreOneAnswer) {
   const std::string denied = "<denied>";
   EXPECT_EQ(denied, View(Req(historian), post, 0, "title"));
   EXPECT_EQ(denied, View(Req(historian), post, 2, "title"));
-  EXPECT_EQ(denied, View(Req(historian), post, 1, "nope"));
+  /* A field the type does not have is absent, as a field the historian may
+   * not read is: the answer must not tell the two apart (story A7). */
+  EXPECT_EQ("absent", View(Req(historian), post, 1, "nope"));
   EXPECT_EQ(denied, View(Req(historian), missing, 1, "title"));
   EXPECT_EQ(denied, View(Req(historian), "not-an-id", 1, "title"));
   /* A principal with no right to see history is told what the missing one is. */

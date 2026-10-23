@@ -283,11 +283,11 @@ typedef struct GDEFCORE_Access_List {
  *    gdefcore_access_grant_risk()).
  * 2. The field-read grants of the field, as a live read applies them.
  *
- * No permission, an unknown entity, an unknown field, a sequence that is not a
- * revision of the entity and an id that is not an id are one answer,
- * ::GDEFCORE_ERR_INVALID. A field the principal may not read, and a field with
- * no value in that revision, are @p out_status ::GDEFCORE_REVISION_ABSENT with
- * no texts; they cannot be told apart. A personal field's stored ciphertext is
+ * No permission, an unknown entity, a sequence that is not a revision of the
+ * entity and an id that is not an id are one answer, ::GDEFCORE_ERR_INVALID. A
+ * field the principal may not read, a field with no value in that revision
+ * and a field the type does not have are @p out_status
+ * ::GDEFCORE_REVISION_ABSENT with no texts; they cannot be told apart. A personal field's stored ciphertext is
  * never shown (story S7): once the field filter allowed it, its value of that
  * revision is decrypted with the catalog's subjects
  * (gdefcore_catalog_bind_subjects()), ::GDEFCORE_REVISION_SHOWN and the
@@ -645,7 +645,9 @@ GDEFCORE_API GDEFCORE_Result gdefcore_access_principal_roles(
  * An id the principal may not see is ::GDEFCORE_ERR_INVALID, the same as an
  * id that was never created, and no field value is written. A field the
  * principal may not read is absent: success with a count of 0, not an empty
- * string. The one exception is a field an access callback governs and opts in
+ * string. So is a field the entity's type does not have (a principal who may
+ * see the entity cannot tell a hidden field from a missing one; one who may
+ * not see it is told what an id never created is told). The one exception is a field an access callback governs and opts in
  * to the locked indicator (module.h, ::GDEFCORE_CALLBACK_LOCKED; access SPEC
  * decision 4): when it is refused to the principal and has a value,
  * @p out_locked is 1, still with a count of 0 and no value. Otherwise

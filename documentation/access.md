@@ -599,11 +599,12 @@ declared for one field is not enforced field by field by the signed-form path;
 `gdefcore_access_revision_values()` is the read behind a revision view. It asks
 `revisions.read` of the entity as stored, then the field-read grants of the field,
 as a live read applies them, and returns one field of one recorded revision. It
-does not need the published flag. Not permitted, an entity that is not there, a
-field the type lacks and a sequence that is no revision of the entity are one
-answer (`GDEFCORE_ERR_INVALID`). A field the principal may not read, and a field
-with no value in that revision, are `GDEFCORE_REVISION_ABSENT` with no text, and
-cannot be told apart. A **personal** field is never shown as the ciphertext it is
+does not need the published flag. Not permitted, an entity that is not there
+and a sequence that is no revision of the entity are one answer
+(`GDEFCORE_ERR_INVALID`). A field the principal may not read, a field with no
+value in that revision and a field the type lacks are
+`GDEFCORE_REVISION_ABSENT` with no text, and cannot be told apart (story A7:
+a hidden field answers as a missing one, in every output). A **personal** field is never shown as the ciphertext it is
 stored as. Allowed, its value of that revision is decrypted then, with the
 catalog's subjects (story S7): `GDEFCORE_REVISION_SHOWN` and the plaintext, or
 `GDEFCORE_REVISION_ERASED` and `[erased]` for an erased subject. With no subjects
