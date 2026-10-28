@@ -73,7 +73,72 @@ struct ModDef {
   std::vector<GDEFCORE_Module_Service> services;
   std::vector<GDEFCORE_Module_Callback> callbacks;
   std::vector<GDEFCORE_Module_Sub> subs;
+  /* Routes and menu links (site admin story 5), and the one handler service
+   * every route names: a handler that does nothing, as these tests only ask
+   * what a path reaches. */
+  struct RouteDef {
+    std::string name, path, permission, title, parent, entity_capture;
+    int weight = 0;
+    int kind = GDEFCORE_ROUTE_PAGE;
+    int is_default = 0;
+    int admin = 0;
+  };
+  struct LinkDef {
+    std::string name, menu, label, route, parent;
+    int weight = 0;
+    int kind = GDEFCORE_ROUTE_PAGE;
+  };
+  std::vector<RouteDef> route_defs;
+  std::vector<LinkDef> link_defs;
+  std::vector<GDEFCORE_Module_Route> routes;
+  std::vector<GDEFCORE_Module_Link> links;
+  GDEFCORE_Module_Route_Handler route_handler;
   GDEFCORE_Module_Manifest man;
+
+  static void NoRoute(const GDEFCORE_Route_Call * call) { (void)call; }
+
+  /** A route. A tab names its @p parent; a permission its entity capture. */
+  RouteDef & Route(const std::string & route_name, const std::string & path,
+      const std::string & title = std::string(),
+      const std::string & permission = std::string(),
+      const std::string & entity_capture = std::string()) {
+    RouteDef r;
+    r.name = route_name;
+    r.path = path;
+    r.title = title;
+    r.permission = permission;
+    r.entity_capture = entity_capture;
+    route_defs.push_back(r);
+    return route_defs.back();
+  }
+
+  /** A tab of @p parent. */
+  RouteDef & Tab(const std::string & route_name, const std::string & path,
+      const std::string & parent, const std::string & title, int weight = 0,
+      const std::string & permission = std::string(),
+      const std::string & entity_capture = std::string(), int is_default = 0) {
+    RouteDef & r = Route(route_name, path, title, permission, entity_capture);
+    r.kind = GDEFCORE_ROUTE_TAB;
+    r.parent = parent;
+    r.weight = weight;
+    r.is_default = is_default;
+    return r;
+  }
+
+  /** A menu link. */
+  LinkDef & Link(const std::string & link_name, const std::string & menu,
+      const std::string & label, const std::string & route, int weight = 0,
+      const std::string & parent = std::string()) {
+    LinkDef l;
+    l.name = link_name;
+    l.menu = menu;
+    l.label = label;
+    l.route = route;
+    l.weight = weight;
+    l.parent = parent;
+    link_defs.push_back(l);
+    return link_defs.back();
+  }
 
   const char * S(const std::string & s) {
     pool.push_back(s);
@@ -210,6 +275,79 @@ struct ModDef {
   }
 
   void Finish() {
+    std::string handler = name + ".route";
+    routes.clear();
+    links.clear();
+    bool has_handler = false;
+    for (const GDEFCORE_Module_Service & have : services) {
+      has_handler = has_handler || (have.name_len == handler.size() &&
+                                    memcmp(have.name, handler.data(), have.name_len) == 0);
+    }
+    if (!route_defs.empty() && !has_handler) {
+      GDEFCORE_Module_Service svc;
+      memset(&route_handler, 0, sizeof route_handler);
+      route_handler.size = sizeof route_handler;
+      route_handler.call_fn = NoRoute;
+      memset(&svc, 0, sizeof svc);
+      svc.size = sizeof svc;
+      svc.name = S(handler);
+      svc.name_len = handler.size();
+      svc.version = GDEFCORE_MODULE_ROUTE_HANDLER_VERSION;
+      svc.table = &route_handler;
+      services.push_back(svc);
+    }
+    for (const RouteDef & d : route_defs) {
+      GDEFCORE_Module_Route r;
+      memset(&r, 0, sizeof r);
+      r.size = sizeof r;
+      r.name = S(d.name);
+      r.name_len = d.name.size();
+      r.path = S(d.path);
+      r.path_len = d.path.size();
+      r.weight = d.weight;
+      if (!d.permission.empty()) {
+        r.permission = S(d.permission);
+        r.permission_len = d.permission.size();
+      }
+      if (!d.title.empty()) {
+        r.title = S(d.title);
+        r.title_len = d.title.size();
+      }
+      r.kind = d.kind;
+      if (!d.parent.empty()) {
+        r.parent = S(d.parent);
+        r.parent_len = d.parent.size();
+      }
+      r.is_default = d.is_default;
+      r.admin = d.admin;
+      r.handler = S(handler);
+      r.handler_len = handler.size();
+      if (!d.entity_capture.empty()) {
+        r.entity_capture = S(d.entity_capture);
+        r.entity_capture_len = d.entity_capture.size();
+      }
+      routes.push_back(r);
+    }
+    for (const LinkDef & d : link_defs) {
+      GDEFCORE_Module_Link l;
+      memset(&l, 0, sizeof l);
+      l.size = sizeof l;
+      l.name = S(d.name);
+      l.name_len = d.name.size();
+      l.menu = S(d.menu);
+      l.menu_len = d.menu.size();
+      l.label = S(d.label);
+      l.label_len = d.label.size();
+      l.route = S(d.route);
+      l.route_len = d.route.size();
+      l.weight = d.weight;
+      if (!d.parent.empty()) {
+        l.parent = S(d.parent);
+        l.parent_len = d.parent.size();
+      }
+      l.kind = d.kind;
+      links.push_back(l);
+    }
     memset(&man, 0, sizeof man);
     man.size = sizeof man;
     man.core_token = kCoreToken;
@@ -231,6 +369,10 @@ struct ModDef {
     man.ncallbacks = callbacks.size();
     man.subs = subs.empty() ? NULL : &subs[0];
     man.nsubs = subs.size();
+    man.routes = routes.empty() ? NULL : &routes[0];
+    man.nroutes = routes.size();
+    man.links = links.empty() ? NULL : &links[0];
+    man.nlinks = links.size();
   }
 };
 

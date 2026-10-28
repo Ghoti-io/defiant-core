@@ -2805,6 +2805,19 @@ TEST_F(Manifest, BadLink) {
   EXPECT_NE(std::string::npos, w_.message.find("pt.l"));
   EXPECT_EQ(before, w_.Dump());
 
+  /* A link takes no route's name (an entry is known by one name), neither
+   * its own module's page nor its tab. */
+  Guest * nm = Mini("nm");
+  nm->links[0].name = "nm.page";
+  nm->Build();
+  w_.Install(nm);
+  ExpectRefused(nm, "menu link 'nm.page' has the name of a route");
+  Guest * nt = Mini("nt");
+  nt->links[0].name = "nt.tab";
+  nt->Build();
+  w_.Install(nt);
+  ExpectRefused(nt, "menu link 'nt.tab' has the name of a route");
+
   /* Parent links: missing, in another menu, a loop. */
   Guest * pm = Mini("pm");
   pm->links[0].parent = "pm.gone";

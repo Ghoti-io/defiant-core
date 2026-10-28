@@ -34,6 +34,7 @@
 #include <ghoti.io/defiant-core/module.h>
 #include <ghoti.io/defiant-core/request.h>
 #include <ghoti.io/defiant-core/subject.h>
+#include <ghoti.io/defiant-core/menu.h>
 #include <ghoti.io/defiant-core/template.h>
 
 #include <ghoti.io/cutil/allocator.h>
@@ -4615,6 +4616,11 @@ GDEFCORE_Result gdefcore_changeset_apply(GDEFCORE_Changeset * changeset,
    */
   if (changeset->request != NULL) {
     rc = gdefcore_template_authorize(changeset, changeset->request);
+    if (rc != GDEFCORE_OK) {
+      return rc;
+    }
+    /* Who may edit a menu entry or an override is decided the same way. */
+    rc = gdefcore_menu_authorize(changeset, changeset->request);
     if (rc != GDEFCORE_OK) {
       return rc;
     }

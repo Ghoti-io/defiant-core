@@ -1308,6 +1308,13 @@ const Listed kListed[] = {
     {"gdefcore_template_may_edit", "decision: yes or no"},
     {"gdefcore_template_can_edit", "decision: yes or no"},
     {"gdefcore_render_sample", "sample data, no entity value"},
+    {"gdefcore_routes_match", "decision: which routes a path reaches, as dispatch runs them; no entity value"},
+    {"gdefcore_routes_permits", "decision: yes or no"},
+    {"gdefcore_menu_tree", "Menus.AnAnonymousVisitorSeesNoAdminEntryAnywhere: an entry carries a label, which is configuration and never an entity field, and is shown only by its route's own check"},
+    {"gdefcore_menu_tabs", "Menus.ATabIsShownOnlyForAnXTheRouteAllows: as the tree"},
+    {"gdefcore_menu_breadcrumbs", "Menus.ACrumbAboveThePageThatIsHiddenOrUnreachableIsLeftOutWithoutATrace: as the tree"},
+    {"gdefcore_menu_entries", "Menus.TheEditorsListIsForThoseWhoMayEditAndShowsWhatIsHidden: only for who may edit menus"},
+    {"gdefcore_menu_may_edit", "decision: yes or no"},
 };
 
 /* Words in a function's name that say it derives a value from stored ones. */

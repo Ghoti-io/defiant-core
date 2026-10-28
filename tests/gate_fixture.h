@@ -388,6 +388,20 @@ struct World {
       ASSERT_EQ(GDEFCORE_OK,
           gdefcore_routes_set_check(routes, gdefcore_access_route_check,
               site.catalog));
+      /* The one entry the menu probes ask about: a link to the guarded route,
+       * which has a path only on a page that names an entity. */
+      GDEFCORE_Route_Link link;
+      memset(&link, 0, sizeof link);
+      link.size = sizeof link;
+      link.name = "core.guarded";
+      link.name_len = 12;
+      link.menu = "g";
+      link.menu_len = 1;
+      link.label = "Guarded";
+      link.label_len = 7;
+      link.route = "guard";
+      link.route_len = 5;
+      ASSERT_EQ(GDEFCORE_OK, gdefcore_routes_add_link(routes, &link));
     }
   }
 
@@ -957,6 +971,65 @@ inline std::string MatchLine(World & w, const std::string & who,
   return out + Diag(w, req);
 }
 
+/**
+ * The menu, the tabs, the breadcrumbs and the editor's list on the page
+ * `/guard/<target>`, as @p who. The one entry (a link to the guarded route) has
+ * a path only for a principal who may read the entity; a principal who may not
+ * gets the answer an id that names nothing gets.
+ */
+inline std::string MenuLine(World & w, const std::string & who,
+    const std::string & target, bool blank_ids) {
+  Fresh fresh(w, who);
+  GDEFCORE_Request * req = fresh.req;
+  GDEFCORE_Route_Match * match = NULL;
+  std::string path = "/guard/" + target;
+  std::string out;
+  auto dump = [&](const char * what, GDEFCORE_Result rc, GDEFCORE_Menu * menu) {
+    out += std::string(" ") + what + "=" + Rc(rc) + ":";
+    for (size_t i = 0; i < gdefcore_menu_count(menu); i++) {
+      GDEFCORE_Menu_Item it;
+      memset(&it, 0, sizeof it);
+      it.size = sizeof it;
+      if (gdefcore_menu_item(menu, i, &it) == GDEFCORE_OK) {
+        out += "[" + std::string(it.label, it.label_len) + "|" +
+               Norm(w, std::string(it.href, it.href_len), blank_ids) + "]";
+      }
+    }
+    gdefcore_menu_free(menu);
+  };
+  GDEFCORE_Menu * menu;
+  GDEFCORE_Result rc;
+  Note("gdefcore_routes_match");
+  rc = gdefcore_routes_match(w.routes, req, path.data(), path.size(), &match);
+  out = "match=" + Rc(rc);
+  menu = (GDEFCORE_Menu *)0x1;
+  Note("gdefcore_menu_tree");
+  rc = gdefcore_menu_tree(w.site.catalog, w.routes, req, match, "g", 1, &menu);
+  if (rc != GDEFCORE_OK && menu != (GDEFCORE_Menu *)0x1) {
+    out += " tree-WROTE-ON-FAILURE";
+    menu = NULL;
+  }
+  dump("tree", rc, rc == GDEFCORE_OK ? menu : NULL);
+  menu = NULL;
+  Note("gdefcore_menu_tabs");
+  rc = gdefcore_menu_tabs(w.site.catalog, w.routes, req, match, &menu);
+  dump("tabs", rc, rc == GDEFCORE_OK ? menu : NULL);
+  menu = NULL;
+  Note("gdefcore_menu_breadcrumbs");
+  rc = gdefcore_menu_breadcrumbs(w.site.catalog, w.routes, req, match, "g", 1,
+      &menu);
+  dump("crumbs", rc, rc == GDEFCORE_OK ? menu : NULL);
+  menu = NULL;
+  Note("gdefcore_menu_entries");
+  rc = gdefcore_menu_entries(w.site.catalog, w.routes, req, match, &menu);
+  dump("entries", rc, rc == GDEFCORE_OK ? menu : NULL);
+  Note("gdefcore_menu_may_edit");
+  out += " may-edit=" +
+         std::to_string(gdefcore_menu_may_edit(w.site.catalog, req));
+  gdefcore_route_match_free(match);
+  return out + Diag(w, req);
+}
+
 inline std::string KeyLine(World & w, const std::string & who) {
   Fresh fresh(w, who);
   GDEFCORE_Request * req = fresh.req;
@@ -1168,6 +1241,7 @@ inline Obs Observe(World & w, const std::string & who, const Ask & ask) {
     o.kv[pre + "resolve.guard"] =
         ResolveLine(w, who, true, "/guard/" + target, true);
     o.kv[pre + "match.guard"] = MatchLine(w, who, "/guard/" + target, true);
+    o.kv[pre + "menu.guard"] = MenuLine(w, who, target, true);
     if (ask.cond_true) {
       o.kv[pre + "cond.true"] = CondLine(w, who, target, true);
     }

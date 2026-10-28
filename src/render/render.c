@@ -32,6 +32,7 @@
 #include "render_internal.h"
 
 #include <ghoti.io/defiant-core/access.h>
+#include <ghoti.io/defiant-core/menu.h>
 #include <ghoti.io/defiant-core/module.h>
 #include <ghoti.io/defiant-core/request.h>
 #include <ghoti.io/defiant-core/template.h>
@@ -2550,6 +2551,11 @@ static GDEFCORE_Result write_kit(GDEFCORE_Catalog * catalog) {
   }
   if (rc == GDEFCORE_OK) {
     rc = ensure_template(catalog, "field", kFieldBody, "core.pane");
+  }
+  if (rc == GDEFCORE_OK) {
+    /* The types of the site's own menu entries and overrides, and the
+     * permission to edit them, granted to nobody. */
+    rc = gdefcore_menu_declare(catalog);
   }
   if (rc == GDEFCORE_OK) {
     rc = ensure_named(catalog, "core.theme", 10, "base", 4, NULL, NULL);

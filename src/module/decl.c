@@ -1226,6 +1226,14 @@ static int check_links(const DeclRef * refs, size_t n, const Entry * routes,
       if (local) {
         continue;
       }
+      /* A menu entry is known by its machine name (AD-35), and a tab route is
+       * an entry too: a link may not take a route's name, or an override
+       * keyed by that name would be about two entries. */
+      if (find_entry(routes, nroutes, l->name, l->name_len) != NULL) {
+        SAY(say, "Module %s: menu link '%s' has the name of a route.",
+            d->module, show(a, l->name, l->name_len));
+        return 1;
+      }
       if (find_entry(routes, nroutes, l->route, l->route_len) == NULL) {
         SAY(say, "Module %s: menu link '%s' targets route '%s', which no "
                  "enabled module declares.",
