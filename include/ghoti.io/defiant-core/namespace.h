@@ -256,6 +256,7 @@
 #define gdefcore_catalog_limits GHOTIIO_DEFCORE(gdefcore_catalog_limits)
 #define gdefcore_entity_publish GHOTIIO_DEFCORE(gdefcore_entity_publish)
 #define gdefcore_entity_unpublish GHOTIIO_DEFCORE(gdefcore_entity_unpublish)
+#define gdefcore_render_widget GHOTIIO_DEFCORE(gdefcore_render_widget)
 #define gdefcore_render_entity GHOTIIO_DEFCORE(gdefcore_render_entity)
 #define gdefcore_tree_add GHOTIIO_DEFCORE(gdefcore_tree_add)
 #define gdefcore_tree_child GHOTIIO_DEFCORE(gdefcore_tree_child)

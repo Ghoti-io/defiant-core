@@ -30,12 +30,21 @@ a kind cannot declare it. A kind that declares `math` or `random` lets a
 template use the engine's library of that name; every other kind has them
 shadowed with null.
 
-The starter kit stores two kinds and sets each built-in template's kind:
+The starter kit stores these kinds and sets each built-in template's kind:
 
 | Kind | Variables | Functions | Templates |
 |---|---|---|---|
 | `core.page` | none | `region/1`, `url/1` | `layout` |
 | `core.pane` | `title`, `body`, `summary`, `value` (all `text`) | `url/1` | `entity`, `recent`, `field` |
+| `core.menu` | `menu` (`text`), `items` (`list`) | `url/1` | `menu` |
+| `core.tabs` | `items` (`list`) | `url/1` | `tabs` |
+| `core.breadcrumbs` | `items` (`list`) | `url/1` | `breadcrumbs` |
+
+The last three draw navigation (menus.md, "Widgets"). `items` is a list of
+maps, one per entry in order, with `name`, `label`, `route`, `href`, `menu`,
+`weight` and `depth` (an integer) and `current` and `trail` (booleans). A site
+restyles a widget by editing its template, and may store more templates of a
+kind and name one from a pane.
 
 These are what the C templates the kit started from actually used. A pane is
 one kind, so its contract is the union of what its three templates read: the

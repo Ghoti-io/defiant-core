@@ -84,6 +84,31 @@ static const char kRecentBody[] =
 static const char kFieldBody[] = "<% use value; %><%= value %>";
 
 /*
+ * The navigation widgets' templates. `items` is the computed list (menu.h): a
+ * map each, with name, label, route, href, menu, weight, depth, current and
+ * trail. Every text in it is escaped by the engine, and url() makes an href
+ * safe in the one place it is used. The depth is part of a class name
+ * (`depth1`) and never a bare number, which a page scanner for internal ids
+ * would take for one.
+ */
+static const char kMenuBody[] =
+    "<% use items; use url; %><ul class=\"menu\">"
+    "<% for (item : items) { %><li class=\"depth<%= item.depth %>"
+    "<% if (item.current) { %> current<% } %>"
+    "<% if (item.trail) { %> trail<% } %>\">"
+    "<a href=\"<%= url(item.href) %>\"><%= item.label %></a></li><% } %></ul>";
+static const char kTabsBody[] =
+    "<% use items; use url; %><ul class=\"tabs\">"
+    "<% for (item : items) { %><li<% if (item.current) { %> class=\"current\""
+    "<% } %>><a href=\"<%= url(item.href) %>\"><%= item.label %></a></li>"
+    "<% } %></ul>";
+static const char kCrumbsBody[] =
+    "<% use items; use url; %><ol class=\"breadcrumbs\">"
+    "<% for (item : items) { %><li<% if (item.current) { %> class=\"current\""
+    "<% } %>><a href=\"<%= url(item.href) %>\"><%= item.label %></a></li>"
+    "<% } %></ol>";
+
+/*
  * The built-in kinds and the contract each template really uses. A page
  * layout calls region() and may call url(); a pane reads title, body,
  * summary or value, and may call url(). A pane is one kind, not three, so
@@ -101,6 +126,19 @@ static const char * const kPaneVars[] = {
     "value text The value of one field of the post being shown. A field pane "
     "binds it."};
 static const char * const kPaneFns[] = {"url 1"};
+
+/* A widget's kind reads the list of what it shows, and url(). */
+static const char * const kMenuVars[] = {
+    "menu text The name of the menu being drawn.",
+    "items list The entries the viewer may follow, in order. Each is a map "
+    "with name, label, route, href, menu, weight, depth, current and trail."};
+static const char * const kTabsVars[] = {
+    "items list The tabs of the page the viewer may follow, in order. Each is "
+    "a map with name, label, route, href, weight, current and trail."};
+static const char * const kCrumbsVars[] = {
+    "items list The trail to the page, from the top. Each is a map with name, "
+    "label, route, href and current (the page itself)."};
+static const char * const kNavFns[] = {"url 1"};
 
 typedef struct TangBind {
   const char * name;
@@ -1458,9 +1496,415 @@ static int split3(const char * s, size_t n, const char ** a, size_t * an,
   return *cn > 0;
 }
 
+/* ---- navigation widgets (site admin story 6) ----------------------------- */
+
+/* What a pane or a widget call draws against: the page, and a cache. */
+typedef struct NavCtx {
+  GDEFCORE_Routes * routes;       /* may be NULL */
+  const char * path;
+  size_t path_len;
+  GDEFCORE_FragmentCache * cache; /* may be NULL */
+} NavCtx;
+
+static int nav_kind(const char * kind, size_t kind_len) {
+  if (span_eq(kind, kind_len, GDEFCORE_WIDGET_MENU,
+          sizeof GDEFCORE_WIDGET_MENU - 1)) {
+    return 1;
+  }
+  if (span_eq(kind, kind_len, GDEFCORE_WIDGET_TABS,
+          sizeof GDEFCORE_WIDGET_TABS - 1)) {
+    return 2;
+  }
+  if (span_eq(kind, kind_len, GDEFCORE_WIDGET_BREADCRUMBS,
+          sizeof GDEFCORE_WIDGET_BREADCRUMBS - 1)) {
+    return 3;
+  }
+  return 0;
+}
+
+/* A growing buffer for the key. */
+typedef struct KeyBuf {
+  char * p;
+  size_t n;
+  size_t cap;
+  int oom;
+} KeyBuf;
+
+static void keybuf_add(KeyBuf * k, const char * s, size_t n) {
+  if (k->oom) {
+    return;
+  }
+  if (k->n + n + 1 > k->cap) {
+    size_t cap = k->cap == 0 ? 256 : k->cap * 2;
+    char * next;
+    while (cap < k->n + n + 1) {
+      cap *= 2;
+    }
+    next = (char *)realloc(k->p, cap);
+    if (next == NULL) {
+      k->oom = 1;
+      return;
+    }
+    k->p = next;
+    k->cap = cap;
+  }
+  if (n > 0) {
+    memcpy(k->p + k->n, s, n);
+  }
+  k->n += n;
+  k->p[k->n] = '\0';
+}
+
+/*
+ * The key a widget's fragment is kept under (AD-30): the render key of the
+ * request, which carries the tenant, the config epoch, the permission set
+ * and, when the render read it, the principal, and which the entries just
+ * computed have already added to (the entities and revisions their visibility
+ * read); and the widget, its template, its menu, and every value the page
+ * matched. A viewer with another permission set, or the same viewer on the
+ * page of another `:id`, is another key.
+ */
+static GDEFCORE_Result widget_key(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Request * request, int which, const char * tmpl, size_t tmpl_len,
+    const char * menu, size_t menu_len, const GDEFCORE_Route_Match * match,
+    char ** out_key, size_t * out_len) {
+  KeyBuf k;
+  char * base = NULL;
+  size_t base_len = 0;
+  size_t i;
+  GDEFCORE_Result rc;
+  memset(&k, 0, sizeof k);
+  rc = gdefcore_access_render_key(catalog, request, NULL, 0, NULL, 0, &base,
+      &base_len);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  keybuf_add(&k, base, base_len);
+  gdefcore_text_free(catalog, base);
+  keybuf_add(&k, "widget:", 7);
+  keybuf_add(&k, which == 1 ? "menu" : (which == 2 ? "tabs" : "breadcrumbs"),
+      which == 1 ? 4 : (which == 2 ? 4 : 11));
+  keybuf_add(&k, "\ntemplate:", 10);
+  keybuf_add(&k, tmpl, tmpl_len);
+  keybuf_add(&k, "\nmenu:", 6);
+  keybuf_add(&k, menu, menu_len);
+  keybuf_add(&k, "\nvalues:", 8);
+  for (i = 0; i < gdefcore_route_match_capture_count(match); i++) {
+    const char * name = NULL;
+    const char * value = NULL;
+    size_t name_len = 0;
+    size_t value_len = 0;
+    char lens[48];
+    int ln;
+    if (gdefcore_route_match_capture(match, i, &name, &name_len, &value,
+            &value_len) != GDEFCORE_OK) {
+      continue;
+    }
+    /* Lengths first, so no value can read as the next name. */
+    ln = snprintf(lens, sizeof lens, "\n%llu:%llu:", (unsigned long long)name_len,
+        (unsigned long long)value_len);
+    keybuf_add(&k, lens, ln > 0 ? (size_t)ln : 0);
+    keybuf_add(&k, name, name_len);
+    keybuf_add(&k, value, value_len);
+  }
+  keybuf_add(&k, "\n", 1);
+  if (k.oom) {
+    free(k.p);
+    return GDEFCORE_ERR_OOM;
+  }
+  *out_key = k.p;
+  *out_len = k.n;
+  return GDEFCORE_OK;
+}
+
+/* A text into a map, for the strictest encoding. A text the engine will not
+ * take (it is not UTF-8: a raw path segment can be anything) is the empty one. */
+static GLTANG_Result nav_text(GLTANG_ValueDescription * d, GLTANG_ValueRef map,
+    const char * key, const char * text, size_t len) {
+  GLTANG_ValueRef v;
+  GLTANG_Result rc = gltang_value_string(d, text, len,
+      GLTANG_UNICODE_STRING_TYPE_HTML_ATTRIBUTE, &v);
+  if (rc == GLTANG_ERR_INVALID) {
+    rc = gltang_value_string(d, "", 0, GLTANG_UNICODE_STRING_TYPE_HTML_ATTRIBUTE,
+        &v);
+  }
+  if (rc == GLTANG_OK) {
+    rc = gltang_value_map_set(d, map, key, strlen(key),
+        GLTANG_UNICODE_STRING_TYPE_HTML_ATTRIBUTE, v);
+  }
+  return rc;
+}
+
+static GLTANG_Result nav_int(GLTANG_ValueDescription * d, GLTANG_ValueRef map,
+    const char * key, int64_t n) {
+  GLTANG_ValueRef v;
+  GLTANG_Result rc = gltang_value_integer(d, n, &v);
+  if (rc == GLTANG_OK) {
+    rc = gltang_value_map_set(d, map, key, strlen(key),
+        GLTANG_UNICODE_STRING_TYPE_HTML_ATTRIBUTE, v);
+  }
+  return rc;
+}
+
+static GLTANG_Result nav_bool(GLTANG_ValueDescription * d, GLTANG_ValueRef map,
+    const char * key, int yes) {
+  GLTANG_ValueRef v;
+  GLTANG_Result rc = gltang_value_bool(d, yes != 0, &v);
+  if (rc == GLTANG_OK) {
+    rc = gltang_value_map_set(d, map, key, strlen(key),
+        GLTANG_UNICODE_STRING_TYPE_HTML_ATTRIBUTE, v);
+  }
+  return rc;
+}
+
+/* The items of a computed menu as a value: a list of maps. */
+static GDEFCORE_Result describe_menu(const GDEFCORE_Menu * menu,
+    GLTANG_ValueDescription ** out) {
+  GLTANG_ValueDescription * d = NULL;
+  GLTANG_ValueRef list;
+  GLTANG_Result lr;
+  size_t i;
+  *out = NULL;
+  if (gltang_value_description_create(NULL, &d) != GLTANG_OK) {
+    return GDEFCORE_ERR_OOM;
+  }
+  lr = gltang_value_array(d, &list);
+  for (i = 0; lr == GLTANG_OK && i < gdefcore_menu_count(menu); i++) {
+    GDEFCORE_Menu_Item it;
+    GLTANG_ValueRef map;
+    memset(&it, 0, sizeof it);
+    it.size = sizeof it;
+    if (gdefcore_menu_item(menu, i, &it) != GDEFCORE_OK) {
+      lr = GLTANG_ERR_INVALID;
+      break;
+    }
+    lr = gltang_value_map(d, &map);
+    if (lr == GLTANG_OK) {
+      lr = nav_text(d, map, "name", it.name, it.name_len);
+    }
+    if (lr == GLTANG_OK) {
+      lr = nav_text(d, map, "label", it.label, it.label_len);
+    }
+    if (lr == GLTANG_OK) {
+      lr = nav_text(d, map, "route", it.route, it.route_len);
+    }
+    if (lr == GLTANG_OK) {
+      lr = nav_text(d, map, "href", it.href, it.href_len);
+    }
+    if (lr == GLTANG_OK) {
+      lr = nav_text(d, map, "menu", it.menu, it.menu_len);
+    }
+    if (lr == GLTANG_OK) {
+      lr = nav_int(d, map, "weight", it.weight);
+    }
+    if (lr == GLTANG_OK) {
+      lr = nav_int(d, map, "depth", it.depth);
+    }
+    if (lr == GLTANG_OK) {
+      lr = nav_bool(d, map, "current", it.current);
+    }
+    if (lr == GLTANG_OK) {
+      lr = nav_bool(d, map, "trail", it.trail);
+    }
+    if (lr == GLTANG_OK) {
+      lr = gltang_value_array_push(d, list, map);
+    }
+  }
+  if (lr == GLTANG_OK) {
+    lr = gltang_value_set_root(d, list);
+  }
+  if (lr != GLTANG_OK) {
+    gltang_value_description_release(d);
+    return lr == GLTANG_ERR_LIMIT ? GDEFCORE_ERR_LIMIT : GDEFCORE_ERR_OOM;
+  }
+  *out = d;
+  return GDEFCORE_OK;
+}
+
+/*
+ * Compute the widget's entries for the page, draw them with the template, and
+ * keep the fragment when there is a cache. The entries come first: what their
+ * visibility read is part of the key the cache looks under.
+ */
+static GDEFCORE_Result render_nav(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Request * request, const NavCtx * nav, const char * kind,
+    size_t kind_len, const char * target, size_t target_len, uint64_t fuel,
+    char ** html, size_t * html_len) {
+  static const char * const kDefault[] = {"", "menu", "tabs", "breadcrumbs"};
+  static const char * const kTemplateKind[] = {"", "core.menu", "core.tabs",
+      "core.breadcrumbs"};
+  int which = nav_kind(kind, kind_len);
+  const char * menu = "";
+  size_t menu_len = 0;
+  const char * tmpl = kDefault[which];
+  size_t tmpl_len = strlen(kDefault[which]);
+  GDEFCORE_Routes * own_routes = NULL;
+  GDEFCORE_Routes * routes;
+  GDEFCORE_Route_Match * match = NULL;
+  GDEFCORE_Menu * items = NULL;
+  GLTANG_ValueDescription * value = NULL;
+  GDEFCORE_Contract * contract = NULL;
+  char * body = NULL;
+  char * tkind = NULL;
+  size_t body_len = 0;
+  size_t tkind_len = 0;
+  char * key = NULL;
+  size_t key_len = 0;
+  char * bytes = NULL;
+  size_t n = 0;
+  TangBind bind;
+  GDEFCORE_Result rc;
+  *html = NULL;
+  *html_len = 0;
+  if (which == 0) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  if (which == 1) {
+    /* `<menu>` or `<menu>/<template>`. */
+    const char * slash = target == NULL ? NULL
+                                        : (const char *)memchr(target, '/', target_len);
+    menu = target;
+    menu_len = slash == NULL ? target_len : (size_t)(slash - target);
+    if (menu == NULL || menu_len == 0) {
+      return GDEFCORE_ERR_INVALID;
+    }
+    if (slash != NULL) {
+      tmpl = slash + 1;
+      tmpl_len = target_len - menu_len - 1;
+    }
+  } else if (target != NULL && target_len > 0) {
+    tmpl = target;
+    tmpl_len = target_len;
+  }
+  if (tmpl_len == 0) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  routes = nav->routes;
+  if (routes == NULL) {
+    /* A host with no routes has no page and no tab: only what is declared
+     * with no route to follow, which is nothing. */
+    rc = gdefcore_routes_create(NULL, &own_routes);
+    if (rc != GDEFCORE_OK) {
+      return rc;
+    }
+    routes = own_routes;
+  }
+  if (nav->path != NULL && nav->path_len > 0 && nav->path[0] == '/') {
+    rc = gdefcore_routes_match(routes, request, nav->path, nav->path_len, &match);
+    if (rc != GDEFCORE_OK) {
+      goto done;
+    }
+  }
+  if (which == 1) {
+    rc = gdefcore_menu_tree(catalog, routes, request, match, menu, menu_len,
+        &items);
+  } else if (which == 2) {
+    rc = gdefcore_menu_tabs(catalog, routes, request, match, &items);
+  } else {
+    rc = gdefcore_menu_breadcrumbs(catalog, routes, request, match, NULL, 0,
+        &items);
+  }
+  if (rc != GDEFCORE_OK) {
+    goto done;
+  }
+  rc = template_load(catalog, tmpl, tmpl_len, &body, &body_len, &tkind,
+      &tkind_len);
+  if (rc == GDEFCORE_OK &&
+      !span_eq(tkind, tkind_len, kTemplateKind[which], strlen(kTemplateKind[which]))) {
+    rc = GDEFCORE_ERR_INVALID;   /* a template of another kind is not this widget's */
+  }
+  if (rc != GDEFCORE_OK) {
+    goto done;
+  }
+  if (nav->cache != NULL) {
+    char * hit = NULL;
+    size_t hit_len = 0;
+    int found = 0;
+    rc = widget_key(catalog, request, which, tmpl, tmpl_len, menu, menu_len, match,
+        &key, &key_len);
+    if (rc != GDEFCORE_OK) {
+      goto done;
+    }
+    rc = gdefcore_fragment_get(nav->cache, key, key_len, &hit, &hit_len, &found);
+    if (rc != GDEFCORE_OK) {
+      goto done;
+    }
+    if (found) {
+      rc = gdefcore_text_dup(catalog, hit, hit_len, html);
+      if (rc == GDEFCORE_OK) {
+        *html_len = hit_len;
+      }
+      gdefcore_fragment_free(nav->cache, hit);
+      goto done;
+    }
+  }
+  rc = describe_menu(items, &value);
+  if (rc == GDEFCORE_OK) {
+    rc = gdefcore_template_contract_open(catalog, NULL, tkind, tkind_len,
+        &contract, NULL);
+    if (rc != GDEFCORE_OK && rc != GDEFCORE_ERR_OOM) {
+      rc = GDEFCORE_ERR_INVALID;
+    }
+  }
+  if (rc == GDEFCORE_OK) {
+    bind.name = "menu";
+    bind.text = menu;
+    bind.len = menu_len;
+    rc = tang_run_value(catalog, request, contract, body, body_len, fuel, &bind,
+        which == 1 ? 1 : 0, "items", value, NULL, NULL, NULL, &bytes, &n);
+  }
+  if (rc == GDEFCORE_OK) {
+    if (nav->cache != NULL) {
+      /* Offered to a cache only when there is one: a pane in a page, or a
+       * widget on an admin screen, is kept nowhere. */
+      (void)fragment_offer("live", 4);
+      (void)gdefcore_fragment_put(nav->cache, request, key, key_len, bytes, n);
+    }
+    *html = bytes;
+    *html_len = n;
+  }
+done:
+  gdefcore_template_contract_close(contract);
+  gltang_value_description_release(value);
+  gdefcore_menu_free(items);
+  gdefcore_route_match_free(match);
+  gdefcore_routes_destroy(own_routes);
+  gdefcore_text_free(catalog, body);
+  gdefcore_text_free(catalog, tkind);
+  free(key);
+  return rc;
+}
+
+GDEFCORE_Result gdefcore_render_widget(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Routes * routes, GDEFCORE_Request * request,
+    GDEFCORE_FragmentCache * cache, const char * kind, size_t kind_len,
+    const char * target, size_t target_len, const char * path, size_t path_len,
+    uint64_t scope_fuel, char ** out_bytes, size_t * out_len) {
+  NavCtx nav;
+  char * html = NULL;
+  size_t html_len = 0;
+  GDEFCORE_Result rc;
+  if (catalog == NULL || request == NULL || kind == NULL || out_bytes == NULL ||
+      out_len == NULL || scope_fuel == 0 || (target == NULL && target_len != 0) ||
+      (path == NULL && path_len != 0)) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  nav.routes = routes;
+  nav.path = path;
+  nav.path_len = path_len;
+  nav.cache = cache;
+  rc = render_nav(catalog, request, &nav, kind, kind_len, target, target_len,
+      scope_fuel, &html, &html_len);
+  if (rc == GDEFCORE_OK) {
+    *out_bytes = html;
+    *out_len = html_len;
+  }
+  return rc;
+}
+
 static GDEFCORE_Result render_display(GDEFCORE_Catalog * catalog,
-    GDEFCORE_Request * request, const char * name, size_t name_len,
-    uint64_t fuel, char ** out, size_t * out_len) {
+    GDEFCORE_Request * request, const NavCtx * nav, const char * name,
+    size_t name_len, uint64_t fuel, char ** out, size_t * out_len) {
   char id[GDEFCORE_PUBLIC_ID_LEN + 1];
   char * layout = NULL;
   size_t layout_len = 0;
@@ -1517,6 +1961,9 @@ static GDEFCORE_Result render_display(GDEFCORE_Catalog * catalog,
     } else if (span_eq(kind, kind_len, "field", 5)) {
       rc = render_field_pane(catalog, request, target, target_len, fuel, &html,
           &html_len);
+    } else if (nav_kind(kind, kind_len) != 0) {
+      rc = render_nav(catalog, request, nav, kind, kind_len, target, target_len,
+          fuel, &html, &html_len);
     } else {
       rc = GDEFCORE_ERR_INVALID;
     }
@@ -1895,18 +2342,23 @@ GDEFCORE_Result gdefcore_render_page(GDEFCORE_Catalog * catalog,
   char canon[GDEFCORE_PUBLIC_ID_LEN + 1];
   char * type = NULL;
   size_t type_len = 0;
+  NavCtx nav;
   GDEFCORE_Result rc;
   if (catalog == NULL || request == NULL || path == NULL || out_bytes == NULL ||
       out_len == NULL || scope_fuel == 0) {
     return GDEFCORE_ERR_INVALID;
   }
+  nav.routes = routes;
+  nav.path = path;
+  nav.path_len = path_len;
+  nav.cache = NULL;
   if (path_len == 1 && path[0] == '/') {
     rc = gdefcore_request_set_resolution(request, NULL, 0);
     if (rc != GDEFCORE_OK) {
       return rc;
     }
-    return render_display(catalog, request, "front", 5, scope_fuel, out_bytes,
-        out_len);
+    return render_display(catalog, request, &nav, "front", 5, scope_fuel,
+        out_bytes, out_len);
   }
   rc = gdefcore_form_resolve(routes, catalog, request, path, path_len, &resolved,
       &resolved_len);
@@ -1932,7 +2384,7 @@ GDEFCORE_Result gdefcore_render_page(GDEFCORE_Catalog * catalog,
   if (rc != GDEFCORE_OK) {
     return rc;
   }
-  return render_display(catalog, request, "post", 4, scope_fuel, out_bytes,
+  return render_display(catalog, request, &nav, "post", 4, scope_fuel, out_bytes,
       out_len);
 }
 
@@ -2553,8 +3005,27 @@ static GDEFCORE_Result write_kit(GDEFCORE_Catalog * catalog) {
     rc = ensure_template(catalog, "field", kFieldBody, "core.pane");
   }
   if (rc == GDEFCORE_OK) {
-    /* The types of the site's own menu entries and overrides, and the
-     * permission to edit them, granted to nobody. */
+    rc = ensure_kind(catalog, "core.menu", "Menu", kMenuVars, 2, kNavFns, 1);
+  }
+  if (rc == GDEFCORE_OK) {
+    rc = ensure_kind(catalog, "core.tabs", "Tabs", kTabsVars, 1, kNavFns, 1);
+  }
+  if (rc == GDEFCORE_OK) {
+    rc = ensure_kind(catalog, "core.breadcrumbs", "Breadcrumbs", kCrumbsVars, 1,
+        kNavFns, 1);
+  }
+  if (rc == GDEFCORE_OK) {
+    rc = ensure_template(catalog, "menu", kMenuBody, "core.menu");
+  }
+  if (rc == GDEFCORE_OK) {
+    rc = ensure_template(catalog, "tabs", kTabsBody, "core.tabs");
+  }
+  if (rc == GDEFCORE_OK) {
+    rc = ensure_template(catalog, "breadcrumbs", kCrumbsBody, "core.breadcrumbs");
+  }
+  if (rc == GDEFCORE_OK) {
+    /* The types of the site's own entries and overrides, and the permission to
+     * edit them, granted to nobody. */
     rc = gdefcore_menu_declare(catalog);
   }
   if (rc == GDEFCORE_OK) {

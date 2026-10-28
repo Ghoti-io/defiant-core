@@ -98,8 +98,9 @@ the displays, and the anonymous grant are missing. Render never opens
 the archive: after install, the store is the only source.
 
 The changeset defines the types, among them `core.template-kind`. The
-two kinds (`core.page` and `core.pane`), the templates, the theme, the view
-and the displays are written after it applies, because an entity of a type
+kinds (`core.page`, `core.pane` and the three navigation kinds of menus.md),
+the templates, the types and permission of menus (`gdefcore_menu_declare()`),
+the theme, the view and the displays are written after it applies, because an entity of a type
 cannot be saved in the same changeset that defines the type. The kinds go
 first and each template carries its kind, because a template is validated
 against its kind as it is saved.

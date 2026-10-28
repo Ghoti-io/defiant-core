@@ -1023,6 +1023,25 @@ inline std::string MenuLine(World & w, const std::string & who,
   Note("gdefcore_menu_entries");
   rc = gdefcore_menu_entries(w.site.catalog, w.routes, req, match, &menu);
   dump("entries", rc, rc == GDEFCORE_OK ? menu : NULL);
+  {
+    /* The widgets: drawn for the same page, they hold what the lists hold. */
+    for (const char * kind : {"menu", "tabs", "breadcrumbs"}) {
+      char * bytes = (char *)0x1;
+      size_t n = 99;
+      Note("gdefcore_render_widget");
+      bool is_menu = std::string(kind) == "menu";
+      rc = gdefcore_render_widget(w.site.catalog, w.routes, req, NULL, kind,
+          strlen(kind), is_menu ? "g" : "", is_menu ? 1 : 0, path.data(),
+          path.size(), GDEFCORE_RENDER_PAGE_FUEL, &bytes, &n);
+      out += std::string(" widget-") + kind + "=" + Rc(rc);
+      if (rc == GDEFCORE_OK) {
+        out += ":" + Norm(w, std::string(bytes, n), blank_ids);
+        gdefcore_text_free(w.site.catalog, bytes);
+      } else if (bytes != (char *)0x1) {
+        out += "-WROTE-ON-FAILURE";
+      }
+    }
+  }
   Note("gdefcore_menu_may_edit");
   out += " may-edit=" +
          std::to_string(gdefcore_menu_may_edit(w.site.catalog, req));

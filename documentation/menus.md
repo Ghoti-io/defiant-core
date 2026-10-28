@@ -101,3 +101,24 @@ whether the viewer would see it. Only a principal who may edit menus asks it.
 
 A catalog reads its own tenant's entries and overrides and the modules enabled
 for its own tenant. Two tenants' menus, entries and overrides never mix.
+
+## Widgets
+
+The menu, the tabs and the breadcrumbs are template kinds (`core.menu`,
+`core.tabs`, `core.breadcrumbs`), seeded with a template each by the render
+kit. `gdefcore_render_widget()` computes the entries for the page and the
+viewer, and draws them with a stored template; a display's pane of the kind
+`menu`, `tabs` or `breadcrumbs` does the same for the page being rendered. A
+pane's target is `<menu>` or `<menu>/<template>` for a menu and the template's
+name for the others, and its text is the engine's, escaped; only `href`, run
+through `url()`, can make a link. A site restyles a widget by editing its
+template, like any other (templates.md).
+
+A widget is given an optional fragment cache, and keeps the fragment under a
+key made of the render key (the tenant, the config epoch, the viewer's
+permission set, the viewer when the render read them, and the entities and
+revisions the visibility read), the widget and its template and menu, and
+**every value the page matched**. A viewer with another permission set, or the
+same viewer on the page of another `:id`, is another fragment, and so is
+another tenant's. The entries are computed before the cache is asked, because
+what their visibility read is part of the key; the cache saves drawing them.

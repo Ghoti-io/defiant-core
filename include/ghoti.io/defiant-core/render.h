@@ -221,6 +221,57 @@ GDEFCORE_API GDEFCORE_Result gdefcore_fragment_purge_subject(
 /** @brief How many fragments the cache holds. */
 GDEFCORE_API size_t gdefcore_fragment_count(GDEFCORE_FragmentCache * cache);
 
+/* ---- navigation widgets (site admin story 6) ---------------------------- */
+
+/** The widget (and pane) kind that draws a menu. Its template kind is
+ * `core.menu`. */
+#define GDEFCORE_WIDGET_MENU "menu"
+/** The widget kind that draws the tabs of the page. Template kind `core.tabs`. */
+#define GDEFCORE_WIDGET_TABS "tabs"
+/** The widget kind that draws the breadcrumbs. Template kind `core.breadcrumbs`. */
+#define GDEFCORE_WIDGET_BREADCRUMBS "breadcrumbs"
+
+/**
+ * @brief Draw a menu, the tabs of a page, or its breadcrumbs, with a stored
+ * template.
+ *
+ * The widget is computed for the page @p path (gdefcore_routes_match()) and
+ * for the request's principal (menu.h), then drawn by a template of the kind
+ * `core.menu`, `core.tabs` or `core.breadcrumbs`, which a site can restyle
+ * like any other (templates.md). The template reads one variable, `items`: a
+ * list of maps, in order, each with `name`, `label`, `route`, `href`, `menu`,
+ * `weight`, `depth`, `current` and `trail`; `core.menu` also reads `menu`, the
+ * name of the menu. Every text in it is bound for the strictest encoding, and
+ * `url()` makes an `href` safe.
+ *
+ * @p kind is ::GDEFCORE_WIDGET_MENU, ::GDEFCORE_WIDGET_TABS or
+ * ::GDEFCORE_WIDGET_BREADCRUMBS. @p target is `<menu>` or `<menu>/<template>`
+ * for a menu (the template is `menu` unless named), and the template's name,
+ * or empty for the template of that kind's own name, for the other two. This is
+ * also what a display's pane of that kind names as its target. @p path is the
+ * page, as the request named it; a path no route reaches draws the widget for
+ * a page that matched nothing. @p routes may be NULL, for a host with none.
+ *
+ * @p cache, when not NULL, keeps the fragment under a key made of the render
+ * key (gdefcore_access_render_key(): the tenant, the config epoch, the
+ * **permission set** of the principal, the principal when the render read it,
+ * and the entities and revisions the visibility read) and of the widget, its
+ * template, and **every value the page matched**: a viewer with another
+ * permission set, or the same viewer on the page of another `:id`, is another
+ * fragment. The entries are worked out first, because what they read is part of
+ * the key; the cache saves drawing them. A fragment the cache refuses (the
+ * request is not cacheable) is returned all the same.
+ *
+ * An unknown kind, a template that does not exist or is not of the kind's
+ * template kind, and a zero @p scope_fuel are ::GDEFCORE_ERR_INVALID. Free
+ * @p out_bytes with gdefcore_text_free(). Not written on failure.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_render_widget(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Routes * routes, GDEFCORE_Request * request,
+    GDEFCORE_FragmentCache * cache, const char * kind, size_t kind_len,
+    const char * target, size_t target_len, const char * path, size_t path_len,
+    uint64_t scope_fuel, char ** out_bytes, size_t * out_len);
+
 /**
  * @brief The Post starter kit as a tar archive.
  *
@@ -269,7 +320,9 @@ GDEFCORE_API void gdefcore_render_names_free(GDEFCORE_Catalog * catalog,
  * @brief One pane of the display named @p name, in stored order.
  *
  * @p out_region, @p out_kind and @p out_target are freed with
- * gdefcore_text_free(). A kind is `view`, `entity` or `field`.
+ * gdefcore_text_free(). A kind is `view`, `entity`, `field`, `menu`, `tabs`
+ * or `breadcrumbs`; the last three are drawn by gdefcore_render_widget() for
+ * the page being rendered.
  */
 GDEFCORE_API GDEFCORE_Result gdefcore_render_pane_at(GDEFCORE_Catalog * catalog,
     const char * name, size_t name_len, size_t index, char ** out_region,

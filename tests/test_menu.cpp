@@ -1257,6 +1257,453 @@ TEST_F(MenusWithTheKit, InstallingTheKitDeclaresTheTypesAndThePermission) {
   EXPECT_NE(std::string::npos, Tree(reader_, "/nowhere", "main").find("Kit /start"));
 }
 
+/* ---- the widgets ---------------------------------------------------------------------- */
+
+/* A route handler that owns the request, as a page does: it resolves to the
+ * entity its `:id` names. */
+void OwnPage(const GDEFCORE_Route_Call * call) {
+  const char * v = NULL;
+  size_t n = 0;
+  if (gdefcore_route_call_capture(call, "id", 2, &v, &n)) {
+    gdefcore_request_set_resolution(call->request, v, n);
+  }
+}
+
+class Widgets : public Menus {
+ protected:
+  GDEFCORE_FragmentCache * cache_ = NULL;
+
+  Widgets() { use_kit_ = true; }
+
+  void SetUp() override {
+    Menus::SetUp();
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_fragment_cache_create(NULL, 0, &cache_));
+  }
+
+  void TearDown() override {
+    gdefcore_fragment_cache_destroy(cache_);
+    Menus::TearDown();
+  }
+
+  /* One widget as @p who sees it on @p path, "<error>" when it fails. */
+  std::string Widget(const std::string & who, const char * kind,
+      const char * target, const std::string & path,
+      GDEFCORE_FragmentCache * cache = NULL, GDEFCORE_Routes * routes = NULL,
+      GDEFCORE_Catalog * catalog = NULL, const char * tenant = NULL) {
+    GDEFCORE_Request * req = NULL;
+    char * bytes = NULL;
+    size_t n = 0;
+    std::string out;
+    GDEFCORE_Routes * table = routes != NULL ? routes : Table();
+    if (tenant != NULL) {
+      EXPECT_EQ(GDEFCORE_OK, gdefcore_request_create((const uint8_t *)tenant,
+                                 strlen(tenant), 0, 0, NULL, &req));
+      requests_.push_back(req);
+      if (!who.empty()) {
+        EXPECT_EQ(GDEFCORE_OK, gdefcore_request_set_principal(req, who.data(),
+                                   who.size()));
+      }
+    } else {
+      req = Req(who);
+    }
+    GDEFCORE_Result rc = gdefcore_render_widget(
+        catalog != NULL ? catalog : catalog_, table, req, cache, kind,
+        strlen(kind), target, strlen(target), path.data(), path.size(),
+        GDEFCORE_RENDER_PAGE_FUEL, &bytes, &n);
+    if (rc != GDEFCORE_OK) {
+      return std::string("<error ") + gdefcore_result_string(rc) + ">";
+    }
+    out.assign(bytes, n);
+    gdefcore_text_free(catalog != NULL ? catalog : catalog_, bytes);
+    return out;
+  }
+
+  /* Replace a stored template's body (the operator's changeset). */
+  void Restyle(const char * name, const char * body, const char * kind = NULL) {
+    char ** ids = NULL;
+    size_t n = 0;
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_entity_ids(catalog_, "core.template", 13, &ids,
+                               &n));
+    std::string id;
+    for (size_t i = 0; i < n && id.empty(); i++) {
+      char ** t = NULL;
+      size_t * l = NULL;
+      size_t c = 0;
+      if (gdefcore_entity_values(catalog_, NULL, GDEFCORE_VIEW_PUBLISHED, ids[i],
+              strlen(ids[i]), "en", 2, "name", 4, &t, &l, &c) == GDEFCORE_OK) {
+        if (c > 0 && std::string(t[0], l[0]) == name) {
+          id = ids[i];
+        }
+        gdefcore_values_free(catalog_, t, l, c);
+      }
+    }
+    gdefcore_ids_free(catalog_, ids, n);
+    if (id.empty()) {
+      char fresh[GDEFCORE_PUBLIC_ID_LEN + 1];
+      ASSERT_EQ(GDEFCORE_OK,
+          gdefcore_entity_create(catalog_, "core.template", 13, fresh, NULL));
+      id = fresh;
+    }
+    GDEFCORE_Changeset * cs = NULL;
+    GDEFCORE_Value values[3];
+    const char * slots[3] = {name, body, kind == NULL ? "core.menu" : kind};
+    size_t lens[3] = {strlen(name), strlen(body), strlen(slots[2])};
+    const char * fields[3] = {"name", "body", "kind"};
+    for (int i = 0; i < 3; i++) {
+      memset(&values[i], 0, sizeof values[i]);
+      values[i].size = sizeof values[i];
+      values[i].field = fields[i];
+      values[i].field_len = strlen(fields[i]);
+      values[i].texts = &slots[i];
+      values[i].text_lens = &lens[i];
+      values[i].count = 1;
+    }
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_entity_save(cs, id.c_str(), id.size(), "en", 2,
+                               values, kind == NULL ? 2 : 3));
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, "core.template", 13));
+    gdefcore_changeset_destroy(cs);
+  }
+};
+
+TEST_F(Widgets, TheKitSeedsTheKindsAndTheTemplates) {
+  for (const char * kind : {"core.menu", "core.tabs", "core.breadcrumbs"}) {
+    GDEFCORE_Contract * c = NULL;
+    GDEFCORE_Contract_Var v;
+    memset(&v, 0, sizeof v);
+    v.size = sizeof v;
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_template_contract_open(catalog_, NULL, kind,
+                               strlen(kind), &c, NULL))
+        << kind;
+    EXPECT_EQ(GDEFCORE_OK, gdefcore_template_contract_var(c, "items", 5, &v)) << kind;
+    EXPECT_EQ(GDEFCORE_TEMPLATE_LIST, v.type);
+    EXPECT_EQ(std::string(kind) == "core.menu" ? GDEFCORE_OK : GDEFCORE_ERR_INVALID,
+        gdefcore_template_contract_var(c, "menu", 4, &v))
+        << kind;
+    gdefcore_template_contract_close(c);
+  }
+  /* The templates are there and of those kinds: a widget draws. */
+  EXPECT_NE(0u, Widget("", "menu", "main", "/start").size());
+  EXPECT_NE("<error Invalid argument>", Widget("", "tabs", "", "/start"));
+  EXPECT_NE("<error Invalid argument>", Widget("", "breadcrumbs", "", "/start"));
+}
+
+TEST_F(Widgets, TheMenuWidgetDrawsWhatTheTreeHoldsEscapedAndMarked) {
+  InstallWiki();
+  EnableWiki();
+  ASSERT_EQ(GDEFCORE_OK, SiteEntry("", "site.evil", "main",
+                             "<script>alert(1)</script> & \"quotes\"", "core.start"));
+  std::string html = Widget(reader_, "menu", "main", "/wiki");
+  EXPECT_EQ("<ul class=\"menu\">"
+            "<li class=\"depth0\"><a href=\"/start\">Start</a></li>"
+            "<li class=\"depth0\"><a href=\"/start\">&lt;script&gt;alert(1)&lt;/script&gt; "
+            "&amp; &quot;quotes&quot;</a></li>"
+            "<li class=\"depth0 current trail\"><a href=\"/wiki\">Wiki</a></li>"
+            "<li class=\"depth1 current\"><a href=\"/wiki\">Recent</a></li>"
+            "</ul>",
+      html);
+  EXPECT_EQ(std::string::npos, html.find("<script>"));
+  /* The visitor's menu has nothing the visitor may not follow, and the
+   * menu of another name is the other menu. */
+  EXPECT_EQ("<ul class=\"menu\"></ul>", Widget("", "menu", "admin", "/wiki"));
+  EXPECT_NE(std::string::npos,
+      Widget(wikiadmin_, "menu", "admin", "/wiki").find("Wiki settings"));
+}
+
+TEST_F(Widgets, TabsAndBreadcrumbsAreDrawnForThePageTheyAreOn) {
+  InstallWiki();
+  EnableWiki();
+  const std::string a = alpha_;
+  EXPECT_EQ("<ul class=\"tabs\">"
+            "<li><a href=\"/node/" + a + "\">View</a></li>"
+            "<li class=\"current\"><a href=\"/node/" + a + "/edit\">Edit</a></li>"
+            "<li><a href=\"/node/" + a + "/history\">History</a></li></ul>",
+      Widget(editor_, "tabs", "", "/node/" + a + "/edit"));
+  EXPECT_EQ("<ul class=\"tabs\"><li class=\"current\"><a href=\"/node/" + a +
+                "\">View</a></li></ul>",
+      Widget("", "tabs", "", "/node/" + a));
+  EXPECT_EQ("<ol class=\"breadcrumbs\">"
+            "<li><a href=\"/node/" + a + "\">This node</a></li>"
+            "<li class=\"current\"><a href=\"/node/" + a + "/edit\">Edit</a></li></ol>",
+      Widget(editor_, "breadcrumbs", "", "/node/" + a + "/edit"));
+}
+
+TEST_F(Widgets, ASiteRestylesAWidgetLikeAnyTemplate) {
+  InstallWiki();
+  EnableWiki();
+  Restyle("menu", "<% use items; %><nav><% for (i : items) { %>[<%= i.label %>]<% } %></nav>");
+  EXPECT_EQ("<nav>[Start][Wiki][Recent]</nav>", Widget(reader_, "menu", "main", "/wiki"));
+  /* A second template of the kind is chosen by the pane's target. */
+  Restyle("footer", "<% use items; use menu; %><%= menu %>:<% for (i : items) { %><%= i.depth %><% } %>",
+      "core.menu");
+  EXPECT_EQ("main:001", Widget(reader_, "menu", "main/footer", "/wiki"));
+  /* A template of another kind is not the widget's; nor is one that is not there. */
+  EXPECT_EQ("<error Invalid argument>", Widget(reader_, "menu", "main/layout", "/wiki"));
+  EXPECT_EQ("<error Invalid argument>", Widget(reader_, "menu", "main/nothing", "/wiki"));
+  EXPECT_EQ("<error Invalid argument>", Widget(reader_, "menu", "", "/wiki"));
+  EXPECT_EQ("<error Invalid argument>", Widget(reader_, "sidebar", "main", "/wiki"));
+  /* A tabs template cannot be drawn as a menu. */
+  EXPECT_EQ("<error Invalid argument>", Widget(reader_, "menu", "main/tabs", "/wiki"));
+}
+
+TEST_F(Widgets, PanesOfThoseKindsWorkInDisplays) {
+  InstallWiki();
+  EnableWiki();
+  GDEFCORE_Routes * routes = Table();
+  /* A page that is a post: /page/<id> resolves to the post, and has a tab. */
+  GDEFCORE_Route_Spec spec;
+  memset(&spec, 0, sizeof spec);
+  spec.size = sizeof spec;
+  spec.machine = "test.page";
+  spec.machine_len = 9;
+  spec.path = "/page/:id";
+  spec.path_len = 9;
+  spec.call_fn = OwnPage;
+  spec.title = "Page";
+  spec.title_len = 4;
+  spec.permission = "read";
+  spec.permission_len = 4;
+  spec.entity_capture = "id";
+  spec.entity_capture_len = 2;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_route_add_spec(routes, &spec, NULL, NULL));
+  memset(&spec, 0, sizeof spec);
+  spec.size = sizeof spec;
+  spec.machine = "test.page-edit";
+  spec.machine_len = 14;
+  spec.path = "/page/:id/edit";
+  spec.path_len = 14;
+  spec.call_fn = OwnPage;
+  spec.title = "Change";
+  spec.title_len = 6;
+  spec.permission = "update";
+  spec.permission_len = 6;
+  spec.entity_capture = "id";
+  spec.entity_capture_len = 2;
+  spec.kind = GDEFCORE_ROUTE_TAB;
+  spec.parent = "test.page";
+  spec.parent_len = 9;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_route_add_spec(routes, &spec, NULL, NULL));
+  /* The displays get a pane of each kind. */
+  for (const char * name : {"front", "post"}) {
+    char ** ids = NULL;
+    size_t n = 0;
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_entity_ids(catalog_, "core.display", 12, &ids, &n));
+    for (size_t i = 0; i < n; i++) {
+      char ** t = NULL;
+      size_t * l = NULL;
+      size_t c = 0;
+      if (gdefcore_entity_values(catalog_, NULL, GDEFCORE_VIEW_PUBLISHED, ids[i],
+              strlen(ids[i]), "en", 2, "name", 4, &t, &l, &c) != GDEFCORE_OK) {
+        continue;
+      }
+      bool mine = c > 0 && std::string(t[0], l[0]) == name;
+      gdefcore_values_free(catalog_, t, l, c);
+      if (!mine) {
+        continue;
+      }
+      GDEFCORE_Changeset * cs = NULL;
+      GDEFCORE_Value value;
+      std::string front = "side menu main";
+      std::vector<std::string> panes;
+      panes.push_back(std::string(name) == "front" ? "side view recent"
+                                                   : "main entity entity");
+      panes.push_back("side menu main");
+      panes.push_back("main tabs tabs");
+      panes.push_back("main breadcrumbs breadcrumbs");
+      std::vector<const char *> slots;
+      std::vector<size_t> lens;
+      for (const std::string & p : panes) {
+        slots.push_back(p.c_str());
+        lens.push_back(p.size());
+      }
+      memset(&value, 0, sizeof value);
+      value.size = sizeof value;
+      value.field = "panes";
+      value.field_len = 5;
+      value.texts = slots.data();
+      value.text_lens = lens.data();
+      value.count = slots.size();
+      ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
+      ASSERT_EQ(GDEFCORE_OK, gdefcore_entity_save(cs, ids[i], strlen(ids[i]), "en", 2,
+                                 &value, 1));
+      ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, "core.display", 12));
+      gdefcore_changeset_destroy(cs);
+    }
+    gdefcore_ids_free(catalog_, ids, n);
+  }
+  auto page = [&](const std::string & who, const std::string & path) {
+    char * bytes = NULL;
+    size_t n = 0;
+    GDEFCORE_Result rc = gdefcore_render_page(catalog_, routes, Req(who), path.data(),
+        path.size(), GDEFCORE_RENDER_PAGE_FUEL, &bytes, &n);
+    if (rc != GDEFCORE_OK) {
+      return std::string("<error ") + gdefcore_result_string(rc) + ">";
+    }
+    std::string out(bytes, n);
+    gdefcore_text_free(catalog_, bytes);
+    return out;
+  };
+  /* The front page: the menu pane, with no page matched. */
+  std::string front = page(reader_, "/");
+  EXPECT_NE(std::string::npos, front.find("<ul class=\"menu\"><li class=\"depth0\">"
+                                          "<a href=\"/start\">Start</a></li>"))
+      << front;
+  /* A post's page by a route: the tabs are the page's own, for this viewer. */
+  std::string as_editor = page(editor_, "/page/" + alpha_);
+  std::string as_reader = page(reader_, "/page/" + alpha_);
+  EXPECT_NE(std::string::npos, as_editor.find("<ul class=\"tabs\"><li>")) << as_editor;
+  EXPECT_NE(std::string::npos,
+      as_editor.find("<a href=\"/page/" + alpha_ + "/edit\">Change</a>"))
+      << as_editor;
+  EXPECT_EQ(std::string::npos, as_reader.find("Change")) << "CONTROL: " << as_reader;
+  EXPECT_NE(std::string::npos, as_reader.find("<ol class=\"breadcrumbs\">")) << as_reader;
+  EXPECT_NE(std::string::npos, as_reader.find("class=\"post\"")) << "the post is drawn";
+}
+
+TEST_F(Widgets, AFragmentIsKeyedByThePermissionSetAndTheMatchedValues) {
+  InstallWiki();
+  EnableWiki();
+  const std::string a = alpha_;
+  const std::string b = beta_;
+  GDEFCORE_Routes * routes = Table();
+  /* People first: a new principal is a change to the configuration, and the
+   * epoch is in every key. */
+  std::string other_editor = Principal("editors");
+  std::string admin2 = Principal("wikiadmins");
+  auto tabs = [&](const std::string & who, const std::string & id) {
+    return Widget(who, "tabs", "", "/node/" + id, cache_, routes);
+  };
+  /* A widget drawn with no cache is offered to none; one drawn with a cache is
+   * a fragment that cache keeps. */
+  uint64_t offered = gdefcore_render_shareable_count();
+  Widget(editor_, "tabs", "", "/node/" + a, NULL, routes);
+  EXPECT_EQ(offered, gdefcore_render_shareable_count());
+  /* One viewer, one page. */
+  std::string editor_a = tabs(editor_, a);
+  EXPECT_GT(gdefcore_render_shareable_count(), offered);
+  EXPECT_NE(std::string::npos, editor_a.find("/node/" + a + "/edit"));
+  EXPECT_EQ(1u, gdefcore_fragment_count(cache_));
+  /* The same again is the kept fragment. */
+  EXPECT_EQ(editor_a, tabs(editor_, a));
+  EXPECT_EQ(1u, gdefcore_fragment_count(cache_));
+  /* A viewer with another permission set gets another fragment: the visitor
+   * never sees the editor's edit tab out of the cache. */
+  std::string visitor_a = tabs("", a);
+  EXPECT_EQ(std::string::npos, visitor_a.find("edit")) << visitor_a;
+  EXPECT_NE(editor_a, visitor_a);
+  EXPECT_EQ(2u, gdefcore_fragment_count(cache_));
+  /* The same viewer on the page of another value gets that value's hrefs. */
+  std::string editor_b = tabs(editor_, b);
+  EXPECT_NE(std::string::npos, editor_b.find("/node/" + b + "/edit")) << editor_b;
+  EXPECT_EQ(std::string::npos, editor_b.find(a)) << editor_b;
+  EXPECT_EQ(3u, gdefcore_fragment_count(cache_));
+  /* A check of one entity records who asked, so another editor has a fragment
+   * of their own, and the same bytes. */
+  EXPECT_EQ(editor_a, tabs(other_editor, a));
+  EXPECT_EQ(4u, gdefcore_fragment_count(cache_));
+  /* A page that asks only the type-level question reads nobody: the key is the
+   * permission set and nothing else about the person. The visitor gets none of
+   * the administrator's entries, whatever was kept for the administrator. */
+  std::string m_admin = Widget(wikiadmin_, "menu", "admin", "/wiki", cache_, routes);
+  std::string m_visitor = Widget("", "menu", "admin", "/wiki", cache_, routes);
+  EXPECT_NE(std::string::npos, m_admin.find("Wiki settings"));
+  EXPECT_EQ(std::string::npos, m_visitor.find("Wiki settings")) << m_visitor;
+  EXPECT_EQ(6u, gdefcore_fragment_count(cache_));
+  /* Another administrator has the same permission set, and the same fragment
+   * (CONTROL: the cache is doing its job). */
+  EXPECT_EQ(m_admin, Widget(admin2, "menu", "admin", "/wiki", cache_, routes));
+  EXPECT_EQ(6u, gdefcore_fragment_count(cache_));
+  std::string on_a = Widget(reader_, "menu", "main", "/node/" + a, cache_, routes);
+  std::string on_b = Widget(reader_, "menu", "main", "/node/" + b, cache_, routes);
+  EXPECT_NE(std::string::npos, on_a.find("/node/" + a));
+  EXPECT_NE(std::string::npos, on_b.find("/node/" + b));
+  EXPECT_EQ(std::string::npos, on_b.find(a)) << on_b;
+  /* A page that reads nothing of any entity differs from another by what it
+   * matched alone: the key has to carry that. */
+  std::string foo = Widget(reader_, "menu", "main", "/wiki/foo", cache_, routes);
+  std::string bar = Widget(reader_, "menu", "main", "/wiki/bar", cache_, routes);
+  EXPECT_NE(std::string::npos, foo.find("<a href=\"/wiki/foo\">This wiki page</a>")) << foo;
+  EXPECT_NE(std::string::npos, bar.find("<a href=\"/wiki/bar\">This wiki page</a>")) << bar;
+  EXPECT_EQ(std::string::npos, bar.find("foo")) << bar;
+  EXPECT_EQ(foo, Widget(reader_, "menu", "main", "/wiki/foo", cache_, routes))
+      << "CONTROL: the same page is the kept fragment";
+}
+
+TEST_F(Widgets, AChangeToTheMenuIsAChangeToTheKey) {
+  InstallWiki();
+  EnableWiki();
+  GDEFCORE_Routes * routes = Table();
+  std::string before = Widget(reader_, "menu", "main", "/wiki", cache_, routes);
+  EXPECT_NE(std::string::npos, before.find(">Wiki<"));
+  Ov rename;
+  rename.label = "Pages";
+  ASSERT_EQ(GDEFCORE_OK, Override("", "wiki.l-index", rename));
+  std::string after = Widget(reader_, "menu", "main", "/wiki", cache_, routes);
+  EXPECT_NE(std::string::npos, after.find(">Pages<")) << after;
+  EXPECT_EQ(std::string::npos, after.find(">Wiki<")) << after;
+}
+
+TEST_F(Widgets, TwoTenantsShareACacheAndNeverShareAFragment) {
+  /* Two tenants set up by the same steps, so that everything in the key but
+   * the tenant is equal: the same epoch, the same permission set, the same
+   * page. Only their menus differ. */
+  GDEFCORE_Catalog * tenants[2] = {NULL, NULL};
+  GDEFCORE_Routes * tables[2] = {NULL, NULL};
+  const char * names[2] = {"ta", "tb"};
+  const char * labels[2] = {"Alpha tenant menu", "Beta tenant menu"};
+  for (int i = 0; i < 2; i++) {
+    uint8_t * bytes = NULL;
+    size_t n = 0;
+    GDEFCORE_Changeset * cs = NULL;
+    GDEFCORE_Route_Spec spec;
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_catalog_open(store_, (const uint8_t *)names[i],
+                               2, NULL, NULL, &tenants[i]));
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_render_kit(tenants[i], &bytes, &n));
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_render_install(tenants[i], bytes, n));
+    gdefcore_text_free(tenants[i], (char *)bytes);
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(tenants[i], NULL, 0, &cs));
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_menu_stage_entry(cs, "site.mine", 9, "main", 4,
+                               labels[i], strlen(labels[i]), "core.start", 10, "", 0, 0));
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, kEntry, strlen(kEntry)));
+    gdefcore_changeset_destroy(cs);
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_routes_create(NULL, &tables[i]));
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_routes_set_check(tables[i],
+                               gdefcore_access_route_check, tenants[i]));
+    memset(&spec, 0, sizeof spec);
+    spec.size = sizeof spec;
+    spec.machine = "core.start";
+    spec.machine_len = 10;
+    spec.path = "/start";
+    spec.path_len = 6;
+    spec.call_fn = ModDef::NoRoute;
+    spec.title = "Start";
+    spec.title_len = 5;
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_route_add_spec(tables[i], &spec, NULL, NULL));
+  }
+  uint64_t e0 = 0;
+  uint64_t e1 = 0;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_epoch(tenants[0], &e0));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_epoch(tenants[1], &e1));
+  ASSERT_EQ(e0, e1) << "CONTROL: nothing in the key but the tenant differs";
+  std::string first = Widget("", "menu", "main", "/start", cache_, tables[0],
+      tenants[0], names[0]);
+  std::string second = Widget("", "menu", "main", "/start", cache_, tables[1],
+      tenants[1], names[1]);
+  EXPECT_NE(std::string::npos, first.find(labels[0])) << first;
+  EXPECT_EQ(std::string::npos, first.find(labels[1])) << first;
+  EXPECT_NE(std::string::npos, second.find(labels[1])) << second;
+  EXPECT_EQ(std::string::npos, second.find(labels[0])) << second;
+  EXPECT_EQ(2u, gdefcore_fragment_count(cache_));
+  /* CONTROL: a tenant asking again is served what it has. */
+  EXPECT_EQ(first, Widget("", "menu", "main", "/start", cache_, tables[0],
+                       tenants[0], names[0]));
+  EXPECT_EQ(2u, gdefcore_fragment_count(cache_));
+  for (int i = 0; i < 2; i++) {
+    gdefcore_routes_destroy(tables[i]);
+    gdefcore_catalog_destroy(tenants[i]);
+  }
+}
+
 TEST_F(Menus, TheStructsHereAreAcceptedAtOnlyTheirOwnSize) {
   InstallWiki();
   EnableWiki();

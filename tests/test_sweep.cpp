@@ -1315,6 +1315,7 @@ const Listed kListed[] = {
     {"gdefcore_menu_breadcrumbs", "Menus.ACrumbAboveThePageThatIsHiddenOrUnreachableIsLeftOutWithoutATrace: as the tree"},
     {"gdefcore_menu_entries", "Menus.TheEditorsListIsForThoseWhoMayEditAndShowsWhatIsHidden: only for who may edit menus"},
     {"gdefcore_menu_may_edit", "decision: yes or no"},
+    {"gdefcore_render_widget", "Widgets.AFragmentIsKeyedByThePermissionSetAndTheMatchedValues: the menu, tabs and breadcrumbs, drawn from the entries above"},
 };
 
 /* Words in a function's name that say it derives a value from stored ones. */

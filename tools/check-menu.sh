@@ -21,6 +21,9 @@
 #   hidden-crumb-kept                     Menus.ACrumbAboveThePageThatIsHiddenOrUnreachableIsLeftOutWithoutATrace
 #   empty-group-shown                     Menus.AnEntryThatOnlyGroupsOthersIsShownOnlyWithSomethingUnderIt
 #   hidden-parent-still-shown             Menus.HidingAnEntryRemovesItFromEveryOutputButNotTheRoute
+#   fragment-key-omits-the-permission-set Widgets.AFragmentIsKeyedByThePermissionSetAndTheMatchedValues
+#   fragment-key-omits-the-matched-values Widgets.AFragmentIsKeyedByThePermissionSetAndTheMatchedValues
+#   fragment-key-omits-the-tenant         Widgets.TwoTenantsShareACacheAndNeverShareAFragment
 #
 # Every test has a control (the viewer who may follow the route DOES see the
 # entry, the module that is enabled again DOES apply the override, the role
@@ -34,7 +37,7 @@ set -u
 . "$(dirname "$0")/plant-load.sh"
 plant_setup "$@"
 
-plant_control testMenu 'Menus.*'
+plant_control testMenu 'Menus.*:MenusWithTheKit.*:Widgets.*'
 
 SRC=src/menu/menu.c
 
@@ -197,5 +200,48 @@ plant hidden-parent-still-shown $SRC testMenu \
   '  int chain = parent_ok && own;' \
   '  int chain = parent_ok;
   (void)own;'
+
+# Plant 12: the widget's fragment is kept under a key that has lost the
+# permission set, as one built from the tenant and the epoch alone would.
+plant fragment-key-omits-the-permission-set src/render/render.c testMenu \
+  'Widgets.AFragmentIsKeyedByThePermissionSetAndTheMatchedValues' \
+  '  keybuf_add(&k, base, base_len);
+  gdefcore_text_free(catalog, base);' \
+  '  {
+    char * at = strstr(base, "\npermissions:");
+    if (at != NULL) {
+      memset(at + 13, 0x30, 64);
+    }
+  }
+  keybuf_add(&k, base, base_len);
+  gdefcore_text_free(catalog, base);'
+
+# Plant 13: the key does not carry the values the page matched.
+plant fragment-key-omits-the-matched-values src/render/render.c testMenu \
+  'Widgets.AFragmentIsKeyedByThePermissionSetAndTheMatchedValues' \
+  '  for (i = 0; i < gdefcore_route_match_capture_count(match); i++) {
+    const char * name = NULL;
+    const char * value = NULL;' \
+  '  for (i = 0; i < gdefcore_route_match_capture_count(match) && 0; i++) {
+    const char * name = NULL;
+    const char * value = NULL;'
+
+# Plant 14: the key does not carry the tenant, so a cache two tenants share
+# serves one tenant'"'"'s menu to the other.
+plant fragment-key-omits-the-tenant src/render/render.c testMenu \
+  'Widgets.TwoTenantsShareACacheAndNeverShareAFragment' \
+  '  keybuf_add(&k, base, base_len);
+  gdefcore_text_free(catalog, base);' \
+  '  {
+    char * at = strstr(base, "tenant:");
+    if (at != NULL) {
+      at += 7;
+      while (*at != 0x0a && *at != 0) {
+        *at++ = 0x30;
+      }
+    }
+  }
+  keybuf_add(&k, base, base_len);
+  gdefcore_text_free(catalog, base);'
 
 plant_finish
