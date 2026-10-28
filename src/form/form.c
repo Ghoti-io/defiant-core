@@ -150,6 +150,22 @@ typedef struct Route {
   int alt_score;
 } Route;
 
+/* A kernel menu link, copied. */
+typedef struct KLink {
+  char * name;
+  size_t name_len;
+  char * menu;
+  size_t menu_len;
+  char * label;
+  size_t label_len;
+  char * route;
+  size_t route_len;
+  int weight;
+  char * parent;
+  size_t parent_len;
+  int kind;
+} KLink;
+
 struct GDEFCORE_Routes {
   const GDEFCORE_Allocator * alloc;
   Route * routes;
@@ -157,6 +173,26 @@ struct GDEFCORE_Routes {
   size_t cap;
   GDEFCORE_Route_Check_Fn check;
   void * check_data;
+  KLink * links;
+  size_t nlinks;
+  size_t links_cap;
+};
+
+/* One name a match captured, and its value. */
+typedef struct MCapture {
+  char * name;
+  size_t name_len;
+  char * value;
+  size_t value_len;
+} MCapture;
+
+struct GDEFCORE_Route_Match {
+  const GDEFCORE_Allocator * alloc;
+  char ** machines;
+  size_t * machine_lens;
+  size_t nmachines;
+  MCapture * caps;
+  size_t ncaps;
 };
 
 static GDEFCORE_Result from_gsec(GSEC_Result rc) {
@@ -2809,6 +2845,15 @@ static void route_clear(const GDEFCORE_Allocator * alloc, Route * route) {
   memset(route, 0, sizeof *route);
 }
 
+static void klink_clear(const GDEFCORE_Allocator * alloc, KLink * link) {
+  gcu_allocator_free(alloc, link->name);
+  gcu_allocator_free(alloc, link->menu);
+  gcu_allocator_free(alloc, link->label);
+  gcu_allocator_free(alloc, link->route);
+  gcu_allocator_free(alloc, link->parent);
+  memset(link, 0, sizeof *link);
+}
+
 GDEFCORE_Result gdefcore_routes_create(const GDEFCORE_Allocator * allocator,
     GDEFCORE_Routes ** out) {
   const GDEFCORE_Allocator * alloc = use_alloc(allocator);
@@ -2835,6 +2880,10 @@ void gdefcore_routes_destroy(GDEFCORE_Routes * routes) {
   for (i = 0; i < routes->nroutes; i++) {
     route_clear(alloc, &routes->routes[i]);
   }
+  for (i = 0; i < routes->nlinks; i++) {
+    klink_clear(alloc, &routes->links[i]);
+  }
+  gcu_allocator_free(alloc, routes->links);
   gcu_allocator_free(alloc, routes->routes);
   gcu_allocator_free(alloc, routes);
 }
@@ -3360,6 +3409,8 @@ GDEFCORE_Result gdefcore_routes_tabs(GDEFCORE_Routes * routes, const char * pare
     info[i].kind = pick[i]->kind;
     info[i].is_default = pick[i]->is_default;
     info[i].weight = pick[i]->weight;
+    info[i].parent = pick[i]->parent;
+    info[i].parent_len = pick[i]->parent_len;
   }
   gcu_allocator_free(routes->alloc, pick);
   *out = info;
@@ -3423,20 +3474,28 @@ typedef struct Cand {
   size_t npat;
 } Cand;
 
-static void dispatch(GDEFCORE_Routes * routes, GDEFCORE_Request * request,
-    const Seg * req, size_t nreq) {
+/*
+ * The routes a request path reaches, in the order they run: those whose
+ * pattern matches and whose permission, asked with the matched values in
+ * hand, is granted, by weight, then by how exact the pattern is, then by when
+ * they were registered. Dispatch runs them and gdefcore_routes_match() reports
+ * them, so the two cannot disagree about which routes a path reaches.
+ * @p *out is allocated (and NULL for none); free it with the table's allocator.
+ */
+static GDEFCORE_Result candidates(GDEFCORE_Routes * routes,
+    GDEFCORE_Request * request, const Seg * req, size_t nreq, Cand ** out,
+    size_t * out_n) {
   Cand * order;
   size_t n = 0;
   size_t i;
   size_t j;
-  int owned = 0;
-  char * owned_res = NULL;
-  size_t owned_len = 0;
   const GDEFCORE_Allocator * alloc = routes->alloc;
+  *out = NULL;
+  *out_n = 0;
   order = (Cand *)gcu_allocator_malloc(alloc,
       (routes->nroutes == 0 ? 1 : routes->nroutes) * sizeof *order);
   if (order == NULL) {
-    return;
+    return GDEFCORE_ERR_OOM;
   }
   for (i = 0; i < routes->nroutes; i++) {
     const Route * r = &routes->routes[i];
@@ -3505,6 +3564,23 @@ static void dispatch(GDEFCORE_Routes * routes, GDEFCORE_Request * request,
     }
     order[j] = key;
   }
+  *out = order;
+  *out_n = n;
+  return GDEFCORE_OK;
+}
+
+static void dispatch(GDEFCORE_Routes * routes, GDEFCORE_Request * request,
+    const Seg * req, size_t nreq) {
+  Cand * order = NULL;
+  size_t n = 0;
+  size_t i;
+  int owned = 0;
+  char * owned_res = NULL;
+  size_t owned_len = 0;
+  const GDEFCORE_Allocator * alloc = routes->alloc;
+  if (candidates(routes, request, req, nreq, &order, &n) != GDEFCORE_OK) {
+    return;
+  }
   for (i = 0; i < n; i++) {
     Route * route = &routes->routes[order[i].idx];
     const char * res;
@@ -3543,6 +3619,523 @@ static void dispatch(GDEFCORE_Routes * routes, GDEFCORE_Request * request,
   }
   gcu_allocator_free(alloc, owned_res);
   gcu_allocator_free(alloc, order);
+}
+
+/* ---- matching a path without running it (site admin story 6) ---------- */
+
+static void match_clear(GDEFCORE_Route_Match * match) {
+  size_t i;
+  const GDEFCORE_Allocator * alloc = match->alloc;
+  for (i = 0; i < match->nmachines; i++) {
+    gcu_allocator_free(alloc, match->machines[i]);
+  }
+  for (i = 0; i < match->ncaps; i++) {
+    gcu_allocator_free(alloc, match->caps[i].name);
+    gcu_allocator_free(alloc, match->caps[i].value);
+  }
+  gcu_allocator_free(alloc, match->machines);
+  gcu_allocator_free(alloc, match->machine_lens);
+  gcu_allocator_free(alloc, match->caps);
+}
+
+void gdefcore_route_match_free(GDEFCORE_Route_Match * match) {
+  const GDEFCORE_Allocator * alloc;
+  if (match == NULL) {
+    return;
+  }
+  alloc = match->alloc;
+  match_clear(match);
+  gcu_allocator_free(alloc, match);
+}
+
+static const MCapture * match_find(const GDEFCORE_Route_Match * match,
+    const char * name, size_t name_len) {
+  size_t i;
+  if (match == NULL) {
+    return NULL;
+  }
+  for (i = 0; i < match->ncaps; i++) {
+    if (span_eq(match->caps[i].name, match->caps[i].name_len, name, name_len)) {
+      return &match->caps[i];
+    }
+  }
+  return NULL;
+}
+
+/* Remember a capture the match does not have yet. The first route to name a
+ * segment keeps the name. */
+static GDEFCORE_Result match_capture_add(GDEFCORE_Route_Match * match,
+    const char * name, size_t name_len, const char * value, size_t value_len,
+    size_t * cap) {
+  MCapture * grown;
+  MCapture * c;
+  if (match_find(match, name, name_len) != NULL) {
+    return GDEFCORE_OK;
+  }
+  if (match->ncaps == *cap) {
+    size_t next = *cap == 0 ? 4 : *cap * 2;
+    grown = (MCapture *)gcu_allocator_realloc(match->alloc, match->caps,
+        next * sizeof *grown);
+    if (grown == NULL) {
+      return GDEFCORE_ERR_OOM;
+    }
+    match->caps = grown;
+    *cap = next;
+  }
+  c = &match->caps[match->ncaps];
+  c->name = dup_span(match->alloc, name, name_len);
+  c->value = dup_span(match->alloc, value, value_len);
+  if (c->name == NULL || c->value == NULL) {
+    gcu_allocator_free(match->alloc, c->name);
+    gcu_allocator_free(match->alloc, c->value);
+    memset(c, 0, sizeof *c);
+    return GDEFCORE_ERR_OOM;
+  }
+  c->name_len = name_len;
+  c->value_len = value_len;
+  match->ncaps += 1;
+  return GDEFCORE_OK;
+}
+
+GDEFCORE_Result gdefcore_routes_match(GDEFCORE_Routes * routes,
+    GDEFCORE_Request * request, const char * path, size_t path_len,
+    GDEFCORE_Route_Match ** out) {
+  const GDEFCORE_Allocator * alloc;
+  Seg * segs = NULL;
+  size_t nsegs = 0;
+  Cand * order = NULL;
+  size_t n = 0;
+  size_t longest = 0;
+  size_t cap = 0;
+  size_t i;
+  size_t k;
+  GDEFCORE_Route_Match * match;
+  GDEFCORE_Result rc;
+  if (out != NULL) {
+    *out = NULL;
+  }
+  if (routes == NULL || request == NULL || path == NULL || path_len == 0 ||
+      path[0] != '/' || out == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  alloc = routes->alloc;
+  rc = split_path(alloc, path, path_len, 0, &segs, &nsegs, NULL, NULL);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  rc = candidates(routes, request, segs, nsegs, &order, &n);
+  if (rc != GDEFCORE_OK) {
+    seg_free(alloc, segs, nsegs);
+    return rc;
+  }
+  match = (GDEFCORE_Route_Match *)gcu_allocator_calloc(alloc, 1, sizeof *match);
+  if (match == NULL) {
+    gcu_allocator_free(alloc, order);
+    seg_free(alloc, segs, nsegs);
+    return GDEFCORE_ERR_OOM;
+  }
+  match->alloc = alloc;
+  for (i = 0; i < n; i++) {
+    if (order[i].npat > longest) {
+      longest = order[i].npat;
+    }
+  }
+  if (n > 0) {
+    match->machines = (char **)gcu_allocator_calloc(alloc, n,
+        sizeof *match->machines);
+    match->machine_lens = (size_t *)gcu_allocator_calloc(alloc, n,
+        sizeof *match->machine_lens);
+    if (match->machines == NULL || match->machine_lens == NULL) {
+      rc = GDEFCORE_ERR_OOM;
+    }
+  }
+  for (i = 0; rc == GDEFCORE_OK && i < n; i++) {
+    const Route * r = &routes->routes[order[i].idx];
+    if (order[i].npat != longest) {
+      continue;
+    }
+    match->machines[match->nmachines] = dup_span(alloc, r->machine,
+        r->machine_len);
+    if (match->machines[match->nmachines] == NULL) {
+      rc = GDEFCORE_ERR_OOM;
+      break;
+    }
+    match->machine_lens[match->nmachines] = r->machine_len;
+    match->nmachines += 1;
+    for (k = 0; rc == GDEFCORE_OK && k < order[i].npat; k++) {
+      if (order[i].pat[k].named) {
+        rc = match_capture_add(match, order[i].pat[k].text, order[i].pat[k].len,
+            segs[k].text, segs[k].len, &cap);
+      }
+    }
+  }
+  gcu_allocator_free(alloc, order);
+  seg_free(alloc, segs, nsegs);
+  if (rc != GDEFCORE_OK) {
+    gdefcore_route_match_free(match);
+    return rc;
+  }
+  *out = match;
+  return GDEFCORE_OK;
+}
+
+size_t gdefcore_route_match_route_count(const GDEFCORE_Route_Match * match) {
+  return match == NULL ? 0 : match->nmachines;
+}
+
+GDEFCORE_Result gdefcore_route_match_route(const GDEFCORE_Route_Match * match,
+    size_t index, const char ** out_machine, size_t * out_machine_len) {
+  if (match == NULL || out_machine == NULL || out_machine_len == NULL ||
+      index >= match->nmachines) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  *out_machine = match->machines[index];
+  *out_machine_len = match->machine_lens[index];
+  return GDEFCORE_OK;
+}
+
+size_t gdefcore_route_match_capture_count(const GDEFCORE_Route_Match * match) {
+  return match == NULL ? 0 : match->ncaps;
+}
+
+GDEFCORE_Result gdefcore_route_match_capture(const GDEFCORE_Route_Match * match,
+    size_t index, const char ** out_name, size_t * out_name_len,
+    const char ** out_value, size_t * out_value_len) {
+  if (match == NULL || out_name == NULL || out_name_len == NULL ||
+      out_value == NULL || out_value_len == NULL || index >= match->ncaps) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  *out_name = match->caps[index].name;
+  *out_name_len = match->caps[index].name_len;
+  *out_value = match->caps[index].value;
+  *out_value_len = match->caps[index].value_len;
+  return GDEFCORE_OK;
+}
+
+static void info_fill(const Route * r, GDEFCORE_Route_Info * info) {
+  memset(info, 0, sizeof *info);
+  info->size = sizeof *info;
+  info->machine = r->machine;
+  info->machine_len = r->machine_len;
+  info->path = r->path;
+  info->path_len = r->path_len;
+  info->title = r->title;
+  info->title_len = r->title_len;
+  info->permission = r->permission;
+  info->permission_len = r->permission_len;
+  info->kind = r->kind;
+  info->is_default = r->is_default;
+  info->weight = r->weight;
+  info->entity_capture = r->entity_capture;
+  info->entity_capture_len = r->entity_capture_len;
+  info->parent = r->parent;
+  info->parent_len = r->parent_len;
+}
+
+GDEFCORE_Result gdefcore_routes_info(GDEFCORE_Routes * routes,
+    const char * machine, size_t machine_len, GDEFCORE_Route_Info * out) {
+  const Route * r;
+  if (routes == NULL || machine == NULL || out == NULL ||
+      out->size != sizeof *out) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  r = route_find(routes, machine, machine_len);
+  if (r == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  info_fill(r, out);
+  return GDEFCORE_OK;
+}
+
+GDEFCORE_Result gdefcore_routes_list(GDEFCORE_Routes * routes,
+    GDEFCORE_Route_Info ** out, size_t * out_count) {
+  GDEFCORE_Route_Info * info;
+  size_t i;
+  if (routes == NULL || out == NULL || out_count == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  *out = NULL;
+  *out_count = 0;
+  if (routes->nroutes == 0) {
+    return GDEFCORE_OK;
+  }
+  info = (GDEFCORE_Route_Info *)gcu_allocator_calloc(routes->alloc,
+      routes->nroutes, sizeof *info);
+  if (info == NULL) {
+    return GDEFCORE_ERR_OOM;
+  }
+  for (i = 0; i < routes->nroutes; i++) {
+    info_fill(&routes->routes[i], &info[i]);
+  }
+  *out = info;
+  *out_count = routes->nroutes;
+  return GDEFCORE_OK;
+}
+
+GDEFCORE_Result gdefcore_routes_permits(GDEFCORE_Routes * routes,
+    GDEFCORE_Request * request, const char * machine, size_t machine_len,
+    const GDEFCORE_Route_Match * match, int * out_allowed) {
+  const Route * r;
+  Seg * req = NULL;
+  size_t i;
+  GDEFCORE_Route_Call call;
+  CallState st;
+  int allowed = 0;
+  if (out_allowed != NULL) {
+    *out_allowed = 0;
+  }
+  if (routes == NULL || request == NULL || machine == NULL ||
+      out_allowed == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  r = route_find(routes, machine, machine_len);
+  if (r == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  if (r->permission_len == 0) {
+    *out_allowed = 1;
+    return GDEFCORE_OK;
+  }
+  if (routes->check == NULL) {
+    return GDEFCORE_OK;
+  }
+  /* The request the route would have been asked about: the route's own
+   * pattern with each named segment holding the value the match captured. A
+   * segment the match has no value for leaves nothing to ask about. */
+  if (r->nsegs > 0) {
+    req = (Seg *)gcu_allocator_calloc(routes->alloc, r->nsegs, sizeof *req);
+    if (req == NULL) {
+      return GDEFCORE_ERR_OOM;
+    }
+  }
+  for (i = 0; i < r->nsegs; i++) {
+    if (r->segs[i].named) {
+      const MCapture * c = match_find(match, r->segs[i].text, r->segs[i].len);
+      if (c == NULL) {
+        gcu_allocator_free(routes->alloc, req);
+        return GDEFCORE_OK;
+      }
+      req[i].text = c->value;
+      req[i].len = c->value_len;
+    } else {
+      req[i].text = r->segs[i].text;
+      req[i].len = r->segs[i].len;
+    }
+  }
+  st.pat = r->segs;
+  st.npat = r->nsegs;
+  st.req = req;
+  memset(&call, 0, sizeof call);
+  call.size = sizeof call;
+  call.request = request;
+  call.machine = r->machine;
+  call.machine_len = r->machine_len;
+  call.data = r->data;
+  call.internal = &st;
+  call.entity_capture = r->entity_capture;
+  call.entity_capture_len = r->entity_capture_len;
+  allowed = routes->check(&call, r->permission, r->permission_len,
+      routes->check_data);
+  gcu_allocator_free(routes->alloc, req);
+  *out_allowed = allowed != 0;
+  return GDEFCORE_OK;
+}
+
+GDEFCORE_Result gdefcore_routes_href(GDEFCORE_Routes * routes,
+    const char * machine, size_t machine_len, const GDEFCORE_Route_Match * match,
+    char ** out, size_t * out_len) {
+  const Route * r;
+  const Seg * pat;
+  size_t npat;
+  size_t total = 1;
+  size_t i;
+  size_t at = 0;
+  char * text;
+  if (out != NULL) {
+    *out = NULL;
+  }
+  if (routes == NULL || machine == NULL || out == NULL || out_len == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  r = route_find(routes, machine, machine_len);
+  if (r == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  /* A default tab answers its parent's path, and that is its address. */
+  pat = r->alt != NULL ? r->alt : r->segs;
+  npat = r->alt != NULL ? r->nalt : r->nsegs;
+  for (i = 0; i < npat; i++) {
+    if (pat[i].named) {
+      const MCapture * c = match_find(match, pat[i].text, pat[i].len);
+      if (c == NULL) {
+        return GDEFCORE_ERR_INVALID;
+      }
+      total += 1 + c->value_len;
+    } else if (pat[i].wild) {
+      return GDEFCORE_ERR_INVALID;
+    } else {
+      total += 1 + pat[i].len;
+    }
+  }
+  text = (char *)gcu_allocator_malloc(routes->alloc, total + 1);
+  if (text == NULL) {
+    return GDEFCORE_ERR_OOM;
+  }
+  if (npat == 0) {
+    text[at++] = '/';
+  }
+  for (i = 0; i < npat; i++) {
+    const char * piece = pat[i].text;
+    size_t piece_len = pat[i].len;
+    if (pat[i].named) {
+      const MCapture * c = match_find(match, pat[i].text, pat[i].len);
+      piece = c->value;
+      piece_len = c->value_len;
+    }
+    text[at++] = '/';
+    memcpy(text + at, piece, piece_len);
+    at += piece_len;
+  }
+  text[at] = '\0';
+  *out = text;
+  *out_len = at;
+  return GDEFCORE_OK;
+}
+
+/* ---- kernel menu links -------------------------------------------------- */
+
+enum { kLinkNameMax = 128, kLinkLabelMax = 256, kLinkMenuMax = 64 };
+
+static int link_char_ok(char c) {
+  return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' ||
+         c == '_' || c == '-';
+}
+
+static int link_name_ok(const char * s, size_t n) {
+  size_t i;
+  if (s == NULL || n <= 5 || n > kLinkNameMax || memcmp(s, "core.", 5) != 0) {
+    return 0;
+  }
+  for (i = 0; i < n; i++) {
+    if (!link_char_ok(s[i])) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static int link_menu_ok(const char * s, size_t n) {
+  size_t i;
+  if (s == NULL || n == 0 || n > kLinkMenuMax || s[0] < 'a' || s[0] > 'z') {
+    return 0;
+  }
+  for (i = 1; i < n; i++) {
+    if (!link_char_ok(s[i])) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static const KLink * klink_find(const GDEFCORE_Routes * routes, const char * name,
+    size_t name_len) {
+  size_t i;
+  for (i = 0; i < routes->nlinks; i++) {
+    if (span_eq(routes->links[i].name, routes->links[i].name_len, name,
+            name_len)) {
+      return &routes->links[i];
+    }
+  }
+  return NULL;
+}
+
+GDEFCORE_Result gdefcore_routes_add_link(GDEFCORE_Routes * routes,
+    const GDEFCORE_Route_Link * link) {
+  const GDEFCORE_Allocator * alloc;
+  KLink made;
+  KLink * grown;
+  if (routes == NULL || link == NULL || link->size != sizeof *link) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  if (!link_name_ok(link->name, link->name_len) ||
+      !link_menu_ok(link->menu, link->menu_len) || link->label == NULL ||
+      link->label_len == 0 || link->label_len > kLinkLabelMax ||
+      !text_ok(link->label, link->label_len) || link->route == NULL ||
+      link->route_len == 0 || (link->parent_len > 0 && link->parent == NULL) ||
+      (link->kind != GDEFCORE_ROUTE_PAGE && link->kind != GDEFCORE_ROUTE_TAB &&
+          link->kind != GDEFCORE_ROUTE_ACTION)) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  if (klink_find(routes, link->name, link->name_len) != NULL ||
+      route_find(routes, link->name, link->name_len) != NULL ||
+      route_find(routes, link->route, link->route_len) == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  if (link->parent_len > 0) {
+    const KLink * up = klink_find(routes, link->parent, link->parent_len);
+    if (up == NULL ||
+        !span_eq(up->menu, up->menu_len, link->menu, link->menu_len)) {
+      return GDEFCORE_ERR_INVALID;
+    }
+  }
+  alloc = routes->alloc;
+  if (routes->nlinks == routes->links_cap) {
+    size_t cap = routes->links_cap == 0 ? 4 : routes->links_cap * 2;
+    grown = (KLink *)gcu_allocator_realloc(alloc, routes->links,
+        cap * sizeof *grown);
+    if (grown == NULL) {
+      return GDEFCORE_ERR_OOM;
+    }
+    routes->links = grown;
+    routes->links_cap = cap;
+  }
+  memset(&made, 0, sizeof made);
+  made.name = dup_span(alloc, link->name, link->name_len);
+  made.menu = dup_span(alloc, link->menu, link->menu_len);
+  made.label = dup_span(alloc, link->label, link->label_len);
+  made.route = dup_span(alloc, link->route, link->route_len);
+  made.parent = dup_span(alloc, link->parent, link->parent_len);
+  if (made.name == NULL || made.menu == NULL || made.label == NULL ||
+      made.route == NULL || made.parent == NULL) {
+    klink_clear(alloc, &made);
+    return GDEFCORE_ERR_OOM;
+  }
+  made.name_len = link->name_len;
+  made.menu_len = link->menu_len;
+  made.label_len = link->label_len;
+  made.route_len = link->route_len;
+  made.parent_len = link->parent_len;
+  made.weight = link->weight;
+  made.kind = link->kind;
+  routes->links[routes->nlinks++] = made;
+  return GDEFCORE_OK;
+}
+
+size_t gdefcore_routes_link_count(const GDEFCORE_Routes * routes) {
+  return routes == NULL ? 0 : routes->nlinks;
+}
+
+GDEFCORE_Result gdefcore_routes_link_at(const GDEFCORE_Routes * routes,
+    size_t index, GDEFCORE_Route_Link * out) {
+  const KLink * k;
+  if (routes == NULL || out == NULL || out->size != sizeof *out ||
+      index >= routes->nlinks) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  k = &routes->links[index];
+  out->name = k->name;
+  out->name_len = k->name_len;
+  out->menu = k->menu;
+  out->menu_len = k->menu_len;
+  out->label = k->label;
+  out->label_len = k->label_len;
+  out->route = k->route;
+  out->route_len = k->route_len;
+  out->weight = k->weight;
+  out->parent = k->parent;
+  out->parent_len = k->parent_len;
+  out->kind = k->kind;
+  return GDEFCORE_OK;
 }
 
 static GDEFCORE_Result resolve_alias(GDEFCORE_Catalog * catalog,

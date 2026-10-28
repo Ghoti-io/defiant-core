@@ -68,6 +68,7 @@
   X(GDEFCORE_Route_Call, "tests/test_routes.cpp") \
   X(GDEFCORE_Route_Spec, "tests/test_routes.cpp") \
   X(GDEFCORE_Route_Info, "tests/test_routes.cpp") \
+  X(GDEFCORE_Route_Link, "tests/test_routes.cpp") \
   X(GDEFCORE_Hook_Out, "tests/test_module.cpp") \
   X(GDEFCORE_Write_Hook, "tests/test_module.cpp") \
   X(GDEFCORE_Module_Rel, "tests/test_module.cpp") \

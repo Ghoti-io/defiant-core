@@ -452,6 +452,8 @@ typedef struct GDEFCORE_Route_Info {
   int weight;                 ///< The route's weight.
   const char * entity_capture; ///< Its entity capture, or "" when none.
   size_t entity_capture_len;  ///< Length of @ref entity_capture.
+  const char * parent;        ///< The parent route of a tab, or "" for none.
+  size_t parent_len;          ///< Length of @ref parent.
 } GDEFCORE_Route_Info;
 
 /**
@@ -528,6 +530,171 @@ GDEFCORE_API GDEFCORE_Result gdefcore_routes_tabs_visible(
 GDEFCORE_API GDEFCORE_Result gdefcore_routes_tabs(GDEFCORE_Routes * routes,
     const char * parent, size_t parent_len, GDEFCORE_Route_Info ** out,
     size_t * out_count);
+
+
+/**
+ * @brief A request path matched against the route table. Opaque.
+ *
+ * It holds which routes the path reached, in the order dispatch would run
+ * them, and the values their named segments took. It holds no request, so
+ * the question "may this viewer follow that route?" is asked with a request
+ * (gdefcore_routes_permits()) and one match serves any number of viewers.
+ */
+typedef struct GDEFCORE_Route_Match GDEFCORE_Route_Match;
+
+/**
+ * @brief A link the kernel itself places in a menu. Begins with @ref size.
+ *
+ * The fields are those of a module's link (GDEFCORE_Module_Link): the host
+ * that owns a route table is the kernel's side of a deployment, and the pages
+ * it serves are menu entries the way a module's are. @ref name is
+ * `core.<name>` (AD-35).
+ */
+typedef struct GDEFCORE_Route_Link {
+  size_t size;                ///< `sizeof(GDEFCORE_Route_Link)`.
+  const char * name;          ///< Machine name `core.<name>`.
+  size_t name_len;            ///< Length of @ref name.
+  const char * menu;          ///< Menu name, such as `admin`.
+  size_t menu_len;            ///< Length of @ref menu.
+  const char * label;         ///< UTF-8 label. Required.
+  size_t label_len;           ///< Length of @ref label.
+  const char * route;         ///< Target route machine name. Required.
+  size_t route_len;           ///< Length of @ref route.
+  int weight;                 ///< Lowest first.
+  const char * parent;        ///< Parent link machine name, or NULL.
+  size_t parent_len;          ///< Length of @ref parent.
+  int kind;                   ///< ::GDEFCORE_ROUTE_PAGE, _TAB or _ACTION.
+} GDEFCORE_Route_Link;
+
+/**
+ * @brief Match @p path against the table.
+ *
+ * The routes a path reaches are those dispatch would run for it
+ * (gdefcore_form_resolve()), the permission check included: a route the
+ * request may not follow is not in the match, exactly as it is not run. Of
+ * those, the match keeps the ones whose pattern is the **longest** (a route
+ * `/node/:id/edit` and not the `/node` it also passes through), in dispatch
+ * order, and the values of every named segment those patterns capture. A
+ * default tab answers its parent's path, so it is in the match at that path.
+ * Nothing is run, written or recorded on @p request but what the permission
+ * check itself records.
+ *
+ * @p out is a match with no routes when nothing matched, and is never NULL
+ * on success. Free it with gdefcore_route_match_free().
+ *
+ * @return ::GDEFCORE_OK, ::GDEFCORE_ERR_INVALID (bad arguments, a path that
+ *   does not start with `/`) or ::GDEFCORE_ERR_OOM.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_routes_match(GDEFCORE_Routes * routes,
+    GDEFCORE_Request * request, const char * path, size_t path_len,
+    GDEFCORE_Route_Match ** out);
+
+/** @brief Free a match. NULL is ignored. */
+GDEFCORE_API void gdefcore_route_match_free(GDEFCORE_Route_Match * match);
+
+/** @brief How many routes the match holds. A NULL match holds none. */
+GDEFCORE_API size_t gdefcore_route_match_route_count(
+    const GDEFCORE_Route_Match * match);
+
+/**
+ * @brief The machine name of route @p index of the match, in dispatch order.
+ * The text is borrowed from the match. ::GDEFCORE_ERR_INVALID past the end.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_route_match_route(
+    const GDEFCORE_Route_Match * match, size_t index, const char ** out_machine,
+    size_t * out_machine_len);
+
+/** @brief How many distinct names the match captured. A NULL match, none. */
+GDEFCORE_API size_t gdefcore_route_match_capture_count(
+    const GDEFCORE_Route_Match * match);
+
+/**
+ * @brief Capture @p index of the match, in the order first seen. The texts are
+ * borrowed from the match. The value is the segment as received. A name two
+ * matched routes capture from different segments keeps the first route's.
+ * ::GDEFCORE_ERR_INVALID past the end.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_route_match_capture(
+    const GDEFCORE_Route_Match * match, size_t index, const char ** out_name,
+    size_t * out_name_len, const char ** out_value, size_t * out_value_len);
+
+/**
+ * @brief The route @p machine as the enumeration reports it.
+ *
+ * @p out->size must be `sizeof(GDEFCORE_Route_Info)`. The text pointers are
+ * borrowed from the table. An unknown route is ::GDEFCORE_ERR_INVALID.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_routes_info(GDEFCORE_Routes * routes,
+    const char * machine, size_t machine_len, GDEFCORE_Route_Info * out);
+
+/**
+ * @brief Every route, in the order they were registered.
+ *
+ * As gdefcore_routes_tabs(): free @p out with gdefcore_routes_free(). An empty
+ * table is success with a count of 0 and @p out NULL.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_routes_list(GDEFCORE_Routes * routes,
+    GDEFCORE_Route_Info ** out, size_t * out_count);
+
+/**
+ * @brief May the request follow route @p machine, for the values of @p match?
+ *
+ * It is the question dispatch asks of a route whose path matched, and it is
+ * asked of the **route's own check** (gdefcore_routes_set_check()), with the
+ * route's own permission and entity capture, and the value of each named
+ * segment of the route's pattern taken from @p match. A menu, a tab or a
+ * breadcrumb asks this and nothing else, so what a page shows cannot drift
+ * from what dispatch serves.
+ *
+ * @p out_allowed is 1 for a route with no permission, and for one with a
+ * permission whose check passes. It is 0 for a route whose pattern names a
+ * segment @p match did not capture (there is no entity to ask about), for a
+ * route that names a permission while no check is set (it never matches),
+ * and for a check that says no. An unknown route is ::GDEFCORE_ERR_INVALID.
+ * @p match may be NULL: it captures nothing.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_routes_permits(GDEFCORE_Routes * routes,
+    GDEFCORE_Request * request, const char * machine, size_t machine_len,
+    const GDEFCORE_Route_Match * match, int * out_allowed);
+
+/**
+ * @brief The path of route @p machine with the values of @p match put in.
+ *
+ * Each `:name` segment is replaced by the value @p match captured under that
+ * name, as received. A default tab's path is its parent's, as that is where
+ * it answers. A route whose pattern has a `*` segment (it captures nothing, so
+ * there is nothing to put there) and a route with a name @p match did not
+ * capture have no path: ::GDEFCORE_ERR_INVALID, and @p out is not written.
+ * Free @p out with gdefcore_routes_free().
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_routes_href(GDEFCORE_Routes * routes,
+    const char * machine, size_t machine_len, const GDEFCORE_Route_Match * match,
+    char ** out, size_t * out_len);
+
+/**
+ * @brief Add a link the kernel places in a menu.
+ *
+ * The link is checked as a module's is: a name `core.<name>` of at most 128
+ * bytes of a-z, 0-9, '.', '_' and '-'; a menu of 1 to 64 bytes of the same
+ * set starting with a letter; a label of 1 to 256 bytes of UTF-8 text; a kind;
+ * a target route this table has; and, when it names a parent, a parent link
+ * already added to the same menu. A name twice is an error, as is a name that
+ * a route of the table has (an entry's name is one name). Every error leaves
+ * the table unchanged and is ::GDEFCORE_ERR_INVALID.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_routes_add_link(GDEFCORE_Routes * routes,
+    const GDEFCORE_Route_Link * link);
+
+/** @brief How many kernel links the table holds. */
+GDEFCORE_API size_t gdefcore_routes_link_count(const GDEFCORE_Routes * routes);
+
+/**
+ * @brief Kernel link @p index, in the order added. The texts are borrowed from
+ * the table and @p out->size must be `sizeof(GDEFCORE_Route_Link)`.
+ * ::GDEFCORE_ERR_INVALID past the end.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_routes_link_at(
+    const GDEFCORE_Routes * routes, size_t index, GDEFCORE_Route_Link * out);
 
 /** @brief Free bytes from the route functions that return them. NULL is ignored. */
 GDEFCORE_API void gdefcore_routes_free(GDEFCORE_Routes * routes, void * bytes);

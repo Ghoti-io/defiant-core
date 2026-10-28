@@ -215,4 +215,23 @@ decision, and the route table uses it through a ready-made check:
   its permission and its entity capture, with the page's captures: so a menu
   cannot show a tab dispatch would answer as not found, nor hide one it would
   serve. Pass the same capture names in the page's pattern and the tabs'.
+- `gdefcore_routes_match(routes, request, path, len, &match)` names the routes
+  a path reaches without running anything: those dispatch would run, the
+  permission check included, narrowed to the ones with the longest pattern
+  (`/node/:id/edit`, not the `/node` it also passes through), in dispatch
+  order, and the value of each named segment they took. A default tab answers
+  its parent's path, so it is in the match there. The match holds no request:
+  `gdefcore_routes_permits(routes, request, machine, len, match, &allowed)`
+  asks any route's own check for the values of any match, and
+  `gdefcore_routes_href()` puts those values into the route's pattern. A route
+  that names a value the match does not have is not followed and has no path.
+  A menu, a tab strip and a breadcrumb are drawn from these, so what a page
+  offers cannot drift from what dispatch serves.
+- `gdefcore_routes_info()` reports one route by name, and
+  `gdefcore_routes_list()` every route in the order registered; both carry the
+  parent of a tab.
+- `gdefcore_routes_add_link()` registers a link the kernel itself places in a
+  menu (`core.<name>`), checked as a module's link is. The host that owns the
+  table is the kernel's side of a deployment and the pages it serves are
+  entries of its menus like a module's.
 

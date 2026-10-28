@@ -1067,6 +1067,414 @@ void SizeCall(const GDEFCORE_Route_Call * call) {
   g_size_filled = call->size;
 }
 
+/* ---- matching a path, listing the table, and asking one route (story 6) --- */
+
+std::string MatchDump(GDEFCORE_Route_Match * match) {
+  std::string out = "routes=";
+  size_t i;
+  for (i = 0; i < gdefcore_route_match_route_count(match); i++) {
+    const char * m = NULL;
+    size_t n = 0;
+    EXPECT_EQ(GDEFCORE_OK, gdefcore_route_match_route(match, i, &m, &n));
+    out += (i == 0 ? "" : ",") + std::string(m, n);
+  }
+  out += " caps=";
+  for (i = 0; i < gdefcore_route_match_capture_count(match); i++) {
+    const char * name = NULL;
+    const char * value = NULL;
+    size_t nn = 0;
+    size_t vn = 0;
+    EXPECT_EQ(GDEFCORE_OK,
+        gdefcore_route_match_capture(match, i, &name, &nn, &value, &vn));
+    out += (i == 0 ? "" : ",") + std::string(name, nn) + "=" + std::string(value, vn);
+  }
+  return out;
+}
+
+class RoutesMatch : public Routes {
+ protected:
+  /* node (page), node.view (default tab), node.edit (tab), node.hist (tab) and
+   * a prefix route `files` that also answers deeper paths. */
+  void Table() {
+    H none{"x", false};
+    GDEFCORE_Route_Spec spec;
+    ASSERT_EQ(GDEFCORE_OK, AddPage("node", "/node/:id", &pass_, 10));
+    spec = Spec("node.view", "/node/:id/view", RunCall, &none);
+    spec.kind = GDEFCORE_ROUTE_TAB;
+    spec.parent = "node";
+    spec.parent_len = 4;
+    spec.is_default = 1;
+    spec.title = "View";
+    spec.title_len = 4;
+    ASSERT_EQ(GDEFCORE_OK, Add(spec));
+    spec = Spec("node.edit", "/node/:id/edit", RunCall, &none);
+    spec.kind = GDEFCORE_ROUTE_TAB;
+    spec.parent = "node";
+    spec.parent_len = 4;
+    spec.weight = 2;
+    spec.title = "Edit";
+    spec.title_len = 4;
+    spec.permission = "Edit nodes";
+    spec.permission_len = 10;
+    spec.entity_capture = "id";
+    spec.entity_capture_len = 2;
+    ASSERT_EQ(GDEFCORE_OK, Add(spec));
+    ASSERT_EQ(GDEFCORE_OK, AddPage("files", "/files", &pass_));
+    ASSERT_EQ(GDEFCORE_OK, AddPage("star", "/star/*/x", &pass_));
+  }
+
+  GDEFCORE_Route_Match * Match(const std::string & path,
+      const std::string & principal = "") {
+    GDEFCORE_Route_Match * match = NULL;
+    GDEFCORE_Request * request = s_.NewRequest(principal);
+    EXPECT_EQ(GDEFCORE_OK, gdefcore_routes_match(routes_, request, path.data(),
+                               path.size(), &match));
+    gdefcore_request_destroy(request);
+    return match;
+  }
+};
+
+TEST_F(RoutesMatch, MatchNamesTheRoutesAPathReachesAndTheValuesTheyTook) {
+  Gate gate;
+  GDEFCORE_Route_Match * match;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_routes_set_check(routes_, GateCheck, &gate));
+  Table();
+  /* The parent's own path is answered by its default tab, ahead of it. */
+  match = Match("/node/42");
+  EXPECT_EQ("routes=node.view,node caps=id=42", MatchDump(match));
+  gdefcore_route_match_free(match);
+  /* A tab's own path reaches the tab, and only the longest pattern. */
+  match = Match("/node/42/view");
+  EXPECT_EQ("routes=node.view caps=id=42", MatchDump(match));
+  gdefcore_route_match_free(match);
+  /* Deeper than any pattern: the nearest route that covers it. */
+  match = Match("/node/42/other/deep");
+  EXPECT_EQ("routes=node caps=id=42", MatchDump(match));
+  gdefcore_route_match_free(match);
+  match = Match("/files/a/b");
+  EXPECT_EQ("routes=files caps=", MatchDump(match));
+  gdefcore_route_match_free(match);
+  /* A `*` captures nothing. */
+  match = Match("/star/anything/x");
+  EXPECT_EQ("routes=star caps=", MatchDump(match));
+  gdefcore_route_match_free(match);
+  /* CONTROL: a path no route reaches is an empty match, not an error. */
+  match = Match("/nothing/here");
+  EXPECT_EQ("routes= caps=", MatchDump(match));
+  EXPECT_EQ(0u, gdefcore_route_match_route_count(match));
+  gdefcore_route_match_free(match);
+}
+
+TEST_F(RoutesMatch, MatchRunsNothingAndAsksTheCheckAsDispatchDoes) {
+  Gate gate;
+  GDEFCORE_Route_Match * match;
+  GDEFCORE_Request * request = s_.NewRequest("");
+  size_t n = 99;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_routes_set_check(routes_, GateCheck, &gate));
+  Table();
+  Log().clear();
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_routes_match(routes_, request, "/node/7/edit", 12, &match));
+  EXPECT_TRUE(Log().empty()) << "a handler ran";
+  EXPECT_EQ(NULL, gdefcore_request_resolution(request, &n));
+  /* The route with a permission was asked, with the value it matched. */
+  ASSERT_EQ(1u, gate.seen.size());
+  EXPECT_EQ("Edit nodes|7|", gate.seen[0]);
+  EXPECT_EQ("routes=node.edit caps=id=7", MatchDump(match));
+  gdefcore_route_match_free(match);
+  /* A refusal is a route that is not in the match: what is left is the
+   * parent page, the nearest route that covers the path. */
+  gate.allow = 0;
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_routes_match(routes_, request, "/node/7/edit", 12, &match));
+  EXPECT_EQ("routes=node caps=id=7", MatchDump(match));
+  gdefcore_route_match_free(match);
+  gdefcore_request_destroy(request);
+}
+
+TEST_F(RoutesMatch, MatchArgumentsAreChecked) {
+  GDEFCORE_Route_Match * match = (GDEFCORE_Route_Match *)0x1;
+  GDEFCORE_Request * request = s_.NewRequest("");
+  const char * m = NULL;
+  size_t n = 0;
+  Table();
+  EXPECT_EQ(GDEFCORE_ERR_INVALID,
+      gdefcore_routes_match(NULL, request, "/a", 2, &match));
+  EXPECT_EQ(NULL, match);
+  EXPECT_EQ(GDEFCORE_ERR_INVALID,
+      gdefcore_routes_match(routes_, NULL, "/a", 2, &match));
+  EXPECT_EQ(GDEFCORE_ERR_INVALID,
+      gdefcore_routes_match(routes_, request, "a", 1, &match));
+  EXPECT_EQ(GDEFCORE_ERR_INVALID,
+      gdefcore_routes_match(routes_, request, "", 0, &match));
+  EXPECT_EQ(GDEFCORE_ERR_INVALID,
+      gdefcore_routes_match(routes_, request, "/a", 2, NULL));
+  /* A NULL match is a match with nothing in it. */
+  EXPECT_EQ(0u, gdefcore_route_match_route_count(NULL));
+  EXPECT_EQ(0u, gdefcore_route_match_capture_count(NULL));
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, gdefcore_route_match_route(NULL, 0, &m, &n));
+  gdefcore_route_match_free(NULL);
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_routes_match(routes_, request, "/node/1", 7, &match));
+  EXPECT_EQ(GDEFCORE_ERR_INVALID,
+      gdefcore_route_match_route(match, 2, &m, &n));
+  EXPECT_EQ(GDEFCORE_ERR_INVALID,
+      gdefcore_route_match_capture(match, 1, &m, &n, &m, &n));
+  gdefcore_route_match_free(match);
+  gdefcore_request_destroy(request);
+}
+
+TEST_F(RoutesMatch, InfoAndListReportEveryRouteWithItsParent) {
+  GDEFCORE_Route_Info info;
+  GDEFCORE_Route_Info * all = NULL;
+  size_t count = 0;
+  Table();
+  memset(&info, 0, sizeof info);
+  info.size = sizeof info;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_routes_info(routes_, "node.edit", 9, &info));
+  EXPECT_EQ("node", std::string(info.parent, info.parent_len));
+  EXPECT_EQ("/node/:id/edit", std::string(info.path, info.path_len));
+  EXPECT_EQ("Edit nodes", std::string(info.permission, info.permission_len));
+  EXPECT_EQ("id", std::string(info.entity_capture, info.entity_capture_len));
+  EXPECT_EQ(GDEFCORE_ROUTE_TAB, info.kind);
+  /* A route that is not a tab has no parent, and is still reported. */
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_routes_info(routes_, "node", 4, &info));
+  EXPECT_EQ(0u, info.parent_len);
+  EXPECT_STREQ("", info.parent);
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, gdefcore_routes_info(routes_, "nope", 4, &info));
+  info.size = sizeof info - 1;
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, gdefcore_routes_info(routes_, "node", 4, &info));
+  /* The list is every route, in the order they were added. */
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_routes_list(routes_, &all, &count));
+  ASSERT_EQ(5u, count);
+  EXPECT_EQ("node", std::string(all[0].machine, all[0].machine_len));
+  EXPECT_EQ("node.view", std::string(all[1].machine, all[1].machine_len));
+  EXPECT_EQ("node.edit", std::string(all[2].machine, all[2].machine_len));
+  EXPECT_EQ("files", std::string(all[3].machine, all[3].machine_len));
+  EXPECT_EQ("star", std::string(all[4].machine, all[4].machine_len));
+  EXPECT_EQ(1, all[1].is_default);
+  gdefcore_routes_free(routes_, all);
+  /* An empty table is not an error. */
+  GDEFCORE_Routes * empty = NULL;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_routes_create(NULL, &empty));
+  all = (GDEFCORE_Route_Info *)0x1;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_routes_list(empty, &all, &count));
+  EXPECT_EQ(NULL, all);
+  EXPECT_EQ(0u, count);
+  gdefcore_routes_destroy(empty);
+}
+
+TEST_F(RoutesMatch, PermitsAsksTheRoutesOwnCheckWithTheMatchedValues) {
+  Gate gate;
+  GDEFCORE_Route_Match * match;
+  GDEFCORE_Request * request = s_.NewRequest("");
+  int allowed = 99;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_routes_set_check(routes_, GateCheck, &gate));
+  Table();
+  match = Match("/node/42");
+  /* The tab's own check, asked with the id of the page the tabs are on. */
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_routes_permits(routes_, request, "node.edit",
+                             9, match, &allowed));
+  EXPECT_EQ(1, allowed);
+  ASSERT_EQ(1u, gate.seen.size());
+  EXPECT_EQ("Edit nodes|42|", gate.seen[0]);
+  /* The check says no: the answer is no (CONTROL for the one above). */
+  gate.allow = 0;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_routes_permits(routes_, request, "node.edit",
+                             9, match, &allowed));
+  EXPECT_EQ(0, allowed);
+  EXPECT_EQ(2u, gate.seen.size());
+  /* A route with no permission is followed by anyone and asks nothing. */
+  allowed = 0;
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_routes_permits(routes_, request, "node", 4, match, &allowed));
+  EXPECT_EQ(1, allowed);
+  EXPECT_EQ(2u, gate.seen.size());
+  /* A route that needs a value the match does not have is not asked about
+   * (there is no entity), and is not followed. */
+  gate.allow = 1;
+  gdefcore_route_match_free(match);
+  match = Match("/files");
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_routes_permits(routes_, request, "node.edit",
+                             9, match, &allowed));
+  EXPECT_EQ(0, allowed);
+  EXPECT_EQ(2u, gate.seen.size()) << "the check was asked with no value";
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_routes_permits(routes_, request, "node.edit",
+                             9, NULL, &allowed));
+  EXPECT_EQ(0, allowed);
+  EXPECT_EQ(2u, gate.seen.size());
+  /* No check set: a permission is never granted. */
+  gdefcore_route_match_free(match);
+  match = Match("/node/42");
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_routes_set_check(routes_, NULL, NULL));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_routes_permits(routes_, request, "node.edit",
+                             9, match, &allowed));
+  EXPECT_EQ(0, allowed);
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, gdefcore_routes_permits(routes_, request,
+                                      "nope", 4, match, &allowed));
+  EXPECT_EQ(0, allowed);
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, gdefcore_routes_permits(routes_, NULL,
+                                      "node", 4, match, &allowed));
+  gdefcore_route_match_free(match);
+  gdefcore_request_destroy(request);
+}
+
+TEST_F(RoutesMatch, PermitsAnswersWhatDispatchDoesForTheSameValues) {
+  /* The menu's question and the router's are one: for each id, a route is
+   * followed by permits() exactly when resolve() reaches it. */
+  AccessGate gate;
+  std::string editor_a;
+  std::string editor_b;
+  std::string note_a;
+  std::string note_b;
+  gate.catalog = s_.catalog;
+  s_.DefineNote();
+  s_.Declare(Perm("Read own notes", "read", GDEFCORE_ACCESS_OWN, "site.note", NULL));
+  s_.Role("writers");
+  s_.Grant("writers", "Read own notes");
+  editor_a = s_.Principal("writers");
+  editor_b = s_.Principal("writers");
+  note_a = s_.SaveNote(editor_a, "A", "sa");
+  note_b = s_.SaveNote(editor_b, "B", "sb");
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_routes_set_check(routes_, AccessCheck, &gate));
+  GDEFCORE_Route_Spec spec = Spec("note.edit", "/note/:id/edit", RunCall, &own_);
+  spec.permission = "Read own notes";
+  spec.permission_len = 14;
+  ASSERT_EQ(GDEFCORE_OK, Add(spec));
+  /* The page the values are matched on: it has the id, and not the route. */
+  ASSERT_EQ(GDEFCORE_OK, AddPage("note.page", "/note/:id/x", &pass_));
+  for (const std::string & who : {editor_a, editor_b}) {
+    for (const std::string & id : {note_a, note_b}) {
+      GDEFCORE_Request * request = s_.NewRequest(who);
+      GDEFCORE_Route_Match * match = NULL;
+      int allowed = 99;
+      Seen seen = ResolveAs("/note/" + id + "/edit", who);
+      std::string path = "/note/" + id + "/edit";
+      ASSERT_EQ(GDEFCORE_OK, gdefcore_routes_match(routes_, request, path.data(),
+                                 path.size(), &match));
+      /* Ask from the match of a path that has the id but not the route. */
+      gdefcore_route_match_free(match);
+      path = "/note/" + id + "/x";
+      ASSERT_EQ(GDEFCORE_OK, gdefcore_routes_match(routes_, request, path.data(),
+                                 path.size(), &match));
+      EXPECT_EQ(GDEFCORE_OK, gdefcore_routes_permits(routes_, request,
+                                 "note.edit", 9, match, &allowed));
+      EXPECT_EQ(seen.resolution == "note.edit", allowed != 0)
+          << who << " " << id;
+      gdefcore_route_match_free(match);
+      gdefcore_request_destroy(request);
+    }
+  }
+  /* CONTROL: the two answers are not all the same. */
+  EXPECT_EQ("note.edit", ResolveAs("/note/" + note_a + "/edit", editor_a).resolution);
+  EXPECT_NE("note.edit", ResolveAs("/note/" + note_a + "/edit", editor_b).resolution);
+}
+
+TEST_F(RoutesMatch, HrefPutsTheMatchedValuesIntoThePattern) {
+  GDEFCORE_Route_Match * match;
+  char * href = NULL;
+  size_t n = 0;
+  Table();
+  match = Match("/node/42%2Fx");
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_routes_href(routes_, "node.edit", 9, match,
+                             &href, &n));
+  EXPECT_EQ("/node/42%2Fx/edit", std::string(href, n));
+  gdefcore_routes_free(routes_, href);
+  /* A default tab is addressed at its parent. */
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_routes_href(routes_, "node.view", 9, match,
+                             &href, &n));
+  EXPECT_EQ("/node/42%2Fx", std::string(href, n));
+  gdefcore_routes_free(routes_, href);
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_routes_href(routes_, "files", 5, match, &href, &n));
+  EXPECT_EQ("/files", std::string(href, n));
+  gdefcore_routes_free(routes_, href);
+  /* No value, no path; a `*` has nothing to put in it. */
+  href = (char *)0x1;
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, gdefcore_routes_href(routes_, "node.edit", 9,
+                                      NULL, &href, &n));
+  EXPECT_EQ(NULL, href);
+  EXPECT_EQ(GDEFCORE_ERR_INVALID,
+      gdefcore_routes_href(routes_, "star", 4, match, &href, &n));
+  EXPECT_EQ(GDEFCORE_ERR_INVALID,
+      gdefcore_routes_href(routes_, "nope", 4, match, &href, &n));
+  gdefcore_route_match_free(match);
+  /* The root route has the path "/". */
+  ASSERT_EQ(GDEFCORE_OK, AddPage("top", "/", &pass_));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_routes_href(routes_, "top", 3, NULL, &href, &n));
+  EXPECT_EQ("/", std::string(href, n));
+  gdefcore_routes_free(routes_, href);
+}
+
+TEST_F(RoutesMatch, KernelLinksAreCheckedAsAModulesAreAndKeptInOrder) {
+  GDEFCORE_Route_Link link;
+  GDEFCORE_Route_Link got;
+  Table();
+  memset(&link, 0, sizeof link);
+  link.size = sizeof link;
+  link.name = "core.home";
+  link.name_len = 9;
+  link.menu = "admin";
+  link.menu_len = 5;
+  link.label = "Home";
+  link.label_len = 4;
+  link.route = "files";
+  link.route_len = 5;
+  link.weight = -3;
+  link.kind = GDEFCORE_ROUTE_PAGE;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_routes_add_link(routes_, &link));
+  EXPECT_EQ(1u, gdefcore_routes_link_count(routes_));
+  /* Twice, and a name a route has, are refused. */
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, gdefcore_routes_add_link(routes_, &link));
+  link.name = "core.again";
+  link.name_len = 10;
+  link.parent = "core.home";
+  link.parent_len = 9;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_routes_add_link(routes_, &link));
+  EXPECT_EQ(2u, gdefcore_routes_link_count(routes_));
+  memset(&got, 0, sizeof got);
+  got.size = sizeof got;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_routes_link_at(routes_, 1, &got));
+  EXPECT_EQ("core.again", std::string(got.name, got.name_len));
+  EXPECT_EQ("core.home", std::string(got.parent, got.parent_len));
+  EXPECT_EQ("Home", std::string(got.label, got.label_len));
+  EXPECT_EQ("files", std::string(got.route, got.route_len));
+  EXPECT_EQ(-3, got.weight);
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, gdefcore_routes_link_at(routes_, 2, &got));
+  /* Each refusal leaves the count where it was. */
+  auto refused = [&](const char * name, const char * menu, const char * label,
+                     const char * route, const char * parent, int kind) {
+    GDEFCORE_Route_Link l = link;
+    l.name = name;
+    l.name_len = name == NULL ? 0 : strlen(name);
+    l.menu = menu;
+    l.menu_len = menu == NULL ? 0 : strlen(menu);
+    l.label = label;
+    l.label_len = label == NULL ? 0 : strlen(label);
+    l.route = route;
+    l.route_len = route == NULL ? 0 : strlen(route);
+    l.parent = parent;
+    l.parent_len = parent == NULL ? 0 : strlen(parent);
+    l.kind = kind;
+    return gdefcore_routes_add_link(routes_, &l) == GDEFCORE_ERR_INVALID &&
+           gdefcore_routes_link_count(routes_) == 2;
+  };
+  EXPECT_TRUE(refused("site.x", "admin", "L", "files", NULL, 0)) << "not core.";
+  EXPECT_TRUE(refused("core.", "admin", "L", "files", NULL, 0)) << "empty tail";
+  EXPECT_TRUE(refused("core.X", "admin", "L", "files", NULL, 0)) << "upper case";
+  EXPECT_TRUE(refused("core.n", "Admin", "L", "files", NULL, 0)) << "menu";
+  EXPECT_TRUE(refused("core.n", "", "L", "files", NULL, 0)) << "no menu";
+  EXPECT_TRUE(refused("core.n", "admin", "", "files", NULL, 0)) << "no label";
+  EXPECT_TRUE(refused("core.n", "admin", "bad\nlabel", "files", NULL, 0));
+  EXPECT_TRUE(refused("core.n", "admin", "L", "nope", NULL, 0)) << "no route";
+  EXPECT_TRUE(refused("core.n", "admin", "L", "files", "core.zz", 0)) << "parent";
+  EXPECT_TRUE(refused("core.n", "other", "L", "files", "core.home", 0))
+      << "parent in another menu";
+  EXPECT_TRUE(refused("core.n", "admin", "L", "files", NULL, 9)) << "kind";
+  EXPECT_TRUE(refused("node", "admin", "L", "files", NULL, 0)) << "a route's name";
+  link.size = sizeof link - 1;
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, gdefcore_routes_add_link(routes_, &link));
+}
+
 /* AD-34: a struct with a size member is accepted at exactly its own size. The
  * three here are the routes' (size_structs.h lists every struct). */
 TEST_F(Routes, TheStructsHereAreAcceptedAtOnlyTheirOwnSize) {
@@ -1098,6 +1506,21 @@ TEST_F(Routes, TheStructsHereAreAcceptedAtOnlyTheirOwnSize) {
         EXPECT_EQ(sizeof(GDEFCORE_Route_Call), g_size_filled) << seen.Str();
         return g_size_read == 1;
       }),
+      GDEFCORE_SIZE_PROBE(GDEFCORE_Route_Link, {
+        std::string machine = "core.size" + std::to_string(n++);
+        GDEFCORE_Route_Link l;
+        memset(&l, 0, sizeof l);
+        l.size = size;
+        l.name = machine.c_str();
+        l.name_len = machine.size();
+        l.menu = "admin";
+        l.menu_len = 5;
+        l.label = "L";
+        l.label_len = 1;
+        l.route = "size.page";
+        l.route_len = 9;
+        return gdefcore_routes_add_link(routes_, &l) == GDEFCORE_OK;
+      }),
       GDEFCORE_SIZE_PROBE(GDEFCORE_Route_Info, {
         GDEFCORE_Route_Info * info = NULL;
         size_t count = 0;
@@ -1106,6 +1529,12 @@ TEST_F(Routes, TheStructsHereAreAcceptedAtOnlyTheirOwnSize) {
         EXPECT_EQ(1u, count);
         bool filled = count == 1 && info[0].size == size;
         gdefcore_routes_free(routes_, info);
+        /* The by-name call fills a struct the caller sized, and only that size. */
+        GDEFCORE_Route_Info one;
+        memset(&one, 0, sizeof one);
+        one.size = size;
+        EXPECT_EQ(filled, gdefcore_routes_info(routes_, "size.page", 9, &one) ==
+                              GDEFCORE_OK);
         return filled;
       }),
   };

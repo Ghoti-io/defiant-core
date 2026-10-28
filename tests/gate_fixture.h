@@ -907,6 +907,56 @@ inline std::string ResolveLine(World & w, const std::string & who,
   return out + Diag(w, req);
 }
 
+/**
+ * Match @p path against the route table as @p who, and ask whether the one
+ * route with a permission (`guard`, of the entity its `:id` names) is followed
+ * for the values the match took. A principal who may not read the entity gets
+ * the answer that an id that names nothing gets.
+ */
+inline std::string MatchLine(World & w, const std::string & who,
+    const std::string & path, bool blank_ids) {
+  Fresh fresh(w, who);
+  GDEFCORE_Request * req = fresh.req;
+  GDEFCORE_Route_Match * match = (GDEFCORE_Route_Match *)0x1;
+  std::string out;
+  GDEFCORE_Result rc;
+  Note("gdefcore_routes_match");
+  rc = gdefcore_routes_match(w.routes, req, path.data(), path.size(), &match);
+  out = "rc=" + Rc(rc);
+  if (rc != GDEFCORE_OK) {
+    return out + (match == (GDEFCORE_Route_Match *)0x1 ? " untouched" : " SET") +
+           Diag(w, req);
+  }
+  out += " routes=";
+  for (size_t i = 0; i < gdefcore_route_match_route_count(match); i++) {
+    const char * m = NULL;
+    size_t n = 0;
+    if (gdefcore_route_match_route(match, i, &m, &n) == GDEFCORE_OK) {
+      out += (i == 0 ? "" : ",") + std::string(m, n);
+    }
+  }
+  out += " caps=";
+  for (size_t i = 0; i < gdefcore_route_match_capture_count(match); i++) {
+    const char * name = NULL;
+    const char * value = NULL;
+    size_t nn = 0;
+    size_t vn = 0;
+    if (gdefcore_route_match_capture(match, i, &name, &nn, &value, &vn) ==
+        GDEFCORE_OK) {
+      out += (i == 0 ? "" : ",") + std::string(name, nn) + "=" +
+             Norm(w, std::string(value, vn), blank_ids);
+    }
+  }
+  {
+    int allowed = 99;
+    Note("gdefcore_routes_permits");
+    rc = gdefcore_routes_permits(w.routes, req, "guard", 5, match, &allowed);
+    out += " permits=" + Rc(rc) + ":" + std::to_string(allowed);
+  }
+  gdefcore_route_match_free(match);
+  return out + Diag(w, req);
+}
+
 inline std::string KeyLine(World & w, const std::string & who) {
   Fresh fresh(w, who);
   GDEFCORE_Request * req = fresh.req;
@@ -1117,6 +1167,7 @@ inline Obs Observe(World & w, const std::string & who, const Ask & ask) {
         CanCreateLine(w, who, target, "site.note");
     o.kv[pre + "resolve.guard"] =
         ResolveLine(w, who, true, "/guard/" + target, true);
+    o.kv[pre + "match.guard"] = MatchLine(w, who, "/guard/" + target, true);
     if (ask.cond_true) {
       o.kv[pre + "cond.true"] = CondLine(w, who, target, true);
     }
