@@ -97,6 +97,14 @@ void gdefcore_request_destroy(GDEFCORE_Request * request) {
     request->fiber = NULL;
   }
   allocator = request->allocator;
+  {
+    size_t k;
+    for (k = 0; k < GDEFCORE_REQUEST_ATTACH_MAX; k++) {
+      if (request->attach[k].data != NULL && request->attach[k].release != NULL) {
+        request->attach[k].release(request->attach[k].data);
+      }
+    }
+  }
   if (request->nnotes > 0) {
     size_t i;
     for (i = 0; i < request->nnotes; i++) {
@@ -726,6 +734,59 @@ int gdefcore_request_validity_at(const GDEFCORE_Request * request, size_t index,
     *out_len = request->validity_lens[index];
   }
   return 1;
+}
+
+GDEFCORE_Result gdefcore_request_attach(GDEFCORE_Request * request,
+    const char * name, void * data, GDEFCORE_Request_Release_Fn release) {
+  size_t k;
+  size_t free_at = GDEFCORE_REQUEST_ATTACH_MAX;
+  size_t n;
+  if (request == NULL || name == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  n = strlen(name);
+  if (n == 0 || n >= sizeof request->attach[0].name) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  for (k = 0; k < GDEFCORE_REQUEST_ATTACH_MAX; k++) {
+    if (request->attach[k].data == NULL) {
+      if (free_at == GDEFCORE_REQUEST_ATTACH_MAX) {
+        free_at = k;
+      }
+    } else if (strcmp(request->attach[k].name, name) == 0) {
+      if (request->attach[k].release != NULL) {
+        request->attach[k].release(request->attach[k].data);
+      }
+      request->attach[k].data = data;
+      request->attach[k].release = data == NULL ? NULL : release;
+      return GDEFCORE_OK;
+    }
+  }
+  if (data == NULL) {
+    return GDEFCORE_OK;
+  }
+  if (free_at == GDEFCORE_REQUEST_ATTACH_MAX) {
+    return GDEFCORE_ERR_LIMIT;
+  }
+  memcpy(request->attach[free_at].name, name, n + 1);
+  request->attach[free_at].data = data;
+  request->attach[free_at].release = release;
+  return GDEFCORE_OK;
+}
+
+void * gdefcore_request_attached(const GDEFCORE_Request * request,
+    const char * name) {
+  size_t k;
+  if (request == NULL || name == NULL) {
+    return NULL;
+  }
+  for (k = 0; k < GDEFCORE_REQUEST_ATTACH_MAX; k++) {
+    if (request->attach[k].data != NULL &&
+        strcmp(request->attach[k].name, name) == 0) {
+      return request->attach[k].data;
+    }
+  }
+  return NULL;
 }
 
 void gdefcore_request_mark_uncacheable(GDEFCORE_Request * request) {

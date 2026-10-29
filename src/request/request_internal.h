@@ -93,6 +93,12 @@ struct GDEFCORE_Request {
   size_t batch_type_len;
   char (*batch)[GDEFCORE_PUBLIC_ID_LEN + 1];
   size_t nbatch;
+  /* Named attachments (gdefcore_request_attach()). */
+  struct {
+    char name[24];
+    void * data;
+    GDEFCORE_Request_Release_Fn release;
+  } attach[GDEFCORE_REQUEST_ATTACH_MAX];
   const GDEFCORE_Allocator * allocator;
 };
 

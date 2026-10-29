@@ -245,9 +245,13 @@ GDEFCORE_API size_t gdefcore_fragment_count(GDEFCORE_FragmentCache * cache);
  * `url()` makes an `href` safe.
  *
  * @p kind is ::GDEFCORE_WIDGET_MENU, ::GDEFCORE_WIDGET_TABS or
- * ::GDEFCORE_WIDGET_BREADCRUMBS. @p target is `<menu>` or `<menu>/<template>`
+ * ::GDEFCORE_WIDGET_BREADCRUMBS, or ::GDEFCORE_WIDGET_MESSAGES: the messages
+ * the request's bound session was left (message.h), claimed by this call and
+ * drawn by the template of kind `core.messages` named by @p target (`messages`
+ * unless named). That one is never cached, and a request with no bound session
+ * draws it with none. For the others @p target is `<menu>` or `<menu>/<template>`
  * for a menu (the template is `menu` unless named), and the template's name,
- * or empty for the template of that kind's own name, for the other two. This is
+ * or empty for the template of that kind's own name, for tabs and breadcrumbs. This is
  * also what a display's pane of that kind names as its target. @p path is the
  * page, as the request named it; a path no route reaches draws the widget for
  * a page that matched nothing. @p routes may be NULL, for a host with none.

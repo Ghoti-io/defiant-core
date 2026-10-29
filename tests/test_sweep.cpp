@@ -1320,6 +1320,7 @@ const Listed kListed[] = {
     {"gdefcore_layout_select", "Layouts.AHiddenWidgetRendersNothingAndRevealsNothing: the name of a layout, from the offers above and the alter hook; no entity value"},
     {"gdefcore_layout_may_edit", "decision: yes or no"},
     {"gdefcore_settings_export", "Moves.TheExportCarriesTheChangedSettingsAndNoLocalOne: the site's changed settings, which are configuration and never an entity field; an environment-local value is not in it"},
+    {"gdefcore_message_take", "Message.AMessageIsShownOnceAndNeverToAnotherSession: the session's own messages, which are text a handler left and never an entity field; a request with no bound session is refused"},
     {"gdefcore_settings_may_edit", "decision: yes or no"},
     {"gdefcore_settings_form_html", "Settings.TheFormShowsASecretAsSetOrNotSetAndNeverItsValue: only for who may edit settings, and a secret's value is never in it"},
 };

@@ -472,6 +472,33 @@ GDEFCORE_API GDEFCORE_Result gdefcore_request_spend_fuel(
 /** @brief The fuel left; UINT64_MAX when no budget was set. */
 GDEFCORE_API uint64_t gdefcore_request_fuel_left(const GDEFCORE_Request * request);
 
+/** Most named attachments one request holds. */
+#define GDEFCORE_REQUEST_ATTACH_MAX 4
+
+/** @brief How an attachment is released with the request. */
+typedef void (*GDEFCORE_Request_Release_Fn)(void * data);
+
+/**
+ * @brief Hang @p data on the request under @p name, for a later call of the
+ * same request to find (the message queue binds the session's keys this way).
+ *
+ * The request owns it from here: @p release, if not NULL, is called with
+ * @p data when the request is destroyed, or when the name is attached again
+ * (the old one is released first). @p data NULL removes the name. Not
+ * thread-safe, as nothing in a request is. At most
+ * ::GDEFCORE_REQUEST_ATTACH_MAX names.
+ *
+ * @return ::GDEFCORE_OK, ::GDEFCORE_ERR_INVALID (a NULL request or name),
+ *   ::GDEFCORE_ERR_LIMIT or ::GDEFCORE_ERR_OOM. On failure @p data is not
+ *   owned and @p release is not called.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_request_attach(GDEFCORE_Request * request,
+    const char * name, void * data, GDEFCORE_Request_Release_Fn release);
+
+/** @brief What is attached under @p name, or NULL. */
+GDEFCORE_API void * gdefcore_request_attached(const GDEFCORE_Request * request,
+    const char * name);
+
 #ifdef __cplusplus
 }
 #endif

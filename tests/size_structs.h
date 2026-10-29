@@ -120,7 +120,8 @@
   X(GDEFCORE_Layout_Hook, "tests/test_layout.cpp") \
   X(GDEFCORE_Setting, "tests/test_settings.cpp") \
   X(GDEFCORE_Settings_Group, "tests/test_settings.cpp") \
-  X(GDEFCORE_Setting_Change, "tests/test_settings.cpp")
+  X(GDEFCORE_Setting_Change, "tests/test_settings.cpp") \
+  X(GDEFCORE_Message, "tests/test_message.cpp")
 
 namespace size_structs {
 

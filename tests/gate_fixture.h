@@ -1076,6 +1076,16 @@ inline std::string MenuLine(World & w, const std::string & who,
     out += " settings-may-edit=" +
            std::to_string(gdefcore_settings_may_edit(w.site.catalog, req));
   }
+  {
+    /* The session's messages: a request with no bound session has no queue,
+     * whoever it is, and is told nothing of anyone else's. */
+    GDEFCORE_Messages * messages = NULL;
+    Note("gdefcore_message_take");
+    rc = gdefcore_message_take(w.site.catalog, req, &messages);
+    out += " message-take=" + Rc(rc) + ":" +
+           std::to_string(gdefcore_messages_count(messages));
+    gdefcore_messages_free(messages);
+  }
   Note("gdefcore_menu_may_edit");
   out += " may-edit=" +
          std::to_string(gdefcore_menu_may_edit(w.site.catalog, req));

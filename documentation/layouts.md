@@ -17,7 +17,7 @@ reads. Eight are built in:
 | `menu` | `core.menu` | the menu named by the target (menus.md) |
 | `tabs` | `core.tabs` | the tabs of the page (menus.md) |
 | `breadcrumbs` | `core.breadcrumbs` | the trail to the page (menus.md) |
-| `messages` | `core.messages` | none yet: the list is always empty and the widget draws nothing |
+| `messages` | `core.messages` | the signed-in session's message queue (messages.md); a visitor has none, and the widget draws nothing |
 | `recent` | `core.pane` | the view named by the target, `recent` unless said |
 
 An enabled module adds a type through its manifest (`GDEFCORE_Module_Widget`,

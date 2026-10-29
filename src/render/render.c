@@ -34,6 +34,7 @@
 #include <ghoti.io/defiant-core/access.h>
 #include <ghoti.io/defiant-core/layout.h>
 #include <ghoti.io/defiant-core/menu.h>
+#include <ghoti.io/defiant-core/message.h>
 #include <ghoti.io/defiant-core/module.h>
 #include <ghoti.io/defiant-core/request.h>
 #include <ghoti.io/defiant-core/settings.h>
@@ -111,15 +112,16 @@ static const char kCrumbsBody[] =
 
 /* The site name, the page title and the messages. The messages template
  * prints nothing while the list is empty, so a page without a queue shows no
- * trace of the widget. */
+ * trace of the widget. A message's text is printed through the render layer, so
+ * it is escaped like any other text. */
 static const char kSiteNameBody[] =
     "<% use name; use tagline; %><span class=\"site-name\"><%= name %></span>"
     "<% if (tagline != \"\") { %><span class=\"tagline\"><%= tagline %></span>"
     "<% } %>";
 static const char kTitleBody[] = "<% use title; %><h1><%= title %></h1>";
 static const char kMessagesBody[] =
-    "<% use items; %><% for (item : items) { %><div class=\"message\">"
-    "<%= item.text %></div><% } %>";
+    "<% use items; %><% for (item : items) { %><div class=\"message "
+    "<%= item.kind %>\"><%= item.text %></div><% } %>";
 
 /*
  * The built-in kinds and the contract each template really uses. A page
@@ -159,8 +161,9 @@ static const char * const kSiteNameVars[] = {
 static const char * const kPageTitleVars[] = {
     "title text The title of the page being shown, as the viewer may read it."};
 static const char * const kMessagesVars[] = {
-    "items list The messages for this viewer, each a map with text. It is "
-    "empty until a message queue supplies it."};
+    "items list The messages the viewer's session was left, each a map with "
+    "kind (status, error or refusal) and text. Each is shown once: the page "
+    "that draws this list claims them. It is empty for a visitor."};
 
 typedef struct TangBind {
   const char * name;
@@ -1170,7 +1173,8 @@ static GDEFCORE_Result render_template(GDEFCORE_Catalog * catalog,
   if (rc == GDEFCORE_OK) {
     rc = tang_run(catalog, request, contract, body, body_len, fuel, binds, nbinds,
         native, native_user, native_name, html, html_len);
-    if (rc == GDEFCORE_OK) {
+    if (rc == GDEFCORE_OK && gdefcore_request_cacheable(request)) {
+      /* A page that drew a session's messages is for that session. */
       (void)fragment_offer("live", 4);
     }
   } else if (rc != GDEFCORE_ERR_OOM) {
@@ -1829,6 +1833,10 @@ done:
   return rc;
 }
 
+static GDEFCORE_Result render_messages(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Request * request, const char * tmpl, size_t tmpl_len, uint64_t fuel,
+    char ** html, size_t * html_len);
+
 GDEFCORE_Result gdefcore_render_widget(GDEFCORE_Catalog * catalog,
     GDEFCORE_Routes * routes, GDEFCORE_Request * request,
     GDEFCORE_FragmentCache * cache, const char * kind, size_t kind_len,
@@ -1842,6 +1850,17 @@ GDEFCORE_Result gdefcore_render_widget(GDEFCORE_Catalog * catalog,
       out_len == NULL || scope_fuel == 0 || (target == NULL && target_len != 0) ||
       (path == NULL && path_len != 0)) {
     return GDEFCORE_ERR_INVALID;
+  }
+  if (span_eq(kind, kind_len, GDEFCORE_WIDGET_MESSAGES,
+          sizeof GDEFCORE_WIDGET_MESSAGES - 1)) {
+    /* The session's messages: claimed by this draw, and never cached. */
+    rc = render_messages(catalog, request, target_len > 0 ? target : "messages",
+        target_len > 0 ? target_len : 8, scope_fuel, &html, &html_len);
+    if (rc == GDEFCORE_OK) {
+      *out_bytes = html;
+      *out_len = html_len;
+    }
+    return rc;
   }
   nav.routes = routes;
   nav.path = path;
@@ -1898,7 +1917,9 @@ static GDEFCORE_Result render_kind(GDEFCORE_Catalog * catalog,
   if (rc == GDEFCORE_OK) {
     rc = tang_run_value(catalog, request, contract, body, body_len, fuel, binds,
         nbinds, value_name, value, NULL, NULL, NULL, html, html_len);
-    if (rc == GDEFCORE_OK) {
+    if (rc == GDEFCORE_OK && gdefcore_request_cacheable(request)) {
+      /* A render the request marked uncacheable (the messages of a session)
+       * is not one a shared cache is offered. */
       (void)fragment_offer("live", 4);
     }
   }
@@ -1973,19 +1994,96 @@ static GDEFCORE_Result render_title(GDEFCORE_Catalog * catalog,
   return rc;
 }
 
-/* The messages widget: declared, with a source that is always empty until the
- * message queue exists. */
+/* The messages as a value: a list of maps with kind and text. The text is a
+ * string of the attribute type, which the template engine escapes on output;
+ * nothing here produces markup. */
+static GDEFCORE_Result describe_messages(const GDEFCORE_Messages * msgs,
+    GLTANG_ValueDescription ** out) {
+  GLTANG_ValueDescription * d = NULL;
+  GLTANG_ValueRef list;
+  GLTANG_Result lr;
+  size_t i;
+  *out = NULL;
+  if (gltang_value_description_create(NULL, &d) != GLTANG_OK) {
+    return GDEFCORE_ERR_OOM;
+  }
+  lr = gltang_value_array(d, &list);
+  for (i = 0; lr == GLTANG_OK && i < gdefcore_messages_count(msgs); i++) {
+    GDEFCORE_Message m;
+    GLTANG_ValueRef map;
+    const char * kind = "status";
+    memset(&m, 0, sizeof m);
+    m.size = sizeof m;
+    if (gdefcore_messages_item(msgs, i, &m) != GDEFCORE_OK) {
+      lr = GLTANG_ERR_INVALID;
+      break;
+    }
+    if (m.kind == GDEFCORE_MESSAGE_ERROR) {
+      kind = "error";
+    } else if (m.kind == GDEFCORE_MESSAGE_REFUSAL) {
+      kind = "refusal";
+    }
+    lr = gltang_value_map(d, &map);
+    if (lr == GLTANG_OK) {
+      lr = nav_text(d, map, "kind", kind, strlen(kind));
+    }
+    if (lr == GLTANG_OK) {
+      lr = nav_text(d, map, "text", m.text, m.text_len);
+    }
+    if (lr == GLTANG_OK) {
+      lr = gltang_value_array_push(d, list, map);
+    }
+  }
+  if (lr == GLTANG_OK) {
+    lr = gltang_value_set_root(d, list);
+  }
+  if (lr != GLTANG_OK) {
+    gltang_value_description_release(d);
+    return lr == GLTANG_ERR_LIMIT ? GDEFCORE_ERR_LIMIT : GDEFCORE_ERR_OOM;
+  }
+  *out = d;
+  return GDEFCORE_OK;
+}
+
+/*
+ * The messages widget (site admin story 9). A request whose session is bound
+ * (gdefcore_message_bind()) is shown the messages it was left, once: they are
+ * claimed here, and are gone from the queue. A render that fails after the
+ * claim puts them back, so a message that was never shown is not lost. What
+ * the page shows depends on the queue, so the request is marked uncacheable;
+ * a visitor has no queue and the widget prints nothing.
+ */
 static GDEFCORE_Result render_messages(GDEFCORE_Catalog * catalog,
     GDEFCORE_Request * request, const char * tmpl, size_t tmpl_len, uint64_t fuel,
     char ** html, size_t * html_len) {
-  GLTANG_ValueDescription * none = NULL;
-  GDEFCORE_Result rc = describe_menu(NULL, &none);
-  if (rc != GDEFCORE_OK) {
-    return rc;
+  GDEFCORE_Messages * msgs = NULL;
+  GLTANG_ValueDescription * value = NULL;
+  GDEFCORE_Result rc;
+  if (gdefcore_message_take(catalog, request, &msgs) != GDEFCORE_OK) {
+    msgs = NULL;
+  } else {
+    gdefcore_request_mark_uncacheable(request);
   }
-  rc = render_kind(catalog, request, tmpl, tmpl_len, "core.messages", 13, fuel,
-      NULL, 0, "items", none, html, html_len);
-  gltang_value_description_release(none);
+  rc = describe_messages(msgs, &value);
+  if (rc == GDEFCORE_OK) {
+    rc = render_kind(catalog, request, tmpl, tmpl_len, "core.messages", 13, fuel,
+        NULL, 0, "items", value, html, html_len);
+  }
+  if (value != NULL) {
+    gltang_value_description_release(value);
+  }
+  if (rc != GDEFCORE_OK) {
+    size_t i;
+    for (i = 0; i < gdefcore_messages_count(msgs); i++) {
+      GDEFCORE_Message m;
+      memset(&m, 0, sizeof m);
+      m.size = sizeof m;
+      if (gdefcore_messages_item(msgs, i, &m) == GDEFCORE_OK) {
+        (void)gdefcore_message_post(catalog, request, m.kind, m.text, m.text_len);
+      }
+    }
+  }
+  gdefcore_messages_free(msgs);
   return rc;
 }
 
