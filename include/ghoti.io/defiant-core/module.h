@@ -543,6 +543,10 @@ typedef GDEFCORE_Result (*GDEFCORE_Contribution_Fn)(GDEFCORE_Request * request,
 #define GDEFCORE_MODULE_RELATIONS_MAX 16
 /** Most access callbacks one manifest registers. */
 #define GDEFCORE_MODULE_CALLBACKS_MAX 16
+/** Most contributors one manifest declares. */
+#define GDEFCORE_MODULE_CONTRIBUTORS_MAX 32
+/** Most widget types one manifest declares. */
+#define GDEFCORE_MODULE_WIDGETS_MAX 32
 /** Most columns one relation has. */
 #define GDEFCORE_RELATION_COLUMNS_MAX 4
 /** Longest name of a relation column, in bytes. */
@@ -559,6 +563,14 @@ typedef GDEFCORE_Result (*GDEFCORE_Contribution_Fn)(GDEFCORE_Request * request,
 #define GDEFCORE_MODULE_ROUTE_HANDLER_VERSION 1
 /** The version of a template variable provider service table. */
 #define GDEFCORE_MODULE_VARIABLE_PROVIDER_VERSION 1
+/** The version of a contributor service table. */
+#define GDEFCORE_MODULE_CONTRIBUTOR_HANDLER_VERSION 1
+/** The version of a widget provider service table. */
+#define GDEFCORE_MODULE_WIDGET_PROVIDER_VERSION 1
+/** Most variables one widget draw binds. */
+#define GDEFCORE_WIDGET_BINDS_MAX 16
+/** Longest value one widget variable carries, in bytes. */
+#define GDEFCORE_WIDGET_VALUE_MAX 65536
 
 /**
  * @brief The table a route's handler service carries. Begins with @ref size.
@@ -588,6 +600,114 @@ typedef struct GDEFCORE_Module_Variable_Provider {
   GDEFCORE_Contribution_Fn provider; ///< The provider. Required.
   void * user;                     ///< Passed back to @ref provider.
 } GDEFCORE_Module_Variable_Provider;
+
+/**
+ * @brief The table a contributor's service carries. Begins with @ref size.
+ *
+ * A contributor (GDEFCORE_Module_Contributor) names its function by a service
+ * name its module also declares (version
+ * ::GDEFCORE_MODULE_CONTRIBUTOR_HANDLER_VERSION).
+ */
+typedef struct GDEFCORE_Module_Contributor_Handler {
+  size_t size;                    ///< `sizeof(GDEFCORE_Module_Contributor_Handler)`.
+  GDEFCORE_Contributor_Fn fn;     ///< The contributor. Required.
+  void * data;                    ///< Passed back in the call.
+} GDEFCORE_Module_Contributor_Handler;
+
+/**
+ * @brief Where a widget provider binds the variables its template reads.
+ * Opaque; valid for the provider's call.
+ */
+typedef struct GDEFCORE_Widget_Sink GDEFCORE_Widget_Sink;
+
+/**
+ * @brief The function that draws a module's widget.
+ *
+ * Called when a layout places the widget on a page, after the widget's
+ * permission has been asked of the viewer (a widget whose permission the
+ * viewer does not hold is not drawn and the provider is not called). It binds
+ * the variables the widget's template kind declares, as text, with
+ * gdefcore_widget_bind_text(); it reads through @p request, so it is
+ * principal-aware and reads through the access filter. A result other than
+ * ::GDEFCORE_OK draws nothing. @p target is whatever the placement carried
+ * after the widget's name, or empty.
+ */
+typedef GDEFCORE_Result (*GDEFCORE_Widget_Fn)(GDEFCORE_Request * request,
+    const char * target, size_t target_len, GDEFCORE_Widget_Sink * sink,
+    void * user);
+
+/**
+ * @brief The table a widget's provider service carries. Begins with @ref size.
+ */
+typedef struct GDEFCORE_Module_Widget_Provider {
+  size_t size;                    ///< `sizeof(GDEFCORE_Module_Widget_Provider)`.
+  GDEFCORE_Widget_Fn fn;          ///< The provider. Required.
+  void * user;                    ///< Passed back to @ref fn.
+} GDEFCORE_Module_Widget_Provider;
+
+/**
+ * @brief Bind a text variable for the widget's template. The bytes are copied.
+ *
+ * ::GDEFCORE_ERR_LIMIT past ::GDEFCORE_WIDGET_BINDS_MAX variables or
+ * ::GDEFCORE_WIDGET_VALUE_MAX bytes; ::GDEFCORE_ERR_INVALID for a NULL sink or
+ * an empty name. A name the template kind does not declare is not seen by the
+ * template (the contract is the kind's, not the provider's). Binding a name
+ * again replaces it.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_widget_bind_text(GDEFCORE_Widget_Sink * sink,
+    const char * name, size_t name_len, const char * text, size_t text_len);
+
+/**
+ * @brief A contributor a module declares. Begins with @ref size.
+ *
+ * A contributor is a handler in the route trie that offers and does not own
+ * the request (GDEFCORE_Contributor_Spec). @ref name is `<module>.<name>`
+ * (AD-35); @ref kind is what it contributes, such as
+ * ::GDEFCORE_CONTRIBUTOR_LAYOUT, so a module's layout selector is one of
+ * these. The handler is a service name the module also declares.
+ */
+typedef struct GDEFCORE_Module_Contributor {
+  size_t size;                ///< `sizeof(GDEFCORE_Module_Contributor)`.
+  const char * name;          ///< Machine name `<module>.<name>`.
+  size_t name_len;            ///< Length of @ref name.
+  const char * kind;          ///< What it contributes.
+  size_t kind_len;            ///< Length of @ref kind.
+  const char * path;          ///< Pattern, `/a/:name/*`.
+  size_t path_len;            ///< Length of @ref path.
+  int exact;                  ///< Non-zero: only a path that is the pattern.
+  int weight;                 ///< Breaks a tie of specificity: lowest first.
+  const char * handler;       ///< Name of the module's contributor service.
+  size_t handler_len;         ///< Length of @ref handler.
+} GDEFCORE_Module_Contributor;
+
+/**
+ * @brief A widget type a module declares. Begins with @ref size.
+ *
+ * A widget type is a template kind and the source of its variables. @ref name
+ * is `<module>.<name>` (AD-35), so it never takes a built-in type's name. The
+ * @ref kind names the template kind the widget is drawn with (a kind the site
+ * or the module's starter data defines; the widget draws nothing while no
+ * such kind exists). @ref template_name is the template drawn when a
+ * placement names none; empty means the widget's own name. @ref permission,
+ * when not empty, is a permission name (as a route's is): a viewer who does
+ * not hold it is shown nothing and the provider is not called, so a widget
+ * never shows what its source would not.
+ */
+typedef struct GDEFCORE_Module_Widget {
+  size_t size;                ///< `sizeof(GDEFCORE_Module_Widget)`.
+  const char * name;          ///< Machine name `<module>.<name>`.
+  size_t name_len;            ///< Length of @ref name.
+  const char * kind;          ///< The template kind it is drawn with.
+  size_t kind_len;            ///< Length of @ref kind.
+  const char * template_name; ///< The default template, or NULL.
+  size_t template_len;        ///< Length of @ref template_name.
+  const char * permission;    ///< The permission its source needs, or NULL.
+  size_t permission_len;      ///< Length of @ref permission.
+  const char * description;   ///< Plain words for the editor. May be NULL.
+  size_t description_len;     ///< Length of @ref description.
+  const char * provider;      ///< Name of the module's widget provider service.
+  size_t provider_len;        ///< Length of @ref provider.
+} GDEFCORE_Module_Widget;
 
 /**
  * @brief A route a module declares. Begins with @ref size.
@@ -839,6 +959,10 @@ typedef struct GDEFCORE_Module_Manifest {
   size_t nupcasters;                        ///< How many upcasters.
   const GDEFCORE_Module_Callback * callbacks; ///< Access callbacks. May be NULL.
   size_t ncallbacks;                        ///< How many callbacks.
+  const GDEFCORE_Module_Contributor * contributors; ///< Contributors. May be NULL.
+  size_t ncontributors;                     ///< How many contributors.
+  const GDEFCORE_Module_Widget * widgets;   ///< Widget types. May be NULL.
+  size_t nwidgets;                          ///< How many widget types.
 } GDEFCORE_Module_Manifest;
 
 /**
@@ -1438,6 +1562,45 @@ typedef struct GDEFCORE_Module_Declared_Relation {
   size_t ncolumns;            ///< How many.
 } GDEFCORE_Module_Declared_Relation;
 
+/** @brief A contributor as the enumeration reports it. Borrowed from the
+ * host; the service is resolved. */
+typedef struct GDEFCORE_Module_Declared_Contributor {
+  size_t size;                ///< `sizeof(GDEFCORE_Module_Declared_Contributor)`.
+  const char * module;        ///< The declaring module.
+  size_t module_len;          ///< Length of @ref module.
+  const char * name;          ///< Machine name.
+  size_t name_len;            ///< Length of @ref name.
+  const char * kind;          ///< What it contributes.
+  size_t kind_len;            ///< Length of @ref kind.
+  const char * path;          ///< Pattern.
+  size_t path_len;            ///< Length of @ref path.
+  int exact;                  ///< Non-zero: only a path that is the pattern.
+  int weight;                 ///< Breaks a tie of specificity.
+  GDEFCORE_Contributor_Fn fn; ///< The contributor.
+  void * data;                ///< Its data pointer.
+} GDEFCORE_Module_Declared_Contributor;
+
+/** @brief A widget type as the enumeration reports it. Borrowed from the
+ * host; the provider is resolved. */
+typedef struct GDEFCORE_Module_Declared_Widget {
+  size_t size;                ///< `sizeof(GDEFCORE_Module_Declared_Widget)`.
+  const char * module;        ///< The declaring module.
+  size_t module_len;          ///< Length of @ref module.
+  const char * name;          ///< Machine name.
+  size_t name_len;            ///< Length of @ref name.
+  const char * kind;          ///< The template kind it is drawn with.
+  size_t kind_len;            ///< Length of @ref kind.
+  const char * template_name; ///< The default template; never NULL, and the
+                              ///< widget's own name when the module named none.
+  size_t template_len;        ///< Length of @ref template_name.
+  const char * permission;    ///< The permission its source needs; never NULL.
+  size_t permission_len;      ///< Length of @ref permission.
+  const char * description;   ///< Never NULL; may be empty.
+  size_t description_len;     ///< Length of @ref description.
+  GDEFCORE_Widget_Fn fn;      ///< The provider.
+  void * user;                ///< Its user pointer.
+} GDEFCORE_Module_Declared_Widget;
+
 /**
  * @brief The routes the modules enabled for @p tenant declare.
  *
@@ -1540,14 +1703,39 @@ GDEFCORE_API int gdefcore_module_field_governed(GDEFCORE_Host * host,
     int * out_locked);
 
 /**
+ * @brief The contributors of the enabled modules. As
+ * gdefcore_module_routes(): module order, then name.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_module_contributors(GDEFCORE_Host * host,
+    const uint8_t * tenant, size_t tenant_len,
+    const GDEFCORE_Changeset * projection,
+    const GDEFCORE_Module_Declared_Contributor *** out_items, size_t * out_count);
+
+/**
+ * @brief The widget types of the enabled modules. As
+ * gdefcore_module_routes(): module order, then name. A layout may place a
+ * widget type only while its module is enabled.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_module_widgets(GDEFCORE_Host * host,
+    const uint8_t * tenant, size_t tenant_len,
+    const GDEFCORE_Changeset * projection,
+    const GDEFCORE_Module_Declared_Widget *** out_items, size_t * out_count);
+
+/**
  * @brief Free an array from gdefcore_module_routes(), _links(), _settings(),
- * _variables(), _grants(), _relations() or _callbacks(). NULL is ignored.
+ * _variables(), _grants(), _relations(), _callbacks(), _contributors() or
+ * _widgets(). NULL is ignored.
  */
 GDEFCORE_API void gdefcore_module_declared_free(GDEFCORE_Host * host,
     const void * items);
 
 /**
- * @brief Add every enabled module's routes to @p routes, in enumeration order.
+ * @brief Add every enabled module's routes, and then its contributors, to
+ * @p routes, in enumeration order.
+ *
+ * A contributor is registered with its service resolved
+ * (gdefcore_routes_add_contributor()); one that clashes with another in
+ * @p routes is an error that names both.
  *
  * A tab is added after its parent; otherwise the order is that of
  * gdefcore_module_routes(). Each route is added with its handler resolved

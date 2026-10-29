@@ -1042,6 +1042,26 @@ inline std::string MenuLine(World & w, const std::string & who,
       }
     }
   }
+  {
+    /* The layout the trie chooses for the page: a name, and the offers that
+     * led to it. Nothing of the entity is in either. */
+    GDEFCORE_Offers * offers = NULL;
+    char * name = NULL;
+    size_t name_len = 0;
+    Note("gdefcore_routes_offers");
+    rc = gdefcore_routes_offers(w.routes, w.site.catalog, req, "layout", 6,
+        path.data(), path.size(), &offers);
+    out += " offers=" + Rc(rc) + ":" + std::to_string(gdefcore_offers_count(offers));
+    gdefcore_offers_free(offers);
+    Note("gdefcore_layout_select");
+    rc = gdefcore_layout_select(w.site.catalog, w.routes, req, path.data(),
+        path.size(), &name, &name_len);
+    out += " layout=" + Rc(rc) + ":" + (name == NULL ? "" : std::string(name, name_len));
+    gdefcore_text_free(w.site.catalog, name);
+    Note("gdefcore_layout_may_edit");
+    out += " layout-may-edit=" +
+           std::to_string(gdefcore_layout_may_edit(w.site.catalog, req));
+  }
   Note("gdefcore_menu_may_edit");
   out += " may-edit=" +
          std::to_string(gdefcore_menu_may_edit(w.site.catalog, req));

@@ -35,6 +35,7 @@
 #include <ghoti.io/defiant-core/request.h>
 #include <ghoti.io/defiant-core/subject.h>
 #include <ghoti.io/defiant-core/menu.h>
+#include <ghoti.io/defiant-core/layout.h>
 #include <ghoti.io/defiant-core/template.h>
 
 #include <ghoti.io/cutil/allocator.h>
@@ -4624,6 +4625,11 @@ GDEFCORE_Result gdefcore_changeset_apply(GDEFCORE_Changeset * changeset,
     if (rc != GDEFCORE_OK) {
       return rc;
     }
+    /* So is who may edit a layout or a rule that chooses one. */
+    rc = gdefcore_layout_authorize(changeset, changeset->request);
+    if (rc != GDEFCORE_OK) {
+      return rc;
+    }
   }
   rc = gdefcore_changeset_rate(changeset, &risk);
   if (rc != GDEFCORE_OK) {
@@ -4654,6 +4660,13 @@ GDEFCORE_Result gdefcore_changeset_apply(GDEFCORE_Changeset * changeset,
    * changeset). This is the second check; the first is the preview.
    */
   rc = gdefcore_template_vet(changeset);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  /* A layout that names a region its page template does not declare, or a
+   * widget nobody offers, and a rule that is not a rule, are refused here, with
+   * nothing written (layout.h). */
+  rc = gdefcore_layout_vet(changeset);
   if (rc != GDEFCORE_OK) {
     return rc;
   }

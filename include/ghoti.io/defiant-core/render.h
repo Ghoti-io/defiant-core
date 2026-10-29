@@ -23,8 +23,8 @@
  * @brief One page, one display, the Post starter kit, and a Tang scope.
  * @stability free
  *
- * A page selects one display. A display is a layout of regions and an
- * ordered list of panes in those regions. Region names belong to the
+ * A page selects one display (layout.h). A display is a layout of regions and an
+ * ordered list of placements of widget types in those regions. Region names belong to the
  * layout template. Tang runs the templates and the rendered bytes are
  * what the template call had already written when its scope ran out.
  * That partial page is success. There is no socket.
@@ -317,12 +317,13 @@ GDEFCORE_API void gdefcore_render_names_free(GDEFCORE_Catalog * catalog,
     char ** names, size_t count);
 
 /**
- * @brief One pane of the display named @p name, in stored order.
+ * @brief One placement of the display named @p name, in stored order.
  *
  * @p out_region, @p out_kind and @p out_target are freed with
- * gdefcore_text_free(). A kind is `view`, `entity`, `field`, `menu`, `tabs`
- * or `breadcrumbs`; the last three are drawn by gdefcore_render_widget() for
- * the page being rendered.
+ * gdefcore_text_free(). @p out_kind is the widget type (layout.h): a built-in
+ * one (`sitename`, `title`, `content`, `menu`, `tabs`, `breadcrumbs`,
+ * `messages`, `recent`) or a module's `<module>.<name>`; the target is the rest
+ * of the line, empty when the placement names none.
  */
 GDEFCORE_API GDEFCORE_Result gdefcore_render_pane_at(GDEFCORE_Catalog * catalog,
     const char * name, size_t name_len, size_t index, char ** out_region,

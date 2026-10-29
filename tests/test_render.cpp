@@ -338,8 +338,8 @@ TEST_F(Render, Region) {
       gdefcore_render_pane_at(catalog_, "front", 5, 0, &region, &region_len,
           &kind, &kind_len, &target, &target_len));
   EXPECT_EQ(std::string("side"), std::string(region, region_len));
-  EXPECT_EQ(std::string("view"), std::string(kind, kind_len));
-  EXPECT_EQ(std::string("recent"), std::string(target, target_len));
+  EXPECT_EQ(std::string("recent"), std::string(kind, kind_len));
+  EXPECT_EQ(std::string(""), std::string(target, target_len)) << "the default view";
   ASSERT_EQ(GDEFCORE_OK,
       gdefcore_render_regions(catalog_, "layout", 6, &names, &count));
   ASSERT_EQ(2u, count);
@@ -427,7 +427,7 @@ TEST_F(Render, Kit) {
       gdefcore_render_pane_at(catalog_, "post", 4, 0, &region, &region_len,
           &kind_text, &kind_len, &target, &target_len));
   EXPECT_EQ(std::string("main"), std::string(region, region_len));
-  EXPECT_EQ(std::string("entity"), std::string(kind_text, kind_len));
+  EXPECT_EQ(std::string("content"), std::string(kind_text, kind_len));
   gdefcore_text_free(catalog_, region);
   gdefcore_text_free(catalog_, kind_text);
   gdefcore_text_free(catalog_, target);

@@ -35,10 +35,17 @@ The starter kit stores these kinds and sets each built-in template's kind:
 | Kind | Variables | Functions | Templates |
 |---|---|---|---|
 | `core.page` | none | `region/1`, `url/1` | `layout` |
-| `core.pane` | `title`, `body`, `summary`, `value` (all `text`) | `url/1` | `entity`, `recent`, `field` |
+| `core.pane` | `title`, `body`, `summary` (all `text`) | `url/1` | `entity`, `recent` |
 | `core.menu` | `menu` (`text`), `items` (`list`) | `url/1` | `menu` |
 | `core.tabs` | `items` (`list`) | `url/1` | `tabs` |
 | `core.breadcrumbs` | `items` (`list`) | `url/1` | `breadcrumbs` |
+| `core.sitename` | `name` (`text`) | none | `sitename` |
+| `core.title` | `title` (`text`) | none | `title` |
+| `core.messages` | `items` (`list`) | none | `messages` |
+
+Each widget type has a template kind (layouts.md): page content and recent
+posts draw with `core.pane`, the others with a kind of their own, and a module's
+widget type names one.
 
 The last three draw navigation (menus.md, "Widgets"). `items` is a list of
 maps, one per entry in order, with `name`, `label`, `route`, `href`, `menu`,
@@ -47,9 +54,9 @@ restyles a widget by editing its template, and may store more templates of a
 kind and name one from a pane.
 
 These are what the C templates the kit started from actually used. A pane is
-one kind, so its contract is the union of what its three templates read: the
-entity pane binds `title` and `body`, the recent-posts pane `title` and
-`summary`, a field pane `value`. A name the pane's renderer does not bind
+one kind, so its contract is the union of what its two templates read: the
+page content widget binds `title` and `body`, the recent-posts widget `title`
+and `summary`. A name the widget's renderer does not bind
 reads as null. `url` is in both contracts because story 1 registered it for
 every template.
 

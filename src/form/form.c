@@ -28,6 +28,7 @@
 
 #include <ghoti.io/defiant-core/macros.h>
 #include <ghoti.io/defiant-core/access.h>
+#include <ghoti.io/defiant-core/layout.h>
 
 #include "form_internal.h"
 
@@ -166,6 +167,23 @@ typedef struct KLink {
   int kind;
 } KLink;
 
+/* A contributor: a handler in the trie that does not own the request. */
+typedef struct Contrib {
+  char * kind;
+  size_t kind_len;
+  char * machine;
+  size_t machine_len;
+  char * path;
+  size_t path_len;
+  int exact;
+  int weight;
+  Seg * segs;
+  size_t nsegs;
+  int score;
+  GDEFCORE_Contributor_Fn fn;
+  void * data;
+} Contrib;
+
 struct GDEFCORE_Routes {
   const GDEFCORE_Allocator * alloc;
   Route * routes;
@@ -176,6 +194,9 @@ struct GDEFCORE_Routes {
   KLink * links;
   size_t nlinks;
   size_t links_cap;
+  Contrib * contribs;
+  size_t ncontribs;
+  size_t contribs_cap;
 };
 
 /* One name a match captured, and its value. */
@@ -2845,6 +2866,14 @@ static void route_clear(const GDEFCORE_Allocator * alloc, Route * route) {
   memset(route, 0, sizeof *route);
 }
 
+static void contrib_clear(const GDEFCORE_Allocator * alloc, Contrib * c) {
+  gcu_allocator_free(alloc, c->kind);
+  gcu_allocator_free(alloc, c->machine);
+  gcu_allocator_free(alloc, c->path);
+  seg_free(alloc, c->segs, c->nsegs);
+  memset(c, 0, sizeof *c);
+}
+
 static void klink_clear(const GDEFCORE_Allocator * alloc, KLink * link) {
   gcu_allocator_free(alloc, link->name);
   gcu_allocator_free(alloc, link->menu);
@@ -2866,6 +2895,26 @@ GDEFCORE_Result gdefcore_routes_create(const GDEFCORE_Allocator * allocator,
     return GDEFCORE_ERR_OOM;
   }
   routes->alloc = alloc;
+  {
+    /* The site's own layout rules are contributors in every table: stored
+     * data, offered as patterns of the trie are (layout.h). */
+    GDEFCORE_Contributor_Spec rules;
+    GDEFCORE_Result rc;
+    memset(&rules, 0, sizeof rules);
+    rules.size = sizeof rules;
+    rules.kind = GDEFCORE_CONTRIBUTOR_LAYOUT;
+    rules.kind_len = sizeof GDEFCORE_CONTRIBUTOR_LAYOUT - 1;
+    rules.machine = GDEFCORE_LAYOUT_RULES_CONTRIBUTOR;
+    rules.machine_len = sizeof GDEFCORE_LAYOUT_RULES_CONTRIBUTOR - 1;
+    rules.path = "/";
+    rules.path_len = 1;
+    rules.fn = gdefcore_layout_site_contributor;
+    rc = gdefcore_routes_add_contributor(routes, &rules, NULL, NULL);
+    if (rc != GDEFCORE_OK) {
+      gdefcore_routes_destroy(routes);
+      return rc;
+    }
+  }
   *out = routes;
   return GDEFCORE_OK;
 }
@@ -2883,6 +2932,10 @@ void gdefcore_routes_destroy(GDEFCORE_Routes * routes) {
   for (i = 0; i < routes->nlinks; i++) {
     klink_clear(alloc, &routes->links[i]);
   }
+  for (i = 0; i < routes->ncontribs; i++) {
+    contrib_clear(alloc, &routes->contribs[i]);
+  }
+  gcu_allocator_free(alloc, routes->contribs);
   gcu_allocator_free(alloc, routes->links);
   gcu_allocator_free(alloc, routes->routes);
   gcu_allocator_free(alloc, routes);
@@ -4259,4 +4312,423 @@ GDEFCORE_Result gdefcore_form_resolve(GDEFCORE_Routes * routes,
     }
   }
   return resolve_alias(catalog, request, path, path_len, out, out_len);
+}
+
+/* ---- contributors (site admin story 7) --------------------------------- */
+
+enum { kOffersMax = 256 };
+
+typedef struct OfferRec {
+  char * value;
+  size_t value_len;
+  char * source;
+  size_t source_len;
+  int64_t rank;
+  int weight;
+  int site;
+} OfferRec;
+
+struct GDEFCORE_Offers {
+  const GDEFCORE_Allocator * alloc;
+  OfferRec * recs;
+  size_t n;
+  size_t cap;
+};
+
+/* What one gathering holds while a contributor runs. */
+typedef struct Gather {
+  GDEFCORE_Offers * offers;
+  const Contrib * contrib;
+  const Seg * req;       /* the request path, split */
+  size_t nreq;
+  GDEFCORE_Result rc;
+} Gather;
+
+int gdefcore_route_pattern_ok(const char * pattern, size_t pattern_len,
+    const char ** out_why) {
+  Seg * segs = NULL;
+  size_t n = 0;
+  const char * why = NULL;
+  GDEFCORE_Result rc;
+  if (pattern_len > GDEFCORE_ROUTE_PATH_MAX) {
+    if (out_why != NULL) {
+      *out_why = "path too long";
+    }
+    return 0;
+  }
+  rc = split_path(gdefcore_allocator_default(), pattern, pattern_len, 1, &segs, &n,
+      NULL, &why);
+  if (rc == GDEFCORE_OK) {
+    seg_free(gdefcore_allocator_default(), segs, n);
+    return 1;
+  }
+  if (out_why != NULL) {
+    *out_why = why != NULL ? why : "out of memory";
+  }
+  return 0;
+}
+
+static int contrib_kind_ok(const char * s, size_t n) {
+  size_t i;
+  if (s == NULL || n == 0 || n > GDEFCORE_CONTRIBUTOR_KIND_MAX || s[0] < 'a' ||
+      s[0] > 'z') {
+    return 0;
+  }
+  for (i = 1; i < n; i++) {
+    char c = s[i];
+    if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' ||
+            c == '_' || c == '-')) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+GDEFCORE_Result gdefcore_routes_add_contributor(GDEFCORE_Routes * routes,
+    const GDEFCORE_Contributor_Spec * spec, char ** out_error,
+    size_t * out_error_len) {
+  const GDEFCORE_Allocator * alloc;
+  Seg * segs = NULL;
+  size_t nsegs = 0;
+  size_t i;
+  int score = 0;
+  const char * why = NULL;
+  Contrib * next;
+  GDEFCORE_Result rc;
+  if (out_error != NULL) {
+    *out_error = NULL;
+  }
+  if (out_error_len != NULL) {
+    *out_error_len = 0;
+  }
+  if (routes == NULL || spec == NULL || spec->size != sizeof *spec ||
+      spec->machine == NULL || spec->machine_len == 0 || spec->path == NULL ||
+      spec->fn == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  alloc = routes->alloc;
+  if (!contrib_kind_ok(spec->kind, spec->kind_len)) {
+    route_error(alloc, out_error, out_error_len, "contributor kind is not valid",
+        spec->machine, spec->machine_len, spec->path, spec->path_len, NULL, 0,
+        NULL, 0);
+    return GDEFCORE_ERR_INVALID;
+  }
+  for (i = 0; i < routes->ncontribs; i++) {
+    if (span_eq(routes->contribs[i].machine, routes->contribs[i].machine_len,
+            spec->machine, spec->machine_len)) {
+      route_error(alloc, out_error, out_error_len, "contributor twice",
+          spec->machine, spec->machine_len, routes->contribs[i].path,
+          routes->contribs[i].path_len, spec->machine, spec->machine_len,
+          spec->path, spec->path_len);
+      return GDEFCORE_ERR_INVALID;
+    }
+  }
+  if (spec->path_len > GDEFCORE_ROUTE_PATH_MAX) {
+    route_error(alloc, out_error, out_error_len, "path too long", spec->machine,
+        spec->machine_len, "(path)", 6, NULL, 0, NULL, 0);
+    return GDEFCORE_ERR_INVALID;
+  }
+  rc = split_path(alloc, spec->path, spec->path_len, 1, &segs, &nsegs, &score,
+      &why);
+  if (rc != GDEFCORE_OK) {
+    if (why != NULL) {
+      route_error(alloc, out_error, out_error_len, why, spec->machine,
+          spec->machine_len, spec->path, spec->path_len, NULL, 0, NULL, 0);
+    }
+    return rc;
+  }
+  if (routes->ncontribs == routes->contribs_cap) {
+    size_t cap = routes->contribs_cap == 0 ? 4 : routes->contribs_cap * 2;
+    next = (Contrib *)gcu_allocator_realloc(alloc, routes->contribs,
+        cap * sizeof *next);
+    if (next == NULL) {
+      seg_free(alloc, segs, nsegs);
+      return GDEFCORE_ERR_OOM;
+    }
+    routes->contribs = next;
+    routes->contribs_cap = cap;
+  }
+  next = &routes->contribs[routes->ncontribs];
+  memset(next, 0, sizeof *next);
+  next->kind = dup_span(alloc, spec->kind, spec->kind_len);
+  next->machine = dup_span(alloc, spec->machine, spec->machine_len);
+  next->path = dup_span(alloc, spec->path, spec->path_len);
+  if (next->kind == NULL || next->machine == NULL || next->path == NULL) {
+    contrib_clear(alloc, next);
+    seg_free(alloc, segs, nsegs);
+    return GDEFCORE_ERR_OOM;
+  }
+  next->kind_len = spec->kind_len;
+  next->machine_len = spec->machine_len;
+  next->path_len = spec->path_len;
+  next->exact = spec->exact != 0;
+  next->weight = spec->weight;
+  next->segs = segs;
+  next->nsegs = nsegs;
+  next->score = score;
+  next->fn = spec->fn;
+  next->data = spec->data;
+  routes->ncontribs += 1;
+  return GDEFCORE_OK;
+}
+
+size_t gdefcore_routes_contributor_count(const GDEFCORE_Routes * routes) {
+  return routes == NULL ? 0 : routes->ncontribs;
+}
+
+/* The rank of a pattern: more literal segments, the earlier counting for more;
+ * then more segments; then an exact pattern; then a refined offer. */
+static int64_t offer_rank(int score, size_t nsegs, int exact, int refined) {
+  int64_t segs = nsegs > 63 ? 63 : (int64_t)nsegs;
+  return ((((int64_t)score * 64 + segs) * 2 + (exact ? 1 : 0)) * 2) +
+         (refined ? 1 : 0);
+}
+
+GDEFCORE_Result gdefcore_contributor_offer(
+    const GDEFCORE_Contributor_Call * call, const GDEFCORE_Offer * offer) {
+  Gather * g;
+  GDEFCORE_Offers * set;
+  OfferRec * rec;
+  const char * source;
+  size_t source_len;
+  int64_t rank;
+  int weight;
+  if (call == NULL || call->size != sizeof *call || call->internal == NULL ||
+      offer == NULL || offer->size != sizeof *offer || offer->value == NULL ||
+      offer->value_len == 0 || offer->value_len > GDEFCORE_OFFER_VALUE_MAX ||
+      (offer->source == NULL && offer->source_len != 0)) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  g = (Gather *)call->internal;
+  set = g->offers;
+  if (offer->pattern != NULL) {
+    Seg * segs = NULL;
+    size_t n = 0;
+    int score = 0;
+    GDEFCORE_Result rc;
+    if (offer->pattern_len > GDEFCORE_ROUTE_PATH_MAX) {
+      return GDEFCORE_ERR_INVALID;
+    }
+    rc = split_path(set->alloc, offer->pattern, offer->pattern_len, 1, &segs, &n,
+        &score, NULL);
+    if (rc != GDEFCORE_OK) {
+      if (rc == GDEFCORE_ERR_OOM) {
+        g->rc = rc;
+      }
+      return rc;
+    }
+    /* An offer ranked by a pattern of its own is kept only if the trie would
+     * reach this path with that pattern: the matching is the trie's, whoever
+     * holds the pattern. */
+    if ((offer->exact ? n != g->nreq : n > g->nreq) ||
+        !segs_match(segs, n, g->req)) {
+      seg_free(set->alloc, segs, n);
+      return GDEFCORE_OK;
+    }
+    seg_free(set->alloc, segs, n);
+    rank = offer_rank(score, n, offer->exact, offer->refined);
+    weight = offer->weight;
+  } else {
+    rank = offer_rank(g->contrib->score, g->contrib->nsegs, g->contrib->exact,
+        offer->refined);
+    weight = g->contrib->weight;
+  }
+  if (offer->source != NULL && offer->source_len > 0) {
+    source = offer->source;
+    source_len = offer->source_len;
+  } else {
+    source = g->contrib->machine;
+    source_len = g->contrib->machine_len;
+  }
+  if (set->n >= kOffersMax) {
+    return GDEFCORE_ERR_LIMIT;
+  }
+  if (set->n == set->cap) {
+    size_t cap = set->cap == 0 ? 8 : set->cap * 2;
+    OfferRec * grown = (OfferRec *)gcu_allocator_realloc(set->alloc, set->recs,
+        cap * sizeof *grown);
+    if (grown == NULL) {
+      g->rc = GDEFCORE_ERR_OOM;
+      return GDEFCORE_ERR_OOM;
+    }
+    set->recs = grown;
+    set->cap = cap;
+  }
+  rec = &set->recs[set->n];
+  memset(rec, 0, sizeof *rec);
+  rec->value = dup_span(set->alloc, offer->value, offer->value_len);
+  rec->source = dup_span(set->alloc, source, source_len);
+  if (rec->value == NULL || rec->source == NULL) {
+    gcu_allocator_free(set->alloc, rec->value);
+    gcu_allocator_free(set->alloc, rec->source);
+    g->rc = GDEFCORE_ERR_OOM;
+    return GDEFCORE_ERR_OOM;
+  }
+  rec->value_len = offer->value_len;
+  rec->source_len = source_len;
+  rec->rank = rank;
+  rec->weight = weight;
+  rec->site = offer->site != 0;
+  set->n += 1;
+  return GDEFCORE_OK;
+}
+
+static int bytes_cmp(const char * a, size_t an, const char * b, size_t bn) {
+  size_t n = an < bn ? an : bn;
+  int c = n == 0 ? 0 : memcmp(a, b, n);
+  if (c != 0) {
+    return c;
+  }
+  return an < bn ? -1 : (an > bn ? 1 : 0);
+}
+
+/* One total order, whatever order the offers were made in. */
+static int offer_cmp(const void * pa, const void * pb) {
+  const OfferRec * a = (const OfferRec *)pa;
+  const OfferRec * b = (const OfferRec *)pb;
+  int c;
+  if (a->rank != b->rank) {
+    return a->rank > b->rank ? -1 : 1;
+  }
+  if (a->weight != b->weight) {
+    return a->weight < b->weight ? -1 : 1;
+  }
+  if (a->site != b->site) {
+    return a->site ? -1 : 1;
+  }
+  c = bytes_cmp(a->source, a->source_len, b->source, b->source_len);
+  if (c != 0) {
+    return c;
+  }
+  return bytes_cmp(a->value, a->value_len, b->value, b->value_len);
+}
+
+void gdefcore_offers_free(GDEFCORE_Offers * offers) {
+  size_t i;
+  if (offers == NULL) {
+    return;
+  }
+  for (i = 0; i < offers->n; i++) {
+    gcu_allocator_free(offers->alloc, offers->recs[i].value);
+    gcu_allocator_free(offers->alloc, offers->recs[i].source);
+  }
+  gcu_allocator_free(offers->alloc, offers->recs);
+  gcu_allocator_free(offers->alloc, offers);
+}
+
+size_t gdefcore_offers_count(const GDEFCORE_Offers * offers) {
+  return offers == NULL ? 0 : offers->n;
+}
+
+GDEFCORE_Result gdefcore_offers_at(const GDEFCORE_Offers * offers, size_t index,
+    const char ** out_value, size_t * out_value_len, const char ** out_source,
+    size_t * out_source_len) {
+  if (offers == NULL || index >= offers->n) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  if (out_value != NULL) {
+    *out_value = offers->recs[index].value;
+  }
+  if (out_value_len != NULL) {
+    *out_value_len = offers->recs[index].value_len;
+  }
+  if (out_source != NULL) {
+    *out_source = offers->recs[index].source;
+  }
+  if (out_source_len != NULL) {
+    *out_source_len = offers->recs[index].source_len;
+  }
+  return GDEFCORE_OK;
+}
+
+GDEFCORE_Result gdefcore_routes_offers(GDEFCORE_Routes * routes,
+    GDEFCORE_Catalog * catalog, GDEFCORE_Request * request, const char * kind,
+    size_t kind_len, const char * path, size_t path_len,
+    GDEFCORE_Offers ** out) {
+  const GDEFCORE_Allocator * alloc;
+  Seg * req = NULL;
+  size_t nreq = 0;
+  GDEFCORE_Offers * set;
+  char * kept_res = NULL;
+  size_t kept_len = 0;
+  size_t i;
+  GDEFCORE_Result rc;
+  if (out != NULL) {
+    *out = NULL;
+  }
+  if (routes == NULL || catalog == NULL || request == NULL || out == NULL ||
+      !contrib_kind_ok(kind, kind_len) || path == NULL || path_len == 0 ||
+      path[0] != '/') {
+    return GDEFCORE_ERR_INVALID;
+  }
+  alloc = routes->alloc;
+  rc = split_path(alloc, path, path_len, 0, &req, &nreq, NULL, NULL);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  set = (GDEFCORE_Offers *)gcu_allocator_calloc(alloc, 1, sizeof *set);
+  if (set == NULL) {
+    seg_free(alloc, req, nreq);
+    return GDEFCORE_ERR_OOM;
+  }
+  set->alloc = alloc;
+  /* The page's entity is the main content's. A contributor is handed the
+   * request, which can set the resolution, so the resolution is kept as it was
+   * and put back after each: nothing a contributor does can change which
+   * entity the page shows. */
+  {
+    size_t res_len = 0;
+    const char * res = gdefcore_request_resolution(request, &res_len);
+    if (res != NULL && res_len > 0) {
+      kept_res = dup_span(alloc, res, res_len);
+      if (kept_res == NULL) {
+        seg_free(alloc, req, nreq);
+        gdefcore_offers_free(set);
+        return GDEFCORE_ERR_OOM;
+      }
+      kept_len = res_len;
+    }
+  }
+  for (i = 0; i < routes->ncontribs; i++) {
+    const Contrib * c = &routes->contribs[i];
+    GDEFCORE_Contributor_Call call;
+    Gather g;
+    if (!span_eq(c->kind, c->kind_len, kind, kind_len) ||
+        (c->exact ? c->nsegs != nreq : c->nsegs > nreq) ||
+        !segs_match(c->segs, c->nsegs, req)) {
+      continue;
+    }
+    g.offers = set;
+    g.contrib = c;
+    g.req = req;
+    g.nreq = nreq;
+    g.rc = GDEFCORE_OK;
+    memset(&call, 0, sizeof call);
+    call.size = sizeof call;
+    call.request = request;
+    call.catalog = catalog;
+    call.machine = c->machine;
+    call.machine_len = c->machine_len;
+    call.kind = c->kind;
+    call.kind_len = c->kind_len;
+    call.path = path;
+    call.path_len = path_len;
+    call.data = c->data;
+    call.internal = &g;
+    c->fn(&call);
+    (void)gdefcore_request_set_resolution(request, kept_res, kept_len);
+    if (g.rc != GDEFCORE_OK) {
+      seg_free(alloc, req, nreq);
+      gdefcore_offers_free(set);
+      gcu_allocator_free(alloc, kept_res);
+      return g.rc;
+    }
+  }
+  gcu_allocator_free(alloc, kept_res);
+  seg_free(alloc, req, nreq);
+  if (set->n > 1) {
+    qsort(set->recs, set->n, sizeof *set->recs, offer_cmp);
+  }
+  *out = set;
+  return GDEFCORE_OK;
 }

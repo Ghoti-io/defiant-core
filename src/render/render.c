@@ -32,6 +32,7 @@
 #include "render_internal.h"
 
 #include <ghoti.io/defiant-core/access.h>
+#include <ghoti.io/defiant-core/layout.h>
 #include <ghoti.io/defiant-core/menu.h>
 #include <ghoti.io/defiant-core/module.h>
 #include <ghoti.io/defiant-core/request.h>
@@ -81,7 +82,6 @@ static const char kRecentBody[] =
     "<% use title; use summary; %>"
     "<article class=\"recent\"><h2><%= title %></h2>"
     "<p><%= summary %></p></article>";
-static const char kFieldBody[] = "<% use value; %><%= value %>";
 
 /*
  * The navigation widgets' templates. `items` is the computed list (menu.h): a
@@ -108,11 +108,22 @@ static const char kCrumbsBody[] =
     "<% } %>><a href=\"<%= url(item.href) %>\"><%= item.label %></a></li>"
     "<% } %></ol>";
 
+/* The site name, the page title and the messages. The messages template
+ * prints nothing while the list is empty, so a page without a queue shows no
+ * trace of the widget. */
+static const char kSiteNameBody[] =
+    "<% use name; %><span class=\"site-name\"><%= name %></span>";
+static const char kTitleBody[] = "<% use title; %><h1><%= title %></h1>";
+static const char kMessagesBody[] =
+    "<% use items; %><% for (item : items) { %><div class=\"message\">"
+    "<%= item.text %></div><% } %>";
+
 /*
  * The built-in kinds and the contract each template really uses. A page
- * layout calls region() and may call url(); a pane reads title, body,
- * summary or value, and may call url(). A pane is one kind, not three, so
- * its contract is the union: each pane binds the subset its renderer has.
+ * layout calls region() and may call url(); a pane reads title, body or
+ * summary, and may call url(). A pane is one kind for two widgets (page content
+ * and recent posts), so its contract is the union: each binds the subset its
+ * renderer has.
  */
 static const char * const kPageVars[] = {NULL};
 static const char * const kPageFns[] = {"region 1", "url 1"};
@@ -122,9 +133,7 @@ static const char * const kPaneVars[] = {
     "escapes it.",
     "summary text The summary of a post in a list: its summary field, else the "
     "text before the break marker, else its first 600 characters. The "
-    "recent-posts view binds it.",
-    "value text The value of one field of the post being shown. A field pane "
-    "binds it."};
+    "recent-posts view binds it."};
 static const char * const kPaneFns[] = {"url 1"};
 
 /* A widget's kind reads the list of what it shows, and url(). */
@@ -139,6 +148,15 @@ static const char * const kCrumbsVars[] = {
     "items list The trail to the page, from the top. Each is a map with name, "
     "label, route, href and current (the page itself)."};
 static const char * const kNavFns[] = {"url 1"};
+
+static const char * const kSiteNameVars[] = {
+    "name text The name of the site, which is the site_name of the base theme "
+    "until settings supply it."};
+static const char * const kPageTitleVars[] = {
+    "title text The title of the page being shown, as the viewer may read it."};
+static const char * const kMessagesVars[] = {
+    "items list The messages for this viewer, each a map with text. It is "
+    "empty until a message queue supplies it."};
 
 typedef struct TangBind {
   const char * name;
@@ -1219,39 +1237,6 @@ static GDEFCORE_Result render_entity_pane(GDEFCORE_Catalog * catalog,
   return rc;
 }
 
-static GDEFCORE_Result render_field_pane(GDEFCORE_Catalog * catalog,
-    GDEFCORE_Request * request, const char * field, size_t field_len,
-    uint64_t fuel, char ** html, size_t * html_len) {
-  const char * id;
-  size_t id_len = 0;
-  char * value = NULL;
-  size_t value_len = 0;
-  int missing = 0;
-  char name[65];
-  TangBind bind;
-  GDEFCORE_Result rc;
-  id = gdefcore_request_resolution(request, &id_len);
-  if (id == NULL || field_len == 0 || field_len >= sizeof name) {
-    return gdefcore_text_dup(catalog, "", 0, html) == GDEFCORE_OK
-        ? (*html_len = 0, GDEFCORE_OK)
-        : GDEFCORE_ERR_OOM;
-  }
-  memcpy(name, field, field_len);
-  name[field_len] = '\0';
-  rc = access_copy(catalog, request, id, id_len, name, &value, &value_len,
-      &missing);
-  if (rc != GDEFCORE_OK || missing) {
-    gdefcore_text_free(catalog, value);
-    return rc == GDEFCORE_OK ? GDEFCORE_ERR_INVALID : rc;
-  }
-  bind.name = "value";
-  bind.text = value == NULL ? "" : value;
-  bind.len = value_len;
-  rc = render_one(catalog, request, "field", 5, fuel, &bind, 1, html, html_len);
-  gdefcore_text_free(catalog, value);
-  return rc;
-}
-
 static GDEFCORE_Result render_view_pane(GDEFCORE_Catalog * catalog,
     GDEFCORE_Request * request, const char * view, size_t view_len,
     uint64_t fuel, char ** html, size_t * html_len) {
@@ -1459,41 +1444,6 @@ done:
     *html_len = 0;
   }
   return rc;
-}
-
-static int split3(const char * s, size_t n, const char ** a, size_t * an,
-    const char ** b, size_t * bn, const char ** c, size_t * cn) {
-  size_t i = 0;
-  size_t a0;
-  size_t b0;
-  size_t k;
-  while (i < n && s[i] != ' ') {
-    i += 1;
-  }
-  if (i == 0 || i >= n) {
-    return 0;
-  }
-  a0 = i;
-  i += 1;
-  b0 = i;
-  while (i < n && s[i] != ' ') {
-    i += 1;
-  }
-  if (i == b0 || i + 1 >= n) {
-    return 0;
-  }
-  for (k = i + 1; k < n; k++) {
-    if (s[k] == ' ') {
-      return 0;
-    }
-  }
-  *a = s;
-  *an = a0;
-  *b = s + b0;
-  *bn = i - b0;
-  *c = s + i + 1;
-  *cn = n - (i + 1);
-  return *cn > 0;
 }
 
 /* ---- navigation widgets (site admin story 6) ----------------------------- */
@@ -1902,6 +1852,281 @@ GDEFCORE_Result gdefcore_render_widget(GDEFCORE_Catalog * catalog,
   return rc;
 }
 
+/* ---- the widget catalog's sources (site admin story 7) --------------------- */
+
+static GDEFCORE_Result empty_html(GDEFCORE_Catalog * catalog, char ** html,
+    size_t * html_len) {
+  *html = NULL;
+  *html_len = 0;
+  return gdefcore_text_dup(catalog, "", 0, html);
+}
+
+/*
+ * Draw the stored template @p tmpl, which must be of the kind @p want, with
+ * the text variables @p binds and the list @p value (either may be absent).
+ */
+static GDEFCORE_Result render_kind(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Request * request, const char * tmpl, size_t tmpl_len,
+    const char * want, size_t want_len, uint64_t fuel, const TangBind * binds,
+    size_t nbinds, const char * value_name, GLTANG_ValueDescription * value,
+    char ** html, size_t * html_len) {
+  char * body = NULL;
+  char * kind = NULL;
+  size_t body_len = 0;
+  size_t kind_len = 0;
+  GDEFCORE_Contract * contract = NULL;
+  GDEFCORE_Result rc;
+  *html = NULL;
+  *html_len = 0;
+  rc = template_load(catalog, tmpl, tmpl_len, &body, &body_len, &kind, &kind_len);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  if (!span_eq(kind, kind_len, want, want_len)) {
+    rc = GDEFCORE_ERR_INVALID;   /* a template of another kind is not this widget's */
+  } else {
+    rc = gdefcore_template_contract_open(catalog, NULL, kind, kind_len, &contract,
+        NULL);
+    if (rc != GDEFCORE_OK && rc != GDEFCORE_ERR_OOM) {
+      rc = GDEFCORE_ERR_INVALID;
+    }
+  }
+  if (rc == GDEFCORE_OK) {
+    rc = tang_run_value(catalog, request, contract, body, body_len, fuel, binds,
+        nbinds, value_name, value, NULL, NULL, NULL, html, html_len);
+    if (rc == GDEFCORE_OK) {
+      (void)fragment_offer("live", 4);
+    }
+  }
+  gdefcore_template_contract_close(contract);
+  gdefcore_text_free(catalog, body);
+  gdefcore_text_free(catalog, kind);
+  return rc;
+}
+
+/* The site name widget. Its source is the base theme's site_name, which
+ * settings will replace; a theme without one draws an empty name. */
+static GDEFCORE_Result render_sitename(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Request * request, const char * tmpl, size_t tmpl_len, uint64_t fuel,
+    char ** html, size_t * html_len) {
+  char id[GDEFCORE_PUBLIC_ID_LEN + 1];
+  char * name = NULL;
+  size_t name_len = 0;
+  TangBind bind;
+  GDEFCORE_Result rc = find_named(catalog, "core.theme", 10, "base", 4, id);
+  if (rc == GDEFCORE_OK) {
+    rc = config_text(catalog, id, "site_name", 0, &name, &name_len);
+  } else if (rc == GDEFCORE_ERR_INVALID) {
+    rc = GDEFCORE_OK;
+  }
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  bind.name = "name";
+  bind.text = name == NULL ? "" : name;
+  bind.len = name_len;
+  rc = render_kind(catalog, request, tmpl, tmpl_len, "core.sitename", 13, fuel,
+      &bind, 1, NULL, NULL, html, html_len);
+  gdefcore_text_free(catalog, name);
+  return rc;
+}
+
+/* The page title widget: the title of the entity the page shows, as the
+ * request's principal may read it. An entity the viewer may not read makes the
+ * page what an unknown path is. */
+static GDEFCORE_Result render_title(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Request * request, const char * tmpl, size_t tmpl_len, uint64_t fuel,
+    char ** html, size_t * html_len) {
+  const char * id;
+  size_t id_len = 0;
+  char * title = NULL;
+  size_t title_len = 0;
+  int missing = 0;
+  TangBind bind;
+  GDEFCORE_Result rc;
+  id = gdefcore_request_resolution(request, &id_len);
+  if (id == NULL || id_len == 0) {
+    return empty_html(catalog, html, html_len);
+  }
+  rc = access_copy(catalog, request, id, id_len, "title", &title, &title_len,
+      &missing);
+  if (rc != GDEFCORE_OK || missing) {
+    gdefcore_text_free(catalog, title);
+    return rc == GDEFCORE_OK ? GDEFCORE_ERR_INVALID : rc;
+  }
+  bind.name = "title";
+  bind.text = title == NULL ? "" : title;
+  bind.len = title_len;
+  rc = render_kind(catalog, request, tmpl, tmpl_len, "core.title", 10, fuel,
+      &bind, 1, NULL, NULL, html, html_len);
+  gdefcore_text_free(catalog, title);
+  return rc;
+}
+
+/* The messages widget: declared, with a source that is always empty until the
+ * message queue exists. */
+static GDEFCORE_Result render_messages(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Request * request, const char * tmpl, size_t tmpl_len, uint64_t fuel,
+    char ** html, size_t * html_len) {
+  GLTANG_ValueDescription * none = NULL;
+  GDEFCORE_Result rc = describe_menu(NULL, &none);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  rc = render_kind(catalog, request, tmpl, tmpl_len, "core.messages", 13, fuel,
+      NULL, 0, "items", none, html, html_len);
+  gltang_value_description_release(none);
+  return rc;
+}
+
+/* The variables a module's widget provider binds. */
+struct GDEFCORE_Widget_Sink {
+  char name[GDEFCORE_WIDGET_BINDS_MAX][65];
+  char * text[GDEFCORE_WIDGET_BINDS_MAX];
+  size_t len[GDEFCORE_WIDGET_BINDS_MAX];
+  size_t n;
+};
+
+static int bind_name_ok(const char * s, size_t n) {
+  size_t i;
+  if (s == NULL || n == 0 || n > 64) {
+    return 0;
+  }
+  for (i = 0; i < n; i++) {
+    char c = s[i];
+    if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' ||
+            (i > 0 && c >= '0' && c <= '9'))) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+GDEFCORE_Result gdefcore_widget_bind_text(GDEFCORE_Widget_Sink * sink,
+    const char * name, size_t name_len, const char * text, size_t text_len) {
+  size_t i;
+  char * copy;
+  if (sink == NULL || !bind_name_ok(name, name_len) ||
+      (text == NULL && text_len != 0)) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  if (text_len > GDEFCORE_WIDGET_VALUE_MAX) {
+    return GDEFCORE_ERR_LIMIT;
+  }
+  for (i = 0; i < sink->n; i++) {
+    if (strlen(sink->name[i]) == name_len &&
+        memcmp(sink->name[i], name, name_len) == 0) {
+      break;
+    }
+  }
+  if (i == sink->n && sink->n == GDEFCORE_WIDGET_BINDS_MAX) {
+    return GDEFCORE_ERR_LIMIT;
+  }
+  copy = (char *)malloc(text_len + 1);
+  if (copy == NULL) {
+    return GDEFCORE_ERR_OOM;
+  }
+  if (text_len > 0) {
+    memcpy(copy, text, text_len);
+  }
+  copy[text_len] = '\0';
+  if (i == sink->n) {
+    memcpy(sink->name[i], name, name_len);
+    sink->name[i][name_len] = '\0';
+    sink->text[i] = NULL;
+    sink->n += 1;
+  }
+  free(sink->text[i]);
+  sink->text[i] = copy;
+  sink->len[i] = text_len;
+  return GDEFCORE_OK;
+}
+
+/*
+ * A widget type an enabled module declared. It is drawn only if the viewer
+ * holds the permission its source needs, and the provider is not even called
+ * otherwise. A provider that fails, a kind or template that does not exist, or
+ * a template of another kind draws nothing: a module's widget never takes the
+ * page down with it.
+ */
+static GDEFCORE_Result render_module_widget(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Request * request, const GDEFCORE_Layout_Widget * w,
+    const char * target, size_t target_len, uint64_t fuel, char ** html,
+    size_t * html_len) {
+  GDEFCORE_Widget_Sink sink;
+  TangBind binds[GDEFCORE_WIDGET_BINDS_MAX];
+  size_t i;
+  GDEFCORE_Result rc;
+  if (w->fn == NULL ||
+      (w->permission_len > 0 &&
+          !gdefcore_access_permits(catalog, request, w->permission,
+              w->permission_len))) {
+    return empty_html(catalog, html, html_len);
+  }
+  memset(&sink, 0, sizeof sink);
+  rc = w->fn(request, target == NULL ? "" : target, target_len, &sink, w->user);
+  if (rc == GDEFCORE_OK) {
+    for (i = 0; i < sink.n; i++) {
+      binds[i].name = sink.name[i];
+      binds[i].text = sink.text[i];
+      binds[i].len = sink.len[i];
+    }
+    rc = render_kind(catalog, request, w->template_name, w->template_len, w->kind,
+        w->kind_len, fuel, binds, sink.n, NULL, NULL, html, html_len);
+  }
+  for (i = 0; i < sink.n; i++) {
+    free(sink.text[i]);
+  }
+  if (rc == GDEFCORE_ERR_OOM || rc == GDEFCORE_OK) {
+    return rc;
+  }
+  gdefcore_text_free(catalog, *html);
+  return empty_html(catalog, html, html_len);
+}
+
+/* Draw one placement: the widget type by name, with what its source gives. */
+static GDEFCORE_Result render_widget_at(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Request * request, const NavCtx * nav, const char * widget,
+    size_t widget_len, const char * target, size_t target_len, uint64_t fuel,
+    char ** html, size_t * html_len) {
+  GDEFCORE_Layout_Widget w;
+  const char * tmpl;
+  size_t tmpl_len;
+  GDEFCORE_Result rc;
+  memset(&w, 0, sizeof w);
+  w.size = sizeof w;
+  rc = gdefcore_layout_widget_find(catalog, widget, widget_len, &w);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  if (w.builtin == 0) {
+    return render_module_widget(catalog, request, &w, target, target_len, fuel,
+        html, html_len);
+  }
+  tmpl = target_len > 0 ? target : w.template_name;
+  tmpl_len = target_len > 0 ? target_len : w.template_len;
+  switch (w.builtin) {
+  case 1:
+    return render_sitename(catalog, request, tmpl, tmpl_len, fuel, html, html_len);
+  case 2:
+    return render_title(catalog, request, tmpl, tmpl_len, fuel, html, html_len);
+  case 3:
+    return render_entity_pane(catalog, request, tmpl, tmpl_len, fuel, html,
+        html_len);
+  case 4:
+  case 5:
+  case 6:
+    return render_nav(catalog, request, nav, widget, widget_len, target,
+        target_len, fuel, html, html_len);
+  case 7:
+    return render_messages(catalog, request, tmpl, tmpl_len, fuel, html, html_len);
+  default:
+    /* Recent posts: the target names the view, `recent` unless said. */
+    return render_view_pane(catalog, request, target_len > 0 ? target : "recent",
+        target_len > 0 ? target_len : 6, fuel, html, html_len);
+  }
+}
+
 static GDEFCORE_Result render_display(GDEFCORE_Catalog * catalog,
     GDEFCORE_Request * request, const NavCtx * nav, const char * name,
     size_t name_len, uint64_t fuel, char ** out, size_t * out_len) {
@@ -1940,33 +2165,20 @@ static GDEFCORE_Result render_display(GDEFCORE_Catalog * catalog,
   }
   for (i = 0; i < count; i++) {
     const char * region;
-    const char * kind;
+    const char * widget;
     const char * target;
     size_t region_len = 0;
-    size_t kind_len = 0;
+    size_t widget_len = 0;
     size_t target_len = 0;
     char * html = NULL;
     size_t html_len = 0;
-    if (!split3(panes[i], lens[i], &region, &region_len, &kind, &kind_len,
-            &target, &target_len)) {
+    if (!gdefcore_render_split_pane(panes[i], lens[i], &region, &region_len,
+            &widget, &widget_len, &target, &target_len)) {
       rc = GDEFCORE_ERR_INVALID;
       goto done;
     }
-    if (span_eq(kind, kind_len, "view", 4)) {
-      rc = render_view_pane(catalog, request, target, target_len, fuel, &html,
-          &html_len);
-    } else if (span_eq(kind, kind_len, "entity", 6)) {
-      rc = render_entity_pane(catalog, request, target, target_len, fuel, &html,
-          &html_len);
-    } else if (span_eq(kind, kind_len, "field", 5)) {
-      rc = render_field_pane(catalog, request, target, target_len, fuel, &html,
-          &html_len);
-    } else if (nav_kind(kind, kind_len) != 0) {
-      rc = render_nav(catalog, request, nav, kind, kind_len, target, target_len,
-          fuel, &html, &html_len);
-    } else {
-      rc = GDEFCORE_ERR_INVALID;
-    }
+    rc = render_widget_at(catalog, request, nav, widget, widget_len, target,
+        target_len, fuel, &html, &html_len);
     if (rc != GDEFCORE_OK) {
       gdefcore_text_free(catalog, html);
       goto done;
@@ -2342,6 +2554,8 @@ GDEFCORE_Result gdefcore_render_page(GDEFCORE_Catalog * catalog,
   char canon[GDEFCORE_PUBLIC_ID_LEN + 1];
   char * type = NULL;
   size_t type_len = 0;
+  char * layout = NULL;
+  size_t layout_len = 0;
   NavCtx nav;
   GDEFCORE_Result rc;
   if (catalog == NULL || request == NULL || path == NULL || out_bytes == NULL ||
@@ -2357,35 +2571,40 @@ GDEFCORE_Result gdefcore_render_page(GDEFCORE_Catalog * catalog,
     if (rc != GDEFCORE_OK) {
       return rc;
     }
-    return render_display(catalog, request, &nav, "front", 5, scope_fuel,
-        out_bytes, out_len);
-  }
-  rc = gdefcore_form_resolve(routes, catalog, request, path, path_len, &resolved,
-      &resolved_len);
-  if (rc != GDEFCORE_OK) {
-    return rc;
-  }
-  if (gdefcore_id_canonical(resolved, resolved_len, canon) != GDEFCORE_OK) {
+  } else {
+    rc = gdefcore_form_resolve(routes, catalog, request, path, path_len,
+        &resolved, &resolved_len);
+    if (rc != GDEFCORE_OK) {
+      return rc;
+    }
+    if (gdefcore_id_canonical(resolved, resolved_len, canon) != GDEFCORE_OK) {
+      gdefcore_text_free(catalog, resolved);
+      return GDEFCORE_ERR_INVALID;
+    }
     gdefcore_text_free(catalog, resolved);
-    return GDEFCORE_ERR_INVALID;
-  }
-  gdefcore_text_free(catalog, resolved);
-  rc = gdefcore_entity_type(catalog, canon, GDEFCORE_PUBLIC_ID_LEN, &type,
-      &type_len);
-  if (rc != GDEFCORE_OK) {
-    return rc == GDEFCORE_ERR_INVALID ? rc : rc;
-  }
-  if (!span_eq(type, type_len, "site.post", 9)) {
+    rc = gdefcore_entity_type(catalog, canon, GDEFCORE_PUBLIC_ID_LEN, &type,
+        &type_len);
+    if (rc != GDEFCORE_OK) {
+      return rc;
+    }
     gdefcore_text_free(catalog, type);
-    return GDEFCORE_ERR_INVALID;
+    rc = gdefcore_request_set_resolution(request, canon, GDEFCORE_PUBLIC_ID_LEN);
+    if (rc != GDEFCORE_OK) {
+      return rc;
+    }
   }
-  gdefcore_text_free(catalog, type);
-  rc = gdefcore_request_set_resolution(request, canon, GDEFCORE_PUBLIC_ID_LEN);
+  /* Which layout draws the page is the route trie's answer (layout.h): the
+   * site's rules and the modules' selectors, most specific first, and the
+   * alter hook. A page no layout applies to is what an unknown path is. */
+  rc = gdefcore_layout_select(catalog, routes, request, path, path_len, &layout,
+      &layout_len);
   if (rc != GDEFCORE_OK) {
     return rc;
   }
-  return render_display(catalog, request, &nav, "post", 4, scope_fuel, out_bytes,
-      out_len);
+  rc = render_display(catalog, request, &nav, layout, layout_len, scope_fuel,
+      out_bytes, out_len);
+  gdefcore_text_free(catalog, layout);
+  return rc;
 }
 
 static int axis_personal(GDEFCORE_Catalog * catalog, const char * type,
@@ -2534,6 +2753,18 @@ static void scan_regions(const char * body, size_t n, char *** out_names,
   *out_count = count;
 }
 
+/* Shared with the layouts (layout.c), which are part of the render subsystem. */
+GDEFCORE_Result gdefcore_render_find_named(GDEFCORE_Catalog * catalog,
+    const char * type, size_t type_len, const char * name, size_t name_len,
+    char out_id[GDEFCORE_PUBLIC_ID_LEN + 1]) {
+  return find_named(catalog, type, type_len, name, name_len, out_id);
+}
+
+void gdefcore_render_scan_regions(const char * body, size_t n, char *** out_names,
+    size_t * out_count, GDEFCORE_Catalog * catalog, GDEFCORE_Result * rc) {
+  scan_regions(body, n, out_names, out_count, catalog, rc);
+}
+
 GDEFCORE_Result gdefcore_render_regions(GDEFCORE_Catalog * catalog,
     const char * name, size_t name_len, char *** out_names, size_t * out_count) {
   char * body = NULL;
@@ -2598,8 +2829,8 @@ GDEFCORE_Result gdefcore_render_pane_at(GDEFCORE_Catalog * catalog,
     return rc;
   }
   if (index >= count ||
-      !split3(panes[index], lens[index], &region, &region_len, &kind, &kind_len,
-          &target, &target_len)) {
+      !gdefcore_render_split_pane(panes[index], lens[index], &region,
+          &region_len, &kind, &kind_len, &target, &target_len)) {
     gdefcore_values_free(catalog, panes, lens, count);
     return GDEFCORE_ERR_INVALID;
   }
@@ -2984,13 +3215,49 @@ static GDEFCORE_Result ensure_template(GDEFCORE_Catalog * catalog,
   return save_entity(catalog, "core.template", values, 3, 1);
 }
 
+/* A selector rule of the site, unless one of that name is stored. */
+static GDEFCORE_Result ensure_rule(GDEFCORE_Catalog * catalog, const char * name,
+    const char * path, int exact, const char * layout, const char * type) {
+  char id[GDEFCORE_PUBLIC_ID_LEN + 1];
+  GDEFCORE_Layout_Rule rule;
+  GDEFCORE_Changeset * cs = NULL;
+  GDEFCORE_Result rc = find_named(catalog, GDEFCORE_LAYOUT_RULE_TYPE,
+      sizeof GDEFCORE_LAYOUT_RULE_TYPE - 1, name, strlen(name), id);
+  if (rc == GDEFCORE_OK) {
+    return GDEFCORE_OK;
+  }
+  if (rc != GDEFCORE_ERR_INVALID) {
+    return rc;
+  }
+  memset(&rule, 0, sizeof rule);
+  rule.size = sizeof rule;
+  rule.path = path;
+  rule.path_len = strlen(path);
+  rule.layout = layout;
+  rule.layout_len = strlen(layout);
+  rule.type = type;
+  rule.type_len = type == NULL ? 0 : strlen(type);
+  rule.exact = exact;
+  rc = gdefcore_changeset_prepare(catalog, NULL, 0, &cs);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  rc = gdefcore_layout_stage_rule(cs, name, strlen(name), &rule);
+  if (rc == GDEFCORE_OK) {
+    rc = gdefcore_changeset_apply(cs, GDEFCORE_LAYOUT_RULE_TYPE,
+        sizeof GDEFCORE_LAYOUT_RULE_TYPE - 1);
+  }
+  gdefcore_changeset_destroy(cs);
+  return rc;
+}
+
 static GDEFCORE_Result write_kit(GDEFCORE_Catalog * catalog) {
   char id[GDEFCORE_PUBLIC_ID_LEN + 1];
   GDEFCORE_Result rc;
   /* The kinds first: a template is validated against its kind as it is saved. */
   rc = ensure_kind(catalog, "core.page", "Page layout", kPageVars, 0, kPageFns, 2);
   if (rc == GDEFCORE_OK) {
-    rc = ensure_kind(catalog, "core.pane", "Pane", kPaneVars, 4, kPaneFns, 1);
+    rc = ensure_kind(catalog, "core.pane", "Pane", kPaneVars, 3, kPaneFns, 1);
   }
   if (rc == GDEFCORE_OK) {
     rc = ensure_template(catalog, "layout", kLayoutBody, "core.page");
@@ -3000,9 +3267,6 @@ static GDEFCORE_Result write_kit(GDEFCORE_Catalog * catalog) {
   }
   if (rc == GDEFCORE_OK) {
     rc = ensure_template(catalog, "recent", kRecentBody, "core.pane");
-  }
-  if (rc == GDEFCORE_OK) {
-    rc = ensure_template(catalog, "field", kFieldBody, "core.pane");
   }
   if (rc == GDEFCORE_OK) {
     rc = ensure_kind(catalog, "core.menu", "Menu", kMenuVars, 2, kNavFns, 1);
@@ -3024,9 +3288,34 @@ static GDEFCORE_Result write_kit(GDEFCORE_Catalog * catalog) {
     rc = ensure_template(catalog, "breadcrumbs", kCrumbsBody, "core.breadcrumbs");
   }
   if (rc == GDEFCORE_OK) {
+    rc = ensure_kind(catalog, "core.sitename", "Site name", kSiteNameVars, 1,
+        NULL, 0);
+  }
+  if (rc == GDEFCORE_OK) {
+    rc = ensure_kind(catalog, "core.title", "Page title", kPageTitleVars, 1,
+        NULL, 0);
+  }
+  if (rc == GDEFCORE_OK) {
+    rc = ensure_kind(catalog, "core.messages", "Messages", kMessagesVars, 1,
+        NULL, 0);
+  }
+  if (rc == GDEFCORE_OK) {
+    rc = ensure_template(catalog, "sitename", kSiteNameBody, "core.sitename");
+  }
+  if (rc == GDEFCORE_OK) {
+    rc = ensure_template(catalog, "title", kTitleBody, "core.title");
+  }
+  if (rc == GDEFCORE_OK) {
+    rc = ensure_template(catalog, "messages", kMessagesBody, "core.messages");
+  }
+  if (rc == GDEFCORE_OK) {
     /* The types of the site's own entries and overrides, and the permission to
      * edit them, granted to nobody. */
     rc = gdefcore_menu_declare(catalog);
+  }
+  if (rc == GDEFCORE_OK) {
+    /* The same for layouts and the rules that choose one. */
+    rc = gdefcore_layout_declare(catalog);
   }
   if (rc == GDEFCORE_OK) {
     rc = ensure_named(catalog, "core.theme", 10, "base", 4, NULL, NULL);
@@ -3039,10 +3328,18 @@ static GDEFCORE_Result write_kit(GDEFCORE_Catalog * catalog) {
     }
   }
   if (rc == GDEFCORE_OK) {
-    rc = ensure_display(catalog, "front", "side view recent");
+    rc = ensure_display(catalog, "front", "side recent");
   }
   if (rc == GDEFCORE_OK) {
-    rc = ensure_display(catalog, "post", "main entity entity");
+    rc = ensure_display(catalog, "post", "main content");
+  }
+  if (rc == GDEFCORE_OK) {
+    /* Which layout draws which page is data too: the front page is exactly
+     * `/`, and a page whose entity is a post is any other path. */
+    rc = ensure_rule(catalog, "site.front", "/", 1, "front", NULL);
+  }
+  if (rc == GDEFCORE_OK) {
+    rc = ensure_rule(catalog, "site.post", "/", 0, "post", "site.post");
   }
   if (rc == GDEFCORE_OK) {
     /* The one permission to edit a template, granted to nobody. */
@@ -3068,6 +3365,21 @@ static GDEFCORE_Result displays_ready(GDEFCORE_Catalog * catalog, int * ready) {
     return post;
   }
   *ready = front == GDEFCORE_OK && post == GDEFCORE_OK;
+  if (*ready) {
+    /* The rules that choose them: a tenant with the displays and no rules has
+     * a front page nobody can reach. */
+    GDEFCORE_Result rf = find_named(catalog, GDEFCORE_LAYOUT_RULE_TYPE,
+        sizeof GDEFCORE_LAYOUT_RULE_TYPE - 1, "site.front", 10, id);
+    GDEFCORE_Result rp = find_named(catalog, GDEFCORE_LAYOUT_RULE_TYPE,
+        sizeof GDEFCORE_LAYOUT_RULE_TYPE - 1, "site.post", 9, id);
+    if (rf != GDEFCORE_OK && rf != GDEFCORE_ERR_INVALID) {
+      return rf;
+    }
+    if (rp != GDEFCORE_OK && rp != GDEFCORE_ERR_INVALID) {
+      return rp;
+    }
+    *ready = rf == GDEFCORE_OK && rp == GDEFCORE_OK;
+  }
   return GDEFCORE_OK;
 }
 
@@ -3098,7 +3410,7 @@ GDEFCORE_Result gdefcore_render_kit(GDEFCORE_Catalog * catalog, uint8_t ** out_b
   GDEFCORE_Field post[3];
   GDEFCORE_Field tmpl[5];
   GDEFCORE_Field kinds[5];
-  GDEFCORE_Field theme[1];
+  GDEFCORE_Field theme[2];
   GDEFCORE_Field view[5];
   GDEFCORE_Field display[3];
   GDEFCORE_Patch * files = NULL;
@@ -3126,6 +3438,7 @@ GDEFCORE_Result gdefcore_render_kit(GDEFCORE_Catalog * catalog, uint8_t ** out_b
   set_field(&kinds[3], "variables", 0, 1);
   set_field(&kinds[4], "functions", 0, 1);
   set_field(&theme[0], "name", 1, 0);
+  set_field(&theme[1], "site_name", 0, 1);
   set_field(&view[0], "name", 1, 0);
   set_field(&view[1], "type", 1, 0);
   set_field(&view[2], "limit", 1, 0);
@@ -3152,7 +3465,7 @@ GDEFCORE_Result gdefcore_render_kit(GDEFCORE_Catalog * catalog, uint8_t ** out_b
   }
   if (rc == GDEFCORE_OK) {
     rc = gdefcore_changeset_define(cs, "core.theme", 10, GDEFCORE_TYPE_CONFIG,
-        theme, 1);
+        theme, 2);
   }
   if (rc == GDEFCORE_OK) {
     GDEFCORE_Field view_fields[6];

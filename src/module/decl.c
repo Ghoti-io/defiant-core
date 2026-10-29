@@ -271,6 +271,8 @@ void gdefcore_decl_free(Decl * d) {
   gcu_allocator_free(d->alloc, d->grants);
   gcu_allocator_free(d->alloc, d->relations);
   gcu_allocator_free(d->alloc, d->callbacks);
+  gcu_allocator_free(d->alloc, d->contributors);
+  gcu_allocator_free(d->alloc, d->widgets);
   gcu_allocator_free(d->alloc, d);
 }
 
@@ -475,6 +477,139 @@ static void build_vars(Build * b, const GDEFCORE_Module_Manifest * m,
   }
   if (b->rc == GDEFCORE_OK && d->nvars > 1) {
     qsort(d->vars, d->nvars, sizeof *d->vars, cmp_var);
+  }
+}
+
+static int cmp_contributor(const void * a, const void * b) {
+  const DeclContributor * x = (const DeclContributor *)a;
+  const DeclContributor * y = (const DeclContributor *)b;
+  int c = span_cmp(x->pub.name, x->pub.name_len, y->pub.name, y->pub.name_len);
+  return c != 0 ? c : (x->index < y->index ? -1 : (x->index > y->index));
+}
+
+static int cmp_widget(const void * a, const void * b) {
+  const DeclWidget * x = (const DeclWidget *)a;
+  const DeclWidget * y = (const DeclWidget *)b;
+  int c = span_cmp(x->pub.name, x->pub.name_len, y->pub.name, y->pub.name_len);
+  return c != 0 ? c : (x->index < y->index ? -1 : (x->index > y->index));
+}
+
+static void build_contributors(Build * b, const GDEFCORE_Module_Manifest * m,
+    const DeclSvc * svcs, size_t nsvcs) {
+  Decl * d = b->d;
+  size_t i;
+  d->contributors = (DeclContributor *)gcu_allocator_calloc(d->alloc,
+      m->ncontributors, sizeof *d->contributors);
+  if (d->contributors == NULL) {
+    build_fail(b, GDEFCORE_ERR_OOM, "contributor", 0);
+    return;
+  }
+  for (i = 0; i < m->ncontributors && b->rc == GDEFCORE_OK; i++) {
+    GDEFCORE_Module_Contributor c;
+    DeclContributor * dc = &d->contributors[i];
+    const void * table = NULL;
+    if (!TAKE_EXACT(b, GDEFCORE_Module_Contributor, c, &m->contributors[i], i)) {
+      break;
+    }
+    dc->index = i;
+    dc->pub.size = sizeof dc->pub;
+    dc->pub.module = d->module;
+    dc->pub.module_len = d->module_len;
+    dc->pub.name = dup_str(b, c.name, c.name_len, "contributor", i);
+    dc->pub.name_len = c.name_len;
+    dc->pub.kind = dup_str(b, c.kind, c.kind_len, "contributor", i);
+    dc->pub.kind_len = c.kind_len;
+    dc->pub.path = dup_str(b, c.path, c.path_len, "contributor", i);
+    dc->pub.path_len = c.path_len;
+    dc->pub.exact = c.exact != 0;
+    dc->pub.weight = c.weight;
+    dc->handler = dup_str(b, c.handler, c.handler_len, "contributor", i);
+    dc->handler_len = c.handler_len;
+    if (b->rc != GDEFCORE_OK) {
+      break;
+    }
+    dc->resolved = resolve(svcs, nsvcs, dc->handler, dc->handler_len,
+        GDEFCORE_MODULE_CONTRIBUTOR_HANDLER_VERSION,
+        sizeof(GDEFCORE_Module_Contributor_Handler), &table);
+    if (dc->resolved == kDeclResolved) {
+      GDEFCORE_Module_Contributor_Handler h;
+      memcpy(&h, table, sizeof h);
+      if (h.fn == NULL) {
+        dc->resolved = kDeclBadTable;
+      } else {
+        dc->pub.fn = h.fn;
+        dc->pub.data = h.data;
+      }
+    }
+    d->ncontributors = i + 1;
+  }
+  if (b->rc == GDEFCORE_OK && d->ncontributors > 1) {
+    qsort(d->contributors, d->ncontributors, sizeof *d->contributors,
+        cmp_contributor);
+  }
+}
+
+static void build_widgets(Build * b, const GDEFCORE_Module_Manifest * m,
+    const DeclSvc * svcs, size_t nsvcs) {
+  Decl * d = b->d;
+  size_t i;
+  d->widgets = (DeclWidget *)gcu_allocator_calloc(d->alloc, m->nwidgets,
+      sizeof *d->widgets);
+  if (d->widgets == NULL) {
+    build_fail(b, GDEFCORE_ERR_OOM, "widget", 0);
+    return;
+  }
+  for (i = 0; i < m->nwidgets && b->rc == GDEFCORE_OK; i++) {
+    GDEFCORE_Module_Widget w;
+    DeclWidget * dw = &d->widgets[i];
+    const void * table = NULL;
+    if (!TAKE_EXACT(b, GDEFCORE_Module_Widget, w, &m->widgets[i], i)) {
+      break;
+    }
+    dw->index = i;
+    dw->pub.size = sizeof dw->pub;
+    dw->pub.module = d->module;
+    dw->pub.module_len = d->module_len;
+    dw->pub.name = dup_str(b, w.name, w.name_len, "widget", i);
+    dw->pub.name_len = w.name_len;
+    dw->pub.kind = dup_str(b, w.kind, w.kind_len, "widget", i);
+    dw->pub.kind_len = w.kind_len;
+    /* A placement that names no template draws the widget's own name. */
+    if (w.template_len == 0) {
+      dw->pub.template_name = dw->pub.name;
+      dw->pub.template_len = w.name_len;
+    } else {
+      dw->pub.template_name = dup_str(b, w.template_name, w.template_len,
+          "widget", i);
+      dw->pub.template_len = w.template_len;
+    }
+    dw->pub.permission = dup_str(b, w.permission, w.permission_len, "widget", i);
+    dw->pub.permission_len = w.permission_len;
+    dw->pub.description = dup_str(b, w.description, w.description_len, "widget",
+        i);
+    dw->pub.description_len = w.description_len;
+    dw->provider = dup_str(b, w.provider, w.provider_len, "widget", i);
+    dw->provider_len = w.provider_len;
+    if (b->rc != GDEFCORE_OK) {
+      break;
+    }
+    dw->resolved = resolve(svcs, nsvcs, dw->provider, dw->provider_len,
+        GDEFCORE_MODULE_WIDGET_PROVIDER_VERSION,
+        sizeof(GDEFCORE_Module_Widget_Provider), &table);
+    if (dw->resolved == kDeclResolved) {
+      GDEFCORE_Module_Widget_Provider p;
+      memcpy(&p, table, sizeof p);
+      if (p.fn == NULL) {
+        dw->resolved = kDeclBadTable;
+      } else {
+        dw->pub.fn = p.fn;
+        dw->pub.user = p.user;
+      }
+    }
+    d->nwidgets = i + 1;
+  }
+  if (b->rc == GDEFCORE_OK && d->nwidgets > 1) {
+    qsort(d->widgets, d->nwidgets, sizeof *d->widgets, cmp_widget);
   }
 }
 
@@ -764,7 +899,7 @@ GDEFCORE_Result gdefcore_decl_build(const GDEFCORE_Allocator * alloc,
   *out = NULL;
   if (man->nroutes == 0 && man->nlinks == 0 && man->nsettings == 0 &&
       man->nvariables == 0 && man->ngrants == 0 && man->nrelations == 0 &&
-      man->ncallbacks == 0) {
+      man->ncallbacks == 0 && man->ncontributors == 0 && man->nwidgets == 0) {
     return GDEFCORE_OK;
   }
   if (module_len > 64) {
@@ -788,16 +923,20 @@ GDEFCORE_Result gdefcore_decl_build(const GDEFCORE_Allocator * alloc,
       man->nvariables > GDEFCORE_MODULE_VARIABLES_MAX ||
       man->ngrants > GDEFCORE_MODULE_GRANTS_MAX ||
       man->nrelations > GDEFCORE_MODULE_RELATIONS_MAX ||
-      man->ncallbacks > GDEFCORE_MODULE_CALLBACKS_MAX) {
+      man->ncallbacks > GDEFCORE_MODULE_CALLBACKS_MAX ||
+      man->ncontributors > GDEFCORE_MODULE_CONTRIBUTORS_MAX ||
+      man->nwidgets > GDEFCORE_MODULE_WIDGETS_MAX) {
     b.rc = GDEFCORE_ERR_LIMIT;
     if (err != NULL && cap > 0) {
       snprintf(err, cap,
           "Module %s declares more than %d routes, %d links, %d settings, "
-          "%d variables, %d grants, %d relations or %d access callbacks.",
+          "%d variables, %d grants, %d relations, %d access callbacks, "
+          "%d contributors or %d widget types.",
           d->module, GDEFCORE_MODULE_ROUTES_MAX, GDEFCORE_MODULE_LINKS_MAX,
           GDEFCORE_MODULE_SETTINGS_MAX, GDEFCORE_MODULE_VARIABLES_MAX,
           GDEFCORE_MODULE_GRANTS_MAX, GDEFCORE_MODULE_RELATIONS_MAX,
-          GDEFCORE_MODULE_CALLBACKS_MAX);
+          GDEFCORE_MODULE_CALLBACKS_MAX, GDEFCORE_MODULE_CONTRIBUTORS_MAX,
+          GDEFCORE_MODULE_WIDGETS_MAX);
     }
   } else if ((man->nroutes > 0 && man->routes == NULL) ||
              (man->nlinks > 0 && man->links == NULL) ||
@@ -805,7 +944,9 @@ GDEFCORE_Result gdefcore_decl_build(const GDEFCORE_Allocator * alloc,
              (man->nvariables > 0 && man->variables == NULL) ||
              (man->ngrants > 0 && man->grants == NULL) ||
              (man->nrelations > 0 && man->relations == NULL) ||
-             (man->ncallbacks > 0 && man->callbacks == NULL)) {
+             (man->ncallbacks > 0 && man->callbacks == NULL) ||
+             (man->ncontributors > 0 && man->contributors == NULL) ||
+             (man->nwidgets > 0 && man->widgets == NULL)) {
     b.rc = GDEFCORE_ERR_INVALID;
     if (err != NULL && cap > 0) {
       snprintf(err, cap, "Module %s: a declared table has a count and no data.",
@@ -832,6 +973,12 @@ GDEFCORE_Result gdefcore_decl_build(const GDEFCORE_Allocator * alloc,
   }
   if (b.rc == GDEFCORE_OK && man->ncallbacks > 0) {
     build_callbacks(&b, man, svcs, nsvcs);
+  }
+  if (b.rc == GDEFCORE_OK && man->ncontributors > 0) {
+    build_contributors(&b, man, svcs, nsvcs);
+  }
+  if (b.rc == GDEFCORE_OK && man->nwidgets > 0) {
+    build_widgets(&b, man, svcs, nsvcs);
   }
   if (b.rc != GDEFCORE_OK) {
     gdefcore_decl_free(d);
@@ -1495,6 +1642,150 @@ static int check_vars(const DeclRef * refs, size_t n, Say * say) {
   return 0;
 }
 
+static int check_contributors(const DeclRef * refs, size_t n, Say * say) {
+  size_t m;
+  size_t i;
+  for (m = 0; m < n; m++) {
+    const Decl * d = refs[m].decl;
+    for (i = 0; i < d->ncontributors; i++) {
+      const DeclContributor * c = &d->contributors[i];
+      const GDEFCORE_Module_Declared_Contributor * p = &c->pub;
+      char a[kShow + 8];
+      char b[kShow + 8];
+      const char * why = NULL;
+      int mc;
+      if (p->name_len == 0) {
+        SAY(say, "Module %s: a contributor has an empty name.", d->module);
+        return 1;
+      }
+      mc = machine_check(p->name, p->name_len, d->module, d->module_len);
+      if (mc == 1) {
+        SAY(say, "Module %s: contributor '%s' is not named %s.<name>.", d->module,
+            show(a, p->name, p->name_len), d->module);
+        return 1;
+      }
+      if (mc == 2) {
+        SAY(say,
+            "Module %s: contributor '%s' has a name over %d bytes or with a "
+            "character outside a-z, 0-9, '.', '_' and '-'.",
+            d->module, show(a, p->name, p->name_len),
+            GDEFCORE_MODULE_DECL_NAME_MAX);
+        return 1;
+      }
+      if (!ident_ok(p->kind, p->kind_len, GDEFCORE_CONTRIBUTOR_KIND_MAX)) {
+        SAY(say, "Module %s: contributor '%s' has a kind that is not 1 to %d "
+                 "bytes of a-z, 0-9, '.', '_' and '-' starting with a letter.",
+            d->module, show(a, p->name, p->name_len),
+            GDEFCORE_CONTRIBUTOR_KIND_MAX);
+        return 1;
+      }
+      if (!gdefcore_route_pattern_ok(p->path, p->path_len, &why)) {
+        SAY(say, "Module %s: contributor '%s' has a pattern the route table "
+                 "refuses: %s.",
+            d->module, show(a, p->name, p->name_len),
+            why == NULL ? "not a pattern" : why);
+        return 1;
+      }
+      if (c->resolved != kDeclResolved) {
+        SAY(say, "Module %s: contributor '%s' handler %s ('%s').", d->module,
+            show(a, p->name, p->name_len), why_service(c->resolved),
+            show(b, c->handler, c->handler_len));
+        return 1;
+      }
+    }
+  }
+  return 0;
+}
+
+static int check_widgets(const DeclRef * refs, size_t n, Say * say) {
+  size_t m;
+  size_t i;
+  for (m = 0; m < n; m++) {
+    const Decl * d = refs[m].decl;
+    for (i = 0; i < d->nwidgets; i++) {
+      const DeclWidget * w = &d->widgets[i];
+      const GDEFCORE_Module_Declared_Widget * p = &w->pub;
+      char a[kShow + 8];
+      char b[kShow + 8];
+      int mc;
+      if (p->name_len == 0) {
+        SAY(say, "Module %s: a widget type has an empty name.", d->module);
+        return 1;
+      }
+      mc = machine_check(p->name, p->name_len, d->module, d->module_len);
+      if (mc == 1) {
+        SAY(say, "Module %s: widget type '%s' is not named %s.<name>.",
+            d->module, show(a, p->name, p->name_len), d->module);
+        return 1;
+      }
+      if (mc == 2) {
+        SAY(say,
+            "Module %s: widget type '%s' has a name over %d bytes or with a "
+            "character outside a-z, 0-9, '.', '_' and '-'.",
+            d->module, show(a, p->name, p->name_len),
+            GDEFCORE_MODULE_DECL_NAME_MAX);
+        return 1;
+      }
+      if (!ident_ok(p->kind, p->kind_len, GDEFCORE_MODULE_DECL_NAME_MAX)) {
+        SAY(say, "Module %s: widget type '%s' has a template kind that is not "
+                 "a name of a-z, 0-9, '.', '_' and '-' starting with a letter.",
+            d->module, show(a, p->name, p->name_len));
+        return 1;
+      }
+      if (!ident_ok(p->template_name, p->template_len,
+              GDEFCORE_MODULE_DECL_NAME_MAX)) {
+        SAY(say, "Module %s: widget type '%s' has a default template that is "
+                 "not a name of a-z, 0-9, '.', '_' and '-' starting with a "
+                 "letter.",
+            d->module, show(a, p->name, p->name_len));
+        return 1;
+      }
+      if (p->permission_len > 0 &&
+          (p->permission_len > GDEFCORE_MODULE_DECL_LABEL_MAX ||
+              !text_ok(p->permission, p->permission_len, 0))) {
+        SAY(say, "Module %s: widget type '%s' has a permission over %d bytes "
+                 "or not UTF-8 text.",
+            d->module, show(a, p->name, p->name_len),
+            GDEFCORE_MODULE_DECL_LABEL_MAX);
+        return 1;
+      }
+      if (p->description_len > kVarDescMax ||
+          !text_ok(p->description, p->description_len, 1)) {
+        SAY(say, "Module %s: widget type '%s' has a description over %d bytes "
+                 "or not UTF-8 text.",
+            d->module, show(a, p->name, p->name_len), kVarDescMax);
+        return 1;
+      }
+      if (w->resolved != kDeclResolved) {
+        SAY(say, "Module %s: widget type '%s' provider %s ('%s').", d->module,
+            show(a, p->name, p->name_len), why_service(w->resolved),
+            show(b, w->provider, w->provider_len));
+        return 1;
+      }
+    }
+  }
+  return 0;
+}
+
+static size_t table_count(const Decl * d, int table) {
+  switch (table) {
+  case 0:
+    return d->nroutes;
+  case 1:
+    return d->nlinks;
+  case 2:
+    return d->nsettings;
+  case 3:
+    return d->nvars;
+  case 4:
+    return d->nrelations;
+  case 5:
+    return d->ncontributors;
+  default:
+    return d->nwidgets;
+  }
+}
+
 /* Fill an Entry table; the caller sorts it. */
 static Entry * collect(const GDEFCORE_Allocator * alloc, const DeclRef * refs,
     size_t n, int table, size_t * out_n) {
@@ -1504,12 +1795,7 @@ static Entry * collect(const GDEFCORE_Allocator * alloc, const DeclRef * refs,
   size_t at = 0;
   Entry * e;
   for (m = 0; m < n; m++) {
-    const Decl * d = refs[m].decl;
-    total += table == 0 ? d->nroutes
-                        : (table == 1 ? d->nlinks
-                                      : (table == 2 ? d->nsettings
-                                                    : (table == 3 ? d->nvars
-                                                                  : d->nrelations)));
+    total += table_count(refs[m].decl, table);
   }
   e = (Entry *)gcu_allocator_calloc(alloc, total == 0 ? 1 : total, sizeof *e);
   if (e == NULL) {
@@ -1517,11 +1803,7 @@ static Entry * collect(const GDEFCORE_Allocator * alloc, const DeclRef * refs,
   }
   for (m = 0; m < n; m++) {
     const Decl * d = refs[m].decl;
-    size_t count = table == 0 ? d->nroutes
-                              : (table == 1 ? d->nlinks
-                                            : (table == 2 ? d->nsettings
-                                                          : (table == 3 ? d->nvars
-                                                                        : d->nrelations)));
+    size_t count = table_count(d, table);
     for (i = 0; i < count; i++) {
       e[at].mod = m;
       e[at].idx = i;
@@ -1540,9 +1822,15 @@ static Entry * collect(const GDEFCORE_Allocator * alloc, const DeclRef * refs,
         e[at].n = d->vars[i].pub.name_len;
         e[at].kind = d->vars[i].pub.kind;
         e[at].kind_n = d->vars[i].pub.kind_len;
-      } else {
+      } else if (table == 4) {
         e[at].p = d->relations[i].pub.name;
         e[at].n = d->relations[i].pub.name_len;
+      } else if (table == 5) {
+        e[at].p = d->contributors[i].pub.name;
+        e[at].n = d->contributors[i].pub.name_len;
+      } else {
+        e[at].p = d->widgets[i].pub.name;
+        e[at].n = d->widgets[i].pub.name_len;
       }
       at += 1;
     }
@@ -1562,6 +1850,10 @@ int gdefcore_decl_validate(const DeclRef * refs, size_t n, int local,
   Entry * settings = NULL;
   Entry * vars = NULL;
   Entry * relations = NULL;
+  Entry * contributors = NULL;
+  Entry * widgets = NULL;
+  size_t ncontributors = 0;
+  size_t nwidgets = 0;
   size_t nroutes = 0;
   size_t nlinks = 0;
   size_t nsettings = 0;
@@ -1581,8 +1873,10 @@ int gdefcore_decl_validate(const DeclRef * refs, size_t n, int local,
   settings = collect(alloc, refs, n, 2, &nsettings);
   vars = collect(alloc, refs, n, 3, &nvars);
   relations = collect(alloc, refs, n, 4, &nrelations);
+  contributors = collect(alloc, refs, n, 5, &ncontributors);
+  widgets = collect(alloc, refs, n, 6, &nwidgets);
   if (routes == NULL || links == NULL || settings == NULL || vars == NULL ||
-      relations == NULL) {
+      relations == NULL || contributors == NULL || widgets == NULL) {
     SAY(&say, "Out of memory while checking the declarations.");
     bad = 1;
     goto done;
@@ -1592,12 +1886,15 @@ int gdefcore_decl_validate(const DeclRef * refs, size_t n, int local,
   bad = check_routes(refs, n, routes, nroutes, local, &say) ||
         check_links(refs, n, routes, nroutes, links, nlinks, local, &say) ||
         check_settings(refs, n, &say) || check_vars(refs, n, &say) ||
-        check_relations(refs, n, &say) ||
+        check_relations(refs, n, &say) || check_contributors(refs, n, &say) ||
+        check_widgets(refs, n, &say) ||
         duplicates(routes, nroutes, refs, "route", &say) ||
         duplicates(links, nlinks, refs, "menu link", &say) ||
         duplicates(settings, nsettings, refs, "setting", &say) ||
         duplicates(vars, nvars, refs, "template variable", &say) ||
-        duplicates(relations, nrelations, refs, "relation", &say);
+        duplicates(relations, nrelations, refs, "relation", &say) ||
+        duplicates(contributors, ncontributors, refs, "contributor", &say) ||
+        duplicates(widgets, nwidgets, refs, "widget type", &say);
   if (bad) {
     goto done;
   }
@@ -1648,6 +1945,8 @@ done:
   gcu_allocator_free(alloc, settings);
   gcu_allocator_free(alloc, vars);
   gcu_allocator_free(alloc, relations);
+  gcu_allocator_free(alloc, contributors);
+  gcu_allocator_free(alloc, widgets);
   return bad;
 }
 
@@ -1868,6 +2167,110 @@ GDEFCORE_Result gdefcore_decl_variables(const GDEFCORE_Allocator * alloc,
   *out = items;
   *count = total;
   return GDEFCORE_OK;
+}
+
+GDEFCORE_Result gdefcore_decl_contributors(const GDEFCORE_Allocator * alloc,
+    const DeclRef * refs, size_t n,
+    const GDEFCORE_Module_Declared_Contributor *** out, size_t * count) {
+  size_t m;
+  size_t i;
+  size_t total = 0;
+  size_t at = 0;
+  const GDEFCORE_Module_Declared_Contributor ** items;
+  *out = NULL;
+  *count = 0;
+  for (m = 0; m < n; m++) {
+    total += refs[m].decl->ncontributors;
+  }
+  if (total == 0) {
+    return GDEFCORE_OK;
+  }
+  items = (const GDEFCORE_Module_Declared_Contributor **)gcu_allocator_calloc(
+      alloc, total, sizeof *items);
+  if (items == NULL) {
+    return GDEFCORE_ERR_OOM;
+  }
+  for (m = 0; m < n; m++) {
+    for (i = 0; i < refs[m].decl->ncontributors; i++) {
+      items[at++] = &refs[m].decl->contributors[i].pub;
+    }
+  }
+  *out = items;
+  *count = total;
+  return GDEFCORE_OK;
+}
+
+GDEFCORE_Result gdefcore_decl_widgets(const GDEFCORE_Allocator * alloc,
+    const DeclRef * refs, size_t n,
+    const GDEFCORE_Module_Declared_Widget *** out, size_t * count) {
+  size_t m;
+  size_t i;
+  size_t total = 0;
+  size_t at = 0;
+  const GDEFCORE_Module_Declared_Widget ** items;
+  *out = NULL;
+  *count = 0;
+  for (m = 0; m < n; m++) {
+    total += refs[m].decl->nwidgets;
+  }
+  if (total == 0) {
+    return GDEFCORE_OK;
+  }
+  items = (const GDEFCORE_Module_Declared_Widget **)gcu_allocator_calloc(alloc,
+      total, sizeof *items);
+  if (items == NULL) {
+    return GDEFCORE_ERR_OOM;
+  }
+  for (m = 0; m < n; m++) {
+    for (i = 0; i < refs[m].decl->nwidgets; i++) {
+      items[at++] = &refs[m].decl->widgets[i].pub;
+    }
+  }
+  *out = items;
+  *count = total;
+  return GDEFCORE_OK;
+}
+
+GDEFCORE_Result gdefcore_decl_add_contributors(const GDEFCORE_Allocator * alloc,
+    const DeclRef * refs, size_t n, GDEFCORE_Routes * routes, char ** out_error,
+    size_t * out_error_len,
+    const GDEFCORE_Module_Declared_Contributor ** failed) {
+  const GDEFCORE_Module_Declared_Contributor ** items = NULL;
+  size_t count = 0;
+  size_t i;
+  GDEFCORE_Result rc;
+  if (failed != NULL) {
+    *failed = NULL;
+  }
+  rc = gdefcore_decl_contributors(alloc, refs, n, &items, &count);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  for (i = 0; i < count; i++) {
+    GDEFCORE_Contributor_Spec spec;
+    memset(&spec, 0, sizeof spec);
+    spec.size = sizeof spec;
+    spec.kind = items[i]->kind;
+    spec.kind_len = items[i]->kind_len;
+    spec.machine = items[i]->name;
+    spec.machine_len = items[i]->name_len;
+    spec.path = items[i]->path;
+    spec.path_len = items[i]->path_len;
+    spec.exact = items[i]->exact;
+    spec.weight = items[i]->weight;
+    spec.fn = items[i]->fn;
+    spec.data = items[i]->data;
+    rc = gdefcore_routes_add_contributor(routes, &spec, out_error,
+        out_error_len);
+    if (rc != GDEFCORE_OK) {
+      if (failed != NULL) {
+        *failed = items[i];
+      }
+      break;
+    }
+  }
+  gcu_allocator_free(alloc, (void *)items);
+  return rc;
 }
 
 /* ------------------------------------------------------------ add routes */

@@ -30,8 +30,8 @@ ends it. templates.md has the rest.
 
 ## Declared tables
 
-A manifest can declare four tables (and grants, below) besides its hooks, services and permissions:
-**routes**, **menu links**, **settings** and **template variables**. They are
+A manifest can declare six tables (and grants, below) besides its hooks, services and permissions:
+**routes**, **menu links**, **settings**, **template variables**, **contributors** and **widget types**. They are
 members of `GDEFCORE_Module_Manifest`; a table a module does not use is NULL
 with a count of 0. The manifest and every entry have a `size` member that must
 be `sizeof` of its struct: any other size refuses the install, and the error
@@ -43,6 +43,8 @@ names the struct and both sizes.
 | menu links | `GDEFCORE_Module_Link` | machine name, menu name, label, target route, weight, parent link, link kind |
 | settings | `GDEFCORE_Module_Setting` | machine name, type (`text`, `number`, `boolean`), default (as text), label, description, environment-local flag, group |
 | template variables | `GDEFCORE_Module_Variable` | template kind, name, type (`text`, `markup`, `number`), description, provider, principal-free flag |
+| contributors | `GDEFCORE_Module_Contributor` | machine name, what it contributes (a kind such as `layout`), path pattern, exact flag, weight, handler |
+| widget types | `GDEFCORE_Module_Widget` | machine name, template kind, default template, the permission its source needs, description, provider |
 
 This is declaration only. There is no menu entity here, no stored setting value
 and no menu rendering.
@@ -56,14 +58,19 @@ error too. Because every name is under its module's prefix, two modules cannot
 declare one name; the clash that can happen across modules is a second default
 tab for one parent, and a route already in the table that receives them.
 
-**Handlers and providers are services.** A route names its handler, and a
-variable its provider, by the name of a service the same module declares in its
+**Handlers and providers are services.** A route names its handler, a
+variable its provider, a contributor its function and a widget type its
+provider, by the name of a service the same module declares in its
 `services`. The service's table is a `GDEFCORE_Module_Route_Handler`
 (version `GDEFCORE_MODULE_ROUTE_HANDLER_VERSION`) holding a
 `GDEFCORE_Route_Call_Fn` and the route's data pointer, or a
 `GDEFCORE_Module_Variable_Provider` (version
 `GDEFCORE_MODULE_VARIABLE_PROVIDER_VERSION`) holding a
-`GDEFCORE_Contribution_Fn` and its state. A native library and a guest declare
+`GDEFCORE_Contribution_Fn` and its state; a `GDEFCORE_Module_Contributor_Handler`
+(version `GDEFCORE_MODULE_CONTRIBUTOR_HANDLER_VERSION`) holding a
+`GDEFCORE_Contributor_Fn`, or a `GDEFCORE_Module_Widget_Provider` (version
+`GDEFCORE_MODULE_WIDGET_PROVIDER_VERSION`) holding a `GDEFCORE_Widget_Fn`.
+A native library and a guest declare
 them the same way, and the host reads them from the same copy of the manifest
 `gdefcore_module_service()` reads. The service has to be the declaring
 module's own: a service of another module under the name is not it. A missing
@@ -98,18 +105,19 @@ goes first. Within a module each table is in machine-name order (template
 variables by kind, then name). Enabling a module twice, or disabling and
 enabling it, leaves the same enumerations.
 
-**Enumeration.** `gdefcore_module_routes()`, `_links()`, `_settings()` and
-`_variables()` return what the modules enabled for a tenant declared, in that
+**Enumeration.** `gdefcore_module_routes()`, `_links()`, `_settings()`,
+`_variables()`, `_contributors()` and `_widgets()` return what the modules enabled for a tenant declared, in that
 order. A changeset passed as the projection shows the site it would leave. The
 routes come as `GDEFCORE_Route_Spec`s with the handler resolved, ready for
 `gdefcore_route_add_spec()`; `gdefcore_module_add_routes()` adds them all to a
-`GDEFCORE_Routes`, a tab after its parent. The variables are the records
+`GDEFCORE_Routes`, a tab after its parent, and then the contributors
+(`gdefcore_routes_add_contributor()`). The variables are the records
 `gdefcore_module_contributions()` returns for their kind, so a template's
 contract includes them while the module is enabled. A module that is
 quarantined declares nothing.
 
-**Limits.** At most 64 routes, 64 links, 64 settings and 32 variables per
-manifest, and 16 services (it was 4: a module with a handler, a provider and a
+**Limits.** At most 64 routes, 64 links, 64 settings, 32 variables, 32
+contributors and 32 widget types per manifest, and 16 services (it was 4: a module with a handler, a provider and a
 service of its own needs more). A string past 64 KiB, or a table with a count
 and no data, is refused when the module is installed. The other limits are
 checked when the module is enabled: 128 bytes for a machine name, 256 for a
@@ -302,6 +310,13 @@ No hook decides who may edit a template, and no decision hook can refuse what
 a grant allows: a module that wants to widen who edits supplies a grant, and
 one that wants to narrow it grants less (templates.md, "Who may edit a
 template").
+
+The kernel fires one alter hook of its own, `layout` (`GDEFCORE_HOOK_LAYOUT`),
+when it has chosen the layout of a page (layouts.md): the shared value is the
+layout's name, a subscriber may name another, and a subscriber can change
+nothing else. It is a hook name like any other, with no registry: a module
+subscribes to it by name, as an alter. A module that subscribes to it as an
+event or a decision is not fired as an alter, and changes nothing.
 
 On a read, a failing event or alter is skipped, counted, and named. A
 failing decision fails the call. An access-relevant subscriber fails the

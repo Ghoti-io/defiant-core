@@ -11,7 +11,7 @@
 #   SafeOut.ForgottenCall        a template that calls no tag method
 #   SafeOut.AttributeDoubleQuoted / AttributeSingleQuoted
 #   SafeOut.HostileEverywhere    the hostile table, in text and both quote styles
-#   SafeOut.BuiltinPost / BuiltinRecent / BuiltinField   the built-in templates
+#   SafeOut.BuiltinPost / BuiltinRecent / BuiltinTitle   the built-in templates
 #   SafeOut.UrlRows              each url() row of the matrix
 #   SafeOut.RegionNotDoubleEscaped  a pane's markup arrives once-escaped
 #
@@ -29,7 +29,7 @@ plant_control testSafeout 'SafeOut.*'
 
 # Plant 1: user values bound as TRUSTED again, the way they were.
 plant bind-trusted src/render/render.c testSafeout \
-  'SafeOut.ForgottenCall SafeOut.AttributeDoubleQuoted SafeOut.AttributeSingleQuoted SafeOut.HostileEverywhere SafeOut.BuiltinPost SafeOut.BuiltinRecent SafeOut.BuiltinField' \
+  'SafeOut.ForgottenCall SafeOut.AttributeDoubleQuoted SafeOut.AttributeSingleQuoted SafeOut.HostileEverywhere SafeOut.BuiltinPost SafeOut.BuiltinRecent SafeOut.BuiltinTitle' \
   '            job->binds[i].len, GLTANG_UNICODE_STRING_TYPE_HTML_ATTRIBUTE) !=' \
   '            job->binds[i].len, GLTANG_UNICODE_STRING_TYPE_TRUSTED) !='
 

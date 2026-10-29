@@ -696,6 +696,171 @@ GDEFCORE_API size_t gdefcore_routes_link_count(const GDEFCORE_Routes * routes);
 GDEFCORE_API GDEFCORE_Result gdefcore_routes_link_at(
     const GDEFCORE_Routes * routes, size_t index, GDEFCORE_Route_Link * out);
 
+/* ---- contributors (site admin story 7) ---------------------------------- */
+
+/** The contributor kind that proposes a layout for a page (layout.h). */
+#define GDEFCORE_CONTRIBUTOR_LAYOUT "layout"
+
+/** Longest contributor kind, in bytes. */
+#define GDEFCORE_CONTRIBUTOR_KIND_MAX 32
+/** Longest value an offer carries, in bytes. */
+#define GDEFCORE_OFFER_VALUE_MAX 256
+
+/**
+ * @brief What a contributor is called with. Begins with @ref size.
+ *
+ * A contributor is a handler in the route trie that does not own the request:
+ * it is given the page and the viewer, and its one output is
+ * gdefcore_contributor_offer(). It is given no way to set the request's
+ * resolution or to write a byte of the page, so a contributor cannot change
+ * the main content, whatever it does. The texts are borrowed for the call.
+ */
+typedef struct GDEFCORE_Contributor_Call {
+  size_t size;               ///< `sizeof(GDEFCORE_Contributor_Call)`.
+  GDEFCORE_Request * request;  ///< The request being served.
+  GDEFCORE_Catalog * catalog;  ///< The tenant's catalog.
+  const char * machine;      ///< The machine name it was registered under.
+  size_t machine_len;        ///< Length of @ref machine.
+  const char * kind;         ///< The contributor kind it was asked as.
+  size_t kind_len;           ///< Length of @ref kind.
+  const char * path;         ///< The page's path, as the request named it.
+  size_t path_len;           ///< Length of @ref path.
+  void * data;               ///< The contributor's data pointer.
+  void * internal;           ///< Private to the route table.
+} GDEFCORE_Contributor_Call;
+
+/** @brief A contributor. */
+typedef void (*GDEFCORE_Contributor_Fn)(const GDEFCORE_Contributor_Call * call);
+
+/**
+ * @brief A contributor to register. Begins with @ref size.
+ *
+ * The @ref path is a route pattern (like `/a/:name/x`, where `*` is a segment that takes any one), matched as a route's is:
+ * it reaches a request path that begins with it, or, with @ref exact, only one
+ * that is it. The most specific pattern is asked about first when the offers
+ * are ordered (gdefcore_routes_offers()). @ref machine is unique among the
+ * contributors of a table, whatever their kind.
+ */
+typedef struct GDEFCORE_Contributor_Spec {
+  size_t size;               ///< `sizeof(GDEFCORE_Contributor_Spec)`.
+  const char * kind;         ///< What it contributes, such as
+                             ///< ::GDEFCORE_CONTRIBUTOR_LAYOUT. Required.
+  size_t kind_len;           ///< Length of @ref kind.
+  const char * machine;      ///< Unique machine name. Required.
+  size_t machine_len;        ///< Length of @ref machine.
+  const char * path;         ///< Pattern. Required.
+  size_t path_len;           ///< Length of @ref path.
+  int exact;                 ///< Non-zero: only a request path that is the pattern.
+  int weight;                ///< Breaks a tie of specificity: lowest first.
+  GDEFCORE_Contributor_Fn fn;  ///< The contributor. Required.
+  void * data;               ///< Passed back in the call.
+} GDEFCORE_Contributor_Spec;
+
+/**
+ * @brief Register a contributor.
+ *
+ * The pattern is checked as a route's is, the kind is 1 to
+ * ::GDEFCORE_CONTRIBUTOR_KIND_MAX bytes of a-z, 0-9, '.', '_' and '-' starting
+ * with a letter, and the machine name is unique in the table. Every error
+ * leaves the table unchanged and is ::GDEFCORE_ERR_INVALID (the error text
+ * names the contributor, as gdefcore_route_add() does). A contributor is not a
+ * route: it is not dispatched, not listed, not a page, a tab or a menu entry.
+ * Free @p out_error with gdefcore_routes_free().
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_routes_add_contributor(
+    GDEFCORE_Routes * routes, const GDEFCORE_Contributor_Spec * spec,
+    char ** out_error, size_t * out_error_len);
+
+/** @brief How many contributors the table holds, of every kind. */
+GDEFCORE_API size_t gdefcore_routes_contributor_count(
+    const GDEFCORE_Routes * routes);
+
+/**
+ * @brief One offer of a contributor. Begins with @ref size.
+ *
+ * With no @ref pattern, the offer is ranked by the pattern of the contributor
+ * that makes it, and its source is that contributor. A contributor that
+ * serves data it holds (the site's own rules) names the @ref pattern, the
+ * @ref exact flag, the @ref weight and the @ref source of each offer, so that
+ * a rule of the site is ranked as a pattern in the trie is. A @ref pattern the
+ * route table would refuse drops the offer.
+ */
+typedef struct GDEFCORE_Offer {
+  size_t size;               ///< `sizeof(GDEFCORE_Offer)`.
+  const char * value;        ///< What is offered, such as a layout name.
+  size_t value_len;          ///< Length of @ref value, at most
+                             ///< ::GDEFCORE_OFFER_VALUE_MAX.
+  const char * source;       ///< Who offers it, or NULL for the contributor.
+  size_t source_len;         ///< Length of @ref source.
+  const char * pattern;      ///< The pattern ranking it, or NULL for the
+                             ///< contributor's.
+  size_t pattern_len;        ///< Length of @ref pattern.
+  int exact;                 ///< With a pattern: only a path that is it.
+  int weight;                ///< With a pattern: breaks a tie, lowest first.
+  int refined;               ///< Non-zero: ranks above the same pattern without.
+  int site;                  ///< Non-zero: the site's own, which beats a
+                             ///< module's at the same rank.
+} GDEFCORE_Offer;
+
+/**
+ * @brief Offer a value, from inside a contributor.
+ *
+ * Several offers are allowed, up to 256 in one gathering; more is
+ * ::GDEFCORE_ERR_LIMIT. A call made outside a contributor, or an offer with
+ * an empty or over-long value, is ::GDEFCORE_ERR_INVALID. The bytes are
+ * copied.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_contributor_offer(
+    const GDEFCORE_Contributor_Call * call, const GDEFCORE_Offer * offer);
+
+/** @brief The offers of one gathering, most specific first. Opaque. */
+typedef struct GDEFCORE_Offers GDEFCORE_Offers;
+
+/**
+ * @brief Ask every contributor of @p kind whose pattern reaches @p path.
+ *
+ * The contributors are the ones dispatch's own candidate rule would reach for
+ * the path: a pattern that matches, as a route's does. Each is called once
+ * and may offer; the offers are returned in **one total order that does not
+ * depend on the order contributors were registered, modules were enabled or
+ * offers were made**: by rank, most specific first (a pattern with more
+ * literal segments, earlier ones counting for more; then more segments; then
+ * an exact pattern; then a refined offer), then by weight, lowest first, then
+ * the site's own before a module's, then by source and then by value, as raw
+ * bytes. @p request is the request being served (its resolution, set by
+ * gdefcore_form_resolve(), is what a contributor reads to know the page's
+ * entity). @p out is a gathering with no offers when nothing was offered and
+ * is never NULL on success. Free it with gdefcore_offers_free().
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_routes_offers(GDEFCORE_Routes * routes,
+    GDEFCORE_Catalog * catalog, GDEFCORE_Request * request, const char * kind,
+    size_t kind_len, const char * path, size_t path_len,
+    GDEFCORE_Offers ** out);
+
+/** @brief How many offers. A NULL gathering holds none. */
+GDEFCORE_API size_t gdefcore_offers_count(const GDEFCORE_Offers * offers);
+
+/**
+ * @brief Offer @p index, most specific first. The texts are borrowed from the
+ * gathering. ::GDEFCORE_ERR_INVALID past the end.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_offers_at(const GDEFCORE_Offers * offers,
+    size_t index, const char ** out_value, size_t * out_value_len,
+    const char ** out_source, size_t * out_source_len);
+
+/** @brief Free a gathering. NULL is ignored. */
+GDEFCORE_API void gdefcore_offers_free(GDEFCORE_Offers * offers);
+
+/**
+ * @brief Whether @p pattern is a route pattern a table would take.
+ *
+ * `/a/:name/x`, `*` taking any one segment: a leading slash, at most ::GDEFCORE_ROUTE_PATH_MAX bytes,
+ * `:name` captures of `[a-z][a-z0-9_]*` each used once. @p out_why, when not
+ * NULL, receives a static reason on a refusal.
+ */
+GDEFCORE_API int gdefcore_route_pattern_ok(const char * pattern,
+    size_t pattern_len, const char ** out_why);
+
 /** @brief Free bytes from the route functions that return them. NULL is ignored. */
 GDEFCORE_API void gdefcore_routes_free(GDEFCORE_Routes * routes, void * bytes);
 

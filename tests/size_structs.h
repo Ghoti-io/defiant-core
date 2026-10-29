@@ -105,7 +105,19 @@
   X(GDEFCORE_Contract_Fn, "tests/test_templates.cpp") \
   X(GDEFCORE_Template_Issue, "tests/test_templates.cpp") \
   X(GDEFCORE_Menu_Item, "tests/test_menu.cpp") \
-  X(GDEFCORE_Menu_Override, "tests/test_menu.cpp")
+  X(GDEFCORE_Menu_Override, "tests/test_menu.cpp") \
+  X(GDEFCORE_Contributor_Call, "tests/test_layout.cpp") \
+  X(GDEFCORE_Contributor_Spec, "tests/test_layout.cpp") \
+  X(GDEFCORE_Offer, "tests/test_layout.cpp") \
+  X(GDEFCORE_Module_Contributor, "tests/test_layout.cpp") \
+  X(GDEFCORE_Module_Contributor_Handler, "tests/test_layout.cpp") \
+  X(GDEFCORE_Module_Widget, "tests/test_layout.cpp") \
+  X(GDEFCORE_Module_Widget_Provider, "tests/test_layout.cpp") \
+  X(GDEFCORE_Module_Declared_Contributor, "tests/test_layout.cpp") \
+  X(GDEFCORE_Module_Declared_Widget, "tests/test_layout.cpp") \
+  X(GDEFCORE_Layout_Widget, "tests/test_layout.cpp") \
+  X(GDEFCORE_Layout_Rule, "tests/test_layout.cpp") \
+  X(GDEFCORE_Layout_Hook, "tests/test_layout.cpp")
 
 namespace size_structs {
 

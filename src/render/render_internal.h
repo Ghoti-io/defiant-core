@@ -99,6 +99,27 @@ uint64_t gdefcore_render_ctx_violations(const GDEFCORE_RenderCtx * ctx);
 /** Destroy the context. NULL is ignored. */
 void gdefcore_render_ctx_close(GDEFCORE_RenderCtx * ctx);
 
+/*
+ * Shared between render.c and layout.c, which are one subsystem.
+ */
+
+/** The id of the published entity of @p type whose `name` is @p name. */
+GDEFCORE_Result gdefcore_render_find_named(GDEFCORE_Catalog * catalog,
+    const char * type, size_t type_len, const char * name, size_t name_len,
+    char out_id[GDEFCORE_PUBLIC_ID_LEN + 1]);
+
+/** The regions a page template's source declares (render.h). */
+void gdefcore_render_scan_regions(const char * body, size_t n, char *** out_names,
+    size_t * out_count, GDEFCORE_Catalog * catalog, GDEFCORE_Result * rc);
+
+/**
+ * Split a placement, `region widget [target]`. Single spaces only; the target
+ * is the rest and holds none. Returns 0 for anything else.
+ */
+int gdefcore_render_split_pane(const char * s, size_t n, const char ** region,
+    size_t * region_len, const char ** widget, size_t * widget_len,
+    const char ** target, size_t * target_len);
+
 #ifdef __cplusplus
 }
 #endif

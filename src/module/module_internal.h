@@ -100,6 +100,22 @@ typedef struct DeclCallback {
   size_t index;
 } DeclCallback;
 
+typedef struct DeclContributor {
+  GDEFCORE_Module_Declared_Contributor pub;
+  const char * handler;
+  size_t handler_len;
+  int resolved;
+  size_t index;
+} DeclContributor;
+
+typedef struct DeclWidget {
+  GDEFCORE_Module_Declared_Widget pub;
+  const char * provider;
+  size_t provider_len;
+  int resolved;
+  size_t index;
+} DeclWidget;
+
 typedef struct DeclRelation {
   GDEFCORE_Module_Declared_Relation pub;
   GDEFCORE_Module_Relation_Column cols[GDEFCORE_RELATION_COLUMNS_MAX];
@@ -130,6 +146,10 @@ struct Decl {
   size_t nrelations;
   DeclCallback * callbacks;
   size_t ncallbacks;
+  DeclContributor * contributors;
+  size_t ncontributors;
+  DeclWidget * widgets;
+  size_t nwidgets;
 };
 
 /** The declarations of the modules in force, already in module order. */
@@ -182,6 +202,23 @@ GDEFCORE_Result gdefcore_decl_grants(const GDEFCORE_Allocator * alloc,
 GDEFCORE_Result gdefcore_decl_callbacks(const GDEFCORE_Allocator * alloc,
     const DeclRef * refs, size_t n,
     const GDEFCORE_Module_Declared_Callback *** out, size_t * count);
+
+GDEFCORE_Result gdefcore_decl_contributors(const GDEFCORE_Allocator * alloc,
+    const DeclRef * refs, size_t n,
+    const GDEFCORE_Module_Declared_Contributor *** out, size_t * count);
+
+GDEFCORE_Result gdefcore_decl_widgets(const GDEFCORE_Allocator * alloc,
+    const DeclRef * refs, size_t n,
+    const GDEFCORE_Module_Declared_Widget *** out, size_t * count);
+
+/**
+ * Add the contributors of @p refs to @p routes. On a refusal @p out_error (when
+ * not NULL) holds the route table's own message.
+ */
+GDEFCORE_Result gdefcore_decl_add_contributors(const GDEFCORE_Allocator * alloc,
+    const DeclRef * refs, size_t n, GDEFCORE_Routes * routes, char ** out_error,
+    size_t * out_error_len,
+    const GDEFCORE_Module_Declared_Contributor ** failed);
 
 GDEFCORE_Result gdefcore_decl_relations(const GDEFCORE_Allocator * alloc,
     const DeclRef * refs, size_t n,

@@ -235,3 +235,26 @@ decision, and the route table uses it through a ready-made check:
   table is the kernel's side of a deployment and the pages it serves are
   entries of its menus like a module's.
 
+
+### Contributors
+
+A route table also holds **contributors**: handlers in the same table that do
+not own the request. `gdefcore_routes_add_contributor()` registers one by
+machine name, kind (what it contributes: `layout` is the one the kernel asks
+for), a pattern as a route's and an exact flag. A contributor is not a route:
+dispatch does not run it, it is not listed, and it is not a page, a tab or a menu
+entry. `gdefcore_routes_offers()` asks the contributors of one kind whose
+pattern reaches a path (the pattern is matched exactly as a route's is), each
+once, and returns what they offered in **one total order**: by rank (more
+literal segments, the earlier ones counting for more; then more segments; then
+an exact pattern; then a refined offer), then weight, then the site's own before
+a module's, then source and value as raw bytes. Registration order, the order
+modules were enabled in and the order offers were made in do not decide.
+
+A contributor's one output is `gdefcore_contributor_offer()`. It is handed the
+request, but whatever it does to the request's resolution is undone before the
+next contributor runs, so it cannot change which entity the page shows, and it
+has no way to write the page. Every route table holds one contributor of the
+kernel's own, `core.layout-rules`, which offers the site's selector rules
+(layouts.md): each rule is offered with its own pattern, and the trie keeps the
+ones that reach the path.

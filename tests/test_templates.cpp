@@ -402,24 +402,28 @@ class Templates : public ::testing::Test {
     posts_.push_back(id);
   }
 
-  void SetLayout(const char * layout) {
+  /* Point the front display at page template @p layout. The result is apply's,
+   * which refuses a template that is not there, or that lacks a region the
+   * display places something in. */
+  GDEFCORE_Result SetLayout(const char * layout) {
     char id[GDEFCORE_PUBLIC_ID_LEN + 1];
-    ASSERT_TRUE(Find("core.display", "front", id));
+    EXPECT_TRUE(Find("core.display", "front", id));
     const char * name = "front";
     size_t name_len = 5;
     size_t layout_len = strlen(layout);
-    const char * pane = "side view recent";
+    const char * pane = "side recent";
     size_t pane_len = strlen(pane);
     GDEFCORE_Value values[3];
     OneValue(&values[0], "name", &name, &name_len);
     OneValue(&values[1], "layout", &layout, &layout_len);
     OneValue(&values[2], "panes", &pane, &pane_len);
     GDEFCORE_Changeset * cs = NULL;
-    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
-    ASSERT_EQ(GDEFCORE_OK,
+    EXPECT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
+    EXPECT_EQ(GDEFCORE_OK,
         gdefcore_entity_save(cs, id, GDEFCORE_PUBLIC_ID_LEN, "en", 2, values, 3));
-    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, "core.display", 12));
+    GDEFCORE_Result rc = gdefcore_changeset_apply(cs, "core.display", 12);
     gdefcore_changeset_destroy(cs);
+    return rc;
   }
 
   std::vector<std::string> posts_;
@@ -658,12 +662,12 @@ TEST_F(Templates, ContractLayers) {
   char * message = NULL;
   ASSERT_EQ(GDEFCORE_OK, gdefcore_template_contract_open(catalog_, NULL, "core.pane", 9, &c, &message));
   /* Base first, then contributions of enabled modules (none yet). */
-  EXPECT_EQ(4u, gdefcore_template_contract_var_count(c));
+  EXPECT_EQ(3u, gdefcore_template_contract_var_count(c));
   EXPECT_EQ(1, gdefcore_template_contract_version(c));
   gdefcore_template_contract_close(c);
   ASSERT_EQ(GDEFCORE_OK, ModuleOp("n", true));
   ASSERT_EQ(GDEFCORE_OK, gdefcore_template_contract_open(catalog_, NULL, "core.pane", 9, &c, &message));
-  EXPECT_EQ(5u, gdefcore_template_contract_var_count(c));
+  EXPECT_EQ(4u, gdefcore_template_contract_var_count(c));
   GDEFCORE_Contract_Var v;
   ASSERT_EQ(GDEFCORE_OK, gdefcore_template_contract_var(c, "n.size", 6, &v));
   EXPECT_NE(nullptr, v.contributed);
@@ -678,7 +682,7 @@ TEST_F(Templates, ContractLayers) {
   ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
   ASSERT_EQ(GDEFCORE_OK, gdefcore_module_enable(host_, cs, "m", 1));
   ASSERT_EQ(GDEFCORE_OK, gdefcore_template_contract_open(catalog_, cs, "core.pane", 9, &c, &message));
-  EXPECT_EQ(6u, gdefcore_template_contract_var_count(c));
+  EXPECT_EQ(5u, gdefcore_template_contract_var_count(c));
   gdefcore_template_contract_close(c);
   EXPECT_TRUE(Check("core.pane", "<% use m.count as q; %>", cs).empty());
   EXPECT_FALSE(Check("core.pane", "<% use m.count as q; %>").empty());
@@ -706,7 +710,7 @@ TEST_F(Templates, Order) {
     std::string out;
     GDEFCORE_Contract * c = NULL;
     EXPECT_EQ(GDEFCORE_OK, gdefcore_template_contract_open(catalog_, NULL, "core.pane", 9, &c, NULL));
-    for (size_t i = 4; i < gdefcore_template_contract_var_count(c); i++) {
+    for (size_t i = 3; i < gdefcore_template_contract_var_count(c); i++) {
       GDEFCORE_Contract_Var v;
       gdefcore_template_contract_var_at(c, i, &v);
       out += std::string(v.name, v.name_len) + " ";
@@ -736,7 +740,7 @@ TEST_F(Templates, Relationships) {
   GDEFCORE_Contract * c = NULL;
   ASSERT_EQ(GDEFCORE_OK, gdefcore_template_contract_open(catalog_, NULL, "core.pane", 9, &c, NULL));
   GDEFCORE_Contract_Var v;
-  ASSERT_EQ(GDEFCORE_OK, gdefcore_template_contract_var_at(c, 4, &v));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_template_contract_var_at(c, 3, &v));
   EXPECT_EQ("b.v", std::string(v.name, v.name_len));
   gdefcore_template_contract_close(c);
   /* A cycle is an error naming both modules. */
@@ -841,7 +845,7 @@ TEST_F(Templates, LazyProvider) {
   ASSERT_EQ(GDEFCORE_OK, ModuleOp("m", true));
   /* A layout that never reads it. */
   ASSERT_EQ(GDEFCORE_OK,
-      SaveTemplate("layout", "<% use region; %><i>plain</i>", "core.page"));
+      SaveTemplate("layout", "<% use region; %><i>plain</i><% /* region(\"main\") region(\"side\") */ %>", "core.page"));
   GDEFCORE_Result rc;
   std::string page = Page(anon_, &rc);
   ASSERT_EQ(GDEFCORE_OK, rc);
@@ -849,7 +853,7 @@ TEST_F(Templates, LazyProvider) {
   EXPECT_EQ(0, probe_.calls);
   /* Control: the same page with a template that reads it calls the provider. */
   ASSERT_EQ(GDEFCORE_OK,
-      SaveTemplate("layout", "<% use m.count as c; %><i><%= c %></i>", "core.page"));
+      SaveTemplate("layout", "<% use m.count as c; %><i><%= c %></i><% /* region(\"main\") region(\"side\") */ %>", "core.page"));
   page = Page(anon_, &rc);
   ASSERT_EQ(GDEFCORE_OK, rc);
   EXPECT_NE(std::string::npos, page.find("<i>7</i>")) << page;
@@ -870,7 +874,7 @@ TEST_F(Templates, ProviderTypes) {
   ASSERT_EQ(GDEFCORE_OK, ModuleOp("m", true));
   ASSERT_EQ(GDEFCORE_OK,
       SaveTemplate("layout",
-          "<% use m.html as h; use m.plain as p; %>[<%= h %>][<%= p %>]", "core.page"));
+          "<% use m.html as h; use m.plain as p; %>[<%= h %>][<%= p %>]<% /* region(\"main\") region(\"side\") */ %>", "core.page"));
   GDEFCORE_Result rc;
   std::string page = Page(anon_, &rc);
   ASSERT_EQ(GDEFCORE_OK, rc);
@@ -896,7 +900,7 @@ TEST_F(Templates, PrincipalKey) {
   /* A page that reads a variable that is not principal_free: the key carries
    * the principal. */
   ASSERT_EQ(GDEFCORE_OK,
-      SaveTemplate("layout", "<% use m.me as q; %><%= q %>", "core.page"));
+      SaveTemplate("layout", "<% use m.me as q; %><%= q %><% /* region(\"main\") region(\"side\") */ %>", "core.page"));
   Page(p1, &rc);
   ASSERT_EQ(GDEFCORE_OK, rc);
   EXPECT_EQ(1, personal.calls);
@@ -905,7 +909,7 @@ TEST_F(Templates, PrincipalKey) {
    * variable, leaves the key without it. */
   GDEFCORE_Request * p2 = AsPrincipal(&who);
   ASSERT_EQ(GDEFCORE_OK,
-      SaveTemplate("layout", "<% use m.all as q; %><%= q %>", "core.page"));
+      SaveTemplate("layout", "<% use m.all as q; %><%= q %><% /* region(\"main\") region(\"side\") */ %>", "core.page"));
   Page(p2, &rc);
   ASSERT_EQ(GDEFCORE_OK, rc);
   EXPECT_EQ(1, shared.calls);
@@ -915,7 +919,7 @@ TEST_F(Templates, PrincipalKey) {
    * provider is registered and enabled (observed, never declared). */
   GDEFCORE_Request * p3 = AsPrincipal(&who);
   ASSERT_EQ(GDEFCORE_OK,
-      SaveTemplate("layout", "<% use region; %>none", "core.page"));
+      SaveTemplate("layout", "<% use region; %>none<% /* region(\"main\") region(\"side\") */ %>", "core.page"));
   Page(p3, &rc);
   EXPECT_EQ(std::string::npos, Key(p3).find(who));
   EXPECT_EQ(0, gdefcore_request_principal_dependent(p3));
@@ -944,7 +948,8 @@ TEST_F(Templates, EditWhileServing) {
   /* And the layout, a page kind. */
   ASSERT_EQ(GDEFCORE_OK,
       SaveTemplate("layout",
-          "<% use region; %><main><%= region(\"side\") %></main>", "core.page"));
+          "<% use region; %><main><%= region(\"side\") %></main>"
+          "<% /* region(\"main\") */ %>", "core.page"));
   page = Page(anon_, &rc);
   EXPECT_NE(std::string::npos, page.find("<main><section")) << page;
   /* Control: a refused edit leaves what is served as it was. */
@@ -980,14 +985,14 @@ TEST_F(Templates, UnknownKindNoRender) {
   ASSERT_EQ(GDEFCORE_OK, gdefcore_entity_save(cs, id, GDEFCORE_PUBLIC_ID_LEN, "en", 2, values, 3));
   GDEFCORE_Template_Report * rep = NULL;
   ASSERT_EQ(GDEFCORE_OK, gdefcore_template_preview(cs, &rep, NULL));
-  /* entity, recent and field name core.pane, which would no longer exist. */
+  /* entity and recent name core.pane, which would no longer exist. */
   size_t breaks = 0;
   for (size_t i = 0; i < gdefcore_template_report_count(rep); i++) {
     GDEFCORE_Template_Issue issue;
     ASSERT_EQ(GDEFCORE_OK, gdefcore_template_report_at(rep, i, &issue));
     breaks += issue.reason == GDEFCORE_ISSUE_BREAKS ? 1 : 0;
   }
-  EXPECT_EQ(3u, breaks);
+  EXPECT_EQ(2u, breaks);
   gdefcore_template_report_free(rep);
   ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, GDEFCORE_TEMPLATE_KIND_TYPE, 18));
   gdefcore_changeset_destroy(cs);
@@ -1068,9 +1073,10 @@ TEST_F(Templates, ApplyRefusesAndNames) {
 
 TEST_F(Templates, BuiltInsAndContracts) {
   /* The kit's own templates validate against the contracts the kit sets. */
-  const char * names[] = {"layout", "entity", "recent", "field"};
-  const char * kinds[] = {"core.page", "core.pane", "core.pane", "core.pane"};
-  for (int i = 0; i < 4; i++) {
+  const char * names[] = {"layout", "entity", "recent", "sitename", "title", "messages"};
+  const char * kinds[] = {"core.page", "core.pane", "core.pane", "core.sitename",
+      "core.title", "core.messages"};
+  for (int i = 0; i < 6; i++) {
     SCOPED_TRACE(names[i]);
     EXPECT_EQ(kinds[i], Field("core.template", names[i], "kind"));
     auto v = Check(kinds[i], Field("core.template", names[i], "body"));
@@ -1086,7 +1092,7 @@ TEST_F(Templates, BuiltInsAndContracts) {
     vars += std::string(v.name, v.name_len) + ":" + std::to_string(v.type) + " ";
     EXPECT_GT(v.description_len, 0u);
   }
-  EXPECT_EQ("title:1 body:1 summary:1 value:1 ", vars);
+  EXPECT_EQ("title:1 body:1 summary:1 ", vars);
   EXPECT_EQ(1u, gdefcore_template_contract_fn_count(c));
   GDEFCORE_Contract_Fn f;
   ASSERT_EQ(GDEFCORE_OK, gdefcore_template_contract_fn_at(c, 0, &f));
@@ -1104,12 +1110,12 @@ TEST_F(Templates, NoKindNoRender) {
   /* Control: the page renders through its layout. */
   Page(anon_, &rc);
   ASSERT_EQ(GDEFCORE_OK, rc);
-  /* What a display whose layout is not stored gets. */
-  SetLayout("no-such-template");
+  /* A display whose page template is not stored is refused when it is saved,
+   * and the page is drawn as it was. */
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, SetLayout("no-such-template"));
   std::string page = Page(anon_, &rc);
-  GDEFCORE_Result missing = rc;
-  ASSERT_NE(GDEFCORE_OK, missing);
-  EXPECT_TRUE(page.empty());
+  EXPECT_EQ(GDEFCORE_OK, rc);
+  GDEFCORE_Result missing = GDEFCORE_ERR_INVALID;
   /* A template row that predates kinds: its type has no kind field, so the
    * row has none. Apply does not judge it (it cannot carry a kind); render
    * refuses it with the very same error as a template that is not there. */
@@ -1131,7 +1137,8 @@ TEST_F(Templates, NoKindNoRender) {
   gdefcore_changeset_destroy(cs);
   char id[GDEFCORE_PUBLIC_ID_LEN + 1];
   ASSERT_EQ(GDEFCORE_OK, gdefcore_entity_create(catalog_, "core.template", 13, id, NULL));
-  const char * slots[2] = {"legacy", "<% use region; %>old"};
+  const char * slots[2] = {"legacy",
+      "<% use region; %>old<% /* region(\"main\") region(\"side\") */ %>"};
   size_t lens[2] = {6, strlen(slots[1])};
   GDEFCORE_Value values[2];
   OneValue(&values[0], "name", &slots[0], &lens[0]);
@@ -1140,12 +1147,12 @@ TEST_F(Templates, NoKindNoRender) {
   ASSERT_EQ(GDEFCORE_OK, gdefcore_entity_save(cs, id, GDEFCORE_PUBLIC_ID_LEN, "en", 2, values, 2));
   ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, "core.template", 13)) << refusal_;
   gdefcore_changeset_destroy(cs);
-  SetLayout("legacy");
+  EXPECT_EQ(GDEFCORE_OK, SetLayout("legacy"));
   page = Page(anon_, &rc);
   EXPECT_EQ(missing, rc);
   EXPECT_TRUE(page.empty());
   /* Control: the same display, pointed back at a template with a kind. */
-  SetLayout("layout");
+  EXPECT_EQ(GDEFCORE_OK, SetLayout("layout"));
   Page(anon_, &rc);
   EXPECT_EQ(GDEFCORE_OK, rc);
 }
@@ -1358,8 +1365,7 @@ TEST_F(Templates, TheStructsHereAreAcceptedAtOnlyTheirOwnSize) {
       Contribute("m", "core.page", "m.count", "number", &probe_, 1));
   ASSERT_EQ(GDEFCORE_OK, ModuleOp("m", true));
   ASSERT_EQ(GDEFCORE_OK,
-      SaveTemplate("layout", "<% use m.count as c; %><i><%= c %></i>",
-          "core.page"));
+      SaveTemplate("layout", "<% use m.count as c; %><i><%= c %></i><% /* region(\"main\") region(\"side\") */ %>", "core.page"));
   GDEFCORE_Contract * contract = NULL;
   ASSERT_EQ(GDEFCORE_OK,
       gdefcore_template_contract_open(catalog_, NULL, "core.pane", 9, &contract,

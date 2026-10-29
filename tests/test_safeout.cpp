@@ -528,18 +528,18 @@ TEST_F(SafeOut, BuiltinRecent) {
   EXPECT_NE(std::string::npos, page.find("<p><img src=x onerror=1></p>"));
 }
 
-TEST_F(SafeOut, BuiltinField) {
+TEST_F(SafeOut, BuiltinTitle) {
   char id[GDEFCORE_PUBLIC_ID_LEN + 1];
   GDEFCORE_Result rc = GDEFCORE_ERR_INVALID;
   Install();
   Login();
   Save("f", "<script>t</script>", "b", NULL, 1, id);
-  SetPanes("post", "main field title");
+  SetPanes("post", "main title");
   std::string page = Show(anon_, "f", &rc);
   ASSERT_EQ(GDEFCORE_OK, rc);
   EXPECT_NE(std::string::npos, page.find("&lt;script&gt;t&lt;/script&gt;"));
   EXPECT_EQ(std::string::npos, page.find("<script"));
-  SetTemplate("field", "<% use value; /* unsafe: control */ %><%= value.raw %>");
+  SetTemplate("title", "<% use title; /* unsafe: control */ %><%= title.raw %>");
   page = Show(anon_, "f", &rc);
   EXPECT_NE(std::string::npos, page.find("<script>t</script>"));
 }
@@ -575,7 +575,8 @@ TEST_F(SafeOut, RegionNotDoubleEscaped) {
   EXPECT_EQ(std::string::npos, page.find("&lt;article"));
   /* Control: a layout that escapes the pasted region again is seen. */
   SetTemplate("layout",
-      "<% use region; %><div class=\"main\"><%= region(\"main\").html %></div>");
+      "<% use region; %><div class=\"main\"><%= region(\"main\").html %></div>"
+      "<%= region(\"side\") %>");
   page = Show(anon_, "amp", &rc);
   EXPECT_NE(std::string::npos, page.find("&lt;article")) << page;
 }

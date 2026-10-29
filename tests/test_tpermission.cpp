@@ -847,7 +847,7 @@ TEST_F(TPerm, TheEditorsAnswersAreTheWritesForEveryPrincipal) {
     const char * classification;
   };
   const Tpl templates[] = {{"recent", "core.pane", ""}, {"entity", "core.pane", ""},
-      {"field", "core.pane", ""}, {"layout", "core.page", "internal"}};
+      {"layout", "core.page", "internal"}};
   /* The model: the permission is held for a template of this kind and
    * classification by a kind grant, or by the module for its people. */
   auto held = [](const Person & p, const std::string & kind,

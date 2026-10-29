@@ -1505,8 +1505,8 @@ TEST_F(Widgets, PanesOfThoseKindsWorkInDisplays) {
       GDEFCORE_Value value;
       std::string front = "side menu main";
       std::vector<std::string> panes;
-      panes.push_back(std::string(name) == "front" ? "side view recent"
-                                                   : "main entity entity");
+      panes.push_back(std::string(name) == "front" ? "side recent"
+                                                   : "main content");
       panes.push_back("side menu main");
       panes.push_back("main tabs tabs");
       panes.push_back("main breadcrumbs breadcrumbs");

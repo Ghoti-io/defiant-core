@@ -93,6 +93,12 @@ struct ModDef {
   std::vector<GDEFCORE_Module_Route> routes;
   std::vector<GDEFCORE_Module_Link> links;
   GDEFCORE_Module_Route_Handler route_handler;
+  /* Contributors and widget types (site admin story 7), each with the service
+   * that carries its function. */
+  std::vector<GDEFCORE_Module_Contributor> contributors;
+  std::list<GDEFCORE_Module_Contributor_Handler> contributor_handlers;
+  std::vector<GDEFCORE_Module_Widget> widgets;
+  std::list<GDEFCORE_Module_Widget_Provider> widget_providers;
   GDEFCORE_Module_Manifest man;
 
   static void NoRoute(const GDEFCORE_Route_Call * call) { (void)call; }
@@ -181,6 +187,85 @@ struct ModDef {
     g.condition = S(condition);
     g.condition_len = condition.size();
     grants.push_back(g);
+  }
+
+  /** A contributor of @p kind at @p path (a route pattern), a function of the
+   * module's, with the service that carries it named `<module>.c.<name>`. */
+  GDEFCORE_Module_Contributor & Contributor(const std::string & contributor_name,
+      const std::string & kind, const std::string & path,
+      GDEFCORE_Contributor_Fn fn, void * data = NULL, int exact = 0,
+      int weight = 0) {
+    GDEFCORE_Module_Contributor_Handler h;
+    GDEFCORE_Module_Service svc;
+    GDEFCORE_Module_Contributor c;
+    std::string service = name + ".c." + contributor_name;
+    memset(&h, 0, sizeof h);
+    h.size = sizeof h;
+    h.fn = fn;
+    h.data = data;
+    contributor_handlers.push_back(h);
+    memset(&svc, 0, sizeof svc);
+    svc.size = sizeof svc;
+    svc.name = S(service);
+    svc.name_len = service.size();
+    svc.version = GDEFCORE_MODULE_CONTRIBUTOR_HANDLER_VERSION;
+    svc.table = &contributor_handlers.back();
+    services.push_back(svc);
+    memset(&c, 0, sizeof c);
+    c.size = sizeof c;
+    c.name = S(name + "." + contributor_name);
+    c.name_len = name.size() + 1 + contributor_name.size();
+    c.kind = S(kind);
+    c.kind_len = kind.size();
+    c.path = S(path);
+    c.path_len = path.size();
+    c.exact = exact;
+    c.weight = weight;
+    c.handler = svc.name;
+    c.handler_len = svc.name_len;
+    contributors.push_back(c);
+    return contributors.back();
+  }
+
+  /** A widget type `<module>.<widget_name>` drawn with template kind @p kind. */
+  GDEFCORE_Module_Widget & Widget(const std::string & widget_name,
+      const std::string & kind, GDEFCORE_Widget_Fn fn, void * user = NULL,
+      const std::string & permission = std::string(),
+      const std::string & template_name = std::string()) {
+    GDEFCORE_Module_Widget_Provider p;
+    GDEFCORE_Module_Service svc;
+    GDEFCORE_Module_Widget w;
+    std::string service = name + ".w." + widget_name;
+    memset(&p, 0, sizeof p);
+    p.size = sizeof p;
+    p.fn = fn;
+    p.user = user;
+    widget_providers.push_back(p);
+    memset(&svc, 0, sizeof svc);
+    svc.size = sizeof svc;
+    svc.name = S(service);
+    svc.name_len = service.size();
+    svc.version = GDEFCORE_MODULE_WIDGET_PROVIDER_VERSION;
+    svc.table = &widget_providers.back();
+    services.push_back(svc);
+    memset(&w, 0, sizeof w);
+    w.size = sizeof w;
+    w.name = S(name + "." + widget_name);
+    w.name_len = name.size() + 1 + widget_name.size();
+    w.kind = S(kind);
+    w.kind_len = kind.size();
+    if (!template_name.empty()) {
+      w.template_name = S(template_name);
+      w.template_len = template_name.size();
+    }
+    if (!permission.empty()) {
+      w.permission = S(permission);
+      w.permission_len = permission.size();
+    }
+    w.provider = svc.name;
+    w.provider_len = svc.name_len;
+    widgets.push_back(w);
+    return widgets.back();
   }
 
   /** A subscription to a hook. */
@@ -373,6 +458,10 @@ struct ModDef {
     man.nroutes = routes.size();
     man.links = links.empty() ? NULL : &links[0];
     man.nlinks = links.size();
+    man.contributors = contributors.empty() ? NULL : &contributors[0];
+    man.ncontributors = contributors.size();
+    man.widgets = widgets.empty() ? NULL : &widgets[0];
+    man.nwidgets = widgets.size();
   }
 };
 

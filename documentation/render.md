@@ -1,9 +1,11 @@
 # Rendering
 
-A page has one display. A display is a layout of regions plus an ordered
-list of panes. The layout template declares its own region names. The
-kernel does not. `main` and `side` belong to the base theme's
-two-column template.
+A page has one layout, which is a display: a page template plus an ordered
+list of placements (`region widget [target]`) of widget types into the regions
+that template declares. The page template declares its own region names. The
+kernel does not. `main` and `side` belong to the base theme's two-column
+template. Widget types, layouts and how one is chosen for a page are in
+layouts.md.
 
 Tang runs each template. The host registers that call with a segment
 scope. When the scope runs out, the bytes already written are the page,
@@ -61,11 +63,12 @@ this.
 
 ## Choosing a display
 
-`/` selects the front-page display and does not consult the route
-chain. Any other path is resolved as a form path. A resolved public id
-of type `site.post` selects the post display. Anything else, including
-a path that does not resolve, writes no bytes. A request that may not
-read the entity gets that same error.
+`/` has no entity and does not consult the route chain. Any other path is
+resolved as a form path. The layout is then chosen by the route trie from the
+site's selector rules and the modules' contributors (layouts.md); the starter kit
+has a rule for the front page and one for pages whose entity is a `site.post`.
+A path that does not resolve, and one no layout applies to, writes no bytes. A
+request that may not read the entity gets that same error.
 
 Render reads the newest revision of a published entity. A view lists through
 the access filter, which reads the current tables only. An unpublished entity
@@ -87,7 +90,7 @@ most five.
 `gdefcore_render_kit` builds a tar archive with one member, named
 `changeset`. It does not modify the catalog. `gdefcore_render_install`
 reads that archive, applies the changeset, and stores the base theme,
-the recent-posts view, and the two displays. It grants anonymous read
+the recent-posts view, the two displays and the rules that choose them. It grants anonymous read
 of `site.post`. The confirmation text is `anonymous means everyone
 without an account`.
 

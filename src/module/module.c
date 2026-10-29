@@ -2361,6 +2361,48 @@ void gdefcore_module_declared_free(GDEFCORE_Host * host, const void * items) {
   }
 }
 
+GDEFCORE_Result gdefcore_module_contributors(GDEFCORE_Host * host,
+    const uint8_t * tenant, size_t tenant_len,
+    const GDEFCORE_Changeset * projection,
+    const GDEFCORE_Module_Declared_Contributor *** out_items, size_t * out_count) {
+  DeclRef * refs;
+  size_t n;
+  GDEFCORE_Result rc;
+  if (out_items == NULL || out_count == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  *out_items = NULL;
+  *out_count = 0;
+  rc = enumerate_refs(host, tenant, tenant_len, projection, &refs, &n);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  rc = gdefcore_decl_contributors(host->alloc, refs, n, out_items, out_count);
+  gcu_allocator_free(host->alloc, refs);
+  return rc;
+}
+
+GDEFCORE_Result gdefcore_module_widgets(GDEFCORE_Host * host,
+    const uint8_t * tenant, size_t tenant_len,
+    const GDEFCORE_Changeset * projection,
+    const GDEFCORE_Module_Declared_Widget *** out_items, size_t * out_count) {
+  DeclRef * refs;
+  size_t n;
+  GDEFCORE_Result rc;
+  if (out_items == NULL || out_count == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  *out_items = NULL;
+  *out_count = 0;
+  rc = enumerate_refs(host, tenant, tenant_len, projection, &refs, &n);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  rc = gdefcore_decl_widgets(host->alloc, refs, n, out_items, out_count);
+  gcu_allocator_free(host->alloc, refs);
+  return rc;
+}
+
 GDEFCORE_Result gdefcore_module_add_routes(GDEFCORE_Host * host,
     const uint8_t * tenant, size_t tenant_len,
     const GDEFCORE_Changeset * projection, GDEFCORE_Routes * routes,
@@ -2383,6 +2425,11 @@ GDEFCORE_Result gdefcore_module_add_routes(GDEFCORE_Host * host,
   }
   rc = gdefcore_decl_add_routes(host->alloc, refs, n, routes, out_error,
       out_error_len, NULL, 0);
+  if (rc == GDEFCORE_OK) {
+    /* The contributors go in after the routes, in the same order. */
+    rc = gdefcore_decl_add_contributors(host->alloc, refs, n, routes,
+        out_error, out_error_len, NULL);
+  }
   gcu_allocator_free(host->alloc, refs);
   return rc;
 }
