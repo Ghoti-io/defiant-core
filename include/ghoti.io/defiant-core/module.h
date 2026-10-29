@@ -784,6 +784,14 @@ typedef struct GDEFCORE_Module_Setting {
   int environment_local;      ///< Non-zero: never imported, never exported.
   const char * group;         ///< Group name for the settings page, or NULL.
   size_t group_len;           ///< Length of @ref group.
+  const char * minimum;       ///< A number's lower bound (a decimal), or NULL.
+  size_t minimum_len;         ///< Length of @ref minimum.
+  const char * maximum;       ///< A number's upper bound (a decimal), or NULL.
+  size_t maximum_len;         ///< Length of @ref maximum.
+  size_t max_length;          ///< A text's longest value in bytes, 0 for the
+                              ///< default cap.
+  int secret;                 ///< Non-zero: its value is never shown again
+                              ///< once stored (the form says set or not set).
 } GDEFCORE_Module_Setting;
 
 /**
@@ -1510,6 +1518,12 @@ typedef struct GDEFCORE_Module_Declared_Setting {
   int environment_local;      ///< Non-zero: never imported or exported.
   const char * group;         ///< Never NULL; may be empty.
   size_t group_len;           ///< Length of @ref group.
+  const char * minimum;       ///< Never NULL; empty for no lower bound.
+  size_t minimum_len;         ///< Length of @ref minimum.
+  const char * maximum;       ///< Never NULL; empty for no upper bound.
+  size_t maximum_len;         ///< Length of @ref maximum.
+  size_t max_length;          ///< A text's longest value, 0 for the default.
+  int secret;                 ///< Non-zero: never shown once stored.
 } GDEFCORE_Module_Declared_Setting;
 
 /** @brief A grant as the enumeration reports it. Borrowed from the host. */

@@ -408,7 +408,7 @@ TEST_F(Render, Kit) {
   EXPECT_EQ(GDEFCORE_TYPE_CONTENT, kind);
   ASSERT_EQ(GDEFCORE_OK,
       gdefcore_entity_ids(catalog_, "core.theme", 10, &themes, &theme_n));
-  EXPECT_EQ(1u, theme_n);
+  EXPECT_EQ(0u, theme_n) << "the theme stopgap is gone: the site name is a setting";
   gdefcore_ids_free(catalog_, themes, theme_n);
   ASSERT_EQ(GDEFCORE_OK,
       gdefcore_entity_ids(catalog_, "core.view", 9, &themes, &theme_n));

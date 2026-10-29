@@ -650,24 +650,13 @@ TEST_F(Layouts, MessagesAndTheSiteNameAndTitleAreWidgets) {
       {"main content", "side messages", "side sitename", "main title"}));
   std::string page = Show("", "/page/" + alpha_, Table());
   EXPECT_EQ(std::string::npos, page.find("message")) << page;
-  EXPECT_NE(std::string::npos, page.find("<span class=\"site-name\"></span>")) << page;
-  /* The site name is the base theme's, until settings supply it. */
-  std::string theme = IdOf("core.theme", "base");
-  ASSERT_FALSE(theme.empty());
+  EXPECT_NE(std::string::npos, page.find("<span class=\"site-name\">My site</span>")) << page;
+  /* The site name is the setting core.site_title (settings.h). */
   GDEFCORE_Changeset * cs = NULL;
-  const char * name[1] = {"Gadget Works"};
-  size_t name_len[1] = {12};
-  GDEFCORE_Value v;
-  memset(&v, 0, sizeof v);
-  v.size = sizeof v;
-  v.field = "site_name";
-  v.field_len = 9;
-  v.texts = name;
-  v.text_lens = name_len;
-  v.count = 1;
   ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
-  ASSERT_EQ(GDEFCORE_OK, gdefcore_entity_save(cs, theme.data(), theme.size(), "en", 2, &v, 1));
-  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, "core.theme", 10));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_settings_stage(cs, GDEFCORE_SETTING_SITE_TITLE,
+                             sizeof GDEFCORE_SETTING_SITE_TITLE - 1, "Gadget Works", 12, NULL));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, "core.setting", 12));
   gdefcore_changeset_destroy(cs);
   page = Show("", "/page/" + alpha_, Table());
   EXPECT_NE(std::string::npos, page.find("<span class=\"site-name\">Gadget Works</span>")) << page;

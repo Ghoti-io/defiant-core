@@ -41,13 +41,13 @@ names the struct and both sizes.
 | --- | --- | --- |
 | routes | `GDEFCORE_Module_Route` | machine name, path pattern with named segments, weight, after, permission, title, kind (page, tab or action), parent, default flag, admin flag, handler |
 | menu links | `GDEFCORE_Module_Link` | machine name, menu name, label, target route, weight, parent link, link kind |
-| settings | `GDEFCORE_Module_Setting` | machine name, type (`text`, `number`, `boolean`), default (as text), label, description, environment-local flag, group |
+| settings | `GDEFCORE_Module_Setting` | machine name, type (`text`, `number`, `boolean`), default (as text), label, description, environment-local flag, group, bounds (a number's minimum and maximum), a text's length limit, secret flag |
 | template variables | `GDEFCORE_Module_Variable` | template kind, name, type (`text`, `markup`, `number`), description, provider, principal-free flag |
 | contributors | `GDEFCORE_Module_Contributor` | machine name, what it contributes (a kind such as `layout`), path pattern, exact flag, weight, handler |
 | widget types | `GDEFCORE_Module_Widget` | machine name, template kind, default template, the permission its source needs, description, provider |
 
-This is declaration only. There is no menu entity here, no stored setting value
-and no menu rendering.
+This is declaration only: what a setting is worth, and how it is stored and
+edited, is settings.md; the menu is menus.md.
 
 **Names.** Every machine name is `<module>.<name>` (AD-35), lowercase letters,
 digits, `.`, `_` and `-`, at most 128 bytes. A template variable is

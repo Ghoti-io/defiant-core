@@ -89,21 +89,21 @@ most five.
 
 `gdefcore_render_kit` builds a tar archive with one member, named
 `changeset`. It does not modify the catalog. `gdefcore_render_install`
-reads that archive, applies the changeset, and stores the base theme,
+reads that archive, applies the changeset, and stores
 the recent-posts view, the two displays and the rules that choose them. It grants anonymous read
 of `site.post`. The confirmation text is `anonymous means everyone
 without an account`.
 
 A second install writes nothing once the front and post displays exist.
 If `site.post` exists and those displays do not, install does not apply
-the changeset again. It still writes whichever of the theme, the view,
+the changeset again. It still writes whichever of the view,
 the displays, and the anonymous grant are missing. Render never opens
 the archive: after install, the store is the only source.
 
 The changeset defines the types, among them `core.template-kind`. The
 kinds (`core.page`, `core.pane` and the three navigation kinds of menus.md),
-the templates, the types and permission of menus (`gdefcore_menu_declare()`),
-the theme, the view and the displays are written after it applies, because an entity of a type
+the templates, the types and permission of menus (`gdefcore_menu_declare()`) and of settings
+(`gdefcore_settings_declare()`), the view and the displays are written after it applies, because an entity of a type
 cannot be saved in the same changeset that defines the type. The kinds go
 first and each template carries its kind, because a template is validated
 against its kind as it is saved.

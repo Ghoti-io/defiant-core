@@ -39,7 +39,7 @@ The starter kit stores these kinds and sets each built-in template's kind:
 | `core.menu` | `menu` (`text`), `items` (`list`) | `url/1` | `menu` |
 | `core.tabs` | `items` (`list`) | `url/1` | `tabs` |
 | `core.breadcrumbs` | `items` (`list`) | `url/1` | `breadcrumbs` |
-| `core.sitename` | `name` (`text`) | none | `sitename` |
+| `core.sitename` | `name`, `tagline` (`text`) | none | `sitename` |
 | `core.title` | `title` (`text`) | none | `title` |
 | `core.messages` | `items` (`list`) | none | `messages` |
 

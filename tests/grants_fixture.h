@@ -88,6 +88,16 @@ struct ModDef {
     int weight = 0;
     int kind = GDEFCORE_ROUTE_PAGE;
   };
+  /* Settings (site admin story 8). */
+  struct SettingDef {
+    std::string name, type = "text", value, label = "A setting", description, group;
+    std::string minimum, maximum;
+    size_t max_length = 0;
+    int local = 0;
+    int secret = 0;
+  };
+  std::vector<SettingDef> setting_defs;
+  std::vector<GDEFCORE_Module_Setting> settings;
   std::vector<RouteDef> route_defs;
   std::vector<LinkDef> link_defs;
   std::vector<GDEFCORE_Module_Route> routes;
@@ -129,6 +139,20 @@ struct ModDef {
     r.weight = weight;
     r.is_default = is_default;
     return r;
+  }
+
+  /** A setting `<module>.<setting_name>` of group @p group. */
+  SettingDef & Setting(const std::string & setting_name, const std::string & type,
+      const std::string & default_value, const std::string & group = std::string(),
+      const std::string & label = "A setting") {
+    SettingDef d;
+    d.name = name + "." + setting_name;
+    d.type = type;
+    d.value = default_value;
+    d.group = group;
+    d.label = label;
+    setting_defs.push_back(d);
+    return setting_defs.back();
   }
 
   /** A menu link. */
@@ -381,6 +405,32 @@ struct ModDef {
       svc.table = &route_handler;
       services.push_back(svc);
     }
+    settings.clear();
+    for (const SettingDef & t : setting_defs) {
+      GDEFCORE_Module_Setting c;
+      memset(&c, 0, sizeof c);
+      c.size = sizeof c;
+      c.name = S(t.name);
+      c.name_len = t.name.size();
+      c.type = S(t.type);
+      c.type_len = t.type.size();
+      c.default_value = S(t.value);
+      c.default_len = t.value.size();
+      c.label = S(t.label);
+      c.label_len = t.label.size();
+      c.description = S(t.description);
+      c.description_len = t.description.size();
+      c.environment_local = t.local;
+      c.group = S(t.group);
+      c.group_len = t.group.size();
+      c.minimum = S(t.minimum);
+      c.minimum_len = t.minimum.size();
+      c.maximum = S(t.maximum);
+      c.maximum_len = t.maximum.size();
+      c.max_length = t.max_length;
+      c.secret = t.secret;
+      settings.push_back(c);
+    }
     for (const RouteDef & d : route_defs) {
       GDEFCORE_Module_Route r;
       memset(&r, 0, sizeof r);
@@ -458,6 +508,8 @@ struct ModDef {
     man.nroutes = routes.size();
     man.links = links.empty() ? NULL : &links[0];
     man.nlinks = links.size();
+    man.settings = settings.empty() ? NULL : &settings[0];
+    man.nsettings = settings.size();
     man.contributors = contributors.empty() ? NULL : &contributors[0];
     man.ncontributors = contributors.size();
     man.widgets = widgets.empty() ? NULL : &widgets[0];

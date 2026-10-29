@@ -44,6 +44,7 @@
 #include <ghoti.io/defiant-core/render.h>
 #include <ghoti.io/defiant-core/request.h>
 #include <ghoti.io/defiant-core/sched.h>
+#include <ghoti.io/defiant-core/settings.h>
 #include <ghoti.io/defiant-core/subject.h>
 #include <ghoti.io/defiant-core/template.h>
 

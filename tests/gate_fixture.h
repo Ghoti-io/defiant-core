@@ -1062,6 +1062,20 @@ inline std::string MenuLine(World & w, const std::string & who,
     out += " layout-may-edit=" +
            std::to_string(gdefcore_layout_may_edit(w.site.catalog, req));
   }
+  {
+    /* The settings form of a group, and whether settings may be edited at all:
+     * a principal who may not is told nothing of which groups there are. */
+    char * html = NULL;
+    size_t html_len = 0;
+    Note("gdefcore_settings_form_html");
+    rc = gdefcore_settings_form_html(w.site.catalog, req, "core.site", 9, "/x", "t",
+        &html, &html_len);
+    out += " settings-form=" + Rc(rc) + ":" + std::to_string(html_len > 0);
+    gdefcore_text_free(w.site.catalog, html);
+    Note("gdefcore_settings_may_edit");
+    out += " settings-may-edit=" +
+           std::to_string(gdefcore_settings_may_edit(w.site.catalog, req));
+  }
   Note("gdefcore_menu_may_edit");
   out += " may-edit=" +
          std::to_string(gdefcore_menu_may_edit(w.site.catalog, req));

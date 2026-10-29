@@ -34,6 +34,8 @@
 #include "../core/size.h"
 #include "module_internal.h"
 
+#include <ghoti.io/defiant-core/settings.h>
+
 #include <ghoti.io/cutil/allocator.h>
 
 #include <stdio.h>
@@ -417,6 +419,12 @@ static void build_settings(Build * b, const GDEFCORE_Module_Manifest * m) {
     ds->pub.environment_local = s.environment_local != 0;
     ds->pub.group = dup_str(b, s.group, s.group_len, "setting", i);
     ds->pub.group_len = s.group_len;
+    ds->pub.minimum = dup_str(b, s.minimum, s.minimum_len, "setting", i);
+    ds->pub.minimum_len = s.minimum_len;
+    ds->pub.maximum = dup_str(b, s.maximum, s.maximum_len, "setting", i);
+    ds->pub.maximum_len = s.maximum_len;
+    ds->pub.max_length = s.max_length;
+    ds->pub.secret = s.secret != 0;
     d->nsettings = i + 1;
   }
   if (b->rc == GDEFCORE_OK && d->nsettings > 1) {
@@ -1493,6 +1501,41 @@ static int check_settings(const DeclRef * refs, size_t n, Say * say) {
         SAY(say, "Module %s: setting '%s' has a group that is not 1 to %d "
                  "bytes of a-z, 0-9, '.', '_' and '-' starting with a letter.",
             d->module, show(a, s->name, s->name_len), kMenuMax);
+        return 1;
+      }
+      if ((s->minimum_len > 0 || s->maximum_len > 0) && !is_number) {
+        SAY(say, "Module %s: setting '%s' has bounds, which only a number "
+                 "can have.",
+            d->module, show(a, s->name, s->name_len));
+        return 1;
+      }
+      if ((s->minimum_len > 0 && !number_ok(s->minimum, s->minimum_len)) ||
+          (s->maximum_len > 0 && !number_ok(s->maximum, s->maximum_len)) ||
+          (s->minimum_len > 0 && s->maximum_len > 0 &&
+              gdefcore_settings_decimal_cmp(s->minimum, s->minimum_len,
+                  s->maximum, s->maximum_len) == 1)) {
+        SAY(say, "Module %s: setting '%s' has a bound that is not a number, or "
+                 "a minimum above its maximum.",
+            d->module, show(a, s->name, s->name_len));
+        return 1;
+      }
+      if (s->max_length > 0 && (!is_text || s->max_length > 65536)) {
+        SAY(say, "Module %s: setting '%s' has a length limit, which only a "
+                 "text of at most 65536 bytes can have.",
+            d->module, show(a, s->name, s->name_len));
+        return 1;
+      }
+      if (s->secret && !is_text) {
+        SAY(say, "Module %s: setting '%s' is secret, which only a text can be.",
+            d->module, show(a, s->name, s->name_len));
+        return 1;
+      }
+      if (!gdefcore_settings_check(s->type, s->type_len, s->minimum,
+              s->minimum_len, s->maximum, s->maximum_len, s->max_length,
+              s->default_value, s->default_len, NULL)) {
+        SAY(say, "Module %s: setting '%s' has a default outside its own bounds "
+                 "or length.",
+            d->module, show(a, s->name, s->name_len));
         return 1;
       }
     }

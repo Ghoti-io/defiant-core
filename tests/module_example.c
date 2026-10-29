@@ -176,11 +176,11 @@ static const GDEFCORE_Module_Link kLinks[] = {
 
 static const GDEFCORE_Module_Setting kSettings[] = {
     {sizeof(GDEFCORE_Module_Setting), XS("example.limit"), XS("number"),
-        XS("10"), XS("Limit"), XS("How many to show."), 0, XS("general")},
+        XS("10"), XS("Limit"), XS("How many to show."), 0, XS("general"), NULL, 0, NULL, 0, 0, 0},
     {sizeof(GDEFCORE_Module_Setting), XS("example.key"), XS("text"), NULL, 0,
-        XS("Key"), XS("An API key, local to this site."), 1, XS("keys")},
+        XS("Key"), XS("An API key, local to this site."), 1, XS("keys"), NULL, 0, NULL, 0, 0, 0},
     {sizeof(GDEFCORE_Module_Setting), XS("example.greeting"), XS("text"),
-        XS("hello"), XS("Greeting"), NULL, 0, 0, NULL, 0}};
+        XS("hello"), XS("Greeting"), NULL, 0, 0, NULL, 0, NULL, 0, NULL, 0, 0, 0}};
 
 static const GDEFCORE_Module_Variable kVariables[] = {
     {sizeof(GDEFCORE_Module_Variable), XS("core.page"), XS("example.count"),

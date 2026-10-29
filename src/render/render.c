@@ -36,6 +36,7 @@
 #include <ghoti.io/defiant-core/menu.h>
 #include <ghoti.io/defiant-core/module.h>
 #include <ghoti.io/defiant-core/request.h>
+#include <ghoti.io/defiant-core/settings.h>
 #include <ghoti.io/defiant-core/template.h>
 #include <ghoti.io/cutil/allocator.h>
 #include <ghoti.io/cutil/fiber.h>
@@ -67,7 +68,7 @@
 static const char kBreak[] = "<!--break-->";
 static const char kWrap[] = "use pane;\nprint(pane());\n";
 static const char kConfirm[] =
-    "core.display\ncore.template\ncore.template-kind\ncore.theme\ncore.view\n"
+    "core.display\ncore.template\ncore.template-kind\ncore.view\n"
     "site.post";
 
 static const char kLayoutBody[] =
@@ -112,7 +113,9 @@ static const char kCrumbsBody[] =
  * prints nothing while the list is empty, so a page without a queue shows no
  * trace of the widget. */
 static const char kSiteNameBody[] =
-    "<% use name; %><span class=\"site-name\"><%= name %></span>";
+    "<% use name; use tagline; %><span class=\"site-name\"><%= name %></span>"
+    "<% if (tagline != \"\") { %><span class=\"tagline\"><%= tagline %></span>"
+    "<% } %>";
 static const char kTitleBody[] = "<% use title; %><h1><%= title %></h1>";
 static const char kMessagesBody[] =
     "<% use items; %><% for (item : items) { %><div class=\"message\">"
@@ -150,8 +153,9 @@ static const char * const kCrumbsVars[] = {
 static const char * const kNavFns[] = {"url 1"};
 
 static const char * const kSiteNameVars[] = {
-    "name text The name of the site, which is the site_name of the base theme "
-    "until settings supply it."};
+    "name text The name of the site: the setting core.site_title.",
+    "tagline text The short line under the name: the setting core.tagline. "
+    "Empty when the site has none."};
 static const char * const kPageTitleVars[] = {
     "title text The title of the page being shown, as the viewer may read it."};
 static const char * const kMessagesVars[] = {
@@ -1904,30 +1908,36 @@ static GDEFCORE_Result render_kind(GDEFCORE_Catalog * catalog,
   return rc;
 }
 
-/* The site name widget. Its source is the base theme's site_name, which
- * settings will replace; a theme without one draws an empty name. */
+/* The site name widget. Its source is the settings core.site_title and
+ * core.tagline: the changed value, else the default (settings.h). */
 static GDEFCORE_Result render_sitename(GDEFCORE_Catalog * catalog,
     GDEFCORE_Request * request, const char * tmpl, size_t tmpl_len, uint64_t fuel,
     char ** html, size_t * html_len) {
-  char id[GDEFCORE_PUBLIC_ID_LEN + 1];
   char * name = NULL;
   size_t name_len = 0;
-  TangBind bind;
-  GDEFCORE_Result rc = find_named(catalog, "core.theme", 10, "base", 4, id);
+  char * tagline = NULL;
+  size_t tagline_len = 0;
+  TangBind bind[2];
+  GDEFCORE_Result rc = gdefcore_settings_get(catalog, GDEFCORE_SETTING_SITE_TITLE,
+      sizeof GDEFCORE_SETTING_SITE_TITLE - 1, &name, &name_len, NULL);
   if (rc == GDEFCORE_OK) {
-    rc = config_text(catalog, id, "site_name", 0, &name, &name_len);
-  } else if (rc == GDEFCORE_ERR_INVALID) {
-    rc = GDEFCORE_OK;
+    rc = gdefcore_settings_get(catalog, GDEFCORE_SETTING_TAGLINE,
+        sizeof GDEFCORE_SETTING_TAGLINE - 1, &tagline, &tagline_len, NULL);
   }
   if (rc != GDEFCORE_OK) {
+    gdefcore_text_free(catalog, name);
     return rc;
   }
-  bind.name = "name";
-  bind.text = name == NULL ? "" : name;
-  bind.len = name_len;
+  bind[0].name = "name";
+  bind[0].text = name == NULL ? "" : name;
+  bind[0].len = name_len;
+  bind[1].name = "tagline";
+  bind[1].text = tagline == NULL ? "" : tagline;
+  bind[1].len = tagline_len;
   rc = render_kind(catalog, request, tmpl, tmpl_len, "core.sitename", 13, fuel,
-      &bind, 1, NULL, NULL, html, html_len);
+      bind, 2, NULL, NULL, html, html_len);
   gdefcore_text_free(catalog, name);
+  gdefcore_text_free(catalog, tagline);
   return rc;
 }
 
@@ -3288,7 +3298,7 @@ static GDEFCORE_Result write_kit(GDEFCORE_Catalog * catalog) {
     rc = ensure_template(catalog, "breadcrumbs", kCrumbsBody, "core.breadcrumbs");
   }
   if (rc == GDEFCORE_OK) {
-    rc = ensure_kind(catalog, "core.sitename", "Site name", kSiteNameVars, 1,
+    rc = ensure_kind(catalog, "core.sitename", "Site name", kSiteNameVars, 2,
         NULL, 0);
   }
   if (rc == GDEFCORE_OK) {
@@ -3318,7 +3328,8 @@ static GDEFCORE_Result write_kit(GDEFCORE_Catalog * catalog) {
     rc = gdefcore_layout_declare(catalog);
   }
   if (rc == GDEFCORE_OK) {
-    rc = ensure_named(catalog, "core.theme", 10, "base", 4, NULL, NULL);
+    /* The settings: the site's changed values and who may change them. */
+    rc = gdefcore_settings_declare(catalog);
   }
   if (rc == GDEFCORE_OK) {
     rc = find_named(catalog, "core.view", 9, "recent", 6, id);
@@ -3410,7 +3421,6 @@ GDEFCORE_Result gdefcore_render_kit(GDEFCORE_Catalog * catalog, uint8_t ** out_b
   GDEFCORE_Field post[3];
   GDEFCORE_Field tmpl[5];
   GDEFCORE_Field kinds[5];
-  GDEFCORE_Field theme[2];
   GDEFCORE_Field view[5];
   GDEFCORE_Field display[3];
   GDEFCORE_Patch * files = NULL;
@@ -3437,8 +3447,6 @@ GDEFCORE_Result gdefcore_render_kit(GDEFCORE_Catalog * catalog, uint8_t ** out_b
   set_field(&kinds[2], "version", 1, 0);
   set_field(&kinds[3], "variables", 0, 1);
   set_field(&kinds[4], "functions", 0, 1);
-  set_field(&theme[0], "name", 1, 0);
-  set_field(&theme[1], "site_name", 0, 1);
   set_field(&view[0], "name", 1, 0);
   set_field(&view[1], "type", 1, 0);
   set_field(&view[2], "limit", 1, 0);
@@ -3462,10 +3470,6 @@ GDEFCORE_Result gdefcore_render_kit(GDEFCORE_Catalog * catalog, uint8_t ** out_b
   if (rc == GDEFCORE_OK) {
     rc = gdefcore_changeset_define(cs, GDEFCORE_TEMPLATE_KIND_TYPE,
         sizeof GDEFCORE_TEMPLATE_KIND_TYPE - 1, GDEFCORE_TYPE_CONFIG, kinds, 5);
-  }
-  if (rc == GDEFCORE_OK) {
-    rc = gdefcore_changeset_define(cs, "core.theme", 10, GDEFCORE_TYPE_CONFIG,
-        theme, 2);
   }
   if (rc == GDEFCORE_OK) {
     GDEFCORE_Field view_fields[6];

@@ -11,7 +11,7 @@ reads. Eight are built in:
 
 | Type | Template kind | Source |
 | --- | --- | --- |
-| `sitename` | `core.sitename` | the `site_name` of the `base` theme, until settings supply it |
+| `sitename` | `core.sitename` | the settings `core.site_title` and `core.tagline` (settings.md) |
 | `title` | `core.title` | the page's entity `title`, as the viewer may read it |
 | `content` | `core.pane` | the page's entity title and body, through the access filter |
 | `menu` | `core.menu` | the menu named by the target (menus.md) |

@@ -36,6 +36,7 @@
 #include <ghoti.io/defiant-core/subject.h>
 #include <ghoti.io/defiant-core/menu.h>
 #include <ghoti.io/defiant-core/layout.h>
+#include <ghoti.io/defiant-core/settings.h>
 #include <ghoti.io/defiant-core/template.h>
 
 #include <ghoti.io/cutil/allocator.h>
@@ -4630,6 +4631,11 @@ GDEFCORE_Result gdefcore_changeset_apply(GDEFCORE_Changeset * changeset,
     if (rc != GDEFCORE_OK) {
       return rc;
     }
+    /* And who may change a setting. */
+    rc = gdefcore_settings_authorize(changeset, changeset->request);
+    if (rc != GDEFCORE_OK) {
+      return rc;
+    }
   }
   rc = gdefcore_changeset_rate(changeset, &risk);
   if (rc != GDEFCORE_OK) {
@@ -4667,6 +4673,12 @@ GDEFCORE_Result gdefcore_changeset_apply(GDEFCORE_Changeset * changeset,
    * widget nobody offers, and a rule that is not a rule, are refused here, with
    * nothing written (layout.h). */
   rc = gdefcore_layout_vet(changeset);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  /* A setting that nobody declares, or that holds a value it may not, is
+   * refused here with nothing written (settings.h). */
+  rc = gdefcore_settings_vet(changeset);
   if (rc != GDEFCORE_OK) {
     return rc;
   }
