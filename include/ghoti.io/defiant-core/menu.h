@@ -81,7 +81,7 @@ extern "C" {
 #endif
 
 /** The entity type of a site-made entry. Its fields: `name`, `menu`, `label`,
- * `route`, `parent`, `weight`. */
+ * `route`, `parent`, `weight`, and `hidden` (optional: 1 when the site hid it). */
 #define GDEFCORE_MENU_ENTRY_TYPE "core.menu-entry"
 /** The entity type of an override. Its fields: `name`, `label`, `weight`,
  * `hidden`, `parent`, `menu`; every one but `name` is optional. */
@@ -96,6 +96,63 @@ extern "C" {
 #define GDEFCORE_MENU_SITE_PREFIX "site."
 /** An override's `parent` that moves an entry to the top level of its menu. */
 #define GDEFCORE_MENU_TOP "-"
+/** The entity type of the record of the last menu edit, which undo reads. Its
+ * fields: `name` (always `last`) and `entities`, one `<id> <seq> <S|C>` line
+ * for each entry or override the edit wrote. */
+#define GDEFCORE_MENU_CHANGE_TYPE "core.menu-change"
+/** Length of a menu version (gdefcore_menu_version()), without the NUL. */
+#define GDEFCORE_MENU_VERSION_LEN 16
+/** Most entries or overrides one edit writes. A move that would write more is
+ * refused. */
+#define GDEFCORE_MENU_EDIT_MAX 256
+
+/** An edit: add a site entry under a parent, at the end of its siblings. */
+#define GDEFCORE_MENU_ACT_ADD 1
+/** An edit: give an entry another label. */
+#define GDEFCORE_MENU_ACT_RENAME 2
+/** An edit: hide an entry from every output. */
+#define GDEFCORE_MENU_ACT_HIDE 3
+/** An edit: show a hidden entry again. */
+#define GDEFCORE_MENU_ACT_SHOW 4
+/** An edit: remove a site entry. A generated entry is hidden, not removed. */
+#define GDEFCORE_MENU_ACT_REMOVE 5
+/** An edit: put an entry under a parent at a position. */
+#define GDEFCORE_MENU_ACT_MOVE 6
+/** An edit: swap an entry with the sibling before it. */
+#define GDEFCORE_MENU_ACT_UP 7
+/** An edit: swap an entry with the sibling after it. */
+#define GDEFCORE_MENU_ACT_DOWN 8
+/** An edit: put an entry last under the sibling before it. */
+#define GDEFCORE_MENU_ACT_INDENT 9
+/** An edit: put an entry after its parent, under its grandparent. */
+#define GDEFCORE_MENU_ACT_OUTDENT 10
+
+/** The refusal (gdefcore_changeset_refusal()) of an edit based on a menu that
+ * has since changed. Nothing is staged. */
+#define GDEFCORE_MENU_REFUSED_STALE \
+  "The menu changed since this page was shown. Nothing was changed."
+/** The refusal of a move under the entry itself or one of its own entries. */
+#define GDEFCORE_MENU_REFUSED_CYCLE \
+  "An entry cannot be moved under itself or under one of its own entries."
+/** The refusal of a move under an entry that is not in the menu. */
+#define GDEFCORE_MENU_REFUSED_PARENT "That parent is not in this menu."
+/** The refusal of an edit that names an entry that is not there, or one that
+ * cannot take the edit (a tab cannot move). */
+#define GDEFCORE_MENU_REFUSED_ENTRY "That entry cannot take that edit."
+/** The refusal of a move that cannot be made: the entry is already first,
+ * last, top level or has no sibling before it, or it would sit too deep. */
+#define GDEFCORE_MENU_REFUSED_PLACE "That entry cannot move that way."
+/** The refusal of removing a generated entry. */
+#define GDEFCORE_MENU_REFUSED_REMOVE \
+  "A generated entry is hidden, not removed."
+/** The refusal of an edit that would write more than ::GDEFCORE_MENU_EDIT_MAX
+ * entries. */
+#define GDEFCORE_MENU_REFUSED_MANY "That edit would change too many entries."
+/** The refusal of an undo when there is no edit to undo. */
+#define GDEFCORE_MENU_REFUSED_NOTHING "There is no menu edit to undo."
+/** The refusal of an undo of an edit whose entries were written since. */
+#define GDEFCORE_MENU_REFUSED_UNDO \
+  "The menu changed after that edit, so it cannot be undone."
 
 /** Longest menu name, in bytes. */
 #define GDEFCORE_MENU_NAME_MAX 64
@@ -187,11 +244,41 @@ typedef struct GDEFCORE_Menu_Override {
 } GDEFCORE_Menu_Override;
 
 /**
+ * @brief One edit of the menus, as the editor makes it. Begins with
+ * @ref size.
+ *
+ * Which fields an edit reads is named by @ref action; the others are ignored.
+ */
+typedef struct GDEFCORE_Menu_Edit {
+  size_t size;                ///< `sizeof(GDEFCORE_Menu_Edit)`.
+  int action;                 ///< A `GDEFCORE_MENU_ACT_` value.
+  const char * name;          ///< The entry's machine name; for an add, the new
+                              ///< `site.<name>`.
+  size_t name_len;            ///< Length of @ref name.
+  const char * label;         ///< Rename and add: the label.
+  size_t label_len;           ///< Length of @ref label.
+  const char * menu;          ///< Add: the menu the entry is in.
+  size_t menu_len;            ///< Length of @ref menu.
+  const char * route;         ///< Add: the route it goes to, or "".
+  size_t route_len;           ///< Length of @ref route.
+  const char * parent;        ///< Move and add: the entry it goes under, or ""
+                              ///< for the top level of its menu.
+  size_t parent_len;          ///< Length of @ref parent.
+  size_t position;            ///< Move: the index it has among its new
+                              ///< siblings once it is there (0 is first).
+  const char * version;       ///< The version of the menu the editor showed
+                              ///< (gdefcore_menu_version()).
+  size_t version_len;         ///< Length of @ref version.
+} GDEFCORE_Menu_Edit;
+
+/**
  * @brief Define the entity types of menus and declare the permission to edit
  * them.
  *
- * Two types of configuration, ::GDEFCORE_MENU_ENTRY_TYPE and
- * ::GDEFCORE_MENU_OVERRIDE_TYPE, and one action, ::GDEFCORE_MENU_EDIT,
+ * Three types of configuration, ::GDEFCORE_MENU_ENTRY_TYPE,
+ * ::GDEFCORE_MENU_OVERRIDE_TYPE and the record of the last edit
+ * (::GDEFCORE_MENU_CHANGE_TYPE, which needs no grant), and one action,
+ * ::GDEFCORE_MENU_EDIT,
  * declared on each under the labels ::GDEFCORE_MENU_EDIT_ENTRY_LABEL and
  * ::GDEFCORE_MENU_EDIT_OVERRIDE_LABEL, module `core`, granted to nobody,
  * admin included. A role is granted the two to edit menus; a condition on a
@@ -359,6 +446,92 @@ GDEFCORE_API GDEFCORE_Result gdefcore_menu_stage_forget(
  * calls this when the changeset has a request.
  */
 GDEFCORE_API GDEFCORE_Result gdefcore_menu_authorize(
+    GDEFCORE_Changeset * changeset, GDEFCORE_Request * request);
+
+/**
+ * @brief The version of the menus gdefcore_menu_entries() listed: 16
+ * lowercase letters (`a` to `p`, four bits each, so that it is never a number)
+ * and a NUL, written to @p out.
+ *
+ * A hash of everything an edit depends on: each entry's name, label, route,
+ * menu, parent, weight, hidden state, source and kind, in the order listed. It
+ * is not about who asks (what a viewer would see is not in it), and it is not a
+ * secret: it says whether the menus an editor was shown are the menus now.
+ *
+ * @p cap must be at least ::GDEFCORE_MENU_VERSION_LEN + 1.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_menu_version(const GDEFCORE_Menu * menu,
+    char * out, size_t cap);
+
+/**
+ * @brief Stage one edit of the menus in @p changeset.
+ *
+ * The editor's actions, each one changeset: add, rename, hide, show, remove,
+ * move, and the moves the keyboard makes (up, down, indent, outdent). For a
+ * generated entry, rename, hide, show and the moves write an **override** that
+ * holds only what the edit changes besides what the override already held, and
+ * never a copy of the entry; for a site entry they edit the entry. The siblings
+ * a move has to renumber are written in the same changeset, so a move is one
+ * revision or none.
+ *
+ * Refused with ::GDEFCORE_ERR_INVALID (a changeset that was refused is
+ * discarded, not applied), with the
+ * refusal (gdefcore_changeset_refusal()) one of the `GDEFCORE_MENU_REFUSED_`
+ * sentences: an edit whose @ref GDEFCORE_Menu_Edit::version is not the version
+ * of the menus now (stale), a move under the entry itself or one of its own
+ * entries (cycle) or under an entry that is not in the menu, a tab that moves,
+ * a generated entry that is removed, and a position that does not exist.
+ *
+ * An edit that changes nothing (an entry moved to the place it has) is success
+ * and stages nothing: check gdefcore_changeset_touched_count().
+ *
+ * When the edit writes anything it also stages the record of it
+ * (::GDEFCORE_MENU_CHANGE_TYPE) that gdefcore_menu_stage_undo() reads. The
+ * record is bookkeeping: it names entries and revisions and no one's text, and
+ * the writes undo makes are authorized as any menu write (apply asks
+ * gdefcore_menu_authorize()), so the record itself needs no grant.
+ *
+ * Nothing is written until the changeset is applied. @p routes, @p request and
+ * @p match are as for gdefcore_menu_entries().
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_menu_stage_edit(
+    GDEFCORE_Changeset * changeset, GDEFCORE_Routes * routes,
+    GDEFCORE_Request * request, const GDEFCORE_Route_Match * match,
+    const GDEFCORE_Menu_Edit * edit);
+
+/**
+ * @brief Stage the record of what @p changeset writes of entries and
+ * overrides, so that gdefcore_menu_stage_undo() can undo it.
+ *
+ * gdefcore_menu_stage_edit() does this itself. A caller that stages entries and
+ * overrides by hand (gdefcore_menu_stage_entry() and the like) and wants the
+ * write undone calls it last, once the changeset names everything it writes.
+ * It replaces the record of the earlier edit, and stages nothing when the
+ * changeset writes no entry or override. At most ::GDEFCORE_MENU_EDIT_MAX
+ * entries are recorded; more is ::GDEFCORE_ERR_INVALID with
+ * ::GDEFCORE_MENU_REFUSED_MANY.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_menu_stage_record(
+    GDEFCORE_Changeset * changeset);
+
+/**
+ * @brief Stage the undo of the last menu edit in @p changeset.
+ *
+ * Every entry and override the last edit wrote is put back as it was before,
+ * in this one changeset: an entry the edit made is cleared, one it cleared is
+ * restored, one it changed gets its earlier values again. It is a new
+ * revision, as every revert is; old rows are never touched. The record is then
+ * emptied, so an edit is undone once.
+ *
+ * Refused with ::GDEFCORE_ERR_INVALID, and the fixed sentence "That edit is not
+ * allowed." and nothing read, when @p request may not edit menus
+ * (gdefcore_menu_may_edit()), so that it learns nothing of the last edit;
+ * with ::GDEFCORE_MENU_REFUSED_NOTHING when
+ * there is no edit to undo, and with ::GDEFCORE_MENU_REFUSED_UNDO when any
+ * entry the edit wrote has been written since, so that an undo never
+ * overwrites a later edit.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_menu_stage_undo(
     GDEFCORE_Changeset * changeset, GDEFCORE_Request * request);
 
 #ifdef __cplusplus

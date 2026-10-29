@@ -104,6 +104,7 @@
   X(GDEFCORE_Contract_Var, "tests/test_templates.cpp") \
   X(GDEFCORE_Contract_Fn, "tests/test_templates.cpp") \
   X(GDEFCORE_Template_Issue, "tests/test_templates.cpp") \
+  X(GDEFCORE_Menu_Edit, "tests/test_menuedit.cpp") \
   X(GDEFCORE_Menu_Item, "tests/test_menu.cpp") \
   X(GDEFCORE_Menu_Override, "tests/test_menu.cpp") \
   X(GDEFCORE_Contributor_Call, "tests/test_layout.cpp") \

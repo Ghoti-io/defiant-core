@@ -362,12 +362,16 @@
 #define gdefcore_menu_free GHOTIIO_DEFCORE(gdefcore_menu_free)
 #define gdefcore_menu_item GHOTIIO_DEFCORE(gdefcore_menu_item)
 #define gdefcore_menu_may_edit GHOTIIO_DEFCORE(gdefcore_menu_may_edit)
+#define gdefcore_menu_stage_edit GHOTIIO_DEFCORE(gdefcore_menu_stage_edit)
 #define gdefcore_menu_stage_entry GHOTIIO_DEFCORE(gdefcore_menu_stage_entry)
 #define gdefcore_menu_stage_forget GHOTIIO_DEFCORE(gdefcore_menu_stage_forget)
 #define gdefcore_menu_stage_override \
   GHOTIIO_DEFCORE(gdefcore_menu_stage_override)
+#define gdefcore_menu_stage_record GHOTIIO_DEFCORE(gdefcore_menu_stage_record)
+#define gdefcore_menu_stage_undo GHOTIIO_DEFCORE(gdefcore_menu_stage_undo)
 #define gdefcore_menu_tabs GHOTIIO_DEFCORE(gdefcore_menu_tabs)
 #define gdefcore_menu_tree GHOTIIO_DEFCORE(gdefcore_menu_tree)
+#define gdefcore_menu_version GHOTIIO_DEFCORE(gdefcore_menu_version)
 #define gdefcore_module_after_apply GHOTIIO_DEFCORE(gdefcore_module_after_apply)
 #define gdefcore_module_clear_pending                                          \
   GHOTIIO_DEFCORE(gdefcore_module_clear_pending)

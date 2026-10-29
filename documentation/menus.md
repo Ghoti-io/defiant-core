@@ -77,8 +77,9 @@ each item's parent; `current` marks the entry whose route the page holds and
 
 ## Editing
 
-`gdefcore_menu_declare()` defines the two types and declares the permission to
-edit. There is one action, `core.menu.edit`, declared on each type under the
+`gdefcore_menu_declare()` defines the types and declares the permission to
+edit. A site entry has an optional `hidden` flag, as an override has. There is
+one action, `core.menu.edit`, declared on each type under the
 labels `Edit menu entries` and `Edit menu overrides`; roles are granted both to
 edit menus, nobody is granted either by default, and a condition on a grant may
 name a site entry's `menu`, `name`, `route` and `parent`.
@@ -96,6 +97,53 @@ writes nothing and says "That edit is not allowed."
 `gdefcore_menu_entries()` is the editor's list: every entry of every menu and
 every tab, with whether the site hid it, whether an override applies, and
 whether the viewer would see it. Only a principal who may edit menus asks it.
+
+## Editing as an editor does
+
+An editor changes a menu one action at a time, and each action is one
+changeset: `gdefcore_menu_stage_edit()` takes a `GDEFCORE_Menu_Edit` and stages
+add, rename, hide, show, remove, move and the four moves a keyboard makes (up,
+down, indent: put it last under the sibling before it, outdent: put it after its
+parent). The same call serves a drag, which names a parent and a position, and a
+key, which names only the move.
+
+- **A generated entry is never copied.** Rename, hide, show, and moving write an
+  override keyed by the entry's machine name that holds what the override held
+  and what the edit changes, and nothing of the entry. A site entry is edited as
+  it is, and a remove applies to site entries only (a generated entry is hidden).
+- **A move is one changeset or none.** Room is made between the new neighbours
+  with their weights where there is any; where the neighbours leave none (every
+  entry has weight 0, or two weights are next to each other) every sibling is
+  numbered again in the same changeset, and only an entry whose weight or parent
+  differs from what it has is written.
+- **A stale edit is refused.** The edit names the version of the menus the editor
+  showed (`gdefcore_menu_version()` of the list `gdefcore_menu_entries()`
+  returned); if the menus are not that now, nothing is staged and the refusal is
+  `GDEFCORE_MENU_REFUSED_STALE`. Apply is also refused if anything the edit
+  writes has been written since the changeset was prepared, as for any changeset.
+- **A cycle is refused.** An entry cannot go under itself or under one of its own
+  entries, nor under an entry that is not in its menu, nor so deep that the menu
+  stops showing it.
+- **Hidden is hidden.** A hidden entry is in no output, and the route behind it is
+  still served.
+
+Staging asks who may edit menus (`gdefcore_menu_may_edit()`), so that a refusal
+tells a visitor nothing about the menus, and apply asks about every entry written
+(`gdefcore_menu_authorize()`).
+
+### Undo
+
+An edit that writes anything also writes a record, the single `core.menu-change`
+entity named `last`, one line for each entry or override it wrote: the entity,
+the revision it had when the changeset was prepared, and whether the edit cleared
+it. `gdefcore_menu_stage_undo()` reads the record and stages, in one changeset,
+the values each entity had before: an entry the edit made is cleared, one it
+cleared is restored, one it changed gets its earlier values. It is a new
+revision, never an edit of the past. It is refused when any entity the edit wrote
+has been written since, so an undo never overwrites a later edit, and it empties
+the record, so an edit is undone once. The record names entities and revisions
+and nobody's text, and it is bookkeeping: every write undo makes is authorized as
+a menu write.
 
 ## Tenants
 
