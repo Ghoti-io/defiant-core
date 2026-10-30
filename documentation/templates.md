@@ -206,7 +206,7 @@ added later is keyed by the render key and by the template's revision.
 
 There is one permission, `core.template.edit`, labelled "Edit templates", on
 the type `core.template` and declared by the kit (`gdefcore_template_edit_declare()`).
-It is granted to nobody, admin included, until a changeset grants it. What it
+It is granted to nobody, admin included, until a changeset grants it (a program's first start does that for `admin`, once: `gdefcore_admin_seed()`). What it
 covers is the grant's **condition**, written about the template (conditions.md):
 
 ```

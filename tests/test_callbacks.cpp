@@ -762,6 +762,7 @@ TEST_F(Callbacks, TheMatrixShowsTheCallbackAndTheEnableRatesItHigh) {
   Install(BillingMod());
   EXPECT_NE(GDEFCORE_OK, EnableWith("billing", Confirmation("billing", {kBodyPerm})));
   EnableBilling();
+  GrantMatrix();
   GDEFCORE_Access_Matrix_Row * rows = NULL;
   size_t n = 0;
   ASSERT_EQ(GDEFCORE_OK, gdefcore_access_matrix(catalog_, Req(Admin()), &rows, &n));

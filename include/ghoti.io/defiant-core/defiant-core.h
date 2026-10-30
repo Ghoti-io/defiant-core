@@ -28,6 +28,7 @@
 #define GHOTI_IO_GDEFCORE_DEFIANT_CORE_H
 
 #include <ghoti.io/defiant-core/access.h>
+#include <ghoti.io/defiant-core/adminarea.h>
 #include <ghoti.io/defiant-core/account.h>
 #include <ghoti.io/defiant-core/allocator.h>
 #include <ghoti.io/defiant-core/condition.h>

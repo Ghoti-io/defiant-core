@@ -81,7 +81,7 @@ each item's parent; `current` marks the entry whose route the page holds and
 edit. A site entry has an optional `hidden` flag, as an override has. There is
 one action, `core.menu.edit`, declared on each type under the
 labels `Edit menu entries` and `Edit menu overrides`; roles are granted both to
-edit menus, nobody is granted either by default, and a condition on a grant may
+edit menus, the kit grants neither (`gdefcore_admin_seed()` gives both to the `admin` role once, at a program's first start), and a condition on a grant may
 name a site entry's `menu`, `name`, `route` and `parent`.
 
 Every write is a changeset (`gdefcore_menu_stage_entry()`,

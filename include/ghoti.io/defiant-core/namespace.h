@@ -705,6 +705,8 @@
 #define gdefcore_layout_select GHOTIIO_DEFCORE(gdefcore_layout_select)
 #define gdefcore_layout_may_edit GHOTIIO_DEFCORE(gdefcore_layout_may_edit)
 #define gdefcore_settings_declare GHOTIIO_DEFCORE(gdefcore_settings_declare)
+#define gdefcore_admin_declare GHOTIIO_DEFCORE(gdefcore_admin_declare)
+#define gdefcore_admin_seed GHOTIIO_DEFCORE(gdefcore_admin_seed)
 #define gdefcore_settings_check GHOTIIO_DEFCORE(gdefcore_settings_check)
 #define gdefcore_settings_decimal_cmp GHOTIIO_DEFCORE(gdefcore_settings_decimal_cmp)
 #define gdefcore_settings_count GHOTIIO_DEFCORE(gdefcore_settings_count)

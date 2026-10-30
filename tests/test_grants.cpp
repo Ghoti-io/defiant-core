@@ -138,7 +138,9 @@ TEST_F(Grants, ARevokedGrantIsGoneAndTheRoleKeepsTheRest) {
   EXPECT_EQ(before, Epoch());
   EXPECT_EQ(GDEFCORE_ERR_INVALID,
       gdefcore_access_revoke(catalog_, "nobody", 6, "Read posts", 10));
-  EXPECT_EQ(GDEFCORE_ERR_INVALID,
+  /* The admin role is a holder of grants like any other: one it does not hold
+   * writes nothing (a control that the refusal above is the unknown role's). */
+  EXPECT_EQ(GDEFCORE_OK,
       gdefcore_access_revoke(catalog_, "admin", 5, "Read posts", 10));
   ASSERT_EQ(GDEFCORE_OK, gdefcore_access_revoke(catalog_, "clerk", 5, "Edit posts", 10));
   EXPECT_TRUE(held().empty());
@@ -941,6 +943,7 @@ TEST_F(Grants, TheStructsHereAreAcceptedAtOnlyTheirOwnSize) {
       GDEFCORE_SIZE_PROBE(GDEFCORE_Access_Matrix_Row, {
         GDEFCORE_Access_Matrix_Row * rows = NULL;
         size_t n = 0;
+        GrantMatrix();
         EXPECT_EQ(GDEFCORE_OK,
             gdefcore_access_matrix(catalog_, Req(Admin()), &rows, &n));
         EXPECT_GT(n, 0u);

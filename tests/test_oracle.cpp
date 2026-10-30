@@ -489,6 +489,14 @@ TEST(Oracle, MatrixIsForAdministrators) {
     ASSERT_EQ(GDEFCORE_OK,
         gdefcore_access_admin_principal(hidden.site.catalog, admin));
     Ask ask = AskEverything(false, {"missing"});
+    /* The role is not asked, the grant is: the control is the administrator
+     * once the role holds the permission to read it. */
+    Obs before = Observe(hidden, admin, ask);
+    EXPECT_NE(std::string::npos,
+        before.kv["g:matrix"].find("rc=Invalid argument null n=0"))
+        << before.kv["g:matrix"];
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_admin_declare(hidden.site.catalog));
+    hidden.site.Grant("admin", GDEFCORE_ACCESS_READ_LABEL);
     Obs a = Observe(hidden, admin, ask);
     EXPECT_NE(std::string::npos, a.kv["g:matrix"].find("rc=No error rows="))
         << a.kv["g:matrix"];

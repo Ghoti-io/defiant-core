@@ -401,8 +401,10 @@ GDEFCORE_API GDEFCORE_Result gdefcore_access_grant(GDEFCORE_Catalog * catalog,
  * keeps its history, as for every change of a role: a new revision holds the
  * grants that are left. No confirmation is asked, because nothing is widened.
  * A grant the role does not hold writes nothing and is ::GDEFCORE_OK. The
- * `admin` role is refused (::GDEFCORE_ERR_INVALID): it holds every permission
- * by construction. An unknown role is ::GDEFCORE_ERR_INVALID.
+ * `admin` role is a role like any other here: it holds the grants it was
+ * given and nothing more, so a grant taken from it is gone at the next
+ * decision.
+ * An unknown role is ::GDEFCORE_ERR_INVALID.
  *
  * What a person could do only through the grant is gone from the next
  * decision, and from the next render key (the config epoch moves), so nothing
@@ -585,9 +587,9 @@ GDEFCORE_API GDEFCORE_Result gdefcore_access_hold_for_confirmation(
  *
  * Rows are sorted by source, permission, type, field and condition, bytewise,
  * so the order does not depend on the order roles were granted or modules
- * enabled in. Only an administrator may read it: the request's principal
- * (and its acting principal, if it names another) must hold `admin`.
- * Anyone else gets ::GDEFCORE_ERR_INVALID, the answer a page that does not
+ * enabled in. Only a principal granted ::GDEFCORE_ACCESS_READ may read it
+ * (adminarea.h; the request's acting principal, if it names another, must hold it
+ * too), and no role's name is asked. Anyone else gets ::GDEFCORE_ERR_INVALID, the answer a page that does not
  * exist gets, and no row. A matrix that cannot be read whole is an error,
  * never a short one. Free @p out_rows with gdefcore_access_matrix_free().
  */

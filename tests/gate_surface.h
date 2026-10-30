@@ -415,6 +415,8 @@ static const Surface kSurface[] = {
     {"gdefcore_layout_widget_at", "RA"},
     {"gdefcore_layout_widget_find", "RA"},
     {"gdefcore_layout_declare", "W"},
+    {"gdefcore_admin_declare", "W"},
+    {"gdefcore_admin_seed", "W"},
     {"gdefcore_layout_check", "RA"},
     {"gdefcore_layout_stage_rule", "W"},
     {"gdefcore_layout_stage_forget", "W"},

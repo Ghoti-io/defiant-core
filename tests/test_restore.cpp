@@ -979,6 +979,10 @@ TEST_F(Restore, ARestoredGrantToAStateIsHeldForItsTypedConfirmation) {
     GDEFCORE_Access_Matrix_Row * rows = NULL;
     size_t n = 0;
     ASSERT_EQ(GDEFCORE_OK, gdefcore_access_admin_principal(catalog_, admin));
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_admin_declare(catalog_));
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_access_grant(catalog_, "admin", 5, GDEFCORE_ACCESS_READ_LABEL,
+            sizeof GDEFCORE_ACCESS_READ_LABEL - 1, "core.role", 9));
     ASSERT_EQ(GDEFCORE_OK,
         gdefcore_access_matrix(catalog_, Req(admin), &rows, &n));
     for (size_t i = 0; i < n; i++) {

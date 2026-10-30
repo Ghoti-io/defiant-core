@@ -146,31 +146,23 @@ int gdefcore_access_grant_risk(const char * action,'
 
 # Plant 9: anyone may read the matrix.
 plant matrix-visible-to-everyone $ACCESS testGrants 'Grants.MatrixOnlyForAdmin' \
-  '  if (!principal_is_admin(catalog, who, who_len) ||
-      (acting != NULL && !same(acting, acting_len, who, who_len) &&
-          !principal_is_admin(catalog, acting, acting_len))) {
+  '  if (!gdefcore_access_permits(catalog, request, GDEFCORE_ACCESS_READ,
+          sizeof GDEFCORE_ACCESS_READ - 1)) {
     return GDEFCORE_ERR_INVALID;
   }' \
-  '  (void)who;
-  (void)who_len;
-  (void)acting;
-  (void)acting_len;
-  if (0) {
+  '  if (0 && !gdefcore_access_permits(catalog, request, GDEFCORE_ACCESS_READ,
+          sizeof GDEFCORE_ACCESS_READ - 1)) {
     return GDEFCORE_ERR_INVALID;
   }'
 
 # Plant 9b: the same, seen by the oracle sweep.
 plant matrix-visible-to-everyone-oracle $ACCESS testOracle 'Oracle.MatrixIsForAdministrators' \
-  '  if (!principal_is_admin(catalog, who, who_len) ||
-      (acting != NULL && !same(acting, acting_len, who, who_len) &&
-          !principal_is_admin(catalog, acting, acting_len))) {
+  '  if (!gdefcore_access_permits(catalog, request, GDEFCORE_ACCESS_READ,
+          sizeof GDEFCORE_ACCESS_READ - 1)) {
     return GDEFCORE_ERR_INVALID;
   }' \
-  '  (void)who;
-  (void)who_len;
-  (void)acting;
-  (void)acting_len;
-  if (0) {
+  '  if (0 && !gdefcore_access_permits(catalog, request, GDEFCORE_ACCESS_READ,
+          sizeof GDEFCORE_ACCESS_READ - 1)) {
     return GDEFCORE_ERR_INVALID;
   }'
 

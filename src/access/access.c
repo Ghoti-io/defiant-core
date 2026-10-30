@@ -31,6 +31,7 @@
 
 #include <ghoti.io/defiant-core/macros.h>
 #include <ghoti.io/defiant-core/access.h>
+#include <ghoti.io/defiant-core/adminarea.h>
 #include <ghoti.io/defiant-core/condition.h>
 #include <ghoti.io/defiant-core/module.h>
 #include <ghoti.io/defiant-core/plan.h>
@@ -2100,10 +2101,6 @@ static GDEFCORE_Result revoke_role(GDEFCORE_Catalog * catalog, const char * role
   GDEFCORE_Result rc = ensure(catalog);
   if (rc != GDEFCORE_OK) {
     return rc;
-  }
-  if (same(role, role_len, kAdmin, strlen(kAdmin))) {
-    /* Admin holds every permission by construction: nothing takes one away. */
-    return GDEFCORE_ERR_INVALID;
   }
   rc = find_role(catalog, role, role_len, role_id);
   if (rc != GDEFCORE_OK) {
@@ -6315,23 +6312,6 @@ static int mx_cmp(const void * pa, const void * pb) {
   return c;
 }
 
-/* Whether the principal holds the role `admin`. A principal that is not
- * there, or was removed, does not. */
-static int principal_is_admin(GDEFCORE_Catalog * catalog, const char * who,
-    size_t who_len) {
-  char id[GDEFCORE_PUBLIC_ID_LEN + 1];
-  int held = 0;
-  if (who == NULL || who_len != GDEFCORE_PUBLIC_ID_LEN) {
-    return 0;
-  }
-  memcpy(id, who, who_len);
-  id[who_len] = '\0';
-  if (holds_admin(catalog, id, &held) != GDEFCORE_OK) {
-    return 0;
-  }
-  return held;
-}
-
 /* One role's grants as rows. */
 static GDEFCORE_Result mx_role(MatrixBuild * b, Eval * ev, const char * role_id) {
   Grant grants[kGrantMax];
@@ -6513,10 +6493,6 @@ GDEFCORE_Result gdefcore_access_matrix(GDEFCORE_Catalog * catalog,
     size_t * out_count) {
   MatrixBuild b;
   Eval ev;
-  const char * who;
-  size_t who_len = 0;
-  const char * acting;
-  size_t acting_len = 0;
   char ** ids = NULL;
   size_t count = 0;
   const GDEFCORE_Module_Declared_Grant ** items = NULL;
@@ -6534,14 +6510,13 @@ GDEFCORE_Result gdefcore_access_matrix(GDEFCORE_Catalog * catalog,
   if (rc != GDEFCORE_OK) {
     return rc;
   }
-  /* Only an administrator reads it; anyone else is told what a page that is
-   * not there is told. An acting principal needs the role as well: an agent
-   * does not read the matrix through the person it acts for (AD-12). */
-  who = gdefcore_request_principal(request, &who_len);
-  acting = gdefcore_request_acting_principal(request, &acting_len);
-  if (!principal_is_admin(catalog, who, who_len) ||
-      (acting != NULL && !same(acting, acting_len, who, who_len) &&
-          !principal_is_admin(catalog, acting, acting_len))) {
+  /* Whoever holds the permission reads it, and nobody else: the role a person
+   * has is not asked. Anyone else is told what a page that is not there is
+   * told. An acting principal is asked too, through the ceiling the question
+   * carries: an agent does not read the matrix through the person it acts for
+   * (AD-12). */
+  if (!gdefcore_access_permits(catalog, request, GDEFCORE_ACCESS_READ,
+          sizeof GDEFCORE_ACCESS_READ - 1)) {
     return GDEFCORE_ERR_INVALID;
   }
   memset(&b, 0, sizeof b);

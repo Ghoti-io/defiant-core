@@ -9,8 +9,36 @@ anonymous. A request with a principal is authenticated. Those two roles
 cannot be assigned and cannot be deleted.
 
 Admin is every permission granted to the `admin` role. The filter still
-applies. There is no skip. The last principal who holds `admin` cannot
-lose it and cannot be removed.
+applies. There is no skip: no decision reads a role's name, so the role holds
+what it was granted and a grant taken from it (`gdefcore_access_revoke()`) is
+gone at the next decision. The last principal who holds `admin` cannot lose the
+role and cannot be removed.
+
+## The admin area
+
+Every page of the admin area is gated by a permission, and the route's own check
+is the only authorization there is (adminarea.h). The pages that already meant a
+permission use it: templates, menus, layouts, settings. The others have one of
+their own, declared by `gdefcore_admin_declare()`:
+
+| Permission | Action | Governs |
+|---|---|---|
+| Use the admin area | `core.admin.use` | the admin home and the More screen |
+| Write posts | `core.post.write` | writing a post, and undoing a change to one |
+| Undo changes | `core.admin.undo` | the undo page |
+| Undo changes to roles | `core.role.revert` | undoing a change to a role |
+| See what is granted | `core.access.read` | the matrix below |
+
+The front page editor asks `core.layout.edit`, which already governs the layouts
+it edits. A page is never reachable with a grant that does not govern it: the
+undo page lists and undoes only what the viewer holds the permission of the
+thing for, and holding `core.admin.undo` alone shows nothing to undo.
+
+`gdefcore_admin_seed()` is the first administrator's: it declares what the pages
+ask and grants each permission to the `admin` role, **once** (it does nothing
+when `core.admin.use` is already declared), so a program that starts again does
+not give back a grant that someone revoked. The grants it makes are ordinary
+role grants, in the matrix like any other.
 
 ## Permissions
 
@@ -386,9 +414,10 @@ modules. A row has its source (`role <name>` or `module <name>`), the
 permission's label, action, type and field, the condition in canonical form,
 the condition in plain English, and a risk. Rows are sorted bytewise by source,
 label, type, field and condition, so the order depends on nothing but the
-grants. Only an administrator may read it (the principal, and an acting
-principal if there is one, must hold the role `admin`); anyone else gets
-`GDEFCORE_ERR_INVALID`, as for a page that is not there, and no row. A matrix
+grants. Only a principal granted `core.access.read` may read it (an acting
+principal, if there is one, must hold it too); no role's name is asked, and
+anyone else gets `GDEFCORE_ERR_INVALID`, as for a page that is not there, and no
+row. A matrix
 that cannot be read whole (a stored condition that no longer parses) is an
 error, not a short matrix. The texts are plain: a page escapes them.
 

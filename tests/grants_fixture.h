@@ -921,9 +921,17 @@ class GrantsFixture : public ::testing::Test {
     int from_module;
   };
 
+  /** The administrator granted the permission to read the matrix (adminarea.h):
+   * the role is not asked, the grant is. */
+  void GrantMatrix() {
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_admin_declare(catalog_));
+    Grant("admin", GDEFCORE_ACCESS_READ_LABEL);
+  }
+
   /** The matrix as the administrator reads it. */
   std::vector<Row> Matrix(GDEFCORE_Result * rc_out = NULL,
       const std::string & who = std::string()) {
+    GrantMatrix();
     GDEFCORE_Access_Matrix_Row * rows = NULL;
     size_t n = 0;
     std::vector<Row> out;

@@ -67,7 +67,7 @@ field leaves it alone, and a Clear box sends it back to its default.
 
 ## Who may
 
-One permission, `core.settings.edit` on `core.setting`, granted to nobody. A grant
+One permission, `core.settings.edit` on `core.setting`, granted to nobody by the kit (`gdefcore_admin_seed()` grants it, with the other admin pages' permissions, to the `admin` role once, when a program first starts: adminarea.h). A grant
 may carry a condition naming the setting's `name` and `group`
 (`(= field.group "shop.limits")`), so a role edits one group and not another.
 It is decided by the one `gdefcore_access_can_with()` for each setting a save

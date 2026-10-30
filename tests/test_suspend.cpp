@@ -258,6 +258,7 @@ class Suspend : public GrantsFixture {
     GDEFCORE_Access_Matrix_Row * rows = NULL;
     size_t n = 0;
     std::vector<MRow> out;
+    GrantMatrix();
     EXPECT_EQ(GDEFCORE_OK, gdefcore_access_matrix(catalog_, Req(Admin()), &rows, &n));
     for (size_t i = 0; i < n; i++) {
       MRow r;
