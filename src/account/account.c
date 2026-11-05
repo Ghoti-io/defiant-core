@@ -30,10 +30,15 @@
 #include <ghoti.io/defiant-core/macros.h>
 #include <ghoti.io/defiant-core/account.h>
 #include <ghoti.io/defiant-core/access.h>
+#include <ghoti.io/defiant-core/entity.h>
+#include <ghoti.io/defiant-core/module.h>
+#include <ghoti.io/defiant-core/request.h>
 
 #include "account_internal.h"
 
 #include <ghoti.io/cutil/allocator.h>
+#include <ghoti.io/defiant-storage/model.h>
+#include <ghoti.io/defiant-storage/store.h>
 #include <ghoti.io/security/aes_gcm.h>
 #include <ghoti.io/security/argon2.h>
 #include <ghoti.io/security/hkdf.h>
@@ -58,9 +63,27 @@ enum {
   kBlobCap = 544,
   kHexCap = 1088,
   kTenantMax = 256,
-  kPlain = 66,
+  kSid = 16,
+  kSidHex = 32,
+  kPlain = 82,
+  kRawCap = 192,
+  kExpDigits = 20,
+  kExpKey = kExpDigits + 1 + kSidHex,
+  kPurgeBatch = 64,
   kWrapLen = 63
 };
+
+/* A revoked session stays on the list until its token has been expired for
+ * this long, in seconds, so that nodes whose clocks differ by less than it
+ * never see a revoked token live again. */
+static const uint64_t kPurgeGrace = 300;
+
+/* The record namespaces of revoked sessions (accounts.md): `revoked` is keyed
+ * by the session id in hex and holds its expiry; `revoked.exp` is keyed
+ * `<20-digit expiry>.<session id in hex>` with an empty value, so that the
+ * oldest expiry is first and a purge reads one bounded page. */
+static const char kRevokedNs[] = "core.session.revoked";
+static const char kRevokedExpNs[] = "core.session.revoked.exp";
 
 static const char kLang[] = "en";
 static const char kAccountType[] = "core.account";
@@ -1020,7 +1043,7 @@ static GDEFCORE_Result mint_token(GDEFCORE_Catalog * catalog,
   uint8_t ct[kPlain];
   uint8_t tag[kTag];
   uint8_t aad[kTenantMax + 32];
-  uint8_t raw[160];
+  uint8_t raw[kRawCap];
   const uint8_t * tenant = NULL;
   size_t tenant_len = 0;
   size_t aad_len = 0;
@@ -1034,15 +1057,24 @@ static GDEFCORE_Result mint_token(GDEFCORE_Catalog * catalog,
     wipe(salt, sizeof salt);
     return rc;
   }
+  /* The session id: 128 bits from the CSPRNG, sealed in the plaintext. */
+  rc = from_gsec(gsec_random_bytes(plain + 66, kSid, NULL));
+  if (rc != GDEFCORE_OK) {
+    wipe(salt, sizeof salt);
+    wipe(plain, sizeof plain);
+    return rc;
+  }
   rc = from_gsec(gsec_hkdf(GSEC_HKDF_SHA256, salt, sizeof salt, session, kKey,
       NULL, 0, token_key, kKey));
   if (rc != GDEFCORE_OK) {
     wipe(salt, sizeof salt);
+    wipe(plain, sizeof plain);
     return rc;
   }
   rc = tenant_of(catalog, &tenant, &tenant_len);
   if (rc != GDEFCORE_OK) {
     wipe(salt, sizeof salt);
+    wipe(plain, sizeof plain);
     wipe(token_key, sizeof token_key);
     return rc;
   }
@@ -1174,10 +1206,22 @@ GDEFCORE_Result gdefcore_account_login(GDEFCORE_Catalog * catalog,
   return rc;
 }
 
-GDEFCORE_Result gdefcore_account_check(GDEFCORE_Catalog * catalog,
-    GDEFCORE_Request * request, GDEFCORE_Keyring * keyring,
-    const uint8_t * root, size_t root_len, const char * token,
-    size_t token_len) {
+/* What a token that opens says, once its tag, tenant, purpose and expiry are
+ * good. Nothing here says the session is still live. */
+typedef struct Session {
+  uint64_t expiry;
+  uint64_t epoch;
+  uint8_t sid[kSid];
+  char account[GDEFCORE_PUBLIC_ID_LEN + 1];
+  char principal[GDEFCORE_PUBLIC_ID_LEN + 1];
+} Session;
+
+/* Parse and open @p token: the layout, the expiry window, the AEAD tag under
+ * the tenant's session key and the tenant in the associated data. A token
+ * that fails any of these is ::GDEFCORE_ERR_INVALID. */
+static GDEFCORE_Result open_session(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Keyring * keyring, const uint8_t * root, size_t root_len,
+    const char * token, size_t token_len, Session * out) {
   const uint8_t * raw;
   const uint8_t * tenant = NULL;
   size_t tenant_len = 0;
@@ -1185,19 +1229,319 @@ GDEFCORE_Result gdefcore_account_check(GDEFCORE_Catalog * catalog,
   size_t aad_len = 0;
   uint32_t ct_len = 0;
   uint64_t expiry = 0;
-  uint64_t token_epoch = 0;
-  uint64_t current = 0;
   uint64_t now = 0;
   uint8_t session[kKey];
   uint8_t token_key[kKey];
   uint8_t plain[kPlain];
   uint8_t aad[kTenantMax + 32];
-  char account[GDEFCORE_PUBLIC_ID_LEN + 1];
-  char principal[GDEFCORE_PUBLIC_ID_LEN + 1];
+  size_t header = 0;
+  GDEFCORE_Result rc;
+  if (token == NULL || token_len < 83) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  raw = (const uint8_t *)token;
+  if (raw[0] != kVersion || raw[1] != kAlg || raw[2] != kKeyId) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  purpose_len = raw[3];
+  header = 4 + purpose_len + 8 + kTokenSalt + kNonce + 4;
+  if (purpose_len != strlen(kSession) || token_len < header + kTag ||
+      memcmp(raw + 4, kSession, purpose_len) != 0) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  expiry = get_u64(raw + 4 + purpose_len);
+  ct_len = get_u32(raw + header - 4);
+  if (ct_len != kPlain || token_len != header + ct_len + kTag) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  if (!now_u64(&now)) {
+    return GDEFCORE_ERR_IO;
+  }
+  if (expiry <= now || expiry > now + GDEFCORE_ACCOUNT_SESSION_MAX) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  rc = purpose_key(keyring, root, root_len, kSession, session);
+  if (rc != GDEFCORE_OK) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  rc = from_gsec(gsec_hkdf(GSEC_HKDF_SHA256, raw + 4 + purpose_len + 8,
+      kTokenSalt, session, kKey, NULL, 0, token_key, kKey));
+  wipe(session, sizeof session);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  rc = tenant_of(catalog, &tenant, &tenant_len);
+  if (rc != GDEFCORE_OK) {
+    wipe(token_key, sizeof token_key);
+    return rc;
+  }
+  put_u32(aad, (uint32_t)tenant_len);
+  memcpy(aad + 4, tenant, tenant_len);
+  memcpy(aad + 4 + tenant_len, kSession, strlen(kSession));
+  aad[4 + tenant_len + strlen(kSession)] = kKeyId;
+  put_u64(aad + 5 + tenant_len + strlen(kSession), expiry);
+  aad_len = 13 + tenant_len + strlen(kSession);
+  rc = from_gsec(gsec_aes_gcm_decrypt(token_key, kKey,
+      raw + 4 + purpose_len + 8 + kTokenSalt, kNonce, aad, aad_len,
+      raw + header, ct_len, plain, raw + header + ct_len, kTag));
+  wipe(token_key, sizeof token_key);
+  if (rc != GDEFCORE_OK) {
+    wipe(plain, sizeof plain);
+    return GDEFCORE_ERR_INVALID;
+  }
+  if (plain[8] != GDEFCORE_PUBLIC_ID_LEN ||
+      plain[37] != GDEFCORE_PUBLIC_ID_LEN) {
+    wipe(plain, sizeof plain);
+    return GDEFCORE_ERR_INVALID;
+  }
+  out->expiry = expiry;
+  out->epoch = get_u64(plain);
+  memcpy(out->account, plain + 9, GDEFCORE_PUBLIC_ID_LEN);
+  out->account[GDEFCORE_PUBLIC_ID_LEN] = '\0';
+  memcpy(out->principal, plain + 38, GDEFCORE_PUBLIC_ID_LEN);
+  out->principal[GDEFCORE_PUBLIC_ID_LEN] = '\0';
+  memcpy(out->sid, plain + 66, kSid);
+  wipe(plain, sizeof plain);
+  return GDEFCORE_OK;
+}
+
+static void session_wipe(Session * s) {
+  wipe(s, sizeof *s);
+}
+
+static GDEFCORE_Result map_stor(GDEFSTOR_Result r) {
+  switch (r) {
+  case GDEFSTOR_OK:
+    return GDEFCORE_OK;
+  case GDEFSTOR_ERR_OOM:
+    return GDEFCORE_ERR_OOM;
+  case GDEFSTOR_ERR_LIMIT:
+    return GDEFCORE_ERR_LIMIT;
+  case GDEFSTOR_ERR_CORRUPT:
+    return GDEFCORE_ERR_CORRUPT;
+  case GDEFSTOR_ERR_INVALID:
+  case GDEFSTOR_ERR_UNSUPPORTED:
+    return GDEFCORE_ERR_INVALID;
+  default:
+    return GDEFCORE_ERR_IO;
+  }
+}
+
+/* Whether the account still stands behind the token: its principal is the
+ * account's, and its epoch is the account's current one. *out_live 0 with
+ * ::GDEFCORE_OK is an older epoch (the session has ended); a newer epoch
+ * than the account's, or a principal that is not the account's, is
+ * ::GDEFCORE_ERR_INVALID. */
+static GDEFCORE_Result session_standing(GDEFCORE_Catalog * catalog,
+    const Session * s, int * out_live) {
   char stored_principal[GDEFCORE_PUBLIC_ID_LEN + 1];
   char epoch_id[GDEFCORE_PUBLIC_ID_LEN + 1];
   size_t stored_len = 0;
-  size_t header = 0;
+  uint64_t current = 0;
+  GDEFCORE_Result rc = read_text(catalog, s->account, "principal",
+      stored_principal, sizeof stored_principal, &stored_len);
+  *out_live = 0;
+  if (rc != GDEFCORE_OK || stored_len != GDEFCORE_PUBLIC_ID_LEN ||
+      !same(stored_principal, stored_len, s->principal,
+          GDEFCORE_PUBLIC_ID_LEN)) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  rc = load_epoch(catalog, s->account, epoch_id, &current);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  if (s->epoch != current) {
+    return s->epoch < current ? GDEFCORE_OK : GDEFCORE_ERR_INVALID;
+  }
+  *out_live = 1;
+  return GDEFCORE_OK;
+}
+
+static GDEFCORE_Result store_of(GDEFCORE_Catalog * catalog,
+    GDEFSTOR_Store ** out_store, const char ** out_tenant,
+    size_t * out_tenant_len) {
+  size_t tenant_len = 0;
+  const uint8_t * tenant = gdefcore_catalog_tenant(catalog, &tenant_len);
+  GDEFSTOR_Store * store = gdefcore_catalog_store(catalog);
+  if (store == NULL || tenant == NULL || tenant_len == 0) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  *out_store = store;
+  *out_tenant = (const char *)tenant;
+  *out_tenant_len = tenant_len;
+  return GDEFCORE_OK;
+}
+
+/* Whether the session is on the tenant's revocation list: one record read.
+ * Any answer but a clean "not there" is an error, so the caller refuses. */
+static GDEFCORE_Result is_revoked(GDEFCORE_Catalog * catalog,
+    const uint8_t sid[kSid], int * out_revoked) {
+  GDEFSTOR_Store * store = NULL;
+  const char * tenant = NULL;
+  size_t tenant_len = 0;
+  char key[kSidHex + 1];
+  size_t key_len = 0;
+  uint8_t * bytes = NULL;
+  size_t len = 0;
+  int found = 0;
+  GDEFCORE_Result rc;
+  *out_revoked = 1;
+  rc = store_of(catalog, &store, &tenant, &tenant_len);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  rc = hex_encode(sid, kSid, key, sizeof key, &key_len);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  rc = map_stor(gdefstor_record_get(store, tenant, tenant_len, kRevokedNs,
+      strlen(kRevokedNs), key, key_len, &found, &bytes, &len, NULL, NULL));
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  gdefstor_bytes_free(NULL, bytes);
+  *out_revoked = found != 0;
+  return GDEFCORE_OK;
+}
+
+/* The expiry index key: the expiry as 20 digits, so keys sort by expiry, then
+ * the session id in hex. */
+static GDEFCORE_Result exp_key(uint64_t expiry, const char * sid_hex,
+    char out[kExpKey + 1]) {
+  int n = snprintf(out, kExpKey + 1, "%020llu.%.*s",
+      (unsigned long long)expiry, kSidHex, sid_hex);
+  return n == kExpKey ? GDEFCORE_OK : GDEFCORE_ERR_INTERNAL;
+}
+
+/* Read an index key back: 20 digits, a dot, 32 lowercase hex digits. */
+static int exp_parse(const char * key, size_t len, uint64_t * out_expiry) {
+  uint64_t v = 0;
+  size_t i;
+  if (len != kExpKey || key[kExpDigits] != '.') {
+    return 0;
+  }
+  for (i = 0; i < kExpDigits; i++) {
+    unsigned d;
+    if (key[i] < '0' || key[i] > '9') {
+      return 0;
+    }
+    d = (unsigned)(key[i] - '0');
+    if (v > (UINT64_MAX - d) / 10u) {
+      return 0;
+    }
+    v = v * 10u + d;
+  }
+  for (i = kExpDigits + 1; i < len; i++) {
+    if (hex_nibble(key[i]) < 0) {
+      return 0;
+    }
+  }
+  *out_expiry = v;
+  return 1;
+}
+
+/* In @p write, drop what has been dead long enough: the oldest page of the
+ * expiry index, in order, stopping at the first entry still inside its
+ * expiry plus the grace. A key that is not an index key cannot be one of
+ * ours and goes too. At most ::kPurgeBatch entries are read, so the work of
+ * one revocation is bounded; a revocation adds one entry and may remove a
+ * page, so the list cannot fall behind. */
+static GDEFCORE_Result purge_dead(GDEFSTOR_Store * store, const char * tenant,
+    size_t tenant_len, GDEFSTOR_Write * write, uint64_t now) {
+  GDEFSTOR_RecordList * list = NULL;
+  size_t n;
+  size_t i;
+  GDEFCORE_Result rc = map_stor(gdefstor_record_list(store, tenant, tenant_len,
+      kRevokedExpNs, strlen(kRevokedExpNs), "", 0, 0, kPurgeBatch, &list));
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  n = gdefstor_record_list_count(list);
+  for (i = 0; i < n && rc == GDEFCORE_OK; i++) {
+    const char * key = NULL;
+    size_t key_len = 0;
+    uint64_t expiry = 0;
+    const uint8_t * bytes = NULL;
+    size_t len = 0;
+    rc = map_stor(gdefstor_record_list_item(list, i, &key, &key_len, &bytes,
+        &len, NULL, NULL));
+    if (rc != GDEFCORE_OK) {
+      break;
+    }
+    if (exp_parse(key, key_len, &expiry)) {
+      if (expiry > now || now - expiry < kPurgeGrace) {
+        break; /* sorted by expiry: nothing later is dead either */
+      }
+      rc = map_stor(gdefstor_record_delete(write, kRevokedNs,
+          strlen(kRevokedNs), key + kExpDigits + 1, kSidHex, NULL));
+    }
+    if (rc == GDEFCORE_OK) {
+      rc = map_stor(gdefstor_record_delete(write, kRevokedExpNs,
+          strlen(kRevokedExpNs), key, key_len, NULL));
+    }
+  }
+  gdefstor_record_list_free(list);
+  return rc;
+}
+
+/* Put the session on the revocation list, and purge, in one write. */
+static GDEFCORE_Result record_revocation(GDEFCORE_Catalog * catalog,
+    const Session * s) {
+  GDEFSTOR_Store * store = NULL;
+  GDEFSTOR_Write * write = NULL;
+  const char * tenant = NULL;
+  size_t tenant_len = 0;
+  char sid_hex[kSidHex + 1];
+  size_t sid_len = 0;
+  char ekey[kExpKey + 1];
+  char value[kExpDigits + 1];
+  uint64_t now = 0;
+  int n;
+  GDEFCORE_Result rc = store_of(catalog, &store, &tenant, &tenant_len);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  rc = hex_encode(s->sid, kSid, sid_hex, sizeof sid_hex, &sid_len);
+  if (rc == GDEFCORE_OK) {
+    rc = exp_key(s->expiry, sid_hex, ekey);
+  }
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  n = snprintf(value, sizeof value, "%llu", (unsigned long long)s->expiry);
+  if (n <= 0 || (size_t)n >= sizeof value || !now_u64(&now)) {
+    return GDEFCORE_ERR_INTERNAL;
+  }
+  rc = map_stor(gdefstor_write_begin(store, tenant, tenant_len, NULL, &write));
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  rc = map_stor(gdefstor_record_put(write, kRevokedNs, strlen(kRevokedNs),
+      sid_hex, sid_len, GDEFCORE_SCHEMA_CORE_STAMP,
+      sizeof GDEFCORE_SCHEMA_CORE_STAMP - 1, (const uint8_t *)value,
+      (size_t)n));
+  if (rc == GDEFCORE_OK) {
+    rc = map_stor(gdefstor_record_put(write, kRevokedExpNs,
+        strlen(kRevokedExpNs), ekey, kExpKey, GDEFCORE_SCHEMA_CORE_STAMP,
+        sizeof GDEFCORE_SCHEMA_CORE_STAMP - 1, NULL, 0));
+  }
+  if (rc == GDEFCORE_OK) {
+    rc = purge_dead(store, tenant, tenant_len, write, now);
+  }
+  if (rc != GDEFCORE_OK) {
+    gdefstor_write_abort(write);
+    return rc;
+  }
+  return map_stor(gdefstor_write_commit(write));
+}
+
+GDEFCORE_Result gdefcore_account_check(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Request * request, GDEFCORE_Keyring * keyring,
+    const uint8_t * root, size_t root_len, const char * token,
+    size_t token_len) {
+  Session s;
+  int live = 0;
+  int revoked = 1;
   GDEFCORE_Result rc;
   if (catalog == NULL || request == NULL || keyring == NULL ||
       !root_ok(root, root_len) || token == NULL || token_len < 83) {
@@ -1207,159 +1551,76 @@ GDEFCORE_Result gdefcore_account_check(GDEFCORE_Catalog * catalog,
     return GDEFCORE_ERR_INVALID;
   }
   clear_identity(request);
-  raw = (const uint8_t *)token;
-  if (raw[0] != kVersion || raw[1] != kAlg || raw[2] != kKeyId) {
-    return GDEFCORE_ERR_INVALID;
-  }
-  purpose_len = raw[3];
-  header = 4 + purpose_len + 8 + kTokenSalt + kNonce + 4;
-  if (purpose_len != strlen(kSession) || token_len < header + kTag ||
-      memcmp(raw + 4, kSession, purpose_len) != 0) {
-    return GDEFCORE_ERR_INVALID;
-  }
-  expiry = get_u64(raw + 4 + purpose_len);
-  ct_len = get_u32(raw + header - 4);
-  if (ct_len != kPlain || token_len != header + ct_len + kTag) {
-    return GDEFCORE_ERR_INVALID;
-  }
-  if (!now_u64(&now)) {
-    return GDEFCORE_ERR_IO;
-  }
-  if (expiry <= now || expiry > now + GDEFCORE_ACCOUNT_SESSION_MAX) {
-    return GDEFCORE_ERR_INVALID;
-  }
-  rc = purpose_key(keyring, root, root_len, kSession, session);
-  if (rc != GDEFCORE_OK) {
-    return GDEFCORE_ERR_INVALID;
-  }
-  rc = from_gsec(gsec_hkdf(GSEC_HKDF_SHA256, raw + 4 + purpose_len + 8,
-      kTokenSalt, session, kKey, NULL, 0, token_key, kKey));
-  wipe(session, sizeof session);
+  rc = open_session(catalog, keyring, root, root_len, token, token_len, &s);
   if (rc != GDEFCORE_OK) {
     return rc;
   }
-  rc = tenant_of(catalog, &tenant, &tenant_len);
-  if (rc != GDEFCORE_OK) {
-    wipe(token_key, sizeof token_key);
+  rc = session_standing(catalog, &s, &live);
+  if (rc != GDEFCORE_OK || !live) {
+    session_wipe(&s);
     return rc;
   }
-  put_u32(aad, (uint32_t)tenant_len);
-  memcpy(aad + 4, tenant, tenant_len);
-  memcpy(aad + 4 + tenant_len, kSession, strlen(kSession));
-  aad[4 + tenant_len + strlen(kSession)] = kKeyId;
-  put_u64(aad + 5 + tenant_len + strlen(kSession), expiry);
-  aad_len = 13 + tenant_len + strlen(kSession);
-  rc = from_gsec(gsec_aes_gcm_decrypt(token_key, kKey,
-      raw + 4 + purpose_len + 8 + kTokenSalt, kNonce, aad, aad_len,
-      raw + header, ct_len, plain, raw + header + ct_len, kTag));
-  wipe(token_key, sizeof token_key);
-  if (rc != GDEFCORE_OK) {
-    wipe(plain, sizeof plain);
-    return GDEFCORE_ERR_INVALID;
-  }
-  token_epoch = get_u64(plain);
-  if (plain[8] != GDEFCORE_PUBLIC_ID_LEN ||
-      plain[37] != GDEFCORE_PUBLIC_ID_LEN) {
-    wipe(plain, sizeof plain);
-    return GDEFCORE_ERR_INVALID;
-  }
-  memcpy(account, plain + 9, GDEFCORE_PUBLIC_ID_LEN);
-  account[GDEFCORE_PUBLIC_ID_LEN] = '\0';
-  memcpy(principal, plain + 38, GDEFCORE_PUBLIC_ID_LEN);
-  principal[GDEFCORE_PUBLIC_ID_LEN] = '\0';
-  wipe(plain, sizeof plain);
-  rc = read_text(catalog, account, "principal", stored_principal,
-      sizeof stored_principal, &stored_len);
-  if (rc != GDEFCORE_OK || stored_len != GDEFCORE_PUBLIC_ID_LEN ||
-      !same(stored_principal, stored_len, principal, GDEFCORE_PUBLIC_ID_LEN)) {
-    return GDEFCORE_ERR_INVALID;
-  }
-  rc = load_epoch(catalog, account, epoch_id, &current);
-  if (rc != GDEFCORE_OK) {
+  /* The one lookup. A list that cannot be read is an error, never a pass. */
+  rc = is_revoked(catalog, s.sid, &revoked);
+  if (rc != GDEFCORE_OK || revoked) {
+    session_wipe(&s);
     return rc;
   }
-  if (token_epoch != current) {
-    if (token_epoch < current) {
-      return GDEFCORE_OK;
-    }
-    return GDEFCORE_ERR_INVALID;
-  }
-  return set_principal(request, stored_principal);
+  rc = set_principal(request, s.principal);
+  session_wipe(&s);
+  return rc;
 }
 
 GDEFCORE_Result gdefcore_account_session_expiry(GDEFCORE_Catalog * catalog,
     GDEFCORE_Keyring * keyring, const uint8_t * root, size_t root_len,
     const char * token, size_t token_len, uint64_t * out_expiry) {
-  const uint8_t * raw;
-  const uint8_t * tenant = NULL;
-  size_t tenant_len = 0;
-  size_t purpose_len = 0;
-  size_t aad_len = 0;
-  uint32_t ct_len = 0;
-  uint64_t expiry = 0;
-  uint64_t now = 0;
-  uint8_t session[kKey];
-  uint8_t token_key[kKey];
-  uint8_t plain[kPlain];
-  uint8_t aad[kTenantMax + 32];
-  size_t header = 0;
+  Session s;
   GDEFCORE_Result rc;
   if (catalog == NULL || keyring == NULL || out_expiry == NULL ||
       !root_ok(root, root_len) || token == NULL || token_len < 83) {
     return GDEFCORE_ERR_INVALID;
   }
-  raw = (const uint8_t *)token;
-  if (raw[0] != kVersion || raw[1] != kAlg || raw[2] != kKeyId) {
+  rc = open_session(catalog, keyring, root, root_len, token, token_len, &s);
+  if (rc == GDEFCORE_OK) {
+    *out_expiry = s.expiry;
+  }
+  session_wipe(&s);
+  return rc;
+}
+
+GDEFCORE_Result gdefcore_account_session_revoke(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Request * request, GDEFCORE_Keyring * keyring,
+    const uint8_t * root, size_t root_len, const char * token,
+    size_t token_len) {
+  Session s;
+  size_t request_tenant_len = 0;
+  size_t tenant_len = 0;
+  const uint8_t * request_tenant;
+  const uint8_t * tenant;
+  int live = 0;
+  GDEFCORE_Result rc;
+  if (catalog == NULL || request == NULL || keyring == NULL ||
+      !root_ok(root, root_len) || token == NULL || token_len < 83) {
     return GDEFCORE_ERR_INVALID;
   }
-  purpose_len = raw[3];
-  header = 4 + purpose_len + 8 + kTokenSalt + kNonce + 4;
-  if (purpose_len != strlen(kSession) || token_len < header + kTag ||
-      memcmp(raw + 4, kSession, purpose_len) != 0) {
+  request_tenant = gdefcore_request_tenant(request, &request_tenant_len);
+  tenant = gdefcore_catalog_tenant(catalog, &tenant_len);
+  if (request_tenant == NULL || tenant == NULL ||
+      !same((const char *)request_tenant, request_tenant_len,
+          (const char *)tenant, tenant_len)) {
     return GDEFCORE_ERR_INVALID;
   }
-  expiry = get_u64(raw + 4 + purpose_len);
-  ct_len = get_u32(raw + header - 4);
-  if (ct_len != kPlain || token_len != header + ct_len + kTag) {
-    return GDEFCORE_ERR_INVALID;
-  }
-  if (!now_u64(&now)) {
-    return GDEFCORE_ERR_IO;
-  }
-  if (expiry <= now || expiry > now + GDEFCORE_ACCOUNT_SESSION_MAX) {
-    return GDEFCORE_ERR_INVALID;
-  }
-  rc = purpose_key(keyring, root, root_len, kSession, session);
-  if (rc != GDEFCORE_OK) {
-    return GDEFCORE_ERR_INVALID;
-  }
-  rc = from_gsec(gsec_hkdf(GSEC_HKDF_SHA256, raw + 4 + purpose_len + 8,
-      kTokenSalt, session, kKey, NULL, 0, token_key, kKey));
-  wipe(session, sizeof session);
+  rc = open_session(catalog, keyring, root, root_len, token, token_len, &s);
   if (rc != GDEFCORE_OK) {
     return rc;
   }
-  rc = tenant_of(catalog, &tenant, &tenant_len);
-  if (rc != GDEFCORE_OK) {
-    wipe(token_key, sizeof token_key);
-    return rc;
+  rc = session_standing(catalog, &s, &live);
+  if (rc == GDEFCORE_OK && live) {
+    rc = record_revocation(catalog, &s);
   }
-  put_u32(aad, (uint32_t)tenant_len);
-  memcpy(aad + 4, tenant, tenant_len);
-  memcpy(aad + 4 + tenant_len, kSession, strlen(kSession));
-  aad[4 + tenant_len + strlen(kSession)] = kKeyId;
-  put_u64(aad + 5 + tenant_len + strlen(kSession), expiry);
-  aad_len = 13 + tenant_len + strlen(kSession);
-  rc = from_gsec(gsec_aes_gcm_decrypt(token_key, kKey,
-      raw + 4 + purpose_len + 8 + kTokenSalt, kNonce, aad, aad_len,
-      raw + header, ct_len, plain, raw + header + ct_len, kTag));
-  wipe(token_key, sizeof token_key);
-  wipe(plain, sizeof plain);
-  if (rc != GDEFCORE_OK) {
-    return GDEFCORE_ERR_INVALID;
-  }
-  *out_expiry = expiry;
-  return GDEFCORE_OK;
+  /* A session an epoch already ended is gone; there is nothing to record. */
+  session_wipe(&s);
+  return rc;
 }
 
 GDEFCORE_Result gdefcore_account_password(GDEFCORE_Catalog * catalog,

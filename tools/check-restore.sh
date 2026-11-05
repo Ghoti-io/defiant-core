@@ -12,6 +12,8 @@
 #   draft-missing-from-the-export  Personal.EverythingAboutThisPersonListsEveryDraftsValues
 #   restore-ignores-the-modules-enabled
 #                                  Restore.ARestoredGrantNamingAGovernedFieldIsHeldAndReportedInWords
+#   revocations-kept-outside-the-tenant
+#                                  Restore.ASessionRevokedBeforeTheBackupIsStillRevokedAfterARestore
 #
 # The restore tests go into memory and SQLite here; `make
 # test-restore-postgres` runs them, unplanted, into Postgres. S5b's
@@ -87,5 +89,18 @@ plant restore-ignores-the-modules-enabled "$SUB" testRestore \
   '    (void)host;
     gdefcore_catalog_bind_host(catalog, NULL);
     rc = gdefcore_access_hold_for_confirmation(catalog, on_held, report);'
+
+# 7. The revocation list kept somewhere other than the tenant's own data
+#    (here, as another tenant of the same store): it still works for the
+#    process that wrote it, and a backup of the tenant does not hold it, so a
+#    restore brings a revoked session back (story 17).
+plant revocations-kept-outside-the-tenant src/account/account.c testRestore \
+  'Restore.ASessionRevokedBeforeTheBackupIsStillRevokedAfterARestore' \
+  '  *out_tenant = (const char *)tenant;
+  *out_tenant_len = tenant_len;' \
+  '  *out_tenant = "environment";
+  *out_tenant_len = 11;
+  (void)tenant;
+  (void)tenant_len;'
 
 plant_finish

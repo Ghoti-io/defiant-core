@@ -151,6 +151,7 @@ static const Surface kSurface[] = {
     {"gdefcore_account_login", "W"},
     {"gdefcore_account_check", "W"},
     {"gdefcore_account_session_expiry", "RA"},
+    {"gdefcore_account_session_revoke", "W"},
     {"gdefcore_account_password", "W"},
     {"gdefcore_account_logout_everywhere", "W"},
     {"gdefcore_account_remove_identifier", "W"},

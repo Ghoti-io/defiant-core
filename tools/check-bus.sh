@@ -65,11 +65,11 @@ plant chain-served-stale src/module/module.c "$EXE" \
 
 plant session-epoch-trusted src/account/account.c "$EXE" \
   'Bus.SessionEpoch' \
-  '  rc = load_epoch(catalog, account, epoch_id, &current);
+  '  rc = load_epoch(catalog, s->account, epoch_id, &current);
   if (rc != GDEFCORE_OK) {
     return rc;
   }
-  if (token_epoch != current) {' \
+  if (s->epoch != current) {' \
   '  {
     static GDEFCORE_Catalog * seen_catalog[16];
     static uint64_t seen_epoch[16];
@@ -81,7 +81,7 @@ plant session-epoch-trusted src/account/account.c "$EXE" \
       current = seen_epoch[slot];
       rc = GDEFCORE_OK;
     } else {
-      rc = load_epoch(catalog, account, epoch_id, &current);
+      rc = load_epoch(catalog, s->account, epoch_id, &current);
       if (rc == GDEFCORE_OK && slot < 16) {
         seen_catalog[slot] = catalog;
         seen_epoch[slot] = current;
@@ -91,6 +91,6 @@ plant session-epoch-trusted src/account/account.c "$EXE" \
   if (rc != GDEFCORE_OK) {
     return rc;
   }
-  if (token_epoch != current) {'
+  if (s->epoch != current) {'
 
 plant_finish

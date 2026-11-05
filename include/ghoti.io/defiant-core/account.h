@@ -25,7 +25,9 @@
  *
  * One subsystem. An account owns one username and a password. The keyring
  * is wrapped for the caller and is not stored. A session token is bound to
- * the tenant and to the account's security epoch.
+ * the tenant and to the account's security epoch, and names its session by a
+ * random id sealed inside it. The epoch ends every session of an account; a
+ * revocation list ends one.
  */
 
 #ifndef GHOTI_IO_GDEFCORE_ACCOUNT_H
@@ -171,11 +173,18 @@ GDEFCORE_API GDEFCORE_Result gdefcore_account_login(
 /**
  * @brief Check a session token and set the request principal.
  *
- * A good tag and the account's current epoch set the principal and leave
- * the acting principal unset. A bad tag, a wrong tenant, a wrong purpose,
- * a wrong root key, or an expired token sets no principal and is an error.
- * A good tag with an older epoch sets no principal and returns
- * ::GDEFCORE_OK: the request stays anonymous.
+ * A good tag, the account's current epoch and a session that is not revoked
+ * set the principal and leave the acting principal unset. A bad tag, a wrong
+ * tenant, a wrong purpose, a wrong root key, or an expired token sets no
+ * principal and is an error. A good tag with an older epoch sets no
+ * principal and returns ::GDEFCORE_OK: the request stays anonymous. So does
+ * a good tag whose session was revoked by gdefcore_account_session_revoke():
+ * the two are not told apart.
+ *
+ * The revocation test is one record read in the tenant's storage. It fails
+ * closed: if the list cannot be read (storage unavailable, out of memory,
+ * corrupt) no principal is set and the storage error is returned, never
+ * ::GDEFCORE_OK.
  */
 GDEFCORE_API GDEFCORE_Result gdefcore_account_check(
     GDEFCORE_Catalog * catalog, GDEFCORE_Request * request,
@@ -187,12 +196,45 @@ GDEFCORE_API GDEFCORE_Result gdefcore_account_check(
  *
  * The token bytes are not changed. A bad tag, a wrong tenant, or an expired
  * token is an error and @p out_expiry is not written. This does not set a
- * principal.
+ * principal, and it does not consult the epoch or the revocation list: it
+ * says what the token claims, not whether the session is live.
  */
 GDEFCORE_API GDEFCORE_Result gdefcore_account_session_expiry(
     GDEFCORE_Catalog * catalog, GDEFCORE_Keyring * keyring,
     const uint8_t * root, size_t root_len, const char * token,
     size_t token_len, uint64_t * out_expiry);
+
+/**
+ * @brief End the one session a token names, and no other.
+ *
+ * The token is opened first, exactly as gdefcore_account_check() opens it. A
+ * bad tag, a wrong tenant, a wrong purpose, a wrong root key or an expired
+ * token is ::GDEFCORE_ERR_INVALID and nothing is written. @p request must be
+ * a request for the catalog's tenant (otherwise ::GDEFCORE_ERR_INVALID); its
+ * principal is not read and not changed, so a request already signed in by
+ * this token stays so until it ends.
+ *
+ * The session id is then added to the tenant's revocation list in the
+ * tenant's storage, with the token's absolute expiry, in one write that also
+ * purges a bounded page of records whose tokens expired (see
+ * documentation/accounts.md). The list is part of the tenant's data: it
+ * survives a restart and goes into a snapshot. The security epoch is not
+ * touched, and neither is any other sign-in of the account, so this is not
+ * a substitute for gdefcore_account_logout_everywhere().
+ *
+ * Revoking a session that is already revoked succeeds and changes nothing.
+ * Revoking a session that an epoch has already ended (an older epoch)
+ * succeeds and writes nothing: it is as ended as a revocation would make it.
+ *
+ * @return ::GDEFCORE_OK, ::GDEFCORE_ERR_INVALID, or a storage error
+ *   (::GDEFCORE_ERR_IO, ::GDEFCORE_ERR_OOM, ::GDEFCORE_ERR_LIMIT,
+ *   ::GDEFCORE_ERR_CORRUPT); on any error the session is not known to be
+ *   revoked, and the caller must not treat it as signed out.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_account_session_revoke(
+    GDEFCORE_Catalog * catalog, GDEFCORE_Request * request,
+    GDEFCORE_Keyring * keyring, const uint8_t * root, size_t root_len,
+    const char * token, size_t token_len);
 
 /**
  * @brief Replace the password. High risk. The confirmation is the username.
@@ -209,7 +251,8 @@ GDEFCORE_API GDEFCORE_Result gdefcore_account_password(
 /**
  * @brief End every live session. High risk. The confirmation is the username.
  *
- * A wrong confirmation writes nothing. The security epoch increases. The
+ * A wrong confirmation writes nothing. The security epoch increases, which
+ * ends every session of the account, whether or not it was revoked. The
  * password is left as it was.
  */
 GDEFCORE_API GDEFCORE_Result gdefcore_account_logout_everywhere(

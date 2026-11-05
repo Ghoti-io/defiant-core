@@ -1772,6 +1772,125 @@ TEST_F(Migration, CoresOwnDataCarriesCoresVersionAndIsCheckedTheSameWay) {
 }
 
 /* What gdefcore_access_hold_for_confirmation() told its callback. */
+/* ---- revoked sessions (story 17) ---------------------------------------- */
+
+/* The revocation list is part of the tenant's data (AD-23): the records go
+ * into the data set and come back with it, on every backend. A session
+ * revoked before the backup point is refused after the restore, and the
+ * session beside it, never revoked, is live there. */
+TEST_F(Restore, ASessionRevokedBeforeTheBackupIsStillRevokedAfterARestore) {
+  Populate();
+  ASSERT_FALSE(HasFatalFailure());
+  char principal[GDEFCORE_PUBLIC_ID_LEN + 1];
+  char account[GDEFCORE_PUBLIC_ID_LEN + 1];
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_account_create(catalog_, ring_, root_,
+      sizeof root_, "ada", 3, "secret", 6, principal, account));
+  auto login = [&]() {
+    char * token = NULL;
+    size_t n = 0;
+    EXPECT_EQ(GDEFCORE_OK, gdefcore_account_login(catalog_, ring_, root_,
+        sizeof root_, "ada", 3, "secret", 6, 3600, &token, &n));
+    std::string out(token == NULL ? "" : token, n);
+    gdefcore_text_free(catalog_, token);
+    return out;
+  };
+  std::string revoked = login();
+  std::string live = login();
+  GDEFCORE_Request * request = Req();
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_account_session_revoke(catalog_, request,
+      ring_, root_, sizeof root_, revoked.data(), revoked.size()));
+  Bytes data = Snapshot();
+  Bytes keys = Keyset();
+  for (int backend : Backends()) {
+    SCOPED_TRACE(BackendName(backend));
+    Dest d(backend);
+    ASSERT_NE(nullptr, d.store);
+    d.Install(Blog<1>);
+    GDEFCORE_Restore * report = NULL;
+    ASSERT_EQ(GDEFCORE_OK, RestoreInto(&d, data, keys, &report))
+        << Reason(report);
+    gdefcore_restore_free(report);
+    GDEFCORE_Catalog * dc = OpenCatalog(d.store);
+    ASSERT_NE(nullptr, dc);
+    GDEFCORE_Request * seen = Req(editor_);
+    size_t n = 0;
+    /* The control: the session that was never revoked is live here, so
+     * "refused" below is the list and not a restore that lost the account. */
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_account_check(dc, seen, ring_, root_,
+        sizeof root_, live.data(), live.size()));
+    const char * who = gdefcore_request_principal(seen, &n);
+    ASSERT_NE(nullptr, who);
+    EXPECT_EQ(std::string(principal), std::string(who, n));
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_request_set_principal(seen, editor_.data(),
+        editor_.size()));
+    EXPECT_EQ(GDEFCORE_OK, gdefcore_account_check(dc, seen, ring_, root_,
+        sizeof root_, revoked.data(), revoked.size()));
+    EXPECT_EQ(nullptr, gdefcore_request_principal(seen, &n))
+        << "a restore brought a revoked session back";
+    gdefcore_catalog_destroy(dc);
+  }
+}
+
+/* The restore contract for a revocation made AFTER the backup point: the
+ * restore brings the tenant back as it was at that point, so the session is
+ * live again at the destination (its token is still inside its expiry and
+ * its account and epoch are as they were), exactly as a session ended by a
+ * later log-out-everywhere is. Nothing at the source is changed. Revoking it
+ * again at the destination ends it there. This is documented in
+ * documentation/accounts.md; the test holds the documentation to it. */
+TEST_F(Restore, ASessionRevokedAfterTheBackupIsLiveAtTheDestinationUntilRevokedAgain) {
+  Populate();
+  ASSERT_FALSE(HasFatalFailure());
+  char principal[GDEFCORE_PUBLIC_ID_LEN + 1];
+  char account[GDEFCORE_PUBLIC_ID_LEN + 1];
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_account_create(catalog_, ring_, root_,
+      sizeof root_, "ada", 3, "secret", 6, principal, account));
+  char * token_text = NULL;
+  size_t token_len = 0;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_account_login(catalog_, ring_, root_,
+      sizeof root_, "ada", 3, "secret", 6, 3600, &token_text, &token_len));
+  std::string token(token_text, token_len);
+  gdefcore_text_free(catalog_, token_text);
+  Bytes data = Snapshot();
+  Bytes keys = Keyset();
+  GDEFCORE_Request * request = Req();
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_account_session_revoke(catalog_, request,
+      ring_, root_, sizeof root_, token.data(), token.size()));
+  size_t n = 0;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_request_set_principal(request, editor_.data(),
+      editor_.size()));
+  EXPECT_EQ(GDEFCORE_OK, gdefcore_account_check(catalog_, request, ring_, root_,
+      sizeof root_, token.data(), token.size()));
+  EXPECT_EQ(nullptr, gdefcore_request_principal(request, &n))
+      << "the source forgot a revocation";
+  for (int backend : Backends()) {
+    SCOPED_TRACE(BackendName(backend));
+    Dest d(backend);
+    ASSERT_NE(nullptr, d.store);
+    d.Install(Blog<1>);
+    GDEFCORE_Restore * report = NULL;
+    ASSERT_EQ(GDEFCORE_OK, RestoreInto(&d, data, keys, &report))
+        << Reason(report);
+    gdefcore_restore_free(report);
+    GDEFCORE_Catalog * dc = OpenCatalog(d.store);
+    ASSERT_NE(nullptr, dc);
+    GDEFCORE_Request * seen = Req();
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_account_check(dc, seen, ring_, root_,
+        sizeof root_, token.data(), token.size()));
+    const char * who = gdefcore_request_principal(seen, &n);
+    ASSERT_NE(nullptr, who) << "the restored list holds a revocation made later";
+    EXPECT_EQ(std::string(principal), std::string(who, n));
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_account_session_revoke(dc, seen, ring_,
+        root_, sizeof root_, token.data(), token.size()));
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_request_set_principal(seen, editor_.data(),
+        editor_.size()));
+    EXPECT_EQ(GDEFCORE_OK, gdefcore_account_check(dc, seen, ring_, root_,
+        sizeof root_, token.data(), token.size()));
+    EXPECT_EQ(nullptr, gdefcore_request_principal(seen, &n));
+    gdefcore_catalog_destroy(dc);
+  }
+}
+
 struct HeldSeen {
   size_t size = 0;
   int calls = 0;

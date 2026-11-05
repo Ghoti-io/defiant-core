@@ -26,20 +26,157 @@
 
 #include <ghoti.io/defiant-core/defiant-core.h>
 #include <ghoti.io/defiant-storage-memory/memory.h>
+#include <ghoti.io/defiant-storage-sqlite/model.h>
+#include <ghoti.io/defiant-storage/model.h>
+#include <ghoti.io/defiant-storage/model_backend.h>
 #include <ghoti.io/defiant-storage/snapshot.h>
+#include <ghoti.io/defiant-storage/store.h>
 
 #include <gtest/gtest.h>
 
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
+#include <filesystem>
 #include <string>
+#include <system_error>
+#include <vector>
 
 namespace {
 
 const uint64_t kLife = 3600;
+
+/* The record namespaces of the revocation list (documentation/accounts.md). */
+const char kRevokedNs[] = "core.session.revoked";
+const char kRevokedExpNs[] = "core.session.revoked.exp";
+const char kTenantT[] = {'t'};
+
+size_t CountRecords(GDEFSTOR_Store * store, const char * tenant, const char * ns) {
+  GDEFSTOR_RecordList * list = NULL;
+  size_t n = 0;
+  EXPECT_EQ(GDEFSTOR_OK,
+      gdefstor_record_list(store, tenant, 1, ns, strlen(ns), "", 0, 0,
+          GDEFSTOR_RECORD_MAX_PAGE, &list));
+  n = gdefstor_record_list_count(list);
+  gdefstor_record_list_free(list);
+  return n;
+}
+
+bool HasRecord(GDEFSTOR_Store * store, const char * ns, const std::string & key) {
+  int found = 0;
+  uint8_t * bytes = NULL;
+  size_t n = 0;
+  EXPECT_EQ(GDEFSTOR_OK,
+      gdefstor_record_get(store, kTenantT, 1, ns, strlen(ns), key.data(),
+          key.size(), &found, &bytes, &n, NULL, NULL));
+  gdefstor_bytes_free(NULL, bytes);
+  return found != 0;
+}
+
+/* Put a record straight into the list, as an earlier revocation would have
+ * left it, so that a purge has something old to find without waiting for a
+ * token to expire. */
+void PutRecord(GDEFSTOR_Store * store, const char * ns, const std::string & key,
+    const std::string & value) {
+  GDEFSTOR_Write * write = NULL;
+  ASSERT_EQ(GDEFSTOR_OK, gdefstor_write_begin(store, kTenantT, 1, NULL, &write));
+  ASSERT_EQ(GDEFSTOR_OK,
+      gdefstor_record_put(write, ns, strlen(ns), key.data(), key.size(),
+          GDEFCORE_SCHEMA_CORE_STAMP, sizeof GDEFCORE_SCHEMA_CORE_STAMP - 1,
+          (const uint8_t *)value.data(), value.size()));
+  ASSERT_EQ(GDEFSTOR_OK, gdefstor_write_commit(write));
+}
+
+std::string SidHex(unsigned n) {
+  char buf[40];
+  snprintf(buf, sizeof buf, "%032x", n);
+  return buf;
+}
+
+std::string ExpKey(uint64_t expiry, const std::string & sid) {
+  char buf[64];
+  snprintf(buf, sizeof buf, "%020llu.", (unsigned long long)expiry);
+  return std::string(buf) + sid;
+}
+
+/* A store whose revocation list can be made unreadable or unwritable: a
+ * SQLite backend with record_get and record_put wrapped. Only the revocation
+ * namespace is touched, so every other read and write is the real one. */
+struct Faults {
+  bool fail_get = false;
+  bool fail_put = false;
+  GDEFSTOR_Result (*get)(void *, void *, const char *, size_t, const char *,
+      size_t, const char *, size_t, const GDEFSTOR_ModelVisitor *) = NULL;
+  GDEFSTOR_Result (*put)(void *, void *, const GDEFSTOR_ModelRecord *) = NULL;
+};
+Faults g_faults;
+
+bool IsRevokedNs(const char * ns, size_t n) {
+  return n == strlen(kRevokedNs) && memcmp(ns, kRevokedNs, n) == 0;
+}
+
+GDEFSTOR_Result FaultGet(void * ctx, void * txn, const char * tenant,
+    size_t tenant_len, const char * ns, size_t ns_len, const char * key,
+    size_t key_len, const GDEFSTOR_ModelVisitor * visitor) {
+  if (g_faults.fail_get && IsRevokedNs(ns, ns_len)) {
+    return GDEFSTOR_ERR_IO;
+  }
+  return g_faults.get(ctx, txn, tenant, tenant_len, ns, ns_len, key, key_len,
+      visitor);
+}
+
+GDEFSTOR_Result FaultPut(void * ctx, void * txn, const GDEFSTOR_ModelRecord * r) {
+  if (g_faults.fail_put && IsRevokedNs(r->ns, r->ns_len)) {
+    return GDEFSTOR_ERR_IO;
+  }
+  return g_faults.put(ctx, txn, r);
+}
+
+/* A directory of SQLite tenant files, removed with it. */
+struct TempDir {
+  std::string path;
+  TempDir() {
+    std::error_code ec;
+    std::string tmpl =
+        (std::filesystem::temp_directory_path(ec) / "gdefcore-account-XXXXXX")
+            .string();
+    const char * made = mkdtemp(&tmpl[0]);
+    EXPECT_NE(made, nullptr);
+    if (made != NULL) {
+      path = made;
+    }
+  }
+  ~TempDir() {
+    std::error_code ec;
+    if (!path.empty()) {
+      std::filesystem::remove_all(path, ec);
+    }
+  }
+};
+
+GDEFSTOR_Store * OpenSqlite(const std::string & dir, bool faults) {
+  GDEFSSQLITE_ModelOptions o;
+  GDEFSTOR_ModelBackend mb;
+  GDEFSTOR_Store * store = NULL;
+  gdefssqlite_model_options_default(&o);
+  o.synchronous = GDEFSSQLITE_SYNC_OFF;
+  EXPECT_EQ(GDEFSSQLITE_OK,
+      gdefssqlite_model_backend(dir.c_str(), &o, NULL, &mb));
+  if (faults) {
+    g_faults.get = mb.record_get;
+    g_faults.put = mb.record_put;
+    mb.record_get = FaultGet;
+    mb.record_put = FaultPut;
+  }
+  if (gdefstor_store_open(&mb, NULL, NULL, &store) != GDEFSTOR_OK) {
+    mb.destroy(mb.ctx);
+    return NULL;
+  }
+  return store;
+}
 
 int HexNibble(char c) {
   if (c >= '0' && c <= '9') {
@@ -171,6 +308,41 @@ class Account : public ::testing::Test {
         gdefcore_account_check(catalog_, request_, keyring_, root_,
             sizeof root_, token.data(), token.size()));
     EXPECT_EQ(Principal(&n), nullptr);
+  }
+
+  GDEFCORE_Result Revoke(const std::string & token) {
+    return gdefcore_account_session_revoke(catalog_, request_, keyring_, root_,
+        sizeof root_, token.data(), token.size());
+  }
+
+  size_t Revoked() { return CountRecords(store_, kTenantT, kRevokedNs); }
+  size_t RevokedByExpiry() {
+    return CountRecords(store_, kTenantT, kRevokedExpNs);
+  }
+
+  /* Replace the fixture's memory store (and the catalog over it) with
+   * @p store. The request and the keyring stay: they are tenant `t` and the
+   * root key, which is all a session needs to be the same one. */
+  void UseStore(GDEFSTOR_Store * store) {
+    const uint8_t tenant[] = {'t'};
+    gdefcore_catalog_destroy(catalog_);
+    catalog_ = NULL;
+    gdefstor_store_destroy(store_);
+    store_ = store;
+    ASSERT_NE(store_, nullptr);
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_catalog_open(store_, tenant, 1, NULL, NULL, &catalog_));
+  }
+
+  /* A signed-in account with a role, so that "live" means something. */
+  void MakeAccount(const char * name, std::string * principal, std::string * id) {
+    char p[GDEFCORE_PUBLIC_ID_LEN + 1];
+    char i[GDEFCORE_PUBLIC_ID_LEN + 1];
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_account_create(catalog_, keyring_, root_, sizeof root_, name,
+            strlen(name), "secret", 6, p, i));
+    *principal = p;
+    *id = i;
   }
 };
 
@@ -678,4 +850,293 @@ TEST_F(Account, PasswordLength) {
 int main(int argc, char ** argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
+}
+
+/* ---- one session at a time (story 17) ------------------------------------ */
+
+/* Gate 1. Two live sessions of one account: revoking one refuses that token
+ * and leaves the other, and a third sign-in of a different account, alone. */
+TEST_F(Account, RevokeOneOfTwoLeavesTheOtherLive) {
+  std::string principal, id, other_principal, other_id;
+  std::string first, second, third;
+  char admin[GDEFCORE_PUBLIC_ID_LEN + 1];
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_access_admin_principal(catalog_, admin));
+  MakeAccount("ada", &principal, &id);
+  MakeAccount("bob", &other_principal, &other_id);
+  first = Login("ada", "secret");
+  second = Login("ada", "secret");
+  third = Login("bob", "secret");
+  EXPECT_NE(first, second) << "two logins made the same token";
+  ExpectLive(first, principal.c_str());
+  ExpectLive(second, principal.c_str());
+  ExpectLive(third, other_principal.c_str());
+  ASSERT_EQ(GDEFCORE_OK, Revoke(first));
+  ExpectAnonymous(first, admin);
+  ExpectLive(second, principal.c_str());
+  ExpectLive(third, other_principal.c_str());
+  /* The same token stays refused on every later request. */
+  ExpectAnonymous(first, admin);
+  EXPECT_EQ(1u, Revoked());
+}
+
+/* Gate 2. Revoking twice succeeds and changes nothing: not the list, not the
+ * epoch, not another sign-in. */
+TEST_F(Account, RevokeIsIdempotentAndNeverRaisesTheEpoch) {
+  std::string principal, id;
+  std::string first, second;
+  char admin[GDEFCORE_PUBLIC_ID_LEN + 1];
+  uint64_t before;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_access_admin_principal(catalog_, admin));
+  MakeAccount("ada", &principal, &id);
+  first = Login("ada", "secret");
+  second = Login("ada", "secret");
+  before = Epoch(id.c_str());
+  ASSERT_EQ(GDEFCORE_OK, Revoke(first));
+  EXPECT_EQ(before, Epoch(id.c_str())) << "a revoke raised the epoch";
+  EXPECT_EQ(1u, Revoked());
+  EXPECT_EQ(1u, RevokedByExpiry());
+  ASSERT_EQ(GDEFCORE_OK, Revoke(first));
+  EXPECT_EQ(before, Epoch(id.c_str()));
+  EXPECT_EQ(1u, Revoked());
+  EXPECT_EQ(1u, RevokedByExpiry());
+  ExpectAnonymous(first, admin);
+  ExpectLive(second, principal.c_str());
+}
+
+/* Gate 3. What check refuses, revoke refuses, and writes nothing. The control
+ * is the same call on a good token, which writes its one record. */
+TEST_F(Account, RevokeRefusesABadTokenAndWritesNothing) {
+  std::string principal, id;
+  std::string token, damaged;
+  const uint8_t other_tenant[] = {'u'};
+  GDEFCORE_Catalog * catalog_b = NULL;
+  GDEFCORE_Request * request_b = NULL;
+  char * short_life = NULL;
+  size_t short_len = 0;
+  MakeAccount("bob", &principal, &id);
+  token = Login("bob", "secret");
+  ASSERT_FALSE(token.empty());
+
+  /* A flipped tag byte, and a flipped ciphertext byte. */
+  damaged = token;
+  damaged[damaged.size() - 1] ^= 0x01;
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, Revoke(damaged));
+  damaged = token;
+  damaged[damaged.size() / 2] ^= 0x80;
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, Revoke(damaged));
+  /* Too short, empty, a token under another root key. */
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, Revoke(token.substr(0, token.size() - 1)));
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, Revoke(std::string()));
+  EXPECT_EQ(GDEFCORE_ERR_INVALID,
+      gdefcore_account_session_revoke(catalog_, request_, keyring_, other_root_,
+          sizeof other_root_, token.data(), token.size()));
+  EXPECT_EQ(GDEFCORE_ERR_INVALID,
+      gdefcore_account_session_revoke(catalog_, request_, keyring_, root_,
+          sizeof root_, NULL, 0));
+  /* A token of another tenant: refused by the tenant in its associated data,
+   * and by a request that is not for the catalog's tenant. */
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_catalog_open(store_, other_tenant, 1, NULL, NULL, &catalog_b));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_request_create(other_tenant, 1, 0, 0, NULL, &request_b));
+  EXPECT_EQ(GDEFCORE_ERR_INVALID,
+      gdefcore_account_session_revoke(catalog_b, request_b, keyring_, root_,
+          sizeof root_, token.data(), token.size()));
+  EXPECT_EQ(GDEFCORE_ERR_INVALID,
+      gdefcore_account_session_revoke(catalog_, request_b, keyring_, root_,
+          sizeof root_, token.data(), token.size()));
+  EXPECT_EQ(GDEFCORE_ERR_INVALID,
+      gdefcore_account_session_revoke(catalog_b, request_, keyring_, root_,
+          sizeof root_, token.data(), token.size()));
+  EXPECT_EQ(0u, CountRecords(store_, "u", kRevokedNs));
+  gdefcore_request_destroy(request_b);
+  gdefcore_catalog_destroy(catalog_b);
+  /* An expired token. */
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_account_login(catalog_, keyring_, root_, sizeof root_, "bob", 3,
+          "secret", 6, 1, &short_life, &short_len));
+  sleep(1);
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, Revoke(std::string(short_life, short_len)));
+  gdefcore_text_free(catalog_, short_life);
+
+  EXPECT_EQ(0u, Revoked()) << "a refused revoke wrote a record";
+  EXPECT_EQ(0u, RevokedByExpiry());
+  /* The control: the good token is revoked, once. */
+  ExpectLive(token, principal.c_str());
+  EXPECT_EQ(GDEFCORE_OK, Revoke(token));
+  EXPECT_EQ(1u, Revoked());
+  EXPECT_EQ(1u, RevokedByExpiry());
+}
+
+/* A session an older epoch has already ended is as ended as a revocation
+ * would make it: revoking it succeeds and records nothing. */
+TEST_F(Account, RevokingASessionAnEpochEndedRecordsNothing) {
+  std::string principal, id;
+  std::string old_token;
+  char admin[GDEFCORE_PUBLIC_ID_LEN + 1];
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_access_admin_principal(catalog_, admin));
+  MakeAccount("ada", &principal, &id);
+  old_token = Login("ada", "secret");
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_account_logout_everywhere(catalog_, id.c_str(), id.size(), "ada",
+          3));
+  ExpectAnonymous(old_token, admin);
+  EXPECT_EQ(GDEFCORE_OK, Revoke(old_token));
+  EXPECT_EQ(0u, Revoked());
+  EXPECT_EQ(0u, RevokedByExpiry());
+}
+
+/* Gate 7. Logging out everywhere still ends every session of the account,
+ * revoked or not, and a session started afterwards is a new one. */
+TEST_F(Account, LogOutEverywhereStillEndsEverySession) {
+  std::string principal, id;
+  std::string first, second, later;
+  char admin[GDEFCORE_PUBLIC_ID_LEN + 1];
+  uint64_t before;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_access_admin_principal(catalog_, admin));
+  MakeAccount("ada", &principal, &id);
+  first = Login("ada", "secret");
+  second = Login("ada", "secret");
+  ASSERT_EQ(GDEFCORE_OK, Revoke(first));
+  ExpectLive(second, principal.c_str());
+  before = Epoch(id.c_str());
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_account_logout_everywhere(catalog_, id.c_str(), id.size(), "ada",
+          3));
+  EXPECT_EQ(before + 1, Epoch(id.c_str()));
+  ExpectAnonymous(first, admin);
+  ExpectAnonymous(second, admin);
+  later = Login("ada", "secret");
+  ExpectLive(later, principal.c_str());
+  ExpectAnonymous(first, admin);
+}
+
+/* Gate 4, restart half. The list is in the tenant's storage, not in the
+ * process: a store closed and opened again over the same files still refuses
+ * the revoked token and still accepts the other one. */
+TEST_F(Account, ARevokedSessionStaysRevokedAcrossARestart) {
+  TempDir dir;
+  std::string principal, id;
+  std::string first, second;
+  char admin[GDEFCORE_PUBLIC_ID_LEN + 1];
+  ASSERT_FALSE(dir.path.empty());
+  UseStore(OpenSqlite(dir.path, false));
+  ASSERT_FALSE(HasFatalFailure());
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_access_admin_principal(catalog_, admin));
+  MakeAccount("ada", &principal, &id);
+  first = Login("ada", "secret");
+  second = Login("ada", "secret");
+  ASSERT_EQ(GDEFCORE_OK, Revoke(first));
+  ExpectAnonymous(first, admin);
+  ExpectLive(second, principal.c_str());
+  UseStore(OpenSqlite(dir.path, false));
+  ASSERT_FALSE(HasFatalFailure());
+  EXPECT_EQ(1u, Revoked());
+  ExpectAnonymous(first, admin);
+  ExpectLive(second, principal.c_str());
+}
+
+/* Gate 5. Fail closed. With the revocation list unreadable, a token that was
+ * live is refused (an error, no principal), and so is the revoked one; with
+ * it readable again the live one passes. Revoking when the list cannot be
+ * written is an error, and the session is still live afterwards, so a caller
+ * that sees the error knows not to say it signed out. */
+TEST_F(Account, AnUnreadableRevocationListRefusesEveryToken) {
+  TempDir dir;
+  std::string principal, id;
+  std::string revoked, live;
+  char admin[GDEFCORE_PUBLIC_ID_LEN + 1];
+  size_t n = 0;
+  ASSERT_FALSE(dir.path.empty());
+  g_faults = Faults();
+  UseStore(OpenSqlite(dir.path, true));
+  ASSERT_FALSE(HasFatalFailure());
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_access_admin_principal(catalog_, admin));
+  MakeAccount("ada", &principal, &id);
+  revoked = Login("ada", "secret");
+  live = Login("ada", "secret");
+  ASSERT_EQ(GDEFCORE_OK, Revoke(revoked));
+  /* Controls: with the list readable the live token passes, the revoked
+   * does not. */
+  ExpectLive(live, principal.c_str());
+  ExpectAnonymous(revoked, admin);
+
+  g_faults.fail_get = true;
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_request_set_principal(request_, admin, strlen(admin)));
+  EXPECT_NE(GDEFCORE_OK,
+      gdefcore_account_check(catalog_, request_, keyring_, root_, sizeof root_,
+          live.data(), live.size()));
+  EXPECT_EQ(Principal(&n), nullptr) << "an unreadable list let a token in";
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_request_set_principal(request_, admin, strlen(admin)));
+  EXPECT_NE(GDEFCORE_OK,
+      gdefcore_account_check(catalog_, request_, keyring_, root_, sizeof root_,
+          revoked.data(), revoked.size()));
+  EXPECT_EQ(Principal(&n), nullptr) << "an unreadable list let a revoked token in";
+  g_faults.fail_get = false;
+  ExpectLive(live, principal.c_str());
+
+  g_faults.fail_put = true;
+  EXPECT_NE(GDEFCORE_OK, Revoke(live));
+  g_faults.fail_put = false;
+  EXPECT_EQ(1u, Revoked()) << "a failed revoke left a record";
+  EXPECT_EQ(1u, RevokedByExpiry());
+  ExpectLive(live, principal.c_str());
+  g_faults = Faults();
+}
+
+/* Gate 6. The list stays bounded. Each revocation reads at most one page of
+ * the oldest expiries and drops the ones whose tokens expired (and have been
+ * expired for the grace); a live one, one inside the grace, and everything
+ * after them stay. Records are put in as an earlier revocation left them, a
+ * day old, because a purge cannot be seen by waiting out a real token. */
+TEST_F(Account, ExpiredRevocationsArePurgedAndLiveOnesStay) {
+  std::string principal, id;
+  std::string t1, t2, t3;
+  const uint64_t now = (uint64_t)time(NULL);
+  const unsigned kOld = 100;
+  const unsigned kLive = 10;
+  const std::string recent = SidHex(5000);
+  unsigned i;
+  MakeAccount("ada", &principal, &id);
+  for (i = 0; i < kOld; i++) {
+    uint64_t expiry = now - 86400 + i;
+    PutRecord(store_, kRevokedNs, SidHex(i), std::to_string(expiry));
+    PutRecord(store_, kRevokedExpNs, ExpKey(expiry, SidHex(i)), "");
+  }
+  /* Expired a moment ago: inside the grace, so it must stay. */
+  PutRecord(store_, kRevokedNs, recent, std::to_string(now - 10));
+  PutRecord(store_, kRevokedExpNs, ExpKey(now - 10, recent), "");
+  for (i = 0; i < kLive; i++) {
+    uint64_t expiry = now + 3600 + i;
+    PutRecord(store_, kRevokedNs, SidHex(1000 + i), std::to_string(expiry));
+    PutRecord(store_, kRevokedExpNs, ExpKey(expiry, SidHex(1000 + i)), "");
+  }
+  /* A key that cannot be one of ours sorts first and goes with the dead. */
+  PutRecord(store_, kRevokedExpNs, "0-not-an-index-key", "");
+  ASSERT_EQ(kOld + 1 + kLive, Revoked());
+  ASSERT_EQ(kOld + 1 + kLive + 1, RevokedByExpiry());
+
+  t1 = Login("ada", "secret");
+  ASSERT_EQ(GDEFCORE_OK, Revoke(t1));
+  /* One page of 64 index entries went (the stray key and the 63 oldest, whose
+   * records went with them) and the new session came. */
+  EXPECT_EQ(kOld + 1 + kLive - 63u + 1u, Revoked());
+  EXPECT_EQ(kOld + 1 + kLive + 1 - 64u + 1u, RevokedByExpiry());
+  t2 = Login("ada", "secret");
+  ASSERT_EQ(GDEFCORE_OK, Revoke(t2));
+  t3 = Login("ada", "secret");
+  ASSERT_EQ(GDEFCORE_OK, Revoke(t3));
+  /* Every dead record is gone; the recent one, the live ones and the three
+   * real sessions are all that is left. */
+  EXPECT_EQ(1u + kLive + 3u, Revoked());
+  EXPECT_EQ(1u + kLive + 3u, RevokedByExpiry());
+  for (i = 0; i < kOld; i++) {
+    EXPECT_FALSE(HasRecord(store_, kRevokedNs, SidHex(i)));
+  }
+  EXPECT_TRUE(HasRecord(store_, kRevokedNs, recent));
+  for (i = 0; i < kLive; i++) {
+    EXPECT_TRUE(HasRecord(store_, kRevokedNs, SidHex(1000 + i)));
+  }
 }

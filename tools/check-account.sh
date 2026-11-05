@@ -5,7 +5,8 @@
 # After the security epoch moves (password change, log out everywhere,
 # demotion), a good token leaves the request anonymous; a refused identifier
 # removal ends nothing; a copy of the tenant under other bytes refuses the
-# token. The planted half, which edits a copy of the source so the session is
+# token. One session of two can be revoked without the other, and the
+# revocation list is durable, fails closed and stays bounded. The planted half, which edits a copy of the source so the session is
 # checked by signature only and requires these same tests to go red, is
 # tools/check-defects.sh.
 #
@@ -14,7 +15,7 @@
 set -eu
 
 BIN="${1:?usage: check-account.sh <test_account>}"
-FILTER='Account.Revocation:Account.Epoch:Account.LogOut:Account.Demotion:Account.LastIdentifier:Account.Revert:Account.OtherTenant:Account.Expired:Account.Purpose'
+FILTER='Account.Revoke*:Account.Revoking*:Account.ARevoked*:Account.AnUnreadable*:Account.Expired*:Account.Revocation:Account.Epoch:Account.LogOut*:Account.Demotion:Account.LastIdentifier:Account.Revert:Account.OtherTenant:Account.Expired:Account.Purpose'
 
 if ! "$BIN" --gtest_filter="$FILTER" --gtest_brief=1
 then

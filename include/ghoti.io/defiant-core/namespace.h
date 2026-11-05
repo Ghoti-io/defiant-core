@@ -198,6 +198,8 @@
 #define gdefcore_account_revert GHOTIIO_DEFCORE(gdefcore_account_revert)
 #define gdefcore_account_session_expiry                                        \
   GHOTIIO_DEFCORE(gdefcore_account_session_expiry)
+#define gdefcore_account_session_revoke                                        \
+  GHOTIIO_DEFCORE(gdefcore_account_session_revoke)
 #define gdefcore_allocator_default GHOTIIO_DEFCORE(gdefcore_allocator_default)
 #define gdefcore_alter_create GHOTIIO_DEFCORE(gdefcore_alter_create)
 #define gdefcore_alter_destroy GHOTIIO_DEFCORE(gdefcore_alter_destroy)

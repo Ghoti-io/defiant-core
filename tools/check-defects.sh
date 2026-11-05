@@ -56,8 +56,8 @@ plant_control 'testAccount testForm' '*'
 # Every trigger test goes red when the epoch compare is skipped.
 plant epoch-ignored src/account/account.c testAccount \
   'Account.Revocation Account.Epoch Account.LogOut Account.Demotion Account.Revert' \
-  '  if (token_epoch != current) {' \
-  '  if (0 && token_epoch != current) {'
+  '  if (s->epoch != current) {' \
+  '  if (0 && s->epoch != current) {'
 
 # Each trigger, taken alone: the trigger that stops moving the epoch.
 plant password-keeps-epoch src/account/account.c testAccount \
@@ -92,6 +92,63 @@ plant demotion-keeps-epoch src/account/account.c testAccount \
     return rc;
   }
   return GDEFCORE_OK;'
+
+# ---- One session at a time: the revocation list (story 17) ------------------
+# The list is read once per check, after the epoch, and written once per
+# revoke. Each plant takes one rule out and the named test must see it.
+plant check-ignores-the-revocation-list src/account/account.c testAccount \
+  'Account.RevokeOneOfTwoLeavesTheOtherLive Account.RevokeIsIdempotentAndNeverRaisesTheEpoch Account.ARevokedSessionStaysRevokedAcrossARestart' \
+  '  if (rc != GDEFCORE_OK || revoked) {' \
+  '  if (rc != GDEFCORE_OK) {'
+
+plant revoke-raises-the-epoch src/account/account.c testAccount \
+  'Account.RevokeIsIdempotentAndNeverRaisesTheEpoch' \
+  '  if (rc == GDEFCORE_OK && live) {
+    rc = record_revocation(catalog, &s);
+  }' \
+  '  if (rc == GDEFCORE_OK && live) {
+    rc = record_revocation(catalog, &s);
+    if (rc == GDEFCORE_OK) {
+      rc = bump_epoch(catalog, s.account, NULL);
+    }
+  }'
+
+plant revoke-accepts-a-token-it-cannot-open src/account/account.c testAccount \
+  'Account.RevokeRefusesABadTokenAndWritesNothing' \
+  '  rc = open_session(catalog, keyring, root, root_len, token, token_len, &s);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  rc = session_standing(catalog, &s, &live);
+  if (rc == GDEFCORE_OK && live) {' \
+  '  rc = open_session(catalog, keyring, root, root_len, token, token_len, &s);
+  if (rc != GDEFCORE_OK) {
+    return GDEFCORE_OK;
+  }
+  rc = session_standing(catalog, &s, &live);
+  if (rc == GDEFCORE_OK && live) {'
+
+plant revocation-list-fails-open src/account/account.c testAccount \
+  'Account.AnUnreadableRevocationListRefusesEveryToken' \
+  '      strlen(kRevokedNs), key, key_len, &found, &bytes, &len, NULL, NULL));
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }' \
+  '      strlen(kRevokedNs), key, key_len, &found, &bytes, &len, NULL, NULL));
+  if (rc != GDEFCORE_OK) {
+    *out_revoked = 0;
+    return GDEFCORE_OK;
+  }'
+
+plant revoked-records-never-purged src/account/account.c testAccount \
+  'Account.ExpiredRevocationsArePurgedAndLiveOnesStay' \
+  '      if (expiry > now || now - expiry < kPurgeGrace) {' \
+  '      if (expiry > now || now - expiry < kPurgeGrace || 1) {'
+
+plant purge-drops-live-records src/account/account.c testAccount \
+  'Account.ExpiredRevocationsArePurgedAndLiveOnesStay' \
+  '      if (expiry > now || now - expiry < kPurgeGrace) {' \
+  '      if (expiry > now && now - expiry < kPurgeGrace && 0) {'
 
 # ---- CSRF and replay: associated data that does not bind the form ---------
 plant form-session-unbound src/form/form.c testForm \
