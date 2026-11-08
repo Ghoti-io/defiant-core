@@ -110,6 +110,14 @@ revocation list.
   number of sign-outs of that period, each of which costs a login, which
   costs an Argon2 hash; there is no separate cap, because a cap that
   refused a revocation would leave a person unable to sign out.
+- **Clocks and maintenance.** Nodes of one tenant must keep their clocks
+  within 300 seconds of each other; the grace is a constant and not an
+  option, because a value smaller than the real skew would let a revoked
+  token live on a slow node. A tenant waiting for a core migration can
+  still sign out: the list is written without the entity layer's schema
+  check, because a sign-out refused in maintenance would leave a person
+  signed in just when the site is least able to say so. A migration that
+  changes the shape of these records must carry the existing ones over.
 - **Restore.** The list is part of the tenant's data. A snapshot exports
   the tenant's records, and a restore imports them, so a session
   revoked before the backup point is still revoked after a restore, on
