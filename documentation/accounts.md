@@ -122,6 +122,10 @@ revocation list.
   operator ends sessions that should not return with
   `gdefcore_account_logout_everywhere` for the accounts affected, or
   revokes the tokens again. Nothing at the source changes.
+  A restore goes into a tenant that holds no data at all: the import
+  refuses any tenant with a row of any kind, so one that has already been
+  seeded (`gdefcore_admin_seed`) or has run is refused, in words, and
+  nothing is written. Restore before the program's first start.
 - **Cross node.** The list is in the storage every node reads, so a
   revocation on one node is seen by the next check on any other, as soon
   as the write commits.
