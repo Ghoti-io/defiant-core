@@ -287,6 +287,14 @@ one, a preview offers none. Only a difference between two reads means
 anything. This core has no fragment cache of its own; the count is the
 instrument that shows a host's cache what it may keep.
 
+A stored template is read and compiled each time it is rendered; nothing is
+compiled at start or kept between renders, which is why an edit shows on the
+very next render and needs no restart. `gdefcore_render_compile_count()` counts
+the template bodies compiled to render and `gdefcore_render_run_count()` the
+ones it ran. A page adds as many to each as it draws templates, a template edit
+adds none, and a compile count that gets ahead of the run count is a template
+compiled for no request.
+
 ## Public functions
 
 | Function | Purpose |
@@ -305,3 +313,4 @@ instrument that shows a host's cache what it may keep.
 | `gdefcore_access_permits` | Whether a request's principal holds a permission by its action. |
 | `gdefcore_access_can` | The one decision: may the principal do this to this entity. What authorize asks. |
 | `gdefcore_render_sample`, `gdefcore_render_shareable_count` | The editor's preview, and the shared-cache count. |
+| `gdefcore_render_compile_count`, `gdefcore_render_run_count` | How many template bodies the process has compiled to render, and how many it has run. |

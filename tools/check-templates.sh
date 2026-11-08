@@ -20,6 +20,7 @@
 #                                 activate: access SPEC decision 13)
 #
 #   validated-on-callers-stack    Templates.DeepTreeOnTheSmallestFiber
+#   templates-compiled-once       Templates.AnEditedTemplateShowsOnTheNextRenderAndNothingIsCompiledAhead
 #
 # and six more that stand behind a matrix row each: the engine's own math is
 # no longer shadowed, the plumbing template is reachable from a template, the
@@ -154,5 +155,40 @@ plant validated-on-callers-stack src/template/template.c testTemplates \
     job->rc = GDEFCORE_ERR_INTERNAL;
   }' \
   '  validate_run(job);'
+
+# Plant 15: a template is taken once, the first time it is rendered, and kept:
+# the body a render runs is the one read the first time, so an edit made while
+# the program runs shows on no later render (site-admin story 12).
+plant templates-compiled-once src/render/render.c testTemplates \
+  'Templates.AnEditedTemplateShowsOnTheNextRenderAndNothingIsCompiledAhead' \
+  '    rc = tang_run(catalog, request, contract, body, body_len, fuel, binds, nbinds,
+        native, native_user, native_name, html, html_len);' \
+  '    static char frozen_name[16][64];
+    static char * frozen_body[16];
+    static size_t frozen_len[16];
+    const char * use = body;
+    size_t use_len = body_len;
+    size_t slot;
+    for (slot = 0; slot < 16 && frozen_body[slot] != NULL; slot++) {
+      if (strlen(frozen_name[slot]) == tmpl_len &&
+          memcmp(frozen_name[slot], tmpl, tmpl_len) == 0) {
+        break;
+      }
+    }
+    if (slot < 16 && frozen_body[slot] == NULL && tmpl_len < 64) {
+      frozen_body[slot] = (char *)malloc(body_len + 1);
+      if (frozen_body[slot] != NULL) {
+        memcpy(frozen_body[slot], body, body_len);
+        memcpy(frozen_name[slot], tmpl, tmpl_len);
+        frozen_name[slot][tmpl_len] = 0;
+        frozen_len[slot] = body_len;
+      }
+    }
+    if (slot < 16 && frozen_body[slot] != NULL) {
+      use = frozen_body[slot];
+      use_len = frozen_len[slot];
+    }
+    rc = tang_run(catalog, request, contract, use, use_len, fuel, binds, nbinds,
+        native, native_user, native_name, html, html_len);'
 
 plant_finish

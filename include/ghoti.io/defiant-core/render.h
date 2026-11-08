@@ -153,6 +153,27 @@ GDEFCORE_API GDEFCORE_Result gdefcore_render_entity(GDEFCORE_Catalog * catalog,
  */
 GDEFCORE_API uint64_t gdefcore_render_shareable_count(void);
 
+/**
+ * @brief How many template bodies this process has compiled to render.
+ *
+ * A stored template is read, parsed and compiled each time it is rendered, so
+ * a change to it shows on the next render and nothing is compiled ahead of
+ * time: a render of a page adds the number of templates the page draws, a
+ * change to a template adds nothing, and a count that moves between renders
+ * (outside a render) is a template compiled for no request. Only a difference
+ * between two reads means anything.
+ */
+GDEFCORE_API uint64_t gdefcore_render_compile_count(void);
+
+/**
+ * @brief How many template bodies this process has run to render.
+ *
+ * Each body compiled for a render is run by it, so the two counts move
+ * together; a compile count that gets ahead of this one is a template compiled
+ * for no render. Only a difference between two reads means anything.
+ */
+GDEFCORE_API uint64_t gdefcore_render_run_count(void);
+
 /* ---- the fragment cache (story S7) -------------------------------------- */
 
 /**

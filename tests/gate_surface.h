@@ -483,6 +483,8 @@ static const Surface kSurface[] = {
     {"gdefcore_render_widget", "RF"},
     {"gdefcore_render_entity", "RF"},
     {"gdefcore_render_shareable_count", "P"},
+    {"gdefcore_render_compile_count", "P"},
+    {"gdefcore_render_run_count", "P"},
     {"gdefcore_render_kit", "RA"},
     {"gdefcore_render_install", "W"},
     {"gdefcore_render_view_define", "W"},

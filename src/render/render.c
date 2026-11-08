@@ -486,6 +486,20 @@ static GDEFCORE_Result template_body(GDEFCORE_Catalog * catalog,
  */
 static atomic_uint_fast64_t g_shareable;
 
+/* The template bodies compiled to render, for gdefcore_render_compile_count(). */
+static atomic_uint_fast64_t g_compiles;
+
+uint64_t gdefcore_render_compile_count(void) {
+  return (uint64_t)atomic_load_explicit(&g_compiles, memory_order_relaxed);
+}
+
+/* The template bodies run to render, for gdefcore_render_run_count(). */
+static atomic_uint_fast64_t g_runs;
+
+uint64_t gdefcore_render_run_count(void) {
+  return (uint64_t)atomic_load_explicit(&g_runs, memory_order_relaxed);
+}
+
 static int fragment_offer(const char * overlay, size_t overlay_len) {
   if (!gdefcore_access_shared_cache(overlay, overlay_len)) {
     return 0;
@@ -961,6 +975,9 @@ static GDEFCORE_Result tang_job_run(TangJob * job) {
   step = gltang_parse(source_z, GLTANG_PARSE_TEMPLATE, &error, &body_tree);
   if (step == GLTANG_OK) {
     step = gltang_compile(body_tree, "pane.tang", &error, &body);
+    if (step == GLTANG_OK) {
+      atomic_fetch_add_explicit(&g_compiles, 1, memory_order_relaxed);
+    }
   }
   if (step == GLTANG_OK) {
     step = gltang_parse(kWrap, GLTANG_PARSE_SCRIPT, &error, &wrap_tree);
@@ -998,6 +1015,7 @@ static GDEFCORE_Result tang_job_run(TangJob * job) {
   if (rc != GDEFCORE_OK) {
     goto done;
   }
+  atomic_fetch_add_explicit(&g_runs, 1, memory_order_relaxed);
   rc = gdefcore_render_ctx_run(ctx, wrap, lib, &rendered, &rendered_len);
   if (rc != GDEFCORE_OK) {
     goto done;

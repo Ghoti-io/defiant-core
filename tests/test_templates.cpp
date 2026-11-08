@@ -839,6 +839,51 @@ TEST_F(Templates, ContributeErrors) {
   EXPECT_EQ(GDEFCORE_OK, Contribute("m", "core.pane", "m.v", "text", &probe_, 1));
 }
 
+/* A template is read and compiled when a page is rendered and at no other time
+ * (CAP-S10): an edit shows on the very next render, saving it compiles nothing,
+ * and a render compiles as many templates as the page draws, every time. The
+ * control is the page before the edit; the count says what was compiled. */
+TEST_F(Templates, AnEditedTemplateShowsOnTheNextRenderAndNothingIsCompiledAhead) {
+  auto body = [&](const std::string & mark) {
+    return "<% use region; %><i>" + mark + "</i>"
+           "<div class=\"main\"><%= region(\"main\") %></div>"
+           "<div class=\"side\"><%= region(\"side\") %></div>";
+  };
+  GDEFCORE_Result rc;
+  ASSERT_EQ(GDEFCORE_OK, SaveTemplate("layout", body("first"), "core.page"));
+  std::string page = Page(anon_, &rc);
+  ASSERT_EQ(GDEFCORE_OK, rc);
+  EXPECT_NE(std::string::npos, page.find("<i>first</i>"));
+  /* The cost of a page: the templates it draws, the same each time, and every
+   * one compiled is one run. */
+  uint64_t before = gdefcore_render_compile_count();
+  const uint64_t runs_before = gdefcore_render_run_count();
+  Page(anon_, &rc);
+  ASSERT_EQ(GDEFCORE_OK, rc);
+  const uint64_t cost = gdefcore_render_compile_count() - before;
+  EXPECT_GT(cost, 0u) << "a render of a page compiled no template";
+  EXPECT_EQ(cost, gdefcore_render_run_count() - runs_before);
+  before = gdefcore_render_compile_count();
+  Page(anon_, &rc);
+  EXPECT_EQ(cost, gdefcore_render_compile_count() - before);
+  /* Saving an edit compiles nothing ahead of the render that shows it. */
+  before = gdefcore_render_compile_count();
+  ASSERT_EQ(GDEFCORE_OK, SaveTemplate("layout", body("second"), "core.page"));
+  EXPECT_EQ(before, gdefcore_render_compile_count());
+  page = Page(anon_, &rc);
+  ASSERT_EQ(GDEFCORE_OK, rc);
+  EXPECT_NE(std::string::npos, page.find("<i>second</i>")) << page;
+  EXPECT_EQ(std::string::npos, page.find("<i>first</i>"));
+  /* The edit left the cost of a page as it was. */
+  before = gdefcore_render_compile_count();
+  Page(anon_, &rc);
+  EXPECT_EQ(cost, gdefcore_render_compile_count() - before);
+  /* And again: not once, every edit. */
+  ASSERT_EQ(GDEFCORE_OK, SaveTemplate("layout", body("third"), "core.page"));
+  page = Page(anon_, &rc);
+  EXPECT_NE(std::string::npos, page.find("<i>third</i>")) << page;
+}
+
 TEST_F(Templates, LazyProvider) {
   Install(0);
   ASSERT_EQ(GDEFCORE_OK, Contribute("m", "core.page", "m.count", "number", &probe_, 1));

@@ -432,6 +432,9 @@
 #define gdefcore_render_pane_at GHOTIIO_DEFCORE(gdefcore_render_pane_at)
 #define gdefcore_render_regions GHOTIIO_DEFCORE(gdefcore_render_regions)
 #define gdefcore_render_sample GHOTIIO_DEFCORE(gdefcore_render_sample)
+#define gdefcore_render_compile_count \
+  GHOTIIO_DEFCORE(gdefcore_render_compile_count)
+#define gdefcore_render_run_count GHOTIIO_DEFCORE(gdefcore_render_run_count)
 #define gdefcore_render_shareable_count \
   GHOTIIO_DEFCORE(gdefcore_render_shareable_count)
 #define gdefcore_render_scope GHOTIIO_DEFCORE(gdefcore_render_scope)
