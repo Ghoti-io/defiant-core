@@ -35,6 +35,9 @@
  * from the values that can still be decrypted, since a data set carries none.
  */
 
+/* clock_gettime(): timespec_get() is not declared on every target. */
+#define _POSIX_C_SOURCE 200809L
+
 #include <ghoti.io/defiant-core/macros.h>
 #include <ghoti.io/defiant-core/subject.h>
 
@@ -354,7 +357,7 @@ static GDEFCORE_Result subject_state(GDEFCORE_Subjects * subjects,
 
 static int64_t now_ms(void) {
   struct timespec ts;
-  if (timespec_get(&ts, TIME_UTC) != TIME_UTC || ts.tv_sec < 0) {
+  if (clock_gettime(CLOCK_REALTIME, &ts) != 0 || ts.tv_sec < 0) {
     return -1;
   }
   return (int64_t)ts.tv_sec * 1000 + (int64_t)(ts.tv_nsec / 1000000);

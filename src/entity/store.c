@@ -1007,8 +1007,18 @@ static int parse_float(const char * s, size_t n, double * out) {
   }
   buf[o] = '\0';
   v = strtod(buf, &end);
-  if (end == NULL || *end != '\0' || !isfinite(v)) {
+  if (end == NULL || *end != '\0') {
     return 0;
+  }
+  {
+    /* Infinity and NaN are the patterns with every exponent bit set. The bits
+     * are read, not isfinite(): on mingw that macro converts the double to
+     * float in a branch it never takes, and -Wfloat-conversion refuses it. */
+    uint64_t bits;
+    memcpy(&bits, &v, sizeof bits);
+    if (((bits >> 52) & 0x7ffu) == 0x7ffu) {
+      return 0;
+    }
   }
   *out = v == 0.0 ? 0.0 : v;
   return 1;
