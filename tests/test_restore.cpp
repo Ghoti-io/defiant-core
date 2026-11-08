@@ -843,6 +843,63 @@ TEST_F(Restore, EveryStepRunsInOrderBeforeTheRestoreReturns) {
   }
 }
 
+/* A restore goes only into a tenant that holds no data (documentation/
+ * accounts.md): a tenant that has been seeded, as the program's first start
+ * does with gdefcore_admin_seed(), is refused, in words, and nothing is
+ * written. The control is the same backup pair into an empty tenant of the
+ * same backend, which restores. */
+TEST_F(Restore, ARestoreIntoATenantThatHasBeenSeededIsRefusedAndWritesNothing) {
+  Populate();
+  ASSERT_FALSE(HasFatalFailure());
+  Bytes data = Snapshot();
+  Bytes keys = Keyset();
+  for (int backend : Backends()) {
+    SCOPED_TRACE(BackendName(backend));
+    {
+      /* The control: an empty tenant takes the pair. */
+      Dest empty(backend);
+      ASSERT_NE(nullptr, empty.store);
+      empty.Install(Blog<1>);
+      GDEFCORE_Restore * report = NULL;
+      ASSERT_EQ(GDEFCORE_OK, RestoreInto(&empty, data, keys, &report))
+          << Reason(report);
+      gdefcore_restore_free(report);
+    }
+    Dest d(backend);
+    ASSERT_NE(nullptr, d.store);
+    d.Install(Blog<1>);
+    GDEFCORE_Catalog * dc = OpenCatalog(d.store);
+    ASSERT_NE(nullptr, dc);
+    char admin[GDEFCORE_PUBLIC_ID_LEN + 1];
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_access_admin_principal(dc, admin));
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_admin_seed(dc));
+    gdefcore_catalog_bind_subjects(dc, NULL);
+    gdefcore_catalog_destroy(dc);
+    const Bytes seeded = Truth(d.store);
+    ASSERT_FALSE(seeded.empty());
+    GDEFCORE_Restore * report = NULL;
+    const GDEFCORE_Result rc = RestoreInto(&d, data, keys, &report);
+    EXPECT_NE(GDEFCORE_OK, rc) << "a restore went into a seeded tenant";
+    const std::string why = Reason(report);
+    gdefcore_restore_free(report);
+    EXPECT_NE(std::string::npos,
+        why.find("the tenant already holds data, and a snapshot is imported "
+                 "only into an empty tenant, so nothing was written"))
+        << "the refusal is not in words: " << why;
+    /* Nothing written: the tenant is byte for byte what the seed left. */
+    EXPECT_EQ(seeded, Truth(d.store));
+    dc = OpenCatalog(d.store);
+    ASSERT_NE(nullptr, dc);
+    char ** posts = NULL;
+    size_t n = 0;
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_entity_ids(dc, kPost, strlen(kPost), &posts, &n));
+    EXPECT_EQ(0u, n) << "the backup's posts were merged into a seeded tenant";
+    gdefcore_ids_free(dc, posts, n);
+    gdefcore_catalog_bind_subjects(dc, NULL);
+    gdefcore_catalog_destroy(dc);
+  }
+}
+
 /* ---- modules ------------------------------------------------------------- */
 
 /* A data set whose data for a module is at a stored-data schema version newer

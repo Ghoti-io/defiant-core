@@ -14,6 +14,8 @@
 #                                  Restore.ARestoredGrantNamingAGovernedFieldIsHeldAndReportedInWords
 #   revocations-kept-outside-the-tenant
 #                                  Restore.ASessionRevokedBeforeTheBackupIsStillRevokedAfterARestore
+#   restore-swallows-the-seeded-tenants-refusal
+#                                  Restore.ARestoreIntoATenantThatHasBeenSeededIsRefusedAndWritesNothing
 #
 # The restore tests go into memory and SQLite here; `make
 # test-restore-postgres` runs them, unplanted, into Postgres. S5b's
@@ -102,5 +104,17 @@ plant revocations-kept-outside-the-tenant src/account/account.c testRestore \
   *out_tenant_len = 11;
   (void)tenant;
   (void)tenant_len;'
+
+# 8. A restore that does not take the import's refusal of a tenant that holds
+#    data: it goes on as if the data set were in, so a seeded tenant is
+#    reported restored with nothing of the backup in it (site-admin story 12).
+plant restore-swallows-the-seeded-tenants-refusal "$SUB" testRestore \
+  'Restore.ARestoreIntoATenantThatHasBeenSeededIsRefusedAndWritesNothing' \
+  '  if (rc != GDEFCORE_OK) {
+    if (why != NULL) {
+      report_why(report, "The data set was not imported: %.*s.",' \
+  '  if (rc != GDEFCORE_OK && why == NULL) {
+    if (why != NULL) {
+      report_why(report, "The data set was not imported: %.*s.",'
 
 plant_finish
