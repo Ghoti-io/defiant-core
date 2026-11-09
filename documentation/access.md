@@ -583,12 +583,16 @@ the *path* is served and the entity changes, for every action in the vocabulary,
 over twenty kinds of principal (an agent's ceiling and a module's grant among
 them), with both outcomes counted.
 
-One exception remains, and is not this rule's to fix: `gdefcore_changeset_apply()`
-still calls `gdefcore_template_authorize()` for a changeset that has a request
-(templates.md). It is a permission check inside a library function, and it asks
-the one decision (`gdefcore_template_can_edit()`, which is `can()` about the
-template as stored and `can_with()` about it as the write leaves it): a template
-move or a new template has a destination that no stored entity can answer for.
+Four exceptions remain, and are not this rule's to fix: `gdefcore_changeset_apply()`
+still asks an authorize call, for a changeset that has a request, about what the
+changeset writes: `gdefcore_template_authorize()` (templates.md),
+`gdefcore_menu_authorize()` (menus.md), `gdefcore_layout_authorize()` (layouts.md)
+and `gdefcore_settings_authorize()` (settings.md). Each is a permission check
+inside a library function, and each asks the one decision: `gdefcore_access_can()`
+about the entity as stored and `gdefcore_access_can_with()` about it as the write
+leaves it, because a move or a new entity has a destination that no stored
+entity can answer for. A changeset with no request is the operator's and is not
+asked. A refusal writes nothing.
 
 **A condition is evaluated only on the stored entity the path names, never on
 submitted data (SPEC decision 8).** The evaluator has no parameter for values and
