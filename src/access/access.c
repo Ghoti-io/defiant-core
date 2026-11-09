@@ -4986,7 +4986,7 @@ GDEFCORE_Result gdefcore_access_render_key(GDEFCORE_Catalog * catalog,
     tenant_hex[hex_n] = '\0';
     en = snprintf(epoch_text, sizeof epoch_text, "%llu",
         (unsigned long long)epoch);
-    if (en <= 0) {
+    if (en <= 0 || (size_t)en >= sizeof epoch_text) {
       rc = GDEFCORE_ERR_LIMIT;
       goto done;
     }

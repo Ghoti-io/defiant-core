@@ -430,7 +430,7 @@ TEST_F(Grants, ModuleGrantOrderAndSweep) {
   std::string probes[3];
   std::map<unsigned, std::string> seen;
   unsigned state = 0;
-  unsigned long rng = 12345;
+  uint64_t rng = 12345;
   size_t checks = 0;
   size_t distinct = 0;
   for (int k = 0; k < 4; k++) {
@@ -450,7 +450,7 @@ TEST_F(Grants, ModuleGrantOrderAndSweep) {
     int k;
     std::string name;
     std::string snap;
-    rng = rng * 6364136223846793005UL + 1442695040888963407UL;
+    rng = rng * 6364136223846793005ULL + 1442695040888963407ULL;
     k = (int)((rng >> 33) % 4);
     name = "m" + std::to_string(k);
     if (state & (1u << k)) {

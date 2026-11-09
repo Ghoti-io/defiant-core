@@ -2556,12 +2556,12 @@ TEST_F(Manifest, Prefix) {
 
   /* Another module's name as a prefix is not the module's own: `mm` is not
    * `m`, and a prefix without the dot is not a prefix. */
-  Guest * near = Mini("nn");
-  near->routes[0].name = "nnx.page";
-  near->routes[1].parent = "nnx.page";
-  near->Build();
-  w_.Install(near);
-  ExpectRefused(near, "route 'nnx.page' is not named nn.<name>", "stage");
+  Guest * nearby = Mini("nn");
+  nearby->routes[0].name = "nnx.page";
+  nearby->routes[1].parent = "nnx.page";
+  nearby->Build();
+  w_.Install(nearby);
+  ExpectRefused(nearby, "route 'nnx.page' is not named nn.<name>", "stage");
 
   /* Apply is the authority: staged past enable's check, the changeset is
    * refused the same way and names the module and the entry. */

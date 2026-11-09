@@ -3204,24 +3204,6 @@ static GDEFCORE_Result read_changeset(const uint8_t * archive, size_t n,
   return GDEFCORE_OK;
 }
 
-static GDEFCORE_Result put_named(GDEFCORE_Catalog * catalog, const char * type,
-    const char * name, const char * extra_field, const char * extra) {
-  GDEFCORE_Value values[2];
-  const char * texts[2];
-  size_t lens[2];
-  size_t nvalues = 1;
-  texts[0] = name;
-  lens[0] = strlen(name);
-  set_value(&values[0], "name", &texts[0], &lens[0], 1);
-  if (extra_field != NULL) {
-    texts[1] = extra;
-    lens[1] = strlen(extra);
-    set_value(&values[1], extra_field, &texts[1], &lens[1], 1);
-    nvalues = 2;
-  }
-  return save_entity(catalog, type, values, nvalues, 1);
-}
-
 static GDEFCORE_Result put_display(GDEFCORE_Catalog * catalog, const char * name,
     const char * pane) {
   GDEFCORE_Value values[3];
@@ -3237,20 +3219,6 @@ static GDEFCORE_Result put_display(GDEFCORE_Catalog * catalog, const char * name
   set_value(&values[1], "layout", &texts[1], &lens[1], 1);
   set_value(&values[2], "panes", &texts[2], &lens[2], 1);
   return save_entity(catalog, "core.display", values, 3, 1);
-}
-
-static GDEFCORE_Result ensure_named(GDEFCORE_Catalog * catalog, const char * type,
-    size_t type_len, const char * name, size_t name_len, const char * extra_field,
-    const char * extra) {
-  char id[GDEFCORE_PUBLIC_ID_LEN + 1];
-  GDEFCORE_Result rc = find_named(catalog, type, type_len, name, name_len, id);
-  if (rc == GDEFCORE_OK) {
-    return GDEFCORE_OK;
-  }
-  if (rc != GDEFCORE_ERR_INVALID) {
-    return rc;
-  }
-  return put_named(catalog, type, name, extra_field, extra);
 }
 
 static GDEFCORE_Result ensure_display(GDEFCORE_Catalog * catalog,
