@@ -65,6 +65,48 @@ plant unpublished-listed-evaluated src/access/access.c testListplan \
   '    if ((0 && !reader_sees(catalog, ids[i], ev)) ||
         !entity_visible(ev, grants, ngrants, local->type_name,'
 
+# A grant's condition reads fields in "en", whatever language the list is
+# asked in (decision of 2026-11-10): the grant decided in the list's language.
+plant grant-read-in-list-language src/access/access.c testListplan \
+  'ListPlan.AGrantReadsFieldsInEnglishWhateverTheListsLanguage' \
+  '  ev->lang = kLang;
+  ev->lang_len = strlen(kLang);' \
+  '  ev->lang = lang == NULL ? kLang : lang;
+  ev->lang_len = lang == NULL ? strlen(kLang) : lang_len;'
+
+# The store asked one question in one language when the grants and the list
+# read in two: the guard that sends such a list to the entity-by-entity path.
+plant two-languages-planned src/access/access.c testListplan \
+  'ListPlan.AGrantReadsFieldsInEnglishWhateverTheListsLanguage' \
+  '  if (!same(ev->lang, ev->lang_len, ev->list_lang, ev->list_lang_len)) {' \
+  '  if (0 && !same(ev->lang, ev->lang_len, ev->list_lang, ev->list_lang_len)) {'
+
+# The list's own filter, sort and written condition read in the list's
+# language: the query bound to "en", and the entity-by-entity reads and
+# condition in "en".
+plant list-query-bound-to-grant-language src/access/access.c testListplan \
+  'ListPlan.AGrantReadsFieldsInEnglishWhateverTheListsLanguage' \
+  '  sq.language = ev->list_lang;
+  sq.language_len = ev->list_lang_len;' \
+  '  sq.language = ev->lang;
+  sq.language_len = ev->lang_len;'
+
+plant list-filter-read-in-grant-language src/access/access.c testListplan \
+  'ListPlan.AGrantReadsFieldsInEnglishWhateverTheListsLanguage' \
+  "      field_name[local->filter_field_len] = '\\0';
+      rc = read_lang(catalog, ids[i], ev->list_lang, ev->list_lang_len, field_name," \
+  "      field_name[local->filter_field_len] = '\\0';
+      rc = read_lang(catalog, ids[i], ev->lang, ev->lang_len, field_name,"
+
+plant list-condition-read-in-grant-language src/access/access.c testListplan \
+  'ListPlan.AGrantReadsFieldsInEnglishWhateverTheListsLanguage' \
+  '      subject.lang = ev->list_lang;
+      subject.lang_len = ev->list_lang_len;
+      holds =' \
+  '      subject.lang = ev->lang;
+      subject.lang_len = ev->lang_len;
+      holds ='
+
 # The cap on a page removed.
 plant limit-cap-removed src/access/access.c testListplan \
   'ListPlan.TheLimitIsClamped' \

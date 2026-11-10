@@ -1658,8 +1658,15 @@ typedef struct Governed {
 typedef struct Eval {
   GDEFCORE_Catalog * catalog;
   GDEFCORE_Request * request;
+  /* The language a grant's condition reads fields in: always "en", whoever
+   * asks and whatever language the answer is wanted in, so that access never
+   * depends on the request language. */
   const char * lang;
   size_t lang_len;
+  /* The language the caller asked in: what a list's own filter, sort and
+   * written condition read. Never used to decide a grant. */
+  const char * list_lang;
+  size_t list_lang_len;
   const char * id;      /* canonical id of the entity being asked about */
   ExprSlot slots[kSlotMax];
   size_t nslots;
@@ -1681,8 +1688,10 @@ static void eval_init(Eval * ev, GDEFCORE_Catalog * catalog,
     GDEFCORE_Request * request, const char * lang, size_t lang_len) {
   ev->catalog = catalog;
   ev->request = request;
-  ev->lang = lang == NULL ? kLang : lang;
-  ev->lang_len = lang == NULL ? strlen(kLang) : lang_len;
+  ev->lang = kLang;
+  ev->lang_len = strlen(kLang);
+  ev->list_lang = lang == NULL ? kLang : lang;
+  ev->list_lang_len = lang == NULL ? strlen(kLang) : lang_len;
   ev->id = NULL;
   ev->nslots = 0;
   ev->failed = 0;
@@ -4631,8 +4640,25 @@ static GDEFCORE_Result list_planned(Eval * ev, GDEFCORE_Catalog * catalog,
   uint64_t total = 0;
   GDEFCORE_Result rc;
   *out_done = 0;
-  rc = gdefcore_plan_create(catalog, q->type_name, q->type_name_len, ev->lang,
-      ev->lang_len, principal, principal_len, gdefcore_request_time(request),
+  /* The query binds one language. A grant's condition reads fields in "en"
+   * and the list's own filter, sort and condition in the list's language, so
+   * when the two differ and a condition grant could apply, only the entity by
+   * entity path can say. */
+  if (!same(ev->lang, ev->lang_len, ev->list_lang, ev->list_lang_len)) {
+    size_t g;
+    for (g = 0; g < ngrants; g++) {
+      if (grants[g].condition == kCondExpr) {
+        return GDEFCORE_OK;
+      }
+    }
+    for (g = 0; g < ev->nceiling; g++) {
+      if (ev->ceiling[g].condition == kCondExpr) {
+        return GDEFCORE_OK;
+      }
+    }
+  }
+  rc = gdefcore_plan_create(catalog, q->type_name, q->type_name_len,
+      ev->list_lang, ev->list_lang_len, principal, principal_len, gdefcore_request_time(request),
       &plan);
   if (rc != GDEFCORE_OK) {
     return rc;
@@ -4708,8 +4734,8 @@ static GDEFCORE_Result list_planned(Eval * ev, GDEFCORE_Catalog * catalog,
   sq.sorts = nsorts > 0 ? sort_copy : NULL;
   sq.sort_count = nsorts;
   /* The port ends in creation order, as gdefcore_entity_ids() lists. */
-  sq.language = ev->lang;
-  sq.language_len = ev->lang_len;
+  sq.language = ev->list_lang;
+  sq.language_len = ev->list_lang_len;
   sq.offset = spec->count_only ? 0 : q->offset;
   sq.limit = spec->count_only ? 1 : spec->limit;
   rc = gdefcore_entity_query_current(catalog, q->type_name, q->type_name_len,
@@ -4834,7 +4860,7 @@ static GDEFCORE_Result list_memory(Eval * ev, GDEFCORE_Catalog * catalog,
       }
       memcpy(field_name, local->filter_field, local->filter_field_len);
       field_name[local->filter_field_len] = '\0';
-      rc = read_lang(catalog, ids[i], ev->lang, ev->lang_len, field_name,
+      rc = read_lang(catalog, ids[i], ev->list_lang, ev->list_lang_len, field_name,
           &texts, &lens, &n);
       if (rc != GDEFCORE_OK) {
         gdefcore_values_free(catalog, texts, lens, n);
@@ -4856,8 +4882,8 @@ static GDEFCORE_Result list_memory(Eval * ev, GDEFCORE_Catalog * catalog,
       subject.size = sizeof subject;
       subject.entity = ids[i];
       subject.entity_len = GDEFCORE_PUBLIC_ID_LEN;
-      subject.lang = ev->lang;
-      subject.lang_len = ev->lang_len;
+      subject.lang = ev->list_lang;
+      subject.lang_len = ev->list_lang_len;
       holds = gdefcore_condition_eval(catalog, request, spec->cond, &subject,
           &failed);
       if (failed) {
@@ -4899,7 +4925,7 @@ static GDEFCORE_Result list_memory(Eval * ev, GDEFCORE_Catalog * catalog,
         }
         memcpy(field_name, sort_fields[k], sort_lens[k]);
         field_name[sort_lens[k]] = '\0';
-        rc = read_lang(catalog, ids[i], ev->lang, ev->lang_len, field_name,
+        rc = read_lang(catalog, ids[i], ev->list_lang, ev->list_lang_len, field_name,
             &texts, &lens, &n);
         if (rc != GDEFCORE_OK) {
           gdefcore_values_free(catalog, texts, lens, n);

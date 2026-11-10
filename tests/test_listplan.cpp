@@ -872,6 +872,7 @@ std::string ReaderOf(Site & site, const std::string & role,
 
 TEST(ListPlan, ListsAgreeWithTheEvaluatedList) {
   size_t compared = 0;
+  size_t en_compared = 0;
   size_t planned = 0;
   size_t nonempty = 0;
   size_t paged = 0;
@@ -940,8 +941,16 @@ TEST(ListPlan, ListsAgreeWithTheEvaluatedList) {
       if (want.rc == GDEFCORE_OK) {
         EXPECT_EQ("evaluated", want.how);
       }
-      if (got.how == "planned") {
-        planned += 1;
+      /* A list in another language than "en" is answered by the store only
+       * when no grant has a condition: a grant reads fields in "en" and the
+       * query binds one language, so it is decided entity by entity. The
+       * promise to answer almost every list by the store is made of the "en"
+       * ones. */
+      if (q.lang == "en") {
+        en_compared += 1;
+        if (got.how == "planned") {
+          planned += 1;
+        }
       }
       compared += 1;
       nonempty += want.ids.empty() ? 0 : 1;
@@ -954,7 +963,8 @@ TEST(ListPlan, ListsAgreeWithTheEvaluatedList) {
   EXPECT_EQ(360u * Backends().size(), compared);
   /* Almost every list is answered by the store: the sweep is of the compiled
    * list and not of the fallback agreeing with itself. */
-  EXPECT_GE(planned, compared * 9 / 10);
+  EXPECT_GE(planned, en_compared * 9 / 10);
+  EXPECT_GE(en_compared, compared / 2);
   EXPECT_GE(nonempty, 100u * Backends().size());
   EXPECT_GE(paged, 50u * Backends().size());
 }
@@ -1596,6 +1606,83 @@ TEST(ListPlan, ADraftIsNeverInAList) {
       s.sort1 = "group";
       s.desc1 = true;
       EXPECT_EQ("other,pub", Titles(site, List(site, r, s).ids)) << "flags " << flags;
+    }
+  }
+}
+
+/*
+ * A grant's condition reads fields in "en", whatever language the list or the
+ * read is asked in, so that who may see an entity never depends on the language
+ * of the request. Here the entity's `group` is "open" in English for one note
+ * and in French for the other; the grant admits "open". A French list, an English
+ * list, the evaluated list and the direct decision must all agree on the English
+ * one. Planned or evaluated, the answer is the same set.
+ */
+TEST(ListPlan, AGrantReadsFieldsInEnglishWhateverTheListsLanguage) {
+  for (int backend : Backends()) {
+    Site site(backend);
+    site.Role("seer");
+    ASSERT_EQ(GDEFCORE_OK,
+        site.Declare("Read open", "read", 0, "(= field.group \"open\")"));
+    site.Grant("seer", "Read open");
+    std::string p = site.Principal("seer");
+    std::string a = site.Make(kBlog, "", V({{"title", "a"}, {"group", "open"}}));
+    site.Save(a, "", V({{"title", "a-fr"}, {"group", "closed"}}), 0, "fr");
+    std::string b = site.Make(kBlog, "", V({{"title", "b"}, {"group", "closed"}}));
+    site.Save(b, "", V({{"title", "b-fr"}, {"group", "open"}}), 0, "fr");
+    GDEFCORE_Request * r = site.Req(p);
+    for (const char * lang : {"en", "fr"}) {
+      for (int flags : {0, (int)GDEFCORE_ACCESS_LIST_EVALUATE}) {
+        Q q;
+        q.lang = lang;
+        q.flags = flags;
+        Listed l = List(site, site.Req(p), q);
+        ASSERT_EQ(GDEFCORE_OK, l.rc);
+        EXPECT_EQ(std::vector<std::string>({a}), l.ids)
+            << "backend " << backend << " lang " << lang << " flags " << flags;
+        EXPECT_EQ(1u, l.total);
+        /* Counted the same. */
+        uint64_t total = 99;
+        GDEFCORE_Access_List al = ToQuery(q);
+        ASSERT_EQ(GDEFCORE_OK, gdefcore_access_count(site.catalog, site.Req(p), &al, &total));
+        EXPECT_EQ(1u, total) << "lang " << lang << " flags " << flags;
+        /* The list's own filter reads in the list's language: the title is
+         * the French one in a French list. */
+        Q f = q;
+        f.filter_field = "title";
+        f.filter_text = std::string("a") + (std::string(lang) == "fr" ? "-fr" : "");
+        Listed lf = List(site, site.Req(p), f);
+        ASSERT_EQ(GDEFCORE_OK, lf.rc);
+        EXPECT_EQ(std::vector<std::string>({a}), lf.ids) << "lang " << lang;
+        /* So does the list's own written condition. */
+        Q c = q;
+        c.condition = std::string("(= field.title \"a") +
+            (std::string(lang) == "fr" ? "-fr" : "") + "\")";
+        Listed lc = List(site, site.Req(p), c);
+        ASSERT_EQ(GDEFCORE_OK, lc.rc);
+        EXPECT_EQ(std::vector<std::string>({a}), lc.ids)
+            << "lang " << lang << " flags " << flags;
+      }
+    }
+    /* A direct decision and a direct read answer as the lists do. */
+    for (const std::string & id : {a, b}) {
+      int allowed = -1;
+      ASSERT_EQ(GDEFCORE_OK, gdefcore_access_can(site.catalog, r, "read", 4, kBlog,
+          strlen(kBlog), id.c_str(), &allowed));
+      EXPECT_EQ(id == a ? 1 : 0, allowed) << "backend " << backend;
+      for (const char * lang : {"en", "fr"}) {
+        char ** texts = NULL;
+        size_t * lens = NULL;
+        size_t n = 0;
+        int locked = 0;
+        GDEFCORE_Result rc = gdefcore_access_read(site.catalog, site.Req(p),
+            id.c_str(), id.size(), lang, 2, "title", 5, &texts, &lens, &n, &locked);
+        bool saw = rc == GDEFCORE_OK && n > 0 && !locked;
+        if (rc == GDEFCORE_OK) {
+          gdefcore_values_free(site.catalog, texts, lens, n);
+        }
+        EXPECT_EQ(id == a, saw) << "backend " << backend << " lang " << lang;
+      }
     }
   }
 }

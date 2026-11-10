@@ -137,6 +137,17 @@ stable. A key containing a NUL byte used to be compared up to the NUL; it is
 now compared in full. `limit` 0 is every row; a larger `limit` than
 `GDEFCORE_ACCESS_LIST_MAX_LIMIT` (200) is clamped to it.
 
+### The language of a grant
+
+A grant's condition reads a field in English (`en`) always, whatever language
+a list, a count or a read is asked in. So whether a principal may see an entity
+does not depend on the language of the request: a `de` list, an `en` list and a
+direct decision agree. What the list itself asks is read in the list's
+language: its filter, its sort keys and its own `condition`. The storage query
+binds one language, so a list in another language than `en` is answered by the
+store only when no grant that could apply carries a condition; with one, it is
+decided entity by entity, which gives the same answer more slowly.
+
 ### Compiled, and the fallback
 
 A list is compiled into a storage query (`gdefstor` query form, see
