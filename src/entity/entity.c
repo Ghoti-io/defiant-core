@@ -2380,7 +2380,7 @@ static GDEFCORE_Result view_doc(GDEFCORE_Catalog * catalog, const char * canon,
   }
   if (view == GDEFCORE_VIEW_DRAFT && look.has_draft) {
     /* An editor's view: the draft, over what the entity is now. */
-    rc = gdefcore_ent_read_doc(catalog, canon, 0, 1, doc);
+    rc = gdefcore_ent_read_doc_look(catalog, canon, &look, 0, 1, doc);
   } else {
     /* A reader's view is the newest revision, and only while the flag is
      * set. The unpublished entity answers as one that is not there; so
@@ -2389,7 +2389,7 @@ static GDEFCORE_Result view_doc(GDEFCORE_Catalog * catalog, const char * canon,
         (view == GDEFCORE_VIEW_PUBLISHED && !look.published)) {
       return GDEFCORE_ERR_INVALID;
     }
-    rc = gdefcore_ent_read_doc(catalog, canon, 0, 0, doc);
+    rc = gdefcore_ent_read_doc_look(catalog, canon, &look, 0, 0, doc);
   }
   return rc;
 }
@@ -3349,6 +3349,75 @@ GDEFCORE_Result gdefcore_entity_values(GDEFCORE_Catalog * catalog,
   rc = values_from(catalog, &doc, lang, lang_len, field, field_len, out_texts,
       out_lens, out_count);
   doc_free(catalog->alloc, &doc);
+  return rc;
+}
+
+GDEFCORE_Result gdefcore_entity_values_many(GDEFCORE_Catalog * catalog,
+    const GDEFCORE_Changeset * changeset, int view, const char * id,
+    size_t id_len, const char * lang, size_t lang_len,
+    GDEFCORE_Field_Values * fields, size_t field_count) {
+  char canon[GDEFCORE_PUBLIC_ID_LEN + 1];
+  GDEFCORE_Doc doc;
+  GDEFCORE_Result rc = GDEFCORE_OK;
+  size_t i;
+  if (catalog == NULL || lang == NULL || (fields == NULL && field_count != 0) ||
+      (view != GDEFCORE_VIEW_PUBLISHED && view != GDEFCORE_VIEW_DRAFT &&
+          view != GDEFCORE_VIEW_CURRENT)) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  for (i = 0; i < field_count; i++) {
+    if (fields[i].size != sizeof fields[i] || fields[i].field == NULL) {
+      return GDEFCORE_ERR_INVALID;
+    }
+    fields[i].texts = NULL;
+    fields[i].lens = NULL;
+    fields[i].count = 0;
+  }
+  if (gdefcore_id_canonical(id, id_len, canon) != GDEFCORE_OK) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  if (changeset != NULL) {
+    /* A changeset that touches the entity answers from what it staged: the
+     * single read decides that, field by field. */
+    for (i = 0; rc == GDEFCORE_OK && i < field_count; i++) {
+      rc = gdefcore_entity_values(catalog, changeset, view, canon,
+          GDEFCORE_PUBLIC_ID_LEN, lang, lang_len, fields[i].field,
+          fields[i].field_len, &fields[i].texts, &fields[i].lens,
+          &fields[i].count);
+      if (rc == GDEFCORE_ERR_INVALID) {
+        fields[i].texts = NULL;
+        fields[i].lens = NULL;
+        fields[i].count = 0;
+        rc = GDEFCORE_OK;
+      }
+    }
+  } else {
+    rc = view_doc(catalog, canon, view, NULL, &doc);
+    if (rc != GDEFCORE_OK) {
+      return rc;
+    }
+    for (i = 0; rc == GDEFCORE_OK && i < field_count; i++) {
+      rc = values_from(catalog, &doc, lang, lang_len, fields[i].field,
+          fields[i].field_len, &fields[i].texts, &fields[i].lens,
+          &fields[i].count);
+      if (rc == GDEFCORE_ERR_INVALID) {
+        fields[i].texts = NULL;
+        fields[i].lens = NULL;
+        fields[i].count = 0;
+        rc = GDEFCORE_OK;
+      }
+    }
+    doc_free(catalog->alloc, &doc);
+  }
+  if (rc != GDEFCORE_OK) {
+    for (i = 0; i < field_count; i++) {
+      gdefcore_values_free(catalog, fields[i].texts, fields[i].lens,
+          fields[i].count);
+      fields[i].texts = NULL;
+      fields[i].lens = NULL;
+      fields[i].count = 0;
+    }
+  }
   return rc;
 }
 

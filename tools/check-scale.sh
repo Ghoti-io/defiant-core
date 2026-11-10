@@ -6,7 +6,9 @@
 # tests on the real tree, then plants the defect in a COPY of the source by an
 # exact text edit and requires the named tests to fail (defiant-storage's plant-lib.sh):
 #
-#   field-index-dropped   the list and count tests of the backend's suite
+#   field-index-dropped      the list and count tests of the backend's suite
+#   values-many-per-field    reading four fields of an entity in one call costs
+#                            what four calls cost (FourFieldsOfAnEntityCostWhatOneDoes)
 #
 # The backend is the one the tests are given: SQLite in `make test`
 # (suite Scale), Postgres in `make test-scale-postgres` with
@@ -37,5 +39,14 @@ plant field-index-dropped src/entity/store.c testScale \
   "$SUITE.AFilteredListPageReadsItsAnswerNotTheTable $SUITE.ACountReadsItsAnswerNotTheTable" \
   '                (d->indexed && !d->personal ? GDEFSTOR_FIELD_INDEXED : 0u) |' \
   '                0u |'
+
+# Several fields read one at a time: the values are the same and the entity is
+# read once for each, which only a count of statements sees.
+plant values-many-per-field src/entity/entity.c testScale \
+  "$SUITE.FourFieldsOfAnEntityCostWhatOneDoes" \
+  '  if (changeset != NULL) {
+    /* A changeset that touches the entity answers from what it staged: the' \
+  '  if (1) {
+    /* A changeset that touches the entity answers from what it staged: the'
 
 plant_finish

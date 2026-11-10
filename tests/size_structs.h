@@ -62,6 +62,7 @@
   X(GDEFCORE_Condition_Value, "tests/test_condition.cpp") \
   X(GDEFCORE_Field, "tests/test_entity.cpp") \
   X(GDEFCORE_Value, "tests/test_entity.cpp") \
+  X(GDEFCORE_Field_Values, "tests/test_entity.cpp") \
   X(GDEFCORE_Patch, "tests/test_entity.cpp") \
   X(GDEFCORE_FieldInfo, "tests/test_groups.cpp") \
   X(GDEFCORE_TreeItem, "tests/test_groups.cpp") \

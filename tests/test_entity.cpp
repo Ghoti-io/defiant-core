@@ -1037,6 +1037,158 @@ TEST_F(Entity, ConfigSaveNeedsTypeName) {
   gdefcore_changeset_destroy(changeset);
 }
 
+/* Several fields of one entity read in one call are what the single read
+ * gives for each: the values, an absent field as no values, and the reasons
+ * an entity cannot be read as the single read's. */
+TEST_F(Entity, ValuesManyReadsEachFieldAsTheSingleReadDoes) {
+  char id[GDEFCORE_PUBLIC_ID_LEN + 1];
+  char draft_only[GDEFCORE_PUBLIC_ID_LEN + 1];
+  uint64_t row = 0;
+  GDEFCORE_Field fields[3];
+  GDEFCORE_Value values[2];
+  const char * title_texts[1] = {"Hello"};
+  size_t title_lens[1] = {5};
+  const char * tag_texts[2] = {"a", "b"};
+  size_t tag_lens[2] = {1, 1};
+  GDEFCORE_Changeset * changeset = NULL;
+  GDEFCORE_Field_Values got[4];
+  size_t i;
+  memset(fields, 0, sizeof fields);
+  fields[0] = TitleField();
+  fields[1].size = sizeof fields[1];
+  fields[1].name = "tag";
+  fields[1].name_len = 3;
+  fields[1].many = 1;
+  fields[2].size = sizeof fields[2];
+  fields[2].name = "note";
+  fields[2].name_len = 4;
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_type_define(catalog_, "site.note", 9, GDEFCORE_TYPE_CONTENT,
+          fields, 3));
+  CreateEntity(catalog_, "site.note", id, &row);
+  CreateEntity(catalog_, "site.note", draft_only, &row);
+  memset(values, 0, sizeof values);
+  values[0].size = sizeof values[0];
+  values[0].field = "title";
+  values[0].field_len = 5;
+  values[0].texts = title_texts;
+  values[0].text_lens = title_lens;
+  values[0].count = 1;
+  values[1].size = sizeof values[1];
+  values[1].field = "tag";
+  values[1].field_len = 3;
+  values[1].texts = tag_texts;
+  values[1].text_lens = tag_lens;
+  values[1].count = 2;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &changeset));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_entity_save(changeset, id, strlen(id), "en", 2, values, 2));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(changeset, NULL, 0));
+  gdefcore_changeset_destroy(changeset);
+
+  auto Fill = [&](GDEFCORE_Field_Values * f) {
+    const char * names[4] = {"title", "tag", "note", "nosuchfield"};
+    memset(f, 0, 4 * sizeof *f);
+    for (int k = 0; k < 4; k++) {
+      f[k].size = sizeof f[k];
+      f[k].field = names[k];
+      f[k].field_len = strlen(names[k]);
+    }
+  };
+  Fill(got);
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_entity_values_many(catalog_, NULL, GDEFCORE_VIEW_PUBLISHED, id,
+          strlen(id), "en", 2, got, 4));
+  ASSERT_EQ(1u, got[0].count);
+  EXPECT_EQ("Hello", std::string(got[0].texts[0], got[0].lens[0]));
+  ASSERT_EQ(2u, got[1].count);
+  EXPECT_EQ("a", std::string(got[1].texts[0], got[1].lens[0]));
+  EXPECT_EQ("b", std::string(got[1].texts[1], got[1].lens[1]));
+  /* A field with no value, and one the type does not have, are no values and
+   * not a failure. */
+  EXPECT_EQ(0u, got[2].count);
+  EXPECT_EQ(NULL, got[2].texts);
+  EXPECT_EQ(0u, got[3].count);
+  EXPECT_EQ(NULL, got[3].texts);
+  /* Each is what the single read says. */
+  for (i = 0; i < 4; i++) {
+    char ** texts = NULL;
+    size_t * lens = NULL;
+    size_t count = 0;
+    GDEFCORE_Result rc = gdefcore_entity_values(catalog_, NULL,
+        GDEFCORE_VIEW_PUBLISHED, id, strlen(id), "en", 2, got[i].field,
+        got[i].field_len, &texts, &lens, &count);
+    EXPECT_EQ(got[i].count, rc == GDEFCORE_OK ? count : 0u) << got[i].field;
+    gdefcore_values_free(catalog_, texts, lens, count);
+  }
+  for (i = 0; i < 4; i++) {
+    gdefcore_values_free(catalog_, got[i].texts, got[i].lens, got[i].count);
+  }
+
+  /* Another language has none of them. */
+  Fill(got);
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_entity_values_many(catalog_, NULL, GDEFCORE_VIEW_PUBLISHED, id,
+          strlen(id), "fr", 2, got, 4));
+  for (i = 0; i < 4; i++) {
+    EXPECT_EQ(0u, got[i].count);
+  }
+
+  /* An entity that cannot be read in the view is as for the single read: not
+   * there, and never saved, are ::GDEFCORE_ERR_INVALID with nothing to free. */
+  Fill(got);
+  EXPECT_EQ(GDEFCORE_ERR_INVALID,
+      gdefcore_entity_values_many(catalog_, NULL, GDEFCORE_VIEW_PUBLISHED,
+          draft_only, strlen(draft_only), "en", 2, got, 4));
+  for (i = 0; i < 4; i++) {
+    EXPECT_EQ(0u, got[i].count);
+    EXPECT_EQ(NULL, got[i].texts);
+  }
+  Fill(got);
+  EXPECT_EQ(GDEFCORE_ERR_INVALID,
+      gdefcore_entity_values_many(catalog_, NULL, GDEFCORE_VIEW_PUBLISHED,
+          "0000000000000000000000", 22, "en", 2, got, 4));
+  Fill(got);
+  EXPECT_EQ(GDEFCORE_ERR_INVALID,
+      gdefcore_entity_values_many(catalog_, NULL, GDEFCORE_VIEW_PUBLISHED,
+          "not-an-id", 9, "en", 2, got, 4));
+
+  /* What a changeset staged is read through it, as the single read does. */
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &changeset));
+  title_texts[0] = "Staged";
+  title_lens[0] = 6;
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_entity_save(changeset, id, strlen(id), "en", 2, values, 1));
+  Fill(got);
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_entity_values_many(catalog_, changeset, GDEFCORE_VIEW_PUBLISHED,
+          id, strlen(id), "en", 2, got, 4));
+  ASSERT_EQ(1u, got[0].count);
+  EXPECT_EQ("Staged", std::string(got[0].texts[0], got[0].lens[0]));
+  for (i = 0; i < 4; i++) {
+    gdefcore_values_free(catalog_, got[i].texts, got[i].lens, got[i].count);
+  }
+  gdefcore_changeset_destroy(changeset);
+
+  /* A request that is not well formed is refused and writes nothing. */
+  Fill(got);
+  got[2].size = 1;
+  EXPECT_EQ(GDEFCORE_ERR_INVALID,
+      gdefcore_entity_values_many(catalog_, NULL, GDEFCORE_VIEW_PUBLISHED, id,
+          strlen(id), "en", 2, got, 4));
+  Fill(got);
+  got[1].field = NULL;
+  EXPECT_EQ(GDEFCORE_ERR_INVALID,
+      gdefcore_entity_values_many(catalog_, NULL, GDEFCORE_VIEW_PUBLISHED, id,
+          strlen(id), "en", 2, got, 4));
+  EXPECT_EQ(GDEFCORE_ERR_INVALID,
+      gdefcore_entity_values_many(catalog_, NULL, 99, id, strlen(id), "en", 2,
+          got, 4));
+  EXPECT_EQ(GDEFCORE_OK,
+      gdefcore_entity_values_many(catalog_, NULL, GDEFCORE_VIEW_PUBLISHED, id,
+          strlen(id), "en", 2, NULL, 0));
+}
+
 TEST_F(Entity, PatchSavesRequiredAfterOptional) {
   char id[GDEFCORE_PUBLIC_ID_LEN + 1];
   uint64_t row = 0;
@@ -1537,6 +1689,37 @@ TEST_F(Entity, TheStructsHereAreAcceptedAtOnlyTheirOwnSize) {
         GDEFCORE_Result rc = gdefcore_entity_save(changeset, id, strlen(id), "en",
             2, &value, 1);
         gdefcore_changeset_destroy(changeset);
+        return rc == GDEFCORE_OK;
+      }),
+      GDEFCORE_SIZE_PROBE(GDEFCORE_Field_Values, {
+        char id[GDEFCORE_PUBLIC_ID_LEN + 1];
+        uint64_t row = 0;
+        GDEFCORE_Changeset * changeset = NULL;
+        const char * texts[1] = {"a title"};
+        size_t lens[1] = {7};
+        GDEFCORE_Value value;
+        GDEFCORE_Field_Values got;
+        memset(&value, 0, sizeof value);
+        value.size = sizeof value;
+        value.field = "title";
+        value.field_len = 5;
+        value.texts = texts;
+        value.text_lens = lens;
+        value.count = 1;
+        CreateEntity(catalog_, "site.sized", id, &row);
+        EXPECT_EQ(GDEFCORE_OK,
+            gdefcore_changeset_prepare(catalog_, NULL, 0, &changeset));
+        EXPECT_EQ(GDEFCORE_OK,
+            gdefcore_entity_save(changeset, id, strlen(id), "en", 2, &value, 1));
+        EXPECT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(changeset, NULL, 0));
+        gdefcore_changeset_destroy(changeset);
+        memset(&got, 0, sizeof got);
+        got.size = size;
+        got.field = "title";
+        got.field_len = 5;
+        GDEFCORE_Result rc = gdefcore_entity_values_many(catalog_, NULL,
+            GDEFCORE_VIEW_PUBLISHED, id, strlen(id), "en", 2, &got, 1);
+        gdefcore_values_free(catalog_, got.texts, got.lens, got.count);
         return rc == GDEFCORE_OK;
       }),
       GDEFCORE_SIZE_PROBE(GDEFCORE_Patch, {

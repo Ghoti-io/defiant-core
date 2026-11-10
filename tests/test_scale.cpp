@@ -82,6 +82,7 @@
 
 #include <filesystem>
 #include <functional>
+#include <map>
 #include <random>
 #include <sstream>
 #include <string>
@@ -110,6 +111,10 @@ struct Cost {
 
 Cost g_cost;
 bool g_counting = false;
+/* With GDEFCORE_SCALE_VERBOSE: the statements of the last SQLite measurement
+ * by kind, so that a page that runs many can be seen to run which. */
+bool g_kinds_on = getenv("GDEFCORE_SCALE_VERBOSE") != NULL;
+std::map<std::string, uint64_t> g_kinds;
 
 bool PostgresArm() {
   const char * v = getenv("GDEFCORE_TEST_SCALE");
@@ -124,10 +129,24 @@ void OnStatement(void *, const GDEFSSQLITE_StatementStats * s) {
   g_cost.fullscan += s->fullscan_steps;
   g_cost.autoindex += s->autoindexes;
   g_cost.statements += 1;
+  if (g_kinds_on && s->sql != NULL) {
+    /* The statement's kind: its text with runs of space collapsed, cut at a
+     * length that tells the statements apart. */
+    std::string kind;
+    for (size_t i = 0; i < s->sql_len && kind.size() < 90; i++) {
+      char c = s->sql[i];
+      bool space = c == ' ' || c == '\n' || c == '\t';
+      if (!space || (!kind.empty() && kind.back() != ' ')) {
+        kind += space ? ' ' : c;
+      }
+    }
+    g_kinds[kind] += 1;
+  }
 }
 
 Cost Measure(const std::function<void()> & call) {
   g_cost = Cost();
+  g_kinds.clear();
   g_counting = true;
   call();
   g_counting = false;
@@ -150,6 +169,9 @@ struct World {
   Cost count_small, count_big;
   Cost create_small, create_big;
   Cost scan_small, scan_big;
+  /* Reading four fields of one entity in one call, and one field in one call:
+   * the first must not cost more than the second. */
+  Cost many_small, many_big, one_small, one_big;
   std::vector<std::string> list_small_ids, list_big_ids;
   uint64_t total_small = 0, total_big = 0;
   uint64_t count_small_n = 0, count_big_n = 0;
@@ -254,7 +276,7 @@ GDEFCORE_Access_List FilteredPage() {
 
 void MeasureAt(World * w, Cost * list, std::vector<std::string> * ids,
     uint64_t * total, Cost * count, uint64_t * counted, Cost * create,
-    Cost * scan) {
+    Cost * scan, Cost * many, Cost * one) {
   GDEFCORE_Request * r = NewRequest(w->reader);
   GDEFCORE_Access_List q = FilteredPage();
   const std::function<Cost(const std::function<void()> &)> & meter =
@@ -283,6 +305,13 @@ void MeasureAt(World * w, Cost * list, std::vector<std::string> * ids,
     }
     gdefcore_access_free(w->catalog, got, n);
   });
+  if (g_kinds_on) {
+    printf("a filtered list page, statements by kind (%zu rows in the world):\n",
+        w->made);
+    for (const auto & kv : g_kinds) {
+      printf("  %6llu  %s\n", (unsigned long long)kv.second, kv.first.c_str());
+    }
+  }
   size_t note_n = 0;
   const char * how = gdefcore_request_note(r, "defiant.access.list", 19, &note_n);
   EXPECT_EQ("planned", std::string(how == NULL ? "" : how, note_n))
@@ -302,6 +331,37 @@ void MeasureAt(World * w, Cost * list, std::vector<std::string> * ids,
           gdefcore_access_list_page(w->catalog, r, &unindexed, &got, &n, &t));
       EXPECT_EQ(10u, t);
       gdefcore_access_free(w->catalog, got, n);
+    });
+  }
+  ASSERT_FALSE(ids->empty());
+  {
+    /* Four fields of one entity in one call, and one field in one call. */
+    const std::string & id = ids->front();
+    const char * names[4] = {"title", "group", "rank", "note"};
+    *many = meter([&]() {
+      GDEFCORE_Field_Values f[4];
+      memset(f, 0, sizeof f);
+      for (int k = 0; k < 4; k++) {
+        f[k].size = sizeof f[k];
+        f[k].field = names[k];
+        f[k].field_len = strlen(names[k]);
+      }
+      ASSERT_EQ(GDEFCORE_OK,
+          gdefcore_entity_values_many(w->catalog, NULL, GDEFCORE_VIEW_PUBLISHED,
+              id.data(), id.size(), "en", 2, f, 4));
+      for (int k = 0; k < 4; k++) {
+        EXPECT_EQ(1u, f[k].count) << names[k];
+        gdefcore_values_free(w->catalog, f[k].texts, f[k].lens, f[k].count);
+      }
+    });
+    *one = meter([&]() {
+      char ** texts = NULL;
+      size_t * lens = NULL;
+      size_t n = 0;
+      ASSERT_EQ(GDEFCORE_OK,
+          gdefcore_entity_values(w->catalog, NULL, GDEFCORE_VIEW_PUBLISHED,
+              id.data(), id.size(), "en", 2, "title", 5, &texts, &lens, &n));
+      gdefcore_values_free(w->catalog, texts, lens, n);
     });
   }
   *create = meter([&]() { ASSERT_TRUE(MakeEntities(w, w->made + 1)); });
@@ -613,12 +673,14 @@ World * Build(bool postgres) {
     return w;
   }
   MeasureAt(w, &w->list_small, &w->list_small_ids, &w->total_small,
-      &w->count_small, &w->count_small_n, &w->create_small, &w->scan_small);
+      &w->count_small, &w->count_small_n, &w->create_small, &w->scan_small,
+      &w->many_small, &w->one_small);
   if (!MakeEntities(w, Size())) {
     return w;
   }
   MeasureAt(w, &w->list_big, &w->list_big_ids, &w->total_big, &w->count_big,
-      &w->count_big_n, &w->create_big, &w->scan_big);
+      &w->count_big_n, &w->create_big, &w->scan_big, &w->many_big,
+      &w->one_big);
   w->ok = true;
   return w;
 }
@@ -690,6 +752,15 @@ TEST_F(Scale, AnUnindexedFilterReadsTheTableAndIsSeenTo) {
   const uint64_t grown = (uint64_t)(Size() - 1000);
   EXPECT_GE(g_world->scan_big.vm, g_world->scan_small.vm + grown)
       << "a scan of the table did not show in the steps";
+}
+
+/* Four fields of an entity cost one read of it, not four: at both sizes the
+ * call that asks for four runs no more statements than the call that asks for
+ * one. */
+TEST_F(Scale, FourFieldsOfAnEntityCostWhatOneDoes) {
+  EXPECT_GT(g_world->one_small.statements, 0u) << "nothing was measured";
+  EXPECT_EQ(g_world->one_small.statements, g_world->many_small.statements);
+  EXPECT_EQ(g_world->one_big.statements, g_world->many_big.statements);
 }
 
 TEST_F(Scale, CreatingOneMoreEntityCostsWhatItDidAtAThousand) {
@@ -785,6 +856,12 @@ TEST_F(ScalePostgres, AnUnindexedFilterReadsTheTableAndIsSeenTo) {
   EXPECT_GE(g_pg_world->scan_big.rows, g_pg_world->scan_small.rows + grown)
       << "a scan of the table did not show in the rows read: "
       << g_pg_world->scan_small.rows << " -> " << g_pg_world->scan_big.rows;
+}
+
+TEST_F(ScalePostgres, FourFieldsOfAnEntityCostWhatOneDoes) {
+  EXPECT_GT(g_pg_world->one_small.statements, 0u) << "nothing was measured";
+  EXPECT_EQ(g_pg_world->one_small.statements, g_pg_world->many_small.statements);
+  EXPECT_EQ(g_pg_world->one_big.statements, g_pg_world->many_big.statements);
 }
 
 TEST_F(ScalePostgres, CreatingOneMoreEntityCostsWhatItDidAtAThousand) {

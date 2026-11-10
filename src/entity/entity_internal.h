@@ -336,6 +336,13 @@ GDEFCORE_Result gdefcore_ent_lookup(GDEFCORE_Catalog * cat, const char * canon,
 GDEFCORE_Result gdefcore_ent_read_doc(GDEFCORE_Catalog * cat,
     const char * canon, uint64_t revision, int draft, GDEFCORE_Doc * out);
 
+/* gdefcore_ent_read_doc() for a caller that has just looked the entity up
+ * (@p known is gdefcore_ent_lookup()'s answer for @p canon): the lookup is not
+ * made again, which is two storage reads and a draft read. */
+GDEFCORE_Result gdefcore_ent_read_doc_look(GDEFCORE_Catalog * cat,
+    const char * canon, const GDEFCORE_EntLook * known, uint64_t revision,
+    int draft, GDEFCORE_Doc * out);
+
 /*
  * Where the trees of a save or a draft find each personal value's subject,
  * and how a save gives a changed one its blind-index MAC (stories S6c, S7). A

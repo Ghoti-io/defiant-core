@@ -82,6 +82,7 @@
 #define GDEFCORE_TreeItem GHOTIIO_DEFCORE(GDEFCORE_TreeItem)
 #define GDEFCORE_Turn GHOTIIO_DEFCORE(GDEFCORE_Turn)
 #define GDEFCORE_Value GHOTIIO_DEFCORE(GDEFCORE_Value)
+#define GDEFCORE_Field_Values GHOTIIO_DEFCORE(GDEFCORE_Field_Values)
 #define GDEFCORE_Write_Hook GHOTIIO_DEFCORE(GDEFCORE_Write_Hook)
 
 #define gdefcore_access_admin_principal                                        \
@@ -297,6 +298,7 @@
 #define gdefcore_entity_save_draft GHOTIIO_DEFCORE(gdefcore_entity_save_draft)
 #define gdefcore_entity_type GHOTIIO_DEFCORE(gdefcore_entity_type)
 #define gdefcore_entity_values GHOTIIO_DEFCORE(gdefcore_entity_values)
+#define gdefcore_entity_values_many GHOTIIO_DEFCORE(gdefcore_entity_values_many)
 #define gdefcore_epoch GHOTIIO_DEFCORE(gdefcore_epoch)
 #define gdefcore_form_alias GHOTIIO_DEFCORE(gdefcore_form_alias)
 #define gdefcore_form_check GHOTIIO_DEFCORE(gdefcore_form_check)

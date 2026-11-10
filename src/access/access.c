@@ -222,6 +222,40 @@ static GDEFCORE_Result read_values(GDEFCORE_Catalog * catalog, const char * id,
       out_lens, out_count);
 }
 
+/* Several fields of one entity from one read of it, each as read_values()
+ * gives it. An entity that cannot be read has no values and is not a failure,
+ * as for read_values(). Free with many_free(). */
+static void many_init(GDEFCORE_Field_Values * field, const char * name) {
+  memset(field, 0, sizeof *field);
+  field->size = sizeof *field;
+  field->field = name;
+  field->field_len = strlen(name);
+}
+
+static void many_free(GDEFCORE_Catalog * catalog, GDEFCORE_Field_Values * fields,
+    size_t count) {
+  size_t i;
+  for (i = 0; i < count; i++) {
+    gdefcore_values_free(catalog, fields[i].texts, fields[i].lens,
+        fields[i].count);
+    fields[i].texts = NULL;
+    fields[i].lens = NULL;
+    fields[i].count = 0;
+  }
+}
+
+static GDEFCORE_Result read_many(GDEFCORE_Catalog * catalog, const char * id,
+    GDEFCORE_Field_Values * fields, size_t count) {
+  GDEFCORE_Result rc = gdefcore_entity_values_many(catalog, NULL,
+      GDEFCORE_VIEW_PUBLISHED, id, GDEFCORE_PUBLIC_ID_LEN, kLang, strlen(kLang),
+      fields, count);
+  if (rc == GDEFCORE_ERR_INVALID) {
+    many_free(catalog, fields, count);
+    return GDEFCORE_OK;
+  }
+  return rc;
+}
+
 static int values_have(char ** texts, size_t * lens, size_t count,
     const char * want, size_t want_len) {
   size_t i;
@@ -326,30 +360,28 @@ static GDEFCORE_Result find_named(GDEFCORE_Catalog * catalog, const char * type,
   }
   rc = GDEFCORE_ERR_INVALID;
   for (i = 0; i < count; i++) {
-    char ** texts = NULL;
-    size_t * lens = NULL;
-    size_t n = 0;
-    int retired = 0;
-    GDEFCORE_Result got = retired_state(catalog, ids[i], &retired);
+    GDEFCORE_Field_Values f[2];
+    int retired;
+    GDEFCORE_Result got;
+    many_init(&f[0], "retired");
+    many_init(&f[1], field);
+    /* The retired flag and the field from one read of the entity. A flag that
+     * cannot be read is retired. */
+    got = read_many(catalog, ids[i], f, 2);
     if (got != GDEFCORE_OK) {
       failure = failure == GDEFCORE_OK ? got : failure;
       continue;
     }
-    if (retired) {
-      continue;
-    }
-    got = read_values(catalog, ids[i], field, &texts, &lens, &n);
-    if (got != GDEFCORE_OK) {
-      failure = failure == GDEFCORE_OK ? got : failure;
-      continue;
-    }
-    if (values_have(texts, lens, n, want, want_len)) {
+    retired = values_have(f[0].texts, f[0].lens, f[0].count, kRetired,
+        strlen(kRetired));
+    if (!retired && values_have(f[1].texts, f[1].lens, f[1].count, want,
+                        want_len)) {
       memcpy(out_id, ids[i], GDEFCORE_PUBLIC_ID_LEN + 1);
       rc = GDEFCORE_OK;
-      gdefcore_values_free(catalog, texts, lens, n);
+      many_free(catalog, f, 2);
       break;
     }
-    gdefcore_values_free(catalog, texts, lens, n);
+    many_free(catalog, f, 2);
   }
   gdefcore_ids_free(catalog, ids, count);
   if (rc != GDEFCORE_OK && failure != GDEFCORE_OK) {
@@ -749,25 +781,34 @@ static GDEFCORE_Result load_effective_for(GDEFCORE_Catalog * catalog,
     role_lens[nroles] = strlen(kAnonymous);
     nroles += 1;
   } else {
-    char ** held = NULL;
-    size_t * held_lens = NULL;
-    size_t held_n = 0;
+    GDEFCORE_Field_Values pf[2];
+    char ** held;
+    size_t * held_lens;
+    size_t held_n;
     GDEFCORE_Result rc;
     if (principal_len > GDEFCORE_PUBLIC_ID_LEN) {
       return GDEFCORE_OK;
     }
     memcpy(principal_id, principal, principal_len);
     principal_id[principal_len] = '\0';
-    if (retired_id(catalog, principal_id)) {
-      return GDEFCORE_OK;
-    }
-    roles[nroles] = kAuthenticated;
-    role_lens[nroles] = strlen(kAuthenticated);
-    nroles += 1;
-    rc = read_values(catalog, principal_id, "role", &held, &held_lens, &held_n);
+    /* The retired flag and the roles from one read of the principal. */
+    many_init(&pf[0], "retired");
+    many_init(&pf[1], "role");
+    rc = read_many(catalog, principal_id, pf, 2);
     if (rc != GDEFCORE_OK) {
       return rc;
     }
+    if (values_have(pf[0].texts, pf[0].lens, pf[0].count, kRetired,
+            strlen(kRetired))) {
+      many_free(catalog, pf, 2);
+      return GDEFCORE_OK;
+    }
+    held = pf[1].texts;
+    held_lens = pf[1].lens;
+    held_n = pf[1].count;
+    roles[nroles] = kAuthenticated;
+    role_lens[nroles] = strlen(kAuthenticated);
+    nroles += 1;
     for (i = 0; i < held_n && nroles < kAssignedRoles + 1; i++) {
       if (same(held[i], held_lens[i], kEmptyMark, strlen(kEmptyMark))) {
         continue;
@@ -791,7 +832,7 @@ static GDEFCORE_Result load_effective_for(GDEFCORE_Catalog * catalog,
       rc = load_role_grants(catalog, role_id, grants + *out_n, cap - *out_n,
           &got);
       if (rc != GDEFCORE_OK) {
-        gdefcore_values_free(catalog, held, held_lens, held_n);
+        many_free(catalog, pf, 2);
         return rc;
       }
       for (g = 0; g < got; g++) {
@@ -802,7 +843,7 @@ static GDEFCORE_Result load_effective_for(GDEFCORE_Catalog * catalog,
       }
       *out_n += got;
     }
-    gdefcore_values_free(catalog, held, held_lens, held_n);
+    many_free(catalog, pf, 2);
     return with_modules ? load_module_all(catalog, grants, cap, out_n)
                         : GDEFCORE_OK;
   }
@@ -853,82 +894,51 @@ static GDEFCORE_Result load_decls(GDEFCORE_Catalog * catalog, Grant * decls,
     return rc;
   }
   for (i = 0; i < count; i++) {
-    char ** label = NULL;
-    char ** type_name = NULL;
-    char ** field = NULL;
-    char ** condition = NULL;
-    char ** action = NULL;
-    size_t * ll = NULL;
-    size_t * tl = NULL;
-    size_t * fl = NULL;
-    size_t * cl = NULL;
-    size_t * al = NULL;
-    size_t ln = 0;
-    size_t tn = 0;
-    size_t fn = 0;
-    size_t cn = 0;
-    size_t an = 0;
+    /* One read of the permission for its five fields. */
+    GDEFCORE_Field_Values f[5];
     Grant * decl;
-    if (read_values(catalog, ids[i], "label", &label, &ll, &ln) !=
-            GDEFCORE_OK ||
-        ln == 0) {
-      gdefcore_values_free(catalog, label, ll, ln);
+    many_init(&f[0], "label");
+    many_init(&f[1], "type");
+    many_init(&f[2], "field");
+    many_init(&f[3], "condition");
+    many_init(&f[4], "action");
+    if (read_many(catalog, ids[i], f, 5) != GDEFCORE_OK || f[0].count == 0 ||
+        f[1].count == 0) {
+      many_free(catalog, f, 5);
       continue;
     }
-    if (read_values(catalog, ids[i], "type", &type_name, &tl, &tn) !=
-            GDEFCORE_OK ||
-        tn == 0) {
-      gdefcore_values_free(catalog, label, ll, ln);
-      gdefcore_values_free(catalog, type_name, tl, tn);
-      continue;
-    }
-    read_values(catalog, ids[i], "field", &field, &fl, &fn);
-    read_values(catalog, ids[i], "condition", &condition, &cl, &cn);
-    read_values(catalog, ids[i], "action", &action, &al, &an);
     if (*out_n >= cap) {
-      gdefcore_values_free(catalog, label, ll, ln);
-      gdefcore_values_free(catalog, type_name, tl, tn);
-      gdefcore_values_free(catalog, field, fl, fn);
-      gdefcore_values_free(catalog, condition, cl, cn);
-      gdefcore_values_free(catalog, action, al, an);
+      many_free(catalog, f, 5);
       gdefcore_ids_free(catalog, ids, count);
       return GDEFCORE_ERR_LIMIT;
     }
     decl = &decls[*out_n];
     memset(decl, 0, sizeof *decl);
-    copy_part(decl->label, sizeof decl->label, &decl->label_len, label[0],
-        ll[0]);
+    copy_part(decl->label, sizeof decl->label, &decl->label_len, f[0].texts[0],
+        f[0].lens[0]);
     copy_part(decl->type_name, sizeof decl->type_name, &decl->type_len,
-        type_name[0], tl[0]);
-    if (fn > 0) {
-      copy_part(decl->field, sizeof decl->field, &decl->field_len, field[0],
-          fl[0]);
+        f[1].texts[0], f[1].lens[0]);
+    if (f[2].count > 0) {
+      copy_part(decl->field, sizeof decl->field, &decl->field_len, f[2].texts[0],
+          f[2].lens[0]);
     }
-    if (an > 0) {
-      copy_part(decl->action, sizeof decl->action, &decl->action_len, action[0],
-          al[0]);
+    if (f[4].count > 0) {
+      copy_part(decl->action, sizeof decl->action, &decl->action_len,
+          f[4].texts[0], f[4].lens[0]);
     }
-    if (cn == 1 && same(condition[0], cl[0], "own", 3)) {
+    if (f[3].count == 1 && same(f[3].texts[0], f[3].lens[0], "own", 3)) {
       decl->condition = GDEFCORE_ACCESS_OWN;
-    } else if (cn == 1 && same(condition[0], cl[0], "any", 3)) {
+    } else if (f[3].count == 1 && same(f[3].texts[0], f[3].lens[0], "any", 3)) {
       decl->condition = GDEFCORE_ACCESS_ANY;
-    } else if (cn == 1 && cl[0] > 0) {
+    } else if (f[3].count == 1 && f[3].lens[0] > 0) {
       /* An expression. Only its field, if any, matters here. */
       decl->condition = kCondExpr;
     } else {
-      gdefcore_values_free(catalog, label, ll, ln);
-      gdefcore_values_free(catalog, type_name, tl, tn);
-      gdefcore_values_free(catalog, field, fl, fn);
-      gdefcore_values_free(catalog, condition, cl, cn);
-      gdefcore_values_free(catalog, action, al, an);
+      many_free(catalog, f, 5);
       continue;
     }
     *out_n += 1;
-    gdefcore_values_free(catalog, label, ll, ln);
-    gdefcore_values_free(catalog, type_name, tl, tn);
-    gdefcore_values_free(catalog, field, fl, fn);
-    gdefcore_values_free(catalog, condition, cl, cn);
-    gdefcore_values_free(catalog, action, al, an);
+    many_free(catalog, f, 5);
   }
   gdefcore_ids_free(catalog, ids, count);
   return GDEFCORE_OK;
@@ -1868,81 +1878,50 @@ static GDEFCORE_Result permission_by_label(GDEFCORE_Catalog * catalog,
   }
   rc = GDEFCORE_ERR_INVALID;
   for (i = 0; i < count; i++) {
-    char ** texts = NULL;
-    size_t * lens = NULL;
-    size_t n = 0;
-    char ** module = NULL;
-    char ** action = NULL;
-    char ** condition = NULL;
-    char ** type_name = NULL;
-    char ** field = NULL;
-    size_t * ml = NULL;
-    size_t * al = NULL;
-    size_t * cl = NULL;
-    size_t * tl = NULL;
-    size_t * fl = NULL;
-    size_t mn = 0;
-    size_t an = 0;
-    size_t cn = 0;
-    size_t tn = 0;
-    size_t fn = 0;
-    if (read_values(catalog, ids[i], "label", &texts, &lens, &n) !=
-            GDEFCORE_OK ||
-        !values_have(texts, lens, n, label, label_len)) {
-      gdefcore_values_free(catalog, texts, lens, n);
+    /* One read of the permission: the label tells whether it is the one, the
+     * rest are what it declares. */
+    GDEFCORE_Field_Values f[6];
+    many_init(&f[0], "label");
+    many_init(&f[1], "module");
+    many_init(&f[2], "action");
+    many_init(&f[3], "condition");
+    many_init(&f[4], "type");
+    many_init(&f[5], "field");
+    if (read_many(catalog, ids[i], f, 6) != GDEFCORE_OK ||
+        !values_have(f[0].texts, f[0].lens, f[0].count, label, label_len) ||
+        f[1].count == 0 || f[2].count == 0 || f[3].count == 0 ||
+        f[4].count == 0) {
+      many_free(catalog, f, 6);
       continue;
     }
-    gdefcore_values_free(catalog, texts, lens, n);
-    if (read_values(catalog, ids[i], "module", &module, &ml, &mn) !=
-            GDEFCORE_OK ||
-        mn == 0 ||
-        read_values(catalog, ids[i], "action", &action, &al, &an) !=
-            GDEFCORE_OK ||
-        an == 0 ||
-        read_values(catalog, ids[i], "condition", &condition, &cl, &cn) !=
-            GDEFCORE_OK ||
-        cn == 0 ||
-        read_values(catalog, ids[i], "type", &type_name, &tl, &tn) !=
-            GDEFCORE_OK ||
-        tn == 0) {
-      gdefcore_values_free(catalog, module, ml, mn);
-      gdefcore_values_free(catalog, action, al, an);
-      gdefcore_values_free(catalog, condition, cl, cn);
-      gdefcore_values_free(catalog, type_name, tl, tn);
-      continue;
-    }
-    read_values(catalog, ids[i], "field", &field, &fl, &fn);
     memset(grant, 0, sizeof *grant);
     copy_part(grant->label, sizeof grant->label, &grant->label_len, label,
         label_len);
     copy_part(grant->action, sizeof grant->action, &grant->action_len,
-        action[0], al[0]);
+        f[2].texts[0], f[2].lens[0]);
     copy_part(grant->type_name, sizeof grant->type_name, &grant->type_len,
-        type_name[0], tl[0]);
-    if (fn > 0) {
-      copy_part(grant->field, sizeof grant->field, &grant->field_len, field[0],
-          fl[0]);
+        f[4].texts[0], f[4].lens[0]);
+    if (f[5].count > 0) {
+      copy_part(grant->field, sizeof grant->field, &grant->field_len,
+          f[5].texts[0], f[5].lens[0]);
     }
     if (module_name != NULL) {
-      copy_part(module_name, module_cap, module_len, module[0], ml[0]);
+      copy_part(module_name, module_cap, module_len, f[1].texts[0],
+          f[1].lens[0]);
     }
-    if (cl[0] == 3 && memcmp(condition[0], "own", 3) == 0) {
+    if (f[3].lens[0] == 3 && memcmp(f[3].texts[0], "own", 3) == 0) {
       grant->condition = GDEFCORE_ACCESS_OWN;
-    } else if (cl[0] == 3 && memcmp(condition[0], "any", 3) == 0) {
+    } else if (f[3].lens[0] == 3 && memcmp(f[3].texts[0], "any", 3) == 0) {
       grant->condition = GDEFCORE_ACCESS_ANY;
     } else {
       grant->condition = kCondExpr;
     }
     copy_part(grant->module_name, sizeof grant->module_name, &grant->module_len,
-        module[0], ml[0]);
+        f[1].texts[0], f[1].lens[0]);
     if (out_id != NULL) {
       memcpy(out_id, ids[i], GDEFCORE_PUBLIC_ID_LEN + 1);
     }
-    gdefcore_values_free(catalog, module, ml, mn);
-    gdefcore_values_free(catalog, action, al, an);
-    gdefcore_values_free(catalog, condition, cl, cn);
-    gdefcore_values_free(catalog, type_name, tl, tn);
-    gdefcore_values_free(catalog, field, fl, fn);
+    many_free(catalog, f, 6);
     rc = GDEFCORE_OK;
     break;
   }

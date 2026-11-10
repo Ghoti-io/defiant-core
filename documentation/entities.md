@@ -62,6 +62,15 @@ newest revision while the entity is published (a miss otherwise),
 `GDEFCORE_VIEW_DRAFT` is the draft over it, where there is one. A draft is in
 no list, no query and no reader's view, and no condition reads it.
 
+`gdefcore_entity_values_many` reads several fields of one entity in one read
+of it, each as `gdefcore_entity_values` would give it. A caller that needs five
+fields of an entity should not read the entity five times: each read loads the
+entity's type, its languages and its trees from the store, and a page of work
+that read five fields of each of twenty entities ran a hundred sets of
+statements instead of twenty. A field with no value is a count of 0 and not an
+error; an entity that cannot be read in the view is
+`GDEFCORE_ERR_INVALID`, as for the single read.
+
 An entity's creator and a revision's author are different things. A revision's
 author is whoever wrote that revision, so an editor who saves someone else's
 post is the author of their revision and of nothing else. The entity's

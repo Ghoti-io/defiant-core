@@ -206,6 +206,21 @@ typedef struct GDEFCORE_Field {
 } GDEFCORE_Field;
 
 /**
+ * @brief One field of gdefcore_entity_values_many(): the name to read, and the
+ * values that came back.
+ *
+ * @ref size is `sizeof(GDEFCORE_Field_Values)`.
+ */
+typedef struct GDEFCORE_Field_Values {
+  size_t size;           ///< Must be `sizeof(GDEFCORE_Field_Values)`.
+  const char * field;    ///< In: the field machine name.
+  size_t field_len;      ///< In: length of @ref field.
+  char ** texts;         ///< Out: the values; NULL when the field has none.
+  size_t * lens;         ///< Out: one length per value.
+  size_t count;          ///< Out: how many values.
+} GDEFCORE_Field_Values;
+
+/**
  * @brief Field values for one save. The caller owns the bytes for the call.
  *
  * @ref size is `sizeof(GDEFCORE_Value)`.
@@ -781,6 +796,25 @@ GDEFCORE_API GDEFCORE_Result gdefcore_entity_values(GDEFCORE_Catalog * catalog,
     size_t id_len, const char * lang, size_t lang_len, const char * field,
     size_t field_len, char *** out_texts, size_t ** out_lens,
     size_t * out_count);
+
+/**
+ * @brief Read several fields of one entity in one read of it.
+ *
+ * Each of @p fields is read as gdefcore_entity_values() reads it, from the one
+ * read of the entity, so that a caller that needs five fields of an entity
+ * does not read the entity five times. The same rules for @p changeset and
+ * @p view apply. An entity that cannot be read in @p view (missing, not
+ * published for a reader's view, cleared) is ::GDEFCORE_ERR_INVALID, as for
+ * gdefcore_entity_values(). A field of a readable entity that has no value is
+ * not an error: its @ref GDEFCORE_Field_Values::count is 0 and its texts are
+ * NULL. Any other failure leaves every field with no values.
+ *
+ * Free each field's texts with gdefcore_values_free().
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_entity_values_many(
+    GDEFCORE_Catalog * catalog, const GDEFCORE_Changeset * changeset, int view,
+    const char * id, size_t id_len, const char * lang, size_t lang_len,
+    GDEFCORE_Field_Values * fields, size_t field_count);
 
 /**
  * @brief Read field values of one recorded revision, unfiltered.

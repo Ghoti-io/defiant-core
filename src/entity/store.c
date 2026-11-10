@@ -1807,6 +1807,19 @@ static GDEFCORE_Result doc_put_tree(const GDEFCORE_Allocator * alloc,
 GDEFCORE_Result gdefcore_ent_read_doc(GDEFCORE_Catalog * cat,
     const char * canon, uint64_t revision, int draft, GDEFCORE_Doc * out) {
   GDEFCORE_EntLook look;
+  GDEFCORE_Result rc;
+  memset(out, 0, sizeof *out);
+  rc = gdefcore_ent_lookup(cat, canon, &look);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  return gdefcore_ent_read_doc_look(cat, canon, &look, revision, draft, out);
+}
+
+GDEFCORE_Result gdefcore_ent_read_doc_look(GDEFCORE_Catalog * cat,
+    const char * canon, const GDEFCORE_EntLook * known, uint64_t revision,
+    int draft, GDEFCORE_Doc * out) {
+  GDEFCORE_EntLook look = *known;
   GDEFSTOR_Type * type = NULL;
   GDEFSTOR_Languages * langs = NULL;
   GDEFSTOR_History * history = NULL;
@@ -1814,10 +1827,6 @@ GDEFCORE_Result gdefcore_ent_read_doc(GDEFCORE_Catalog * cat,
   GDEFCORE_Result rc;
   size_t i;
   memset(out, 0, sizeof *out);
-  rc = gdefcore_ent_lookup(cat, canon, &look);
-  if (rc != GDEFCORE_OK) {
-    return rc;
-  }
   rc = load_port_type(cat, look.type, look.type_len, &type);
   if (rc != GDEFCORE_OK) {
     return rc;
