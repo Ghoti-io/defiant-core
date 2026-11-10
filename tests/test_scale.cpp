@@ -966,12 +966,15 @@ TEST_F(ScalePostgres, FourFieldsOfAnEntityCostWhatOneDoes) {
  * request that has already decided, on one that has not, and on a catalog
  * that has read nothing, run the statements of the same budgets. A statement
  * is one the store ran, counted the same way for both. */
-TEST_F(ScalePostgres, APageStaysWithinItsBudgetOnAWarmAndAFreshRequest) {
+TEST_F(ScalePostgres, APageOnAWarmRequestStaysWithinItsBudget) {
   EXPECT_GT(g_pg_world->list_big.statements, 0u) << "nothing was measured";
   EXPECT_LE(g_pg_world->list_small.statements, kPageBudget);
   EXPECT_LE(g_pg_world->list_big.statements, kPageBudget);
   EXPECT_LE(g_pg_world->count_small.statements, kPageBudget);
   EXPECT_LE(g_pg_world->count_big.statements, kPageBudget);
+}
+
+TEST_F(ScalePostgres, AFreshRequestOnAWarmCatalogReadsNoModel) {
   EXPECT_GT(g_pg_world->fresh_big.statements, 0u) << "nothing was measured";
   EXPECT_LE(g_pg_world->fresh_small.statements, kPageBudget);
   EXPECT_LE(g_pg_world->fresh_big.statements, kPageBudget);
