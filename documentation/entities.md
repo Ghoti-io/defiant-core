@@ -118,9 +118,15 @@ and a refused draft ends it as refused, each keeping the draft and leaving no
 revision. With no draft the job only sets the published flag. Clearing the
 entity cancels its schedule, so a cleared entity is not brought back. The
 time is milliseconds since 1970 UTC; a civil time and zone are the caller's
-to convert. A job does not yet check its scheduler's permission again when it
-runs (AD-33 asks it of jobs, which are out of milestone 1): the path that
-schedules asks it.
+to convert. The path that schedules asks the permission to publish, and a job
+asks it again when it runs, of its scheduler, as of that moment and the entity
+as then stored: a person who has lost the right since, by a role taken away or
+a condition that no longer holds, does not publish through the job they left
+behind. The job ends as `refused`, the draft is kept and no revision is
+written. A job that names no scheduler is asked as the anonymous principal, so
+it publishes only where anonymous may. A question that cannot be answered never
+grants: a failure a later run can mend (the allocator, the store) leaves the
+job pending, and any other refuses it.
 
 `gdefcore_type_define` writes a type without moving the config epoch, so a
 content save can still be the epoch's first step. A changeset that defines

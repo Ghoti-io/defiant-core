@@ -585,9 +585,9 @@ GDEFCORE_API GDEFCORE_Result gdefcore_entity_publish(
 /** It was refused as a conflict: the draft was made from a revision that was
  * no longer the newest when its time came (CAP-S4). The draft is kept. */
 #define GDEFCORE_SCHEDULE_CONFLICT 3
-/** It was refused: there was nothing to publish, the draft did not fit its
- * type as the type was then, or it held a new value of an erased subject.
- * The draft is kept. */
+/** It was refused: the scheduler may no longer publish the entity, there was
+ * nothing to publish, the draft did not fit its type as the type was then, or
+ * it held a new value of an erased subject. The draft is kept. */
 #define GDEFCORE_SCHEDULE_REFUSED 4
 /** gdefcore_schedule_apply(): the job was not there (applied already,
  * cancelled, or moved to another time), and nothing was written. */
@@ -610,10 +610,13 @@ typedef struct GDEFCORE_ScheduleJob {
  * own; an entity has one schedule, which this replaces. When the job is
  * applied (gdefcore_schedule_apply(), gdefcore_schedule_run()), at or after
  * its time and once, the entity is published as by gdefcore_entity_publish()
- * staged by @p actor (empty or NULL: the system): the draft it has then, if
- * any, is validated against its type and applied on the revision it was made
- * from, a moved head is a conflict, and the published flag is set. Clearing
- * the entity cancels its schedule. The time is the caller's: a civil time and
+ * staged by @p actor (empty or NULL: nobody, who is asked as the anonymous
+ * principal): the draft it has then, if any, is validated against its type
+ * and applied on the revision it was made from, a moved head is a conflict,
+ * and the published flag is set. The permission to publish is asked again
+ * then, of @p actor, as of the run and the entity as stored; the path that
+ * schedules asks it as well, because it is that path that knows the request.
+ * Clearing the entity cancels its schedule. The time is the caller's: a civil time and
  * zone (AD-33) are converted before this.
  *
  * @return ::GDEFCORE_OK, ::GDEFCORE_ERR_INVALID (an id that is not a known
@@ -654,8 +657,14 @@ GDEFCORE_API GDEFCORE_Result gdefcore_schedule_due(GDEFCORE_Catalog * catalog,
  *
  * The publish is one changeset, applied in one port write that reads the job
  * row again and deletes it: a job is applied once, whichever runner gets to
- * it first, and never before its time. @p now_ms is also the time the
- * revision and the state change record. @p out_outcome receives
+ * it first, and never before its time. A job that is due is first asked
+ * whether its scheduler may publish the entity now (`publish`, as
+ * gdefcore_access_can() decides it for that principal): one who may not ends
+ * the job as ::GDEFCORE_SCHEDULE_REFUSED, nothing is published and the draft
+ * is kept. A question that fails for a reason a later run can mend (the
+ * allocator, the store) returns that error with _PENDING and leaves the job;
+ * one that cannot be answered otherwise refuses, and no failure grants.
+ * @p now_ms is also the time the revision and the state change record. @p out_outcome receives
  * ::GDEFCORE_SCHEDULE_DONE, _CONFLICT or _REFUSED (the job ended; the entity's
  * schedule says the same), _GONE or _EARLY (nothing was written), or _PENDING
  * when the write kept losing to other writers (::GDEFCORE_ERR_BUSY is returned

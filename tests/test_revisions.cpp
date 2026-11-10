@@ -927,8 +927,68 @@ TEST_F(Revisions, TheTouchedListNamesTheNewOperations) {
 
 /* ---- scheduled publish (story S6c) ------------------------------------- */
 
+/* The scheduled-publish tests run with a permission system: the job asks its
+ * scheduler's right to publish again when it runs, so every scheduler in
+ * these tests is a principal that holds, or has lost, a grant. alice_, bob_
+ * and carol_ are principals of the `publishers` role, which may publish any
+ * note; an `editors` principal may publish a note only while it is not
+ * published. */
 class Schedule : public Revisions {
  protected:
+  std::string editor_;
+
+  std::string NewPrincipal(const char * role) {
+    char id[GDEFCORE_PUBLIC_ID_LEN + 1];
+    EXPECT_EQ(GDEFCORE_OK, gdefcore_access_principal_create(catalog_, id));
+    if (role != NULL) {
+      EXPECT_EQ(GDEFCORE_OK, gdefcore_access_principal_add_role(catalog_, id,
+          strlen(id), role, strlen(role)));
+    }
+    return std::string(id);
+  }
+
+  void SetUp() override {
+    Revisions::SetUp();
+    GDEFCORE_Permission perm;
+    const char kLabel[] = "Publish notes";
+    const char kDraftOnly[] = "(= state \"draft\")";
+    memset(&perm, 0, sizeof perm);
+    perm.size = sizeof perm;
+    perm.label = kLabel;
+    perm.label_len = sizeof kLabel - 1;
+    perm.module_name = "site";
+    perm.module_name_len = 4;
+    perm.action = "publish";
+    perm.action_len = 7;
+    perm.condition = GDEFCORE_ACCESS_ANY;
+    perm.type_name = "site.note";
+    perm.type_name_len = 9;
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_access_declare(catalog_, &perm));
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_access_role_create(catalog_, "publishers", 10, NULL));
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_access_grant(catalog_, "publishers", 10,
+        kLabel, sizeof kLabel - 1, "core.role", 9));
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_access_role_create(catalog_, "editors", 7, NULL));
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_access_grant_when(catalog_, "editors", 7,
+        kLabel, sizeof kLabel - 1, kDraftOnly, sizeof kDraftOnly - 1, "core.role",
+        9));
+    alice_ = NewPrincipal("publishers");
+    bob_ = NewPrincipal("publishers");
+    carol_ = NewPrincipal("publishers");
+    editor_ = NewPrincipal("editors");
+  }
+
+  GDEFCORE_Result PublishNow(const std::string & actor, const std::string & id) {
+    GDEFCORE_Changeset * cs = Prepare(actor);
+    GDEFCORE_Result rc = gdefcore_entity_publish(cs, id.c_str(), id.size());
+    if (rc == GDEFCORE_OK) {
+      rc = gdefcore_changeset_apply(cs, NULL, 0);
+    }
+    gdefcore_changeset_destroy(cs);
+    return rc;
+  }
+
   int State(const std::string & id, int64_t * at = NULL) {
     int state = -1;
     EXPECT_EQ(GDEFCORE_OK, gdefcore_entity_schedule_state(catalog_, id.c_str(),
@@ -1109,6 +1169,95 @@ TEST_F(Schedule, ClearingAnEntityCancelsItsSchedule) {
   EXPECT_EQ(GDEFCORE_SCHEDULE_NONE, State(id));
   EXPECT_EQ(0u, Run(kT));
   EXPECT_EQ("<none>", Title(GDEFCORE_VIEW_PUBLISHED, id));
+}
+
+/* The scheduler is asked again when the job runs. A person who lost the right
+ * between scheduling and the run does not publish through the job they left:
+ * it ends refused, the draft is kept and no revision is written. The control
+ * is the same job of a scheduler who kept the right. */
+TEST_F(Schedule, ASchedulerWhoLostTheRightIsRefusedWhenTheJobRuns) {
+  const int64_t kT = 13000;
+  std::string kept = Create();
+  Save(alice_, kept, "first");
+  Draft(bob_, kept, "second");
+  At(bob_, kept, kT);
+  std::string lost = Create();
+  Save(alice_, lost, "first");
+  Draft(bob_, lost, "second");
+  At(carol_, lost, kT);
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_access_principal_remove_role(catalog_, carol_.c_str(),
+          carol_.size(), "publishers", 10));
+  /* Not yet due: nothing is asked and nothing ends, so the job waits. */
+  EXPECT_EQ(GDEFCORE_SCHEDULE_EARLY, Apply(lost, kT, kT - 1));
+  EXPECT_EQ(GDEFCORE_SCHEDULE_PENDING, State(lost));
+  size_t ended = 0;
+  EXPECT_EQ(1u, Run(kT, &ended));
+  EXPECT_EQ(1u, ended);
+  /* The control published. */
+  EXPECT_EQ(GDEFCORE_SCHEDULE_DONE, State(kept));
+  EXPECT_EQ("second", Title(GDEFCORE_VIEW_PUBLISHED, kept));
+  EXPECT_EQ(2u, Count(kept));
+  /* The one that lost the right did not. */
+  EXPECT_EQ(GDEFCORE_SCHEDULE_REFUSED, State(lost));
+  EXPECT_EQ(1u, Count(lost));
+  EXPECT_EQ("first", Title(GDEFCORE_VIEW_PUBLISHED, lost));
+  EXPECT_EQ("second", Title(GDEFCORE_VIEW_DRAFT, lost));
+  EXPECT_EQ(0u, Due(kT + 1000));
+}
+
+/* A job that names nobody is asked as the anonymous principal, which holds
+ * nothing here: it is refused. Once anonymous is granted the right, the same
+ * job publishes. */
+TEST_F(Schedule, AJobThatNamesNobodyIsAskedAsAnonymous) {
+  const int64_t kT = 15000;
+  std::string refused = Create();
+  Save(alice_, refused, "first");
+  Draft(bob_, refused, "second");
+  At("", refused, kT);
+  size_t ended = 0;
+  EXPECT_EQ(0u, Run(kT, &ended));
+  EXPECT_EQ(1u, ended);
+  EXPECT_EQ(GDEFCORE_SCHEDULE_REFUSED, State(refused));
+  EXPECT_EQ(1u, Count(refused));
+  EXPECT_EQ("second", Title(GDEFCORE_VIEW_DRAFT, refused));
+  /* The control: anonymous may publish notes. */
+  const char kLabel[] = "Publish notes";
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_access_grant(catalog_, "anonymous", 9, kLabel,
+      sizeof kLabel - 1, GDEFCORE_ACCESS_CONFIRM_ANONYMOUS,
+      strlen(GDEFCORE_ACCESS_CONFIRM_ANONYMOUS)));
+  std::string allowed = Create();
+  Save(alice_, allowed, "first");
+  Draft(bob_, allowed, "second");
+  At("", allowed, kT + 1);
+  EXPECT_EQ(1u, Run(kT + 1));
+  EXPECT_EQ(GDEFCORE_SCHEDULE_DONE, State(allowed));
+  EXPECT_EQ("second", Title(GDEFCORE_VIEW_PUBLISHED, allowed));
+}
+
+/* A scheduler whose right depends on the entity is judged on the entity as it
+ * is stored when the job runs, not as it was when it was scheduled: an editor
+ * may publish a note only while it is unpublished, so a note someone else
+ * published in the meantime is refused to them. The control is a note nobody
+ * touched. */
+TEST_F(Schedule, ASchedulersConditionalRightIsJudgedOnTheEntityAsStoredNow) {
+  const int64_t kT = 17000;
+  std::string moved = Create();
+  Save(alice_, moved, "first");
+  ASSERT_EQ(GDEFCORE_OK, Unpublish(alice_, moved));
+  At(editor_, moved, kT);
+  std::string untouched = Create();
+  Save(alice_, untouched, "first");
+  ASSERT_EQ(GDEFCORE_OK, Unpublish(alice_, untouched));
+  At(editor_, untouched, kT);
+  /* Both were the editor's to publish when scheduled; one is published since. */
+  ASSERT_EQ(GDEFCORE_OK, PublishNow(alice_, moved));
+  size_t ended = 0;
+  EXPECT_EQ(1u, Run(kT, &ended));
+  EXPECT_EQ(1u, ended);
+  EXPECT_EQ(GDEFCORE_SCHEDULE_REFUSED, State(moved));
+  EXPECT_EQ(GDEFCORE_SCHEDULE_DONE, State(untouched));
+  EXPECT_EQ("first", Title(GDEFCORE_VIEW_PUBLISHED, untouched));
 }
 
 int main(int argc, char ** argv) {

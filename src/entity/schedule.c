@@ -39,10 +39,17 @@
  * publish is an ordinary one: validated against the type as it is then, a
  * moved head is a conflict, and an erased subject's new value is refused.
  * Those outcomes end the job too, with the entity's schedule saying which.
+ *
+ * The scheduler is asked again when the job runs: the permission to publish
+ * was decided when the job was scheduled, and a person who has lost it since
+ * does not publish through a job they left behind. A scheduler who may no
+ * longer publish ends the job as refused, with the draft kept.
  */
 
 #include <ghoti.io/defiant-core/macros.h>
+#include <ghoti.io/defiant-core/access.h>
 #include <ghoti.io/defiant-core/entity.h>
+#include <ghoti.io/defiant-core/request.h>
 
 #include <ghoti.io/cutil/allocator.h>
 #include <ghoti.io/defiant-storage/model.h>
@@ -434,6 +441,52 @@ static GDEFCORE_Result job_end(GDEFCORE_Catalog * cat, const char * key,
   return write_end(write, rc);
 }
 
+/* Whether the job's scheduler may publish the entity as it is stored now.
+ * The permission is asked as of the run, the way the path that scheduled it
+ * asked it then. A scheduler stored empty is the anonymous principal, so a job
+ * that names nobody publishes only where anonymous may.
+ *
+ * A question that could not be answered never grants. A failure that a later
+ * run can mend (the allocator, the store) is returned, the job stays pending
+ * and nothing is published; any other (no fuel, an entity that is gone) is a
+ * refusal, because asking again would not change the answer. */
+static GDEFCORE_Result scheduler_may_publish(GDEFCORE_Catalog * cat,
+    const char * canon, const uint8_t * who, size_t who_len, int * out_allowed) {
+  GDEFCORE_EntLook look;
+  GDEFCORE_Request * req = NULL;
+  GDEFCORE_Result rc;
+  *out_allowed = 0;
+  rc = gdefcore_ent_lookup(cat, canon, &look);
+  if (rc == GDEFCORE_ERR_INVALID) {
+    return GDEFCORE_OK; /* nothing to publish: refused, as before */
+  }
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  rc = gdefcore_request_create(cat->tenant, cat->tenant_len, 0, 0, cat->alloc,
+      &req);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  if (who_len != 0) {
+    rc = gdefcore_request_set_principal(req, (const char *)who, who_len);
+  }
+  if (rc == GDEFCORE_OK) {
+    rc = gdefcore_access_can(cat, req, GDEFCORE_ACTION_PUBLISH,
+        sizeof GDEFCORE_ACTION_PUBLISH - 1, look.type, look.type_len, canon,
+        out_allowed);
+  }
+  gdefcore_request_destroy(req);
+  if (rc == GDEFCORE_ERR_INVALID || rc == GDEFCORE_ERR_LIMIT) {
+    *out_allowed = 0;
+    return GDEFCORE_OK;
+  }
+  if (rc != GDEFCORE_OK) {
+    *out_allowed = 0;
+  }
+  return rc;
+}
+
 GDEFCORE_Result gdefcore_schedule_apply(GDEFCORE_Catalog * catalog,
     const char * id, size_t id_len, int64_t at_ms, int64_t now_ms,
     int * out_outcome) {
@@ -462,11 +515,30 @@ GDEFCORE_Result gdefcore_schedule_apply(GDEFCORE_Catalog * catalog,
     gdefstor_bytes_free(NULL, who);
     who = NULL;
     who_len = 0;
+  } else if (at_ms <= now_ms) {
+    /* The scheduler is asked again, as of now (a job not yet due is left to
+     * the publish below, which reports it early without writing). */
+    int allowed = 0;
+    rc = scheduler_may_publish(catalog, canon, who, who_len, &allowed);
+    if (rc != GDEFCORE_OK) {
+      gdefstor_bytes_free(NULL, who);
+      *out_outcome = GDEFCORE_SCHEDULE_PENDING;
+      return rc;
+    }
+    if (!allowed) {
+      gdefstor_bytes_free(NULL, who);
+      return job_end(catalog, key, canon, at_ms, GDEFCORE_SCHEDULE_REFUSED,
+          out_outcome);
+    }
   }
   for (attempt = 0; attempt < 3; attempt++) {
     GDEFCORE_Changeset * cs = NULL;
     GDEFCORE_EntLook look;
-    rc = gdefcore_changeset_prepare(catalog, (const char *)who, who_len, &cs);
+    /* A job that names nobody stores an empty scheduler, which the port hands
+     * back as a non-NULL pointer of length 0; prepare takes "no actor" as NULL
+     * and reads any other pointer as an id, so the pointer is dropped here. */
+    rc = gdefcore_changeset_prepare(catalog,
+        who_len == 0 ? NULL : (const char *)who, who_len, &cs);
     if (rc == GDEFCORE_OK) {
       rc = gdefcore_ent_text_set(catalog->alloc, &cs->job_key, key, kKeyLen);
       cs->job_now = now_ms;

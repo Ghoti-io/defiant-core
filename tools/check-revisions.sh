@@ -34,6 +34,13 @@
 #   schedule-conflict-retried   Schedule.AScheduledPublishOnAMovedHeadIsAConflict
 #   draft-fits-skipped          Schedule.AScheduledDraftIsValidatedWhenItIsApplied
 #   schedule-survives-clear     Schedule.ClearingAnEntityCancelsItsSchedule
+#   schedule-skips-permission   Schedule.ASchedulerWhoLostTheRightIsRefusedWhenTheJobRuns
+#   schedule-asks-about-the-type
+#                               Schedule.ASchedulersConditionalRightIsJudgedOnTheEntityAsStoredNow
+#   schedule-anonymous-as-system
+#                               Schedule.AJobThatNamesNobodyIsAskedAsAnonymous
+#   schedule-empty-scheduler-as-id
+#                               Schedule.AJobThatNamesNobodyIsAskedAsAnonymous
 #
 #   unpublish-deletes           Revisions.UnpublishClearsTheFlagAndNothingElse
 #   revert-leaves-deleted       Revisions.ClearUnpublishesDeletesAndDropsTheDraft
@@ -492,5 +499,45 @@ plant schedule-survives-clear $ENT testRevisions \
   'Schedule.ClearingAnEntityCancelsItsSchedule' \
   '    rc = gdefcore_ent_job_drop(cat, write, op->id.p);' \
   '    rc = GDEFCORE_OK;'
+
+# A job that publishes without asking its scheduler again: a person who lost
+# the right after scheduling publishes through the job they left.
+plant schedule-skips-permission $SCH testRevisions \
+  'Schedule.ASchedulerWhoLostTheRightIsRefusedWhenTheJobRuns' \
+  '    rc = scheduler_may_publish(catalog, canon, who, who_len, &allowed);' \
+  '    rc = GDEFCORE_OK;
+    allowed = 1;'
+
+# The right asked about the type and not the entity when the job runs: a
+# conditional grant then holds for some entity of the type, whatever state
+# the one being published is in.
+plant schedule-asks-about-the-type $SCH testRevisions \
+  'Schedule.ASchedulersConditionalRightIsJudgedOnTheEntityAsStoredNow' \
+  '        out_allowed);
+  }
+  gdefcore_request_destroy(req);' \
+  '        out_allowed);
+    if (rc == GDEFCORE_OK && !*out_allowed) {
+      rc = gdefcore_access_can(cat, req, GDEFCORE_ACTION_PUBLISH,
+          sizeof GDEFCORE_ACTION_PUBLISH - 1, look.type, look.type_len, NULL,
+          out_allowed);
+    }
+  }
+  gdefcore_request_destroy(req);'
+
+# A job that names nobody taken for the system, which may publish anything:
+# the permission is not asked of it.
+plant schedule-anonymous-as-system $SCH testRevisions \
+  'Schedule.AJobThatNamesNobodyIsAskedAsAnonymous' \
+  '  } else if (at_ms <= now_ms) {' \
+  '  } else if (who_len != 0 && at_ms <= now_ms) {'
+
+# An empty scheduler passed on as a pointer, which the changeset reads as an
+# id that is not one: a job that names nobody and may publish never applies
+# and stays pending for good.
+plant schedule-empty-scheduler-as-id $SCH testRevisions \
+  'Schedule.AJobThatNamesNobodyIsAskedAsAnonymous' \
+  '        who_len == 0 ? NULL : (const char *)who, who_len, &cs);' \
+  '        (const char *)who, who_len, &cs);'
 
 plant_finish
