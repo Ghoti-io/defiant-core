@@ -164,6 +164,20 @@ ledger through them, as binding a cache does through step 3, so an erasure
 cut short after step 1 (a crash, a failed data store) is finished then. Erasing an erased subject runs them again and
 writes no second ledger row. Revisions stay, so the stored ciphertext stays.
 
+**One process or several.** Step 3 reaches the fragment cache that is bound
+in the process that ran the erasure. Another process that serves pages from
+its own fragment cache is not told: it learns of the erasure only when it
+next opens the subject store or binds the cache, because that replays the
+ledger. Nothing in this library carries an erasure to a running process, so
+an erasure is complete across several processes only when each of them has
+replayed the ledger. A deployment with one process holding a fragment cache
+meets the rule that matters (an erasure is not reported complete while a
+fragment that decrypted the subject's value remains anywhere); a deployment
+with several must make each of them replay before it reports the erasure
+complete, or keep personal data out of cached fragments. A message that
+reaches every running process, with an acknowledgement from each, is not
+built.
+
 What an engine keeps of a destroyed key is its own: SQLite's key store clears
 it with `secure_delete` and a truncated log; Postgres's vacuums the key
 tables after the erasure (`VACUUM (FULL)`). Neither reaches a write-ahead log
