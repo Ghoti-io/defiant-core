@@ -1250,6 +1250,15 @@ TEST_F(Schedule, ASchedulersConditionalRightIsJudgedOnTheEntityAsStoredNow) {
   Save(alice_, untouched, "first");
   ASSERT_EQ(GDEFCORE_OK, Unpublish(alice_, untouched));
   At(editor_, untouched, kT);
+  /* A note that stays a draft and is never scheduled. The two jobs share a
+   * time and run in the order of their random ids; when the untouched one
+   * runs first it is published, and nothing of the type is left that the
+   * editor could publish. The question about the type, which the plant
+   * asks in place of the one about the note, would then answer no and the
+   * plant would go unseen in half the runs. This note keeps it a yes. */
+  std::string spare = Create();
+  Save(alice_, spare, "first");
+  ASSERT_EQ(GDEFCORE_OK, Unpublish(alice_, spare));
   /* Both were the editor's to publish when scheduled; one is published since. */
   ASSERT_EQ(GDEFCORE_OK, PublishNow(alice_, moved));
   size_t ended = 0;
