@@ -962,6 +962,32 @@ TEST_F(ScalePostgres, FourFieldsOfAnEntityCostWhatOneDoes) {
   EXPECT_EQ(g_pg_world->one_big.statements, g_pg_world->many_big.statements);
 }
 
+/* The access model is kept, on this store as on SQLite: a page and a count on a
+ * request that has already decided, on one that has not, and on a catalog
+ * that has read nothing, run the statements of the same budgets. A statement
+ * is one the store ran, counted the same way for both. */
+TEST_F(ScalePostgres, APageStaysWithinItsBudgetOnAWarmAndAFreshRequest) {
+  EXPECT_GT(g_pg_world->list_big.statements, 0u) << "nothing was measured";
+  EXPECT_LE(g_pg_world->list_small.statements, kPageBudget);
+  EXPECT_LE(g_pg_world->list_big.statements, kPageBudget);
+  EXPECT_LE(g_pg_world->count_small.statements, kPageBudget);
+  EXPECT_LE(g_pg_world->count_big.statements, kPageBudget);
+  EXPECT_GT(g_pg_world->fresh_big.statements, 0u) << "nothing was measured";
+  EXPECT_LE(g_pg_world->fresh_small.statements, kPageBudget);
+  EXPECT_LE(g_pg_world->fresh_big.statements, kPageBudget);
+  EXPECT_LE(g_pg_world->fresh_count_small.statements, kPageBudget);
+  EXPECT_LE(g_pg_world->fresh_count_big.statements, kPageBudget);
+}
+
+TEST_F(ScalePostgres, AColdCatalogReadsTheModelOnceAndNoMore) {
+  EXPECT_GT(g_pg_world->cold_big.statements,
+      g_pg_world->fresh_big.statements + 50)
+      << "the model was not read for a catalog that had not read it";
+  EXPECT_LE(g_pg_world->cold_small.statements, kColdPageBudget);
+  EXPECT_LE(g_pg_world->cold_big.statements, kColdPageBudget);
+  EXPECT_EQ(g_pg_world->cold_small.statements, g_pg_world->cold_big.statements);
+}
+
 TEST_F(ScalePostgres, CreatingOneMoreEntityCostsWhatItDidAtAThousand) {
   EXPECT_GE(g_pg_world->made, Size());
   ExpectFlat(g_pg_world->create_small, g_pg_world->create_big,

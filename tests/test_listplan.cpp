@@ -1664,6 +1664,30 @@ TEST(ListPlan, AGrantReadsFieldsInEnglishWhateverTheListsLanguage) {
             << "lang " << lang << " flags " << flags;
       }
     }
+    /* With no conditional grant in the way a list in French is answered by
+     * the store, and its filter, sort and condition read in French there. */
+    {
+      site.Role("all");
+      ASSERT_EQ(GDEFCORE_OK, site.Declare("Read any", "read", GDEFCORE_ACCESS_ANY, ""));
+      site.Grant("all", "Read any");
+      std::string pa = site.Principal("all");
+      Q fr;
+      fr.lang = "fr";
+      fr.filter_field = "title";
+      fr.filter_text = "b-fr";
+      GDEFCORE_Request * rr = site.Req(pa);
+      Listed l = List(site, rr, fr);
+      ASSERT_EQ(GDEFCORE_OK, l.rc);
+      EXPECT_EQ(std::vector<std::string>({b}), l.ids) << "backend " << backend;
+      EXPECT_EQ("planned", l.how);
+      Q fr2;
+      fr2.lang = "fr";
+      fr2.condition = "(= field.title \"a-fr\")";
+      l = List(site, site.Req(pa), fr2);
+      ASSERT_EQ(GDEFCORE_OK, l.rc);
+      EXPECT_EQ(std::vector<std::string>({a}), l.ids) << "backend " << backend;
+      EXPECT_EQ("planned", l.how);
+    }
     /* A direct decision and a direct read answer as the lists do. */
     for (const std::string & id : {a, b}) {
       int allowed = -1;
