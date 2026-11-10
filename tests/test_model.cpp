@@ -141,6 +141,59 @@ TEST_F(Model, AModuleDisabledInTheMiddleOfARequestStopsGranting) {
   EXPECT_EQ("A-post", Read(req, a));
 }
 
+/* What a catalog keeps is for every request of the catalog: a revoke is seen
+ * by a request that has not decided yet, which has no copy of its own to drop. */
+TEST_F(Model, ARevokeIsSeenByARequestThatHasNotDecidedYet) {
+  Clerk();
+  std::string colleague = Principal("clerk");
+  ASSERT_EQ("A-post", Read(Req(colleague), post_));
+  ASSERT_EQ(GDEFCORE_OK, Revoke());
+  EXPECT_EQ("<denied>", Read(Req(colleague), post_));
+  EXPECT_EQ("<denied>", Read(Req(clerk_), post_));
+  Grant("clerk", "Read posts");
+  EXPECT_EQ("A-post", Read(Req(colleague), post_));
+  EXPECT_EQ("A-post", Read(Req(clerk_), post_));
+}
+
+/* The model a request holds is the request's to free, whichever of the two is
+ * destroyed first: a request that outlives its catalog frees it, and a
+ * catalog that outlives its requests frees the one it kept. */
+TEST_F(Model, ARequestThatOutlivesItsCatalogFreesWhatItHolds) {
+  GDEFCORE_Catalog * other = NULL;
+  GDEFCORE_Request * request = NULL;
+  Clerk();
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_catalog_open(store_, (const uint8_t *)kTenant, 1, NULL, NULL,
+          &other));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_request_create((const uint8_t *)kTenant, 1, 0, 0, NULL, &request));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_request_set_principal(request, clerk_.data(), clerk_.size()));
+  char ** texts = NULL;
+  size_t * lens = NULL;
+  size_t count = 0;
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_access_read(other, request, post_.data(), post_.size(), "en", 2,
+          "title", 5, &texts, &lens, &count, NULL));
+  gdefcore_values_free(other, texts, lens, count);
+  gdefcore_catalog_destroy(other);
+  gdefcore_request_destroy(request);
+  /* And the other way round: the catalog is left with the one it kept. */
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_catalog_open(store_, (const uint8_t *)kTenant, 1, NULL, NULL,
+          &other));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_request_create((const uint8_t *)kTenant, 1, 0, 0, NULL, &request));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_request_set_principal(request, clerk_.data(), clerk_.size()));
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_access_read(other, request, post_.data(), post_.size(), "en", 2,
+          "title", 5, &texts, &lens, &count, NULL));
+  gdefcore_values_free(other, texts, lens, count);
+  gdefcore_request_destroy(request);
+  gdefcore_catalog_destroy(other);
+}
+
 /* A second catalog over the same store writes: the first catalog's requests
  * see it at their next decision, because the epoch they are filed under is
  * the store's and not the catalog's. */

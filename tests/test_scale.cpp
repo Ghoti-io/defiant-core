@@ -172,6 +172,11 @@ struct World {
   /* Reading four fields of one entity in one call, and one field in one call:
    * the first must not cost more than the second. */
   Cost many_small, many_big, one_small, one_big;
+  /* A page and a count on a request that has decided nothing yet, on the
+   * catalog the page was just made on (the access model is kept for it), and
+   * a page on a catalog that has read nothing. */
+  Cost fresh_small, fresh_big, fresh_count_small, fresh_count_big;
+  Cost cold_small, cold_big;
   std::vector<std::string> list_small_ids, list_big_ids;
   uint64_t total_small = 0, total_big = 0;
   uint64_t count_small_n = 0, count_big_n = 0;
@@ -276,7 +281,8 @@ GDEFCORE_Access_List FilteredPage() {
 
 void MeasureAt(World * w, Cost * list, std::vector<std::string> * ids,
     uint64_t * total, Cost * count, uint64_t * counted, Cost * create,
-    Cost * scan, Cost * many, Cost * one) {
+    Cost * scan, Cost * many, Cost * one, Cost * fresh, Cost * fresh_count,
+    Cost * cold) {
   GDEFCORE_Request * r = NewRequest(w->reader);
   GDEFCORE_Access_List q = FilteredPage();
   const std::function<Cost(const std::function<void()> &)> & meter =
@@ -332,6 +338,41 @@ void MeasureAt(World * w, Cost * list, std::vector<std::string> * ids,
       EXPECT_EQ(10u, t);
       gdefcore_access_free(w->catalog, got, n);
     });
+  }
+  {
+    /* A request that has decided nothing, on the warm catalog. */
+    GDEFCORE_Request * fresh_request = NewRequest(w->reader);
+    *fresh = meter([&]() {
+      char ** got = NULL;
+      size_t n = 0;
+      uint64_t t = 0;
+      ASSERT_EQ(GDEFCORE_OK,
+          gdefcore_access_list_page(w->catalog, fresh_request, &q, &got, &n, &t));
+      gdefcore_access_free(w->catalog, got, n);
+    });
+    *fresh_count = meter([&]() {
+      uint64_t n = 0;
+      ASSERT_EQ(GDEFCORE_OK,
+          gdefcore_access_count(w->catalog, fresh_request, &q, &n));
+    });
+    gdefcore_request_destroy(fresh_request);
+  }
+  {
+    /* A catalog that has read nothing: the model is read for it. */
+    GDEFCORE_Catalog * cold_catalog = NULL;
+    GDEFCORE_Request * cold_request = NewRequest(w->reader);
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_catalog_open(w->store, kTenant, 1, NULL, NULL, &cold_catalog));
+    *cold = meter([&]() {
+      char ** got = NULL;
+      size_t n = 0;
+      uint64_t t = 0;
+      ASSERT_EQ(GDEFCORE_OK,
+          gdefcore_access_list_page(cold_catalog, cold_request, &q, &got, &n, &t));
+      gdefcore_access_free(cold_catalog, got, n);
+    });
+    gdefcore_request_destroy(cold_request);
+    gdefcore_catalog_destroy(cold_catalog);
   }
   ASSERT_FALSE(ids->empty());
   {
@@ -674,13 +715,14 @@ World * Build(bool postgres) {
   }
   MeasureAt(w, &w->list_small, &w->list_small_ids, &w->total_small,
       &w->count_small, &w->count_small_n, &w->create_small, &w->scan_small,
-      &w->many_small, &w->one_small);
+      &w->many_small, &w->one_small, &w->fresh_small, &w->fresh_count_small,
+      &w->cold_small);
   if (!MakeEntities(w, Size())) {
     return w;
   }
   MeasureAt(w, &w->list_big, &w->list_big_ids, &w->total_big, &w->count_big,
       &w->count_big_n, &w->create_big, &w->scan_big, &w->many_big,
-      &w->one_big);
+      &w->one_big, &w->fresh_big, &w->fresh_count_big, &w->cold_big);
   w->ok = true;
   return w;
 }
@@ -726,6 +768,19 @@ class Scale : public ::testing::Test {
 }  // namespace
 
 TEST_F(Scale, AFilteredListPageReadsItsAnswerNotTheTable) {
+  if (getenv("GDEFCORE_SCALE_VERBOSE") != NULL) {
+    printf("statements: warm request list %llu count %llu; fresh request list "
+           "%llu count %llu; cold catalog list %llu (at %zu); warm %llu, "
+           "fresh %llu, cold %llu (at 1000)\n",
+        (unsigned long long)g_world->list_big.statements,
+        (unsigned long long)g_world->count_big.statements,
+        (unsigned long long)g_world->fresh_big.statements,
+        (unsigned long long)g_world->fresh_count_big.statements,
+        (unsigned long long)g_world->cold_big.statements, Size(),
+        (unsigned long long)g_world->list_small.statements,
+        (unsigned long long)g_world->fresh_small.statements,
+        (unsigned long long)g_world->cold_small.statements);
+  }
   EXPECT_EQ(10u, g_world->total_small);
   EXPECT_EQ(10u, g_world->total_big);
   EXPECT_EQ(g_world->list_small_ids, g_world->list_big_ids);
@@ -752,6 +807,49 @@ TEST_F(Scale, AnUnindexedFilterReadsTheTableAndIsSeenTo) {
   const uint64_t grown = (uint64_t)(Size() - 1000);
   EXPECT_GE(g_world->scan_big.vm, g_world->scan_small.vm + grown)
       << "a scan of the table did not show in the steps";
+}
+
+/* The statements a page and a count may run once the access model is kept.
+ * Measured at 20 each, at 1,000 entities and at 10,000: the epoch (read before
+ * each of the three things that need the model), the type of the list, the
+ * list's query and its count. Before the model was kept every page and every
+ * count ran 534. The slack is for a statement a change adds that the page
+ * needs; the budget is not a target. */
+constexpr uint64_t kPageBudget = 24;
+/* The statements a page on a catalog that has read nothing may run: the model
+ * is read once, as the roles, the permissions and the principal. Measured at
+ * 135, at both sizes: what is read is the access configuration and not the
+ * entities listed, so it does not grow with them. */
+constexpr uint64_t kColdPageBudget = 150;
+
+/* A page and a count on a request that has already decided, and on a request
+ * that has not, are within the budget, at both sizes. */
+TEST_F(Scale, APageOnAWarmRequestStaysWithinItsBudget) {
+  EXPECT_GT(g_world->list_big.statements, 0u) << "nothing was measured";
+  EXPECT_LE(g_world->list_small.statements, kPageBudget);
+  EXPECT_LE(g_world->list_big.statements, kPageBudget);
+  EXPECT_LE(g_world->count_small.statements, kPageBudget);
+  EXPECT_LE(g_world->count_big.statements, kPageBudget);
+}
+
+TEST_F(Scale, AFreshRequestOnAWarmCatalogReadsNoModel) {
+  EXPECT_GT(g_world->fresh_big.statements, 0u) << "nothing was measured";
+  EXPECT_LE(g_world->fresh_small.statements, kPageBudget);
+  EXPECT_LE(g_world->fresh_big.statements, kPageBudget);
+  EXPECT_LE(g_world->fresh_count_small.statements, kPageBudget);
+  EXPECT_LE(g_world->fresh_count_big.statements, kPageBudget);
+}
+
+/* The control: a catalog that has read nothing does read the model, so that
+ * the budgets above are a count of what is kept and not of a page that never
+ * needed it; and what it reads does not depend on the entities listed. */
+TEST_F(Scale, AColdCatalogReadsTheModelOnceAndNoMore) {
+  EXPECT_GT(g_world->cold_big.statements,
+      g_world->fresh_big.statements + 50)
+      << "the model was not read for a catalog that had not read it";
+  EXPECT_LE(g_world->cold_small.statements, kColdPageBudget);
+  EXPECT_LE(g_world->cold_big.statements, kColdPageBudget);
+  EXPECT_EQ(g_world->cold_small.statements, g_world->cold_big.statements);
 }
 
 /* Four fields of an entity cost one read of it, not four: at both sizes the

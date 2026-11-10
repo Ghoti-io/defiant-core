@@ -515,6 +515,15 @@ same uses that copy:
   decision reads the store again. A request that is used with two catalogs
   keeps the model of whichever asked last, and a model is only ever used for
   the catalog that made it, even when both are at the same epoch.
+- **The catalog keeps the newest model it has read**, for its requests to share:
+  a request that has none of its own takes the catalog's when that is for the
+  epoch it has just read, and reads the store only when it is not. So the
+  requests of a catalog read the roles, the permissions and the roles of each
+  principal once between them, and not once each, for as long as nothing is
+  changed. It replaces what it kept only with a model of a later epoch, so a
+  decision that read the store a moment before a write and finishes after it
+  cannot put an older model in place of a newer. What is kept is freed with the
+  catalog, and a model a request still holds is freed with the request.
 - **The epoch is read before the model**, never after. A write that lands
   between the two leaves the model newer than the epoch it is filed under, so
   the next decision sees a later epoch and reads again; read in the other
@@ -530,11 +539,33 @@ same uses that copy:
 - **A principal's roles are kept in the model that was read when it first
   asked**, at most 64 principals to a model, the oldest replaced. They are keyed
   by the principal's id, and the grants a principal holds are made from them for
-  each decision.
+  each decision; the roles kept for one principal are never used for another,
+  an acting principal included. A model that is read at the same epoch for the
+  next principal is the same model, so a principal is read from the store once
+  for an epoch however many requests it makes.
+- **Seeding is not asked of the store on every call.** A tenant starts with its
+  roles and its admin principal, written by the first call that finds none; the
+  later calls ask the model whether the admin role is there, and ask the store
+  only when it is not.
+- **What it costs.** Reading the model for a catalog that has read nothing is
+  about 135 statements, however many entities the tenant holds. A page that lists
+  entities, or a count, then runs about 20 statements, three of which read the
+  epoch (one for each thing that needs the model); before the model was kept it
+  ran 534, for a page of ten, a hundred or a thousand entities alike.
 
 Everything the model holds is a copy of what the store says, made by the same
 functions that read it from the store for the admin pages, so what is kept
-cannot mean something other than what is read.
+cannot mean something other than what is read. The admin pages and every write
+(a grant, a revoke, a role made or deleted, a principal given a role) still read
+the store itself and not the model: a write that decides from a copy could
+decide from one that another writer has already outdated.
+
+A model is shared by the requests that hold it, so it has locks of its own, for
+the count of requests holding it and for the principals it keeps, and the
+catalog has one for the model it keeps. They protect the model and nothing else:
+they do not make a catalog's store safe to read from several threads at once,
+which it is not, so a catalog is used from one thread at a time as it is
+everywhere else in the library.
 
 ## One can()
 

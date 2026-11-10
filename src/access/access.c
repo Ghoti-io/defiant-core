@@ -418,84 +418,6 @@ static GDEFCORE_Result create_named(GDEFCORE_Catalog * catalog,
   return GDEFCORE_OK;
 }
 
-static GDEFCORE_Result ensure(GDEFCORE_Catalog * catalog) {
-  char admin_role[GDEFCORE_PUBLIC_ID_LEN + 1];
-  char auth_role[GDEFCORE_PUBLIC_ID_LEN + 1];
-  char anon_role[GDEFCORE_PUBLIC_ID_LEN + 1];
-  char principal[GDEFCORE_PUBLIC_ID_LEN + 1];
-  const char * admin_name = kAdmin;
-  const char * auth_name = kAuthenticated;
-  const char * anon_name = kAnonymous;
-  size_t admin_len = strlen(kAdmin);
-  size_t auth_len = strlen(kAuthenticated);
-  size_t anon_len = strlen(kAnonymous);
-  GDEFCORE_Value values[2];
-  const char * role_text[1];
-  size_t role_lens[1];
-  GDEFCORE_Changeset * changeset = NULL;
-  GDEFCORE_Result rc;
-  rc = find_role(catalog, kAdmin, strlen(kAdmin), admin_role);
-  if (rc == GDEFCORE_OK) {
-    return GDEFCORE_OK;
-  }
-  if (rc != GDEFCORE_ERR_INVALID) {
-    /* Not "no admin role yet": the lookup itself failed (an allocation, the
-     * store). Seeding on top of an admin role that is there but unread would
-     * make a second admin role and a second admin principal. */
-    return rc;
-  }
-  rc = define_types(catalog);
-  if (rc != GDEFCORE_OK) {
-    return rc;
-  }
-  rc = gdefcore_entity_create(catalog, kRoleType, strlen(kRoleType), admin_role,
-      NULL);
-  if (rc == GDEFCORE_OK) {
-    rc = gdefcore_entity_create(catalog, kRoleType, strlen(kRoleType),
-        auth_role, NULL);
-  }
-  if (rc == GDEFCORE_OK) {
-    rc = gdefcore_entity_create(catalog, kRoleType, strlen(kRoleType),
-        anon_role, NULL);
-  }
-  if (rc == GDEFCORE_OK) {
-    rc = gdefcore_entity_create(catalog, kPrincipalType, strlen(kPrincipalType),
-        principal, NULL);
-  }
-  if (rc != GDEFCORE_OK) {
-    return rc;
-  }
-  rc = gdefcore_changeset_prepare(catalog, NULL, 0, &changeset);
-  if (rc != GDEFCORE_OK) {
-    return rc;
-  }
-  value_set(&values[0], "name", &admin_name, &admin_len, 1);
-  rc = gdefcore_entity_save(changeset, admin_role, GDEFCORE_PUBLIC_ID_LEN,
-      kLang, strlen(kLang), values, 1);
-  if (rc == GDEFCORE_OK) {
-    value_set(&values[0], "name", &auth_name, &auth_len, 1);
-    rc = gdefcore_entity_save(changeset, auth_role, GDEFCORE_PUBLIC_ID_LEN,
-        kLang, strlen(kLang), values, 1);
-  }
-  if (rc == GDEFCORE_OK) {
-    value_set(&values[0], "name", &anon_name, &anon_len, 1);
-    rc = gdefcore_entity_save(changeset, anon_role, GDEFCORE_PUBLIC_ID_LEN,
-        kLang, strlen(kLang), values, 1);
-  }
-  if (rc == GDEFCORE_OK) {
-    role_text[0] = kAdmin;
-    role_lens[0] = strlen(kAdmin);
-    value_set(&values[0], "role", role_text, role_lens, 1);
-    rc = gdefcore_entity_save(changeset, principal, GDEFCORE_PUBLIC_ID_LEN,
-        kLang, strlen(kLang), values, 1);
-  }
-  if (rc == GDEFCORE_OK) {
-    rc = gdefcore_changeset_apply(changeset, kSeedConfirm, strlen(kSeedConfirm));
-  }
-  gdefcore_changeset_destroy(changeset);
-  return rc;
-}
-
 static int encode_grant(char * buf, size_t cap, const Grant * grant) {
   const char * cond = grant->condition == kCondExpr
                           ? kCondExprMark
@@ -736,7 +658,12 @@ static int perm_grant(const GDEFCORE_Field_Values * f, const char * label,
  * and an epoch that has not moved cannot say that it has not changed.
  *
  * It is shared (reference counted, its principals under a lock of its own)
- * by the requests that hold it, and is freed with the last of them.
+ * by the requests that hold it, and by the catalog, which keeps the newest one
+ * for its requests (AccessCache); it is freed with the last of them.
+ *
+ * Only decisions use it. What writes the roles, grants, principals and
+ * permissions reads the store itself: a write that decided from a copy could
+ * decide from one that another writer has already outdated.
  */
 enum {
   /* Principals one model keeps; the oldest is replaced. */
@@ -780,9 +707,16 @@ typedef struct Model {
 } Model;
 
 /* What a catalog keeps for the model: who it is, so that a model made for one
- * catalog is never taken for another's, whatever address either has. */
+ * catalog is never taken for another's, whatever address either has, and the
+ * newest model made for it, which every request of the catalog may use while
+ * its epoch is the store's. The lock is held to read or replace the pointer and
+ * for nothing else; a model has a lock of its own, taken (never the other way
+ * round) while this one is held to count a new reference. */
 typedef struct AccessCache {
   uint64_t nonce;
+  GCU_MUTEX_T lock;
+  int lock_made;
+  Model * current;
 } AccessCache;
 
 static const char kCacheKey[] = "defiant.access";
@@ -895,14 +829,23 @@ static void * access_cache_create(void * ctx) {
   if (cache == NULL) {
     return NULL;
   }
-  if (gsec_random_bytes(&cache->nonce, sizeof cache->nonce, NULL) != GSEC_OK) {
+  if (gsec_random_bytes(&cache->nonce, sizeof cache->nonce, NULL) != GSEC_OK ||
+      GCU_MUTEX_CREATE(cache->lock) != 0) {
     gcu_allocator_free(alloc_default(), cache);
     return NULL;
   }
+  cache->lock_made = 1;
   return cache;
 }
 
-static void access_cache_release(void * cache) {
+/* The catalog is destroyed: its newest model goes with it, unless a request
+ * still holds it, which then frees it. */
+static void access_cache_release(void * object) {
+  AccessCache * cache = (AccessCache *)object;
+  model_release(cache->current);
+  if (cache->lock_made) {
+    (void)GCU_MUTEX_DESTROY(cache->lock);
+  }
   gcu_allocator_free(alloc_default(), cache);
 }
 
@@ -1024,7 +967,10 @@ static GDEFCORE_Result model_build(GDEFCORE_Catalog * catalog, uint64_t epoch,
  * under a name of its own and uses it again while the epoch has not moved, so
  * that the many decisions of one request read the store once; the request
  * drops it when the epoch moves (a write the request made itself, or anyone
- * else's), and with itself.
+ * else's), and with itself. When the request has none for this epoch, the
+ * catalog's newest is used if it is for it, so that the requests of a catalog
+ * read the store once between them; and when neither has one it is read, kept
+ * by the request, and kept by the catalog if it is newer than the catalog's.
  */
 static GDEFCORE_Result model_acquire(GDEFCORE_Catalog * catalog,
     GDEFCORE_Request * request, Model ** out) {
@@ -1032,6 +978,7 @@ static GDEFCORE_Result model_acquire(GDEFCORE_Catalog * catalog,
   void * object = NULL;
   uint64_t epoch = 0;
   Model * m = NULL;
+  Model * replaced = NULL;
   GDEFCORE_Result rc = gdefcore_epoch(catalog, &epoch);
   if (rc != GDEFCORE_OK) {
     return rc;
@@ -1051,9 +998,33 @@ static GDEFCORE_Result model_acquire(GDEFCORE_Catalog * catalog,
       return GDEFCORE_OK;
     }
   }
-  rc = model_build(catalog, epoch, cache->nonce, &m);
-  if (rc != GDEFCORE_OK) {
-    return rc;
+  m = NULL;
+  if (epoch != 0) {
+    (void)GCU_MUTEX_LOCK(cache->lock);
+    if (cache->current != NULL && cache->current->epoch == epoch) {
+      m = cache->current;
+      model_ref(m);
+    }
+    (void)GCU_MUTEX_UNLOCK(cache->lock);
+  }
+  if (m == NULL) {
+    rc = model_build(catalog, epoch, cache->nonce, &m);
+    if (rc != GDEFCORE_OK) {
+      return rc;
+    }
+    if (epoch != 0 && m->nroles + m->nperms <= (size_t)kModelKept) {
+      /* Kept for the catalog when it is newer than the one it has: a decision
+       * that read the store at an older epoch and finished late must not
+       * replace the newer. */
+      (void)GCU_MUTEX_LOCK(cache->lock);
+      if (cache->current == NULL || cache->current->epoch < epoch) {
+        model_ref(m);
+        replaced = cache->current;
+        cache->current = m;
+      }
+      (void)GCU_MUTEX_UNLOCK(cache->lock);
+      model_release(replaced);
+    }
   }
   if (request != NULL && epoch != 0 &&
       m->nroles + m->nperms <= (size_t)kModelKept) {
@@ -1204,6 +1175,97 @@ static GDEFCORE_Result model_principal(Model * m, GDEFCORE_Catalog * catalog,
   }
   (void)GCU_MUTEX_UNLOCK(m->lock);
   return GDEFCORE_OK;
+}
+
+static GDEFCORE_Result ensure(GDEFCORE_Catalog * catalog) {
+  char admin_role[GDEFCORE_PUBLIC_ID_LEN + 1];
+  char auth_role[GDEFCORE_PUBLIC_ID_LEN + 1];
+  char anon_role[GDEFCORE_PUBLIC_ID_LEN + 1];
+  char principal[GDEFCORE_PUBLIC_ID_LEN + 1];
+  const char * admin_name = kAdmin;
+  const char * auth_name = kAuthenticated;
+  const char * anon_name = kAnonymous;
+  size_t admin_len = strlen(kAdmin);
+  size_t auth_len = strlen(kAuthenticated);
+  size_t anon_len = strlen(kAnonymous);
+  GDEFCORE_Value values[2];
+  const char * role_text[1];
+  size_t role_lens[1];
+  GDEFCORE_Changeset * changeset = NULL;
+  GDEFCORE_Result rc;
+  {
+    /* Seeded already, as the model says: the common case, which reads nothing
+     * but the epoch. Anything else (no model, no admin role in it) is asked of
+     * the store as it always was. */
+    Model * model = NULL;
+    if (model_acquire(catalog, NULL, &model) == GDEFCORE_OK) {
+      rc = model_find_role(model, kAdmin, strlen(kAdmin), admin_role);
+      model_release(model);
+      if (rc == GDEFCORE_OK) {
+        return GDEFCORE_OK;
+      }
+    }
+  }
+  rc = find_role(catalog, kAdmin, strlen(kAdmin), admin_role);
+  if (rc == GDEFCORE_OK) {
+    return GDEFCORE_OK;
+  }
+  if (rc != GDEFCORE_ERR_INVALID) {
+    /* Not "no admin role yet": the lookup itself failed (an allocation, the
+     * store). Seeding on top of an admin role that is there but unread would
+     * make a second admin role and a second admin principal. */
+    return rc;
+  }
+  rc = define_types(catalog);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  rc = gdefcore_entity_create(catalog, kRoleType, strlen(kRoleType), admin_role,
+      NULL);
+  if (rc == GDEFCORE_OK) {
+    rc = gdefcore_entity_create(catalog, kRoleType, strlen(kRoleType),
+        auth_role, NULL);
+  }
+  if (rc == GDEFCORE_OK) {
+    rc = gdefcore_entity_create(catalog, kRoleType, strlen(kRoleType),
+        anon_role, NULL);
+  }
+  if (rc == GDEFCORE_OK) {
+    rc = gdefcore_entity_create(catalog, kPrincipalType, strlen(kPrincipalType),
+        principal, NULL);
+  }
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  rc = gdefcore_changeset_prepare(catalog, NULL, 0, &changeset);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  value_set(&values[0], "name", &admin_name, &admin_len, 1);
+  rc = gdefcore_entity_save(changeset, admin_role, GDEFCORE_PUBLIC_ID_LEN,
+      kLang, strlen(kLang), values, 1);
+  if (rc == GDEFCORE_OK) {
+    value_set(&values[0], "name", &auth_name, &auth_len, 1);
+    rc = gdefcore_entity_save(changeset, auth_role, GDEFCORE_PUBLIC_ID_LEN,
+        kLang, strlen(kLang), values, 1);
+  }
+  if (rc == GDEFCORE_OK) {
+    value_set(&values[0], "name", &anon_name, &anon_len, 1);
+    rc = gdefcore_entity_save(changeset, anon_role, GDEFCORE_PUBLIC_ID_LEN,
+        kLang, strlen(kLang), values, 1);
+  }
+  if (rc == GDEFCORE_OK) {
+    role_text[0] = kAdmin;
+    role_lens[0] = strlen(kAdmin);
+    value_set(&values[0], "role", role_text, role_lens, 1);
+    rc = gdefcore_entity_save(changeset, principal, GDEFCORE_PUBLIC_ID_LEN,
+        kLang, strlen(kLang), values, 1);
+  }
+  if (rc == GDEFCORE_OK) {
+    rc = gdefcore_changeset_apply(changeset, kSeedConfirm, strlen(kSeedConfirm));
+  }
+  gdefcore_changeset_destroy(changeset);
+  return rc;
 }
 
 static GDEFCORE_Result permission_by_label(GDEFCORE_Catalog * catalog,

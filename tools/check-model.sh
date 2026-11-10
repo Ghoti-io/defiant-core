@@ -12,10 +12,13 @@
 #                                (a revoke, a grant or a role change inside the
 #                                request, or another catalog's write, goes
 #                                unseen)
+#   catalog-model-of-another-epoch  the catalog hands a request the model it
+#                                kept at an epoch the store has moved on from
 #   model-not-of-its-catalog     a copy made for one catalog is used for
 #                                another that is at the same epoch
 #   principal-not-keyed          the roles kept for one principal are given to
-#                                the next one that asks
+#                                the next one that asks, in one request (an
+#                                acting principal) or between requests
 #
 # And one rule that no test can see happen: the epoch is read BEFORE the model
 # is, never after (a write that lands in between then leaves the copy newer
@@ -44,6 +47,13 @@ plant model-reused-across-epochs src/access/access.c testModel \
         epoch != 0) {' \
   '    if (m != NULL && m->owner == cache->nonce && epoch != 0) {'
 
+# What the catalog kept, at an epoch the store has moved on from, handed to a
+# request that has no copy of its own to drop.
+plant catalog-model-of-another-epoch src/access/access.c testModel \
+  'Model.ARevokeIsSeenByARequestThatHasNotDecidedYet' \
+  '    if (cache->current != NULL && cache->current->epoch == epoch) {' \
+  '    if (cache->current != NULL) {'
+
 # A copy made for another catalog, used for this one.
 plant model-not-of-its-catalog src/access/access.c testModel \
   'Model.ARequestUsedWithTwoCatalogsIsDecidedByEachOnItsOwnStore' \
@@ -53,7 +63,7 @@ plant model-not-of-its-catalog src/access/access.c testModel \
 
 # The roles kept for one principal, given to whoever asks next.
 plant principal-not-keyed src/access/access.c testModel \
-  'Model.AnActingPrincipalIsNotGivenThePrincipalsGrants' \
+  'Model.AnActingPrincipalIsNotGivenThePrincipalsGrants Model.OnePrincipalIsNeverGivenAnothersGrants' \
   '    if (kept->used && memcmp(kept->id, id, GDEFCORE_PUBLIC_ID_LEN) == 0) {' \
   '    if (kept->used) {'
 
@@ -77,7 +87,7 @@ else
 fi
 swapped=$(mktemp "${TMPDIR:-/tmp}/check-model.XXXXXX") || exit 1
 sed -e 's/GDEFCORE_Result rc = gdefcore_epoch(catalog, &epoch);/GDEFCORE_Result rc = GDEFCORE_OK;/' \
-    -e 's/^  rc = model_build(catalog, epoch, cache->nonce, &m);/&\n  if (rc == GDEFCORE_OK) { rc = gdefcore_epoch(catalog, \&epoch); }/' \
+    -e 's/^ *rc = model_build(catalog, epoch, cache->nonce, &m);/&\n  if (rc == GDEFCORE_OK) { rc = gdefcore_epoch(catalog, \&epoch); }/' \
     src/access/access.c > "$swapped"
 if cmp -s "$swapped" src/access/access.c; then
   plant_say "$PLANT_TAG: epoch-read-after-model: FAILED: the plant did not change the source, so it shows nothing"

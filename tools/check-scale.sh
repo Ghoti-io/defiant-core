@@ -9,6 +9,10 @@
 #   field-index-dropped      the list and count tests of the backend's suite
 #   values-many-per-field    reading four fields of an entity in one call costs
 #                            what four calls cost (FourFieldsOfAnEntityCostWhatOneDoes)
+#   model-not-kept           the access model is read for every decision again
+#                            (a page's statements are over the budget)
+#   model-not-shared         a request of a catalog that has read the access
+#                            model reads it again
 #
 # The backend is the one the tests are given: SQLite in `make test`
 # (suite Scale), Postgres in `make test-scale-postgres` with
@@ -48,5 +52,27 @@ plant values-many-per-field src/entity/entity.c testScale \
     /* A changeset that touches the entity answers from what it staged: the' \
   '  if (1) {
     /* A changeset that touches the entity answers from what it staged: the'
+
+# The access model is not kept: neither the request nor the catalog uses what
+# was read, so every decision reads the store for the roles, the permissions and
+# the principal again.
+plant model-not-kept src/access/access.c testScale \
+  "$SUITE.APageOnAWarmRequestStaysWithinItsBudget $SUITE.AFreshRequestOnAWarmCatalogReadsNoModel" \
+  '    if (m != NULL && m->owner == cache->nonce && m->epoch == epoch &&
+        epoch != 0) {' \
+  '    if (0) {' \
+  '  if (epoch != 0) {
+    (void)GCU_MUTEX_LOCK(cache->lock);' \
+  '  if (0) {
+    (void)GCU_MUTEX_LOCK(cache->lock);'
+
+# Kept by the request but not by the catalog: a request that has decided is
+# cheap and the next request, on the same catalog, reads the model again.
+plant model-not-shared src/access/access.c testScale \
+  "$SUITE.AFreshRequestOnAWarmCatalogReadsNoModel" \
+  '  if (epoch != 0) {
+    (void)GCU_MUTEX_LOCK(cache->lock);' \
+  '  if (0) {
+    (void)GCU_MUTEX_LOCK(cache->lock);'
 
 plant_finish
