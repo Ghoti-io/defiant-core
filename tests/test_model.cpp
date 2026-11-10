@@ -37,6 +37,33 @@ namespace {
 
 using namespace gfx;
 
+/* A catalog allocator that fails the one allocation asked for. */
+struct FailAlloc {
+  GCU_Allocator alloc;
+  bool armed = false;
+  long target = 0;
+  long seen = 0;
+};
+
+bool Hit(FailAlloc * f) {
+  if (!f->armed) {
+    return false;
+  }
+  f->seen += 1;
+  return f->target > 0 && f->seen == f->target;
+}
+void * FaMalloc(void * ctx, size_t n) {
+  return Hit((FailAlloc *)ctx) ? NULL : malloc(n == 0 ? 1 : n);
+}
+void * FaCalloc(void * ctx, size_t count, size_t n) {
+  return Hit((FailAlloc *)ctx) ? NULL
+                               : calloc(count == 0 ? 1 : count, n == 0 ? 1 : n);
+}
+void * FaRealloc(void * ctx, void * p, size_t n) {
+  return Hit((FailAlloc *)ctx) ? NULL : realloc(p, n == 0 ? 1 : n);
+}
+void FaFree(void *, void * p) { free(p); }
+
 class Model : public GrantsFixture {
  protected:
   std::string clerk_;
@@ -139,6 +166,111 @@ TEST_F(Model, AModuleDisabledInTheMiddleOfARequestStopsGranting) {
   ASSERT_EQ(GDEFCORE_OK,
       Enable("blog", {GrantLine("blog", "blog.read", "low", "(= field.group \"a\")")}));
   EXPECT_EQ("A-post", Read(req, a));
+}
+
+/* A model that could not be read is a failure of the decision that needed it
+ * and is not kept: the next decision, with nothing failing, reads it again and
+ * is decided as it should be. The failure is put at each allocation of the
+ * first decision of a catalog that has read nothing (the reads of the model
+ * are most of them), and after each the same catalog is asked again. A
+ * principal with no role is never allowed, whatever failed. */
+TEST_F(Model, AModelThatFailedToReadIsNotKeptAndTheNextDecisionReadsItAgain) {
+  Clerk();
+  std::string nobody = Principal();
+  FailAlloc fa;
+  fa.alloc.ctx = &fa;
+  fa.alloc.malloc_fn = FaMalloc;
+  fa.alloc.calloc_fn = FaCalloc;
+  fa.alloc.realloc_fn = FaRealloc;
+  fa.alloc.free_fn = FaFree;
+  auto Decide = [&](GDEFCORE_Catalog * catalog, GDEFCORE_Request * request,
+                    std::string * title) {
+    char ** texts = NULL;
+    size_t * lens = NULL;
+    size_t count = 0;
+    GDEFCORE_Result rc = gdefcore_access_read(catalog, request, post_.data(),
+        post_.size(), "en", 2, "title", 5, &texts, &lens, &count, NULL);
+    title->clear();
+    if (rc == GDEFCORE_OK && count > 0) {
+      title->assign(texts[0], lens[0]);
+    }
+    if (rc == GDEFCORE_OK) {
+      gdefcore_values_free(catalog, texts, lens, count);
+    }
+    return rc;
+  };
+  auto Fresh = [&](const std::string & who) {
+    GDEFCORE_Request * request = NULL;
+    EXPECT_EQ(GDEFCORE_OK,
+        gdefcore_request_create((const uint8_t *)kTenant, 1, 0, 0, NULL, &request));
+    EXPECT_EQ(GDEFCORE_OK,
+        gdefcore_request_set_principal(request, who.data(), who.size()));
+    return request;
+  };
+  /* The allocations the first decision of a cold catalog makes. */
+  long total = 0;
+  {
+    GDEFCORE_Catalog * cold = NULL;
+    GDEFCORE_Request * request = Fresh(clerk_);
+    std::string title;
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_catalog_open(store_, (const uint8_t *)kTenant, 1, NULL,
+            &fa.alloc, &cold));
+    fa.armed = true;
+    fa.target = 0;
+    fa.seen = 0;
+    ASSERT_EQ(GDEFCORE_OK, Decide(cold, request, &title));
+    EXPECT_EQ("A-post", title);
+    total = fa.seen;
+    fa.armed = false;
+    gdefcore_request_destroy(request);
+    gdefcore_catalog_destroy(cold);
+  }
+  ASSERT_GT(total, 20) << "the model's reads were not reached";
+  int failed = 0;
+  int succeeded = 0;
+  for (long n = 1; n <= total + 1; n++) {
+    GDEFCORE_Catalog * cold = NULL;
+    GDEFCORE_Request * request = Fresh(clerk_);
+    GDEFCORE_Request * nobody_request = Fresh(nobody);
+    std::string title;
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_catalog_open(store_, (const uint8_t *)kTenant, 1, NULL,
+            &fa.alloc, &cold));
+    fa.armed = true;
+    fa.target = n;
+    fa.seen = 0;
+    GDEFCORE_Result rc = Decide(cold, request, &title);
+    fa.armed = false;
+    if (rc == GDEFCORE_OK && title == "A-post") {
+      succeeded += 1;
+    } else {
+      failed += 1;
+      EXPECT_EQ("", title) << "a failed decision read something, allocation " << n;
+    }
+    /* The principal with no role is never allowed, failure or not. */
+    fa.armed = true;
+    fa.target = n;
+    fa.seen = 0;
+    (void)Decide(cold, nobody_request, &title);
+    fa.armed = false;
+    EXPECT_EQ("", title) << "a principal with no role was allowed, allocation " << n;
+    /* Nothing is failing now: the same catalog decides as it should. */
+    GDEFCORE_Request * again = Fresh(clerk_);
+    EXPECT_EQ(GDEFCORE_OK, Decide(cold, again, &title)) << "allocation " << n;
+    EXPECT_EQ("A-post", title)
+        << "a model that failed to read was kept, allocation " << n;
+    GDEFCORE_Request * again_nobody = Fresh(nobody);
+    (void)Decide(cold, again_nobody, &title);
+    EXPECT_EQ("", title) << "allocation " << n;
+    gdefcore_request_destroy(again_nobody);
+    gdefcore_request_destroy(again);
+    gdefcore_request_destroy(nobody_request);
+    gdefcore_request_destroy(request);
+    gdefcore_catalog_destroy(cold);
+  }
+  EXPECT_GT(failed, 0) << "no failure reached the decision";
+  EXPECT_GT(succeeded, 0) << "the control, the allocation past the last, never decided";
 }
 
 /* What a catalog keeps is for every request of the catalog: a revoke is seen

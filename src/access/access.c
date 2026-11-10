@@ -1195,20 +1195,26 @@ static GDEFCORE_Result ensure(GDEFCORE_Catalog * catalog) {
   GDEFCORE_Result rc;
   {
     /* Seeded already, as the model says: the common case, which reads nothing
-     * but the epoch. Anything else (no model, no admin role in it) is asked of
-     * the store as it always was. */
+     * but the epoch. A model that says there is no admin role is confirmed by
+     * the store before anything is seeded, because a second admin role and a
+     * second admin principal are worse than the question. A model that could
+     * not be read is a lookup that failed, and is answered as one: not as "no
+     * such role", which is what seeds again (see the failure branch below). */
     Model * model = NULL;
-    if (model_acquire(catalog, NULL, &model) == GDEFCORE_OK) {
+    rc = model_acquire(catalog, NULL, &model);
+    if (rc == GDEFCORE_OK) {
       rc = model_find_role(model, kAdmin, strlen(kAdmin), admin_role);
       model_release(model);
       if (rc == GDEFCORE_OK) {
         return GDEFCORE_OK;
       }
     }
-  }
-  rc = find_role(catalog, kAdmin, strlen(kAdmin), admin_role);
-  if (rc == GDEFCORE_OK) {
-    return GDEFCORE_OK;
+    if (rc == GDEFCORE_ERR_INVALID) {
+      rc = find_role(catalog, kAdmin, strlen(kAdmin), admin_role);
+      if (rc == GDEFCORE_OK) {
+        return GDEFCORE_OK;
+      }
+    }
   }
   if (rc != GDEFCORE_ERR_INVALID) {
     /* Not "no admin role yet": the lookup itself failed (an allocation, the

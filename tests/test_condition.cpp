@@ -2089,10 +2089,19 @@ TEST(CondAccess, FailureNeverGrants) {
     total = env.fa.seen;
     ASSERT_GT(total, 10);
     for (n = 1; n <= total; n++) {
-      GDEFCORE_Request * r = env.Req(p);
+      GDEFCORE_Request * r;
       std::string got;
       size_t count = 0;
       std::string listed;
+      /* A write, so that the epoch has moved and the access model, which a
+       * decision keeps while the epoch is the same, is read from the store
+       * again under the failing allocation: the lookup of the admin role that
+       * this sweep exists to fail is that read. Two condition texts that are
+       * both false for the entity, so the entity stays hidden throughout. */
+      env.fa.armed = false;
+      env.Corrupt("Read a",
+          n % 2 == 0 ? "(= field.group \"nope\")" : "(= field.group \"nope2\")");
+      r = env.Req(p);
       env.fa.armed = true;
       env.fa.target = n;
       env.fa.seen = 0;

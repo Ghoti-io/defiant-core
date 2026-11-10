@@ -16,6 +16,8 @@
 #                                kept at an epoch the store has moved on from
 #   model-not-of-its-catalog     a copy made for one catalog is used for
 #                                another that is at the same epoch
+#   failed-model-kept            a model some of whose reads failed is kept, and
+#                                the next decision of the catalog is made on it
 #   principal-not-keyed          the roles kept for one principal are given to
 #                                the next one that asks, in one request (an
 #                                acting principal) or between requests
@@ -53,6 +55,22 @@ plant catalog-model-of-another-epoch src/access/access.c testModel \
   'Model.ARevokeIsSeenByARequestThatHasNotDecidedYet' \
   '    if (cache->current != NULL && cache->current->epoch == epoch) {' \
   '    if (cache->current != NULL) {'
+
+# A role whose read failed is left out of the model and the model is kept, so
+# the catalog decides on a model that has lost a role until the epoch moves.
+plant failed-model-kept src/access/access.c testModel \
+  'Model.AModelThatFailedToReadIsNotKeptAndTheNextDecisionReadsItAgain' \
+  '    many_free(catalog, f, 3);
+    if (rc != GDEFCORE_OK) {
+      gdefcore_ids_free(catalog, ids, count);
+      return rc;
+    }
+    m->nroles += 1;' \
+  '    many_free(catalog, f, 3);
+    if (rc != GDEFCORE_OK) {
+      continue;
+    }
+    m->nroles += 1;'
 
 # A copy made for another catalog, used for this one.
 plant model-not-of-its-catalog src/access/access.c testModel \
