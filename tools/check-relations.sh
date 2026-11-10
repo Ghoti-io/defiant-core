@@ -152,4 +152,21 @@ plant relation-grant-rated-low $ACCESS testRelations \
   }
   if (has_field) {'
 
+# 13. A relation's rows are kept in English and read in English, whatever the
+# language a list is asked in: the evaluator and the compiled list each read
+# them in another language.
+plant relation-rows-read-in-another-language-evaluated $EVAL testRelations \
+  'Relations.AGrantThatComparesAFieldWithARelationColumnIgnoresTheListsLanguage' \
+  '      q.language = GDEFCORE_RELATION_LANG;
+      q.language_len = strlen(GDEFCORE_RELATION_LANG);' \
+  '      q.language = "fr";
+      q.language_len = 2;'
+
+plant relation-rows-read-in-another-language-compiled $PLAN testRelations \
+  'Relations.AGrantThatComparesAFieldWithARelationColumnIgnoresTheListsLanguage' \
+  '  exists->exists_language = GDEFCORE_RELATION_LANG;
+  exists->exists_language_len = strlen(GDEFCORE_RELATION_LANG);' \
+  '  exists->exists_language = "fr";
+  exists->exists_language_len = 2;'
+
 plant_finish

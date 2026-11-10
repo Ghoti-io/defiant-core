@@ -1102,6 +1102,69 @@ struct Rng {
 
 }  // namespace
 
+/*
+ * A relation's rows are kept in English, and a grant reads a field in English,
+ * so a grant that compares a field with a relation's text column decides the
+ * same whatever language the list is asked in. Here the post's `group` is "g1"
+ * in English for one post and in French for the other; the editor's row names
+ * "g1".
+ */
+TEST_F(Relations, AGrantThatComparesAFieldWithARelationColumnIgnoresTheListsLanguage) {
+  Boot();
+  std::string person = Principal();
+  ASSERT_EQ(GDEFCORE_OK, Add(kEditor, {person, "g1"}));
+  std::string a = Save("", "a", "g1");
+  std::string b = Save("", "b", "g2");
+  auto in_french = [&](const std::string & id, const char * title, const char * group) {
+    GDEFCORE_Changeset * cs = NULL;
+    GDEFCORE_Value values[2];
+    const char * texts[2] = {title, group};
+    size_t lens[2] = {strlen(title), strlen(group)};
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
+    memset(values, 0, sizeof values);
+    for (int i = 0; i < 2; i++) {
+      values[i].size = sizeof values[i];
+      values[i].field = i == 0 ? "title" : "group";
+      values[i].field_len = i == 0 ? 5 : 5;
+      values[i].texts = &texts[i];
+      values[i].text_lens = &lens[i];
+      values[i].count = 1;
+    }
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_entity_save(cs, id.data(), id.size(), "fr", 2, values, 2));
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, NULL, 0));
+    gdefcore_changeset_destroy(cs);
+  };
+  in_french(a, "a-fr", "g2");
+  in_french(b, "b-fr", "g1");
+  EXPECT_TRUE(Can(person, a, "read"));
+  EXPECT_FALSE(Can(person, b, "read"));
+  for (const char * lang : {"en", "fr"}) {
+    for (int flags : {0, (int)GDEFCORE_ACCESS_LIST_EVALUATE}) {
+      GDEFCORE_Access_List q;
+      memset(&q, 0, sizeof q);
+      q.size = sizeof q;
+      q.type_name = kPost;
+      q.type_name_len = strlen(kPost);
+      q.lang = lang;
+      q.lang_len = 2;
+      q.flags = flags;
+      char ** ids = NULL;
+      size_t n = 0;
+      uint64_t total = 7;
+      ASSERT_EQ(GDEFCORE_OK,
+          gdefcore_access_list_page(catalog_, Req(person), &q, &ids, &n, &total));
+      std::vector<std::string> got;
+      for (size_t i = 0; i < n; i++) {
+        got.push_back(ids[i]);
+      }
+      gdefcore_access_free(catalog_, ids, n);
+      EXPECT_EQ(std::vector<std::string>({a}), got) << "lang " << lang << " flags " << flags;
+      EXPECT_EQ(1u, total) << "lang " << lang << " flags " << flags;
+    }
+  }
+}
+
 TEST_F(Relations, ListsThatRestOnARelationAgreeWithTheEvaluatedList) {
   size_t compared = 0;
   size_t planned = 0;

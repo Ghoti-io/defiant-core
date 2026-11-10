@@ -136,7 +136,12 @@ that is an operand with no text at all (`creator` of an entity with no creator,
   (no such relation, wrong number) or of the operand.
 - **Reading** is as the system. The evaluator and the list compiler read
   `core.relation_row` through the port's query of its current rows (its rows
-  are kept in their own language, `en`, whatever the list's is), only for a relation an
+  are kept in their own language, `en`, whatever the list's is; a grant
+  reads the entity's fields in `en` too, so a grant that compares a field with
+  a relation's text column decides the same in every language. A list's own
+  written `condition` that does the same reads the field in the list's
+  language and the column in `en`, which can differ: write such a condition for
+  a field that is not translated), only for a relation an
   enabled module declares with this many columns and only its declared columns;
   there is no call that returns rows (relation.h). A relation that is not
   declared now (its module is disabled), or declared with another number of
