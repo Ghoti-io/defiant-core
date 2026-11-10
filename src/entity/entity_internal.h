@@ -37,6 +37,8 @@
 #include <ghoti.io/defiant-core/module.h>
 #include <ghoti.io/defiant-storage/model.h>
 
+#include <ghoti.io/cutil/mutex.h>
+
 enum {
   GDEFCORE_OP_SAVE = 1,
   GDEFCORE_OP_CLEAR = 2,
@@ -208,6 +210,15 @@ struct GDEFCORE_Catalog {
   GDEFCORE_Limits limits;
   GDEFCORE_Host * host;
   struct GDEFCORE_Subjects * subjects; /* the keys that index its values */
+  /* What parts of the library keep per catalog (gdefcore_catalog_cache()). */
+  GCU_MUTEX_T cache_lock;
+  int cache_lock_made;
+  struct {
+    char name[24];
+    void * object;
+    GDEFCORE_Catalog_Release_Fn release;
+  } caches[4];
+  size_t ncaches;
   /* A migration's catalog (migrate.c): its step's write, the component the
    * step brings forward and the version it writes, and the step's clock.
    * NULL outside a step. */

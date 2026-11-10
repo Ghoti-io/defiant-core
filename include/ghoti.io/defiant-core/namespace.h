@@ -210,6 +210,9 @@
 #define gdefcore_catalog_bind_subjects                                         \
   GHOTIIO_DEFCORE(gdefcore_catalog_bind_subjects)
 #define gdefcore_catalog_destroy GHOTIIO_DEFCORE(gdefcore_catalog_destroy)
+#define gdefcore_catalog_cache GHOTIIO_DEFCORE(gdefcore_catalog_cache)
+#define GDEFCORE_Catalog_Create_Fn GHOTIIO_DEFCORE(GDEFCORE_Catalog_Create_Fn)
+#define GDEFCORE_Catalog_Release_Fn GHOTIIO_DEFCORE(GDEFCORE_Catalog_Release_Fn)
 #define gdefcore_catalog_open GHOTIIO_DEFCORE(gdefcore_catalog_open)
 #define gdefcore_catalog_tenant GHOTIIO_DEFCORE(gdefcore_catalog_tenant)
 #define gdefcore_catalog_store GHOTIIO_DEFCORE(gdefcore_catalog_store)

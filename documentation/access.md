@@ -494,6 +494,48 @@ decides (below, "A grant that names a governed field is suspended"), which is
 held and reported too. A restore calls it after its import, before it returns
 (subjects.md, "Backups").
 
+## What a decision reads, and what is kept
+
+Every decision rests on the same few things the store holds as entities: the
+roles with their grants, the permissions with what each declares (their action,
+type, field and condition), and the roles of the principal, and of the acting
+principal when there is one. Reading them takes about a hundred statements of the
+store, and a page that lists twenty entities makes a decision for each, so
+without more care that is most of what the page costs.
+
+They change in one way: a changeset is applied, and applying one moves the
+tenant's config epoch (`gdefcore_epoch()`) in the same write. So they are read
+once for an epoch, as a *model*, and every decision made while the epoch is the
+same uses that copy:
+
+- **A request keeps the model it used** (under the request attachment
+  `defiant.access.model`) and uses it again while the epoch it reads at the
+  start of each decision is the one the model was read at. A write the request
+  makes itself, or anyone else's, moves the epoch, and the request's next
+  decision reads the store again. A request that is used with two catalogs
+  keeps the model of whichever asked last, and a model is only ever used for
+  the catalog that made it, even when both are at the same epoch.
+- **The epoch is read before the model**, never after. A write that lands
+  between the two leaves the model newer than the epoch it is filed under, so
+  the next decision sees a later epoch and reads again; read in the other
+  order, the model would be older than its epoch and would pass for current.
+- **Epoch 0 is not kept.** A tenant no changeset has been applied to has
+  nothing to keep, and an epoch that has not moved cannot say that nothing has
+  changed.
+- **What a module grants is never in the model.** The grants and access
+  callbacks of enabled modules come from the module host, which the decision
+  asks each time, so a module that is disabled stops granting at the next
+  decision. Only the permission each grant names (its action, type and field)
+  is looked up in the model.
+- **A principal's roles are kept in the model that was read when it first
+  asked**, at most 64 principals to a model, the oldest replaced. They are keyed
+  by the principal's id, and the grants a principal holds are made from them for
+  each decision.
+
+Everything the model holds is a copy of what the store says, made by the same
+functions that read it from the store for the admin pages, so what is kept
+cannot mean something other than what is read.
+
 ## One can()
 
 `gdefcore_access_can(catalog, request, permission, type, entity_id, &allowed)`

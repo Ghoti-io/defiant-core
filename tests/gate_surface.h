@@ -163,6 +163,7 @@ static const Surface kSurface[] = {
     {"gdefcore_limits_default", "P"},
     {"gdefcore_catalog_open", "W"},
     {"gdefcore_catalog_destroy", "W"},
+    {"gdefcore_catalog_cache", "P"},
     {"gdefcore_id_encode", "P"},
     {"gdefcore_id_generate", "P"},
     {"gdefcore_id_canonical", "P"},

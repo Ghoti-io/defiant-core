@@ -1362,8 +1362,56 @@ GDEFCORE_Result gdefcore_catalog_open(GDEFSTOR_Store * store,
   } else {
     cat->limits = *limits;
   }
+  if (GCU_MUTEX_CREATE(cat->cache_lock) != 0) {
+    gcu_allocator_free(allocator, cat->tenant);
+    gcu_allocator_free(allocator, cat);
+    return GDEFCORE_ERR_OOM;
+  }
+  cat->cache_lock_made = 1;
   *out_catalog = cat;
   return GDEFCORE_OK;
+}
+
+GDEFCORE_Result gdefcore_catalog_cache(GDEFCORE_Catalog * catalog,
+    const char * name, GDEFCORE_Catalog_Create_Fn create,
+    GDEFCORE_Catalog_Release_Fn release, void * ctx, void ** out_object) {
+  size_t i;
+  size_t n;
+  void * object;
+  GDEFCORE_Result rc = GDEFCORE_OK;
+  if (catalog == NULL || name == NULL || create == NULL || out_object == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  n = strlen(name);
+  if (n == 0 || n >= sizeof catalog->caches[0].name) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  if (GCU_MUTEX_LOCK(catalog->cache_lock) != 0) {
+    return GDEFCORE_ERR_INTERNAL;
+  }
+  for (i = 0; i < catalog->ncaches; i++) {
+    if (strcmp(catalog->caches[i].name, name) == 0) {
+      *out_object = catalog->caches[i].object;
+      (void)GCU_MUTEX_UNLOCK(catalog->cache_lock);
+      return GDEFCORE_OK;
+    }
+  }
+  if (catalog->ncaches >= sizeof catalog->caches / sizeof catalog->caches[0]) {
+    rc = GDEFCORE_ERR_LIMIT;
+  } else {
+    object = create(ctx);
+    if (object == NULL) {
+      rc = GDEFCORE_ERR_OOM;
+    } else {
+      memcpy(catalog->caches[catalog->ncaches].name, name, n + 1);
+      catalog->caches[catalog->ncaches].object = object;
+      catalog->caches[catalog->ncaches].release = release;
+      catalog->ncaches += 1;
+      *out_object = object;
+    }
+  }
+  (void)GCU_MUTEX_UNLOCK(catalog->cache_lock);
+  return rc;
 }
 
 static GDEFCORE_Result read_epoch(GDEFCORE_Catalog * cat, uint64_t * out) {
@@ -1617,6 +1665,17 @@ GDEFCORE_Result gdefcore_entity_subject(GDEFCORE_Catalog * catalog,
 void gdefcore_catalog_destroy(GDEFCORE_Catalog * catalog) {
   if (catalog == NULL) {
     return;
+  }
+  {
+    size_t i;
+    for (i = 0; i < catalog->ncaches; i++) {
+      if (catalog->caches[i].release != NULL) {
+        catalog->caches[i].release(catalog->caches[i].object);
+      }
+    }
+  }
+  if (catalog->cache_lock_made) {
+    (void)GCU_MUTEX_DESTROY(catalog->cache_lock);
   }
   gcu_allocator_free(catalog->alloc, catalog->tenant);
   gcu_allocator_free(catalog->alloc, catalog);

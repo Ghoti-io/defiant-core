@@ -23,7 +23,9 @@
  *
  * Roles, permissions and the access filter. The filter is a table of
  * grants, read from storage at the tenant's current config epoch, not a
- * callback. A filtered read is the read a principal uses.
+ * callback. A filtered read is the read a principal uses. What a decision
+ * reads of the store is kept for an epoch (see "the access model" below, and
+ * "What a decision reads, and what is kept" in documentation/access.md).
  */
 
 /* clock_gettime(), for an access callback's timeout (story A6). */
@@ -41,6 +43,8 @@
 #include "access_internal.h"
 
 #include <ghoti.io/cutil/allocator.h>
+#include <ghoti.io/cutil/mutex.h>
+#include <ghoti.io/security/random.h>
 #include <ghoti.io/security/secret.h>
 #include <ghoti.io/security/sha256.h>
 
@@ -564,35 +568,641 @@ static int parse_grant(const char * text, size_t len, Grant * grant,
   return 1;
 }
 
-static GDEFCORE_Result load_role_grants(GDEFCORE_Catalog * catalog,
-    const char * role_id, Grant * grants, size_t cap, size_t * out_n) {
-  char ** texts = NULL;
-  size_t * lens = NULL;
-  size_t count = 0;
+/* The grants a role's stored grant texts make. A text that does not parse
+ * is ::GDEFCORE_ERR_CORRUPT and one past @p cap is ::GDEFCORE_ERR_LIMIT. */
+static GDEFCORE_Result grants_from_texts(char ** texts, size_t * lens,
+    size_t count, Grant * grants, size_t cap, size_t * out_n) {
   size_t i;
-  GDEFCORE_Result rc = read_values(catalog, role_id, "grant", &texts, &lens,
-      &count);
   *out_n = 0;
-  if (rc != GDEFCORE_OK) {
-    return rc;
-  }
   for (i = 0; i < count; i++) {
     Grant grant;
     if (same(texts[i], lens[i], kEmptyMark, strlen(kEmptyMark))) {
       continue;
     }
     if (!parse_grant(texts[i], lens[i], &grant, NULL, 0, NULL)) {
-      gdefcore_values_free(catalog, texts, lens, count);
       return GDEFCORE_ERR_CORRUPT;
     }
     if (*out_n >= cap) {
-      gdefcore_values_free(catalog, texts, lens, count);
       return GDEFCORE_ERR_LIMIT;
     }
     grants[*out_n] = grant;
     *out_n += 1;
   }
+  return GDEFCORE_OK;
+}
+
+static GDEFCORE_Result load_role_grants(GDEFCORE_Catalog * catalog,
+    const char * role_id, Grant * grants, size_t cap, size_t * out_n) {
+  char ** texts = NULL;
+  size_t * lens = NULL;
+  size_t count = 0;
+  GDEFCORE_Result rc = read_values(catalog, role_id, "grant", &texts, &lens,
+      &count);
+  *out_n = 0;
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  rc = grants_from_texts(texts, lens, count, grants, cap, out_n);
   gdefcore_values_free(catalog, texts, lens, count);
+  return rc;
+}
+
+/* ---- what a permission declares -------------------------------------------
+ *
+ * A permission entity's six fields, in this order wherever they are read or
+ * kept, and the two things made of them: the declaration the field-limit
+ * checks read, and the permission a module's grant names by its label. Both
+ * the store's entity and the cached copy of it (the model below) are turned
+ * into them by the same two functions, so that what is cached cannot mean
+ * something else than what is read. */
+enum {
+  kPermLabel = 0,
+  kPermModule = 1,
+  kPermAction = 2,
+  kPermCondition = 3,
+  kPermType = 4,
+  kPermField = 5,
+  kPermFields = 6
+};
+
+static void perm_fields_init(GDEFCORE_Field_Values * f) {
+  many_init(&f[kPermLabel], "label");
+  many_init(&f[kPermModule], "module");
+  many_init(&f[kPermAction], "action");
+  many_init(&f[kPermCondition], "condition");
+  many_init(&f[kPermType], "type");
+  many_init(&f[kPermField], "field");
+}
+
+/* A permission that names a label and a type is a declaration; one that does
+ * not is nothing to count against a caller's capacity. */
+static int perm_is_declared(const GDEFCORE_Field_Values * f) {
+  return f[kPermLabel].count != 0 && f[kPermType].count != 0;
+}
+
+/* The declaration of a permission for which perm_is_declared() holds, or 0
+ * when its condition is none a grant can have. */
+static int perm_decl(const GDEFCORE_Field_Values * f, Grant * decl) {
+  const GDEFCORE_Field_Values * cond = &f[kPermCondition];
+  memset(decl, 0, sizeof *decl);
+  copy_part(decl->label, sizeof decl->label, &decl->label_len,
+      f[kPermLabel].texts[0], f[kPermLabel].lens[0]);
+  copy_part(decl->type_name, sizeof decl->type_name, &decl->type_len,
+      f[kPermType].texts[0], f[kPermType].lens[0]);
+  if (f[kPermField].count > 0) {
+    copy_part(decl->field, sizeof decl->field, &decl->field_len,
+        f[kPermField].texts[0], f[kPermField].lens[0]);
+  }
+  if (f[kPermAction].count > 0) {
+    copy_part(decl->action, sizeof decl->action, &decl->action_len,
+        f[kPermAction].texts[0], f[kPermAction].lens[0]);
+  }
+  if (cond->count == 1 && same(cond->texts[0], cond->lens[0], "own", 3)) {
+    decl->condition = GDEFCORE_ACCESS_OWN;
+  } else if (cond->count == 1 && same(cond->texts[0], cond->lens[0], "any", 3)) {
+    decl->condition = GDEFCORE_ACCESS_ANY;
+  } else if (cond->count == 1 && cond->lens[0] > 0) {
+    /* An expression. Only its field, if any, matters here. */
+    decl->condition = kCondExpr;
+  } else {
+    return 0;
+  }
+  return 1;
+}
+
+/* The permission named @p label, if @p f is it and declares everything a
+ * grant of it needs: 1 and the grant (and the module that declared it), or 0
+ * when @p f is some other permission or an incomplete one. */
+static int perm_grant(const GDEFCORE_Field_Values * f, const char * label,
+    size_t label_len, Grant * grant, char * module_name, size_t module_cap,
+    size_t * module_len) {
+  const GDEFCORE_Field_Values * cond = &f[kPermCondition];
+  if (!values_have(f[kPermLabel].texts, f[kPermLabel].lens,
+          f[kPermLabel].count, label, label_len) ||
+      f[kPermModule].count == 0 || f[kPermAction].count == 0 ||
+      cond->count == 0 || f[kPermType].count == 0) {
+    return 0;
+  }
+  memset(grant, 0, sizeof *grant);
+  copy_part(grant->label, sizeof grant->label, &grant->label_len, label,
+      label_len);
+  copy_part(grant->action, sizeof grant->action, &grant->action_len,
+      f[kPermAction].texts[0], f[kPermAction].lens[0]);
+  copy_part(grant->type_name, sizeof grant->type_name, &grant->type_len,
+      f[kPermType].texts[0], f[kPermType].lens[0]);
+  if (f[kPermField].count > 0) {
+    copy_part(grant->field, sizeof grant->field, &grant->field_len,
+        f[kPermField].texts[0], f[kPermField].lens[0]);
+  }
+  if (module_name != NULL) {
+    copy_part(module_name, module_cap, module_len, f[kPermModule].texts[0],
+        f[kPermModule].lens[0]);
+  }
+  if (cond->lens[0] == 3 && memcmp(cond->texts[0], "own", 3) == 0) {
+    grant->condition = GDEFCORE_ACCESS_OWN;
+  } else if (cond->lens[0] == 3 && memcmp(cond->texts[0], "any", 3) == 0) {
+    grant->condition = GDEFCORE_ACCESS_ANY;
+  } else {
+    grant->condition = kCondExpr;
+  }
+  copy_part(grant->module_name, sizeof grant->module_name, &grant->module_len,
+      f[kPermModule].texts[0], f[kPermModule].lens[0]);
+  return 1;
+}
+
+/*
+ * ---- the access model ------------------------------------------------------
+ *
+ * What a decision needs of the store: the roles, with their grants, the
+ * permissions, with what each declares, and the roles each principal holds.
+ * Reading them is a hundred statements or so, and a decision asks for them
+ * again every time it is made, which on a page that lists twenty entities is
+ * most of what the page costs. They change only when a changeset is applied,
+ * and a changeset moves the tenant's config epoch in the write that applies it
+ * (gdefcore_epoch()). So they are read once for an epoch, as a Model, and a
+ * decision made while the epoch is the same uses that copy.
+ *
+ * A Model holds what the store says and nothing derived from it that has a
+ * pointer into something else: the grants a principal holds are made from its
+ * texts for each decision, by the same functions that read them from the
+ * store, and the grants an enabled module declares, which point into the
+ * module host, are never in it.
+ *
+ * It is read after the epoch is, never before, and kept under the epoch that
+ * was read first: a write that lands while it is being read leaves it newer
+ * than the epoch it is filed under, so that the next decision, which sees a
+ * later epoch, reads it again. Epoch 0 is a tenant that no changeset has been
+ * applied to: nothing is kept for it, because nothing there is worth keeping
+ * and an epoch that has not moved cannot say that it has not changed.
+ *
+ * It is shared (reference counted, its principals under a lock of its own)
+ * by the requests that hold it, and is freed with the last of them.
+ */
+enum {
+  /* Principals one model keeps; the oldest is replaced. */
+  kModelPrincipals = 64,
+  /* Roles and permissions beyond which a model is used for one decision and
+   * not kept. */
+  kModelKept = 4096
+};
+
+typedef struct ModelRole {
+  char id[GDEFCORE_PUBLIC_ID_LEN + 1];
+  int retired;
+  GDEFCORE_Field_Values name;
+  GDEFCORE_Field_Values grant;
+} ModelRole;
+
+typedef struct ModelPerm {
+  char id[GDEFCORE_PUBLIC_ID_LEN + 1];
+  GDEFCORE_Field_Values f[kPermFields];
+} ModelPerm;
+
+typedef struct ModelPrincipal {
+  char id[GDEFCORE_PUBLIC_ID_LEN + 1];
+  int used;
+  int retired;
+  GDEFCORE_Field_Values roles;
+} ModelPrincipal;
+
+typedef struct Model {
+  uint64_t owner;     /* the catalog's cache that made it */
+  uint64_t epoch;
+  GCU_MUTEX_T lock;   /* the reference count and the principals */
+  int lock_made;
+  size_t refs;
+  ModelRole * roles;
+  size_t nroles;
+  ModelPerm * perms;
+  size_t nperms;
+  ModelPrincipal principals[kModelPrincipals];
+  size_t next_principal;
+} Model;
+
+/* What a catalog keeps for the model: who it is, so that a model made for one
+ * catalog is never taken for another's, whatever address either has. */
+typedef struct AccessCache {
+  uint64_t nonce;
+} AccessCache;
+
+static const char kCacheKey[] = "defiant.access";
+static const char kModelKey[] = "defiant.access.model";
+
+/* The values of @p src kept in memory of the model's own: what a model holds
+ * does not depend on the catalog that read it still being there. */
+static void fv_free(GDEFCORE_Field_Values * f) {
+  size_t i;
+  if (f->texts != NULL) {
+    for (i = 0; i < f->count; i++) {
+      gcu_allocator_free(alloc_default(), f->texts[i]);
+    }
+  }
+  gcu_allocator_free(alloc_default(), f->texts);
+  gcu_allocator_free(alloc_default(), f->lens);
+  f->texts = NULL;
+  f->lens = NULL;
+  f->count = 0;
+}
+
+static GDEFCORE_Result fv_copy(GDEFCORE_Field_Values * dst,
+    const GDEFCORE_Field_Values * src) {
+  size_t i;
+  memset(dst, 0, sizeof *dst);
+  dst->size = sizeof *dst;
+  dst->field = src->field;
+  dst->field_len = src->field_len;
+  if (src->count == 0) {
+    return GDEFCORE_OK;
+  }
+  dst->texts = (char **)gcu_allocator_calloc(alloc_default(), src->count,
+      sizeof *dst->texts);
+  dst->lens = (size_t *)gcu_allocator_calloc(alloc_default(), src->count,
+      sizeof *dst->lens);
+  if (dst->texts == NULL || dst->lens == NULL) {
+    fv_free(dst);
+    return GDEFCORE_ERR_OOM;
+  }
+  for (i = 0; i < src->count; i++) {
+    dst->texts[i] = (char *)gcu_allocator_malloc(alloc_default(),
+        src->lens[i] + 1);
+    if (dst->texts[i] == NULL) {
+      dst->count = i;
+      fv_free(dst);
+      return GDEFCORE_ERR_OOM;
+    }
+    memcpy(dst->texts[i], src->texts[i], src->lens[i]);
+    dst->texts[i][src->lens[i]] = '\0';
+    dst->lens[i] = src->lens[i];
+  }
+  dst->count = src->count;
+  return GDEFCORE_OK;
+}
+
+static void model_free(Model * m) {
+  size_t i;
+  size_t k;
+  if (m == NULL) {
+    return;
+  }
+  for (i = 0; i < m->nroles; i++) {
+    fv_free(&m->roles[i].name);
+    fv_free(&m->roles[i].grant);
+  }
+  gcu_allocator_free(alloc_default(), m->roles);
+  for (i = 0; i < m->nperms; i++) {
+    for (k = 0; k < kPermFields; k++) {
+      fv_free(&m->perms[i].f[k]);
+    }
+  }
+  gcu_allocator_free(alloc_default(), m->perms);
+  for (i = 0; i < kModelPrincipals; i++) {
+    fv_free(&m->principals[i].roles);
+  }
+  if (m->lock_made) {
+    (void)GCU_MUTEX_DESTROY(m->lock);
+  }
+  gcu_allocator_free(alloc_default(), m);
+}
+
+static void model_ref(Model * m) {
+  (void)GCU_MUTEX_LOCK(m->lock);
+  m->refs += 1;
+  (void)GCU_MUTEX_UNLOCK(m->lock);
+}
+
+static void model_release(Model * m) {
+  size_t left;
+  if (m == NULL) {
+    return;
+  }
+  (void)GCU_MUTEX_LOCK(m->lock);
+  m->refs -= 1;
+  left = m->refs;
+  (void)GCU_MUTEX_UNLOCK(m->lock);
+  if (left == 0) {
+    model_free(m);
+  }
+}
+
+static void model_release_attached(void * model) {
+  model_release((Model *)model);
+}
+
+static void * access_cache_create(void * ctx) {
+  AccessCache * cache;
+  (void)ctx;
+  cache = (AccessCache *)gcu_allocator_calloc(alloc_default(), 1, sizeof *cache);
+  if (cache == NULL) {
+    return NULL;
+  }
+  if (gsec_random_bytes(&cache->nonce, sizeof cache->nonce, NULL) != GSEC_OK) {
+    gcu_allocator_free(alloc_default(), cache);
+    return NULL;
+  }
+  return cache;
+}
+
+static void access_cache_release(void * cache) {
+  gcu_allocator_free(alloc_default(), cache);
+}
+
+/* Every role and permission of the tenant, read from the store. */
+static GDEFCORE_Result model_read(GDEFCORE_Catalog * catalog, Model * m) {
+  char ** ids = NULL;
+  size_t count = 0;
+  size_t i;
+  GDEFCORE_Result rc = gdefcore_entity_ids(catalog, kRoleType,
+      strlen(kRoleType), &ids, &count);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  m->roles = (ModelRole *)gcu_allocator_calloc(alloc_default(),
+      count > 0 ? count : 1, sizeof *m->roles);
+  if (m->roles == NULL) {
+    gdefcore_ids_free(catalog, ids, count);
+    return GDEFCORE_ERR_OOM;
+  }
+  for (i = 0; i < count; i++) {
+    GDEFCORE_Field_Values f[3];
+    ModelRole * role = &m->roles[m->nroles];
+    many_init(&f[0], "retired");
+    many_init(&f[1], "name");
+    many_init(&f[2], "grant");
+    rc = read_many(catalog, ids[i], f, 3);
+    if (rc == GDEFCORE_OK) {
+      memcpy(role->id, ids[i], GDEFCORE_PUBLIC_ID_LEN + 1);
+      role->retired = values_have(f[0].texts, f[0].lens, f[0].count, kRetired,
+          strlen(kRetired));
+      rc = fv_copy(&role->name, &f[1]);
+      if (rc == GDEFCORE_OK) {
+        rc = fv_copy(&role->grant, &f[2]);
+        if (rc != GDEFCORE_OK) {
+          fv_free(&role->name);
+        }
+      }
+    }
+    many_free(catalog, f, 3);
+    if (rc != GDEFCORE_OK) {
+      gdefcore_ids_free(catalog, ids, count);
+      return rc;
+    }
+    m->nroles += 1;
+  }
+  gdefcore_ids_free(catalog, ids, count);
+  ids = NULL;
+  count = 0;
+  rc = gdefcore_entity_ids(catalog, kPermissionType, strlen(kPermissionType),
+      &ids, &count);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  m->perms = (ModelPerm *)gcu_allocator_calloc(alloc_default(),
+      count > 0 ? count : 1, sizeof *m->perms);
+  if (m->perms == NULL) {
+    gdefcore_ids_free(catalog, ids, count);
+    return GDEFCORE_ERR_OOM;
+  }
+  for (i = 0; i < count; i++) {
+    GDEFCORE_Field_Values f[kPermFields];
+    ModelPerm * perm = &m->perms[m->nperms];
+    size_t k;
+    size_t made = 0;
+    perm_fields_init(f);
+    rc = read_many(catalog, ids[i], f, kPermFields);
+    if (rc == GDEFCORE_OK) {
+      memcpy(perm->id, ids[i], GDEFCORE_PUBLIC_ID_LEN + 1);
+      for (k = 0; k < kPermFields && rc == GDEFCORE_OK; k++) {
+        rc = fv_copy(&perm->f[k], &f[k]);
+        if (rc == GDEFCORE_OK) {
+          made += 1;
+        }
+      }
+      if (rc != GDEFCORE_OK) {
+        for (k = 0; k < made; k++) {
+          fv_free(&perm->f[k]);
+        }
+      }
+    }
+    many_free(catalog, f, kPermFields);
+    if (rc != GDEFCORE_OK) {
+      gdefcore_ids_free(catalog, ids, count);
+      return rc;
+    }
+    m->nperms += 1;
+  }
+  gdefcore_ids_free(catalog, ids, count);
+  return GDEFCORE_OK;
+}
+
+static GDEFCORE_Result model_build(GDEFCORE_Catalog * catalog, uint64_t epoch,
+    uint64_t owner, Model ** out) {
+  Model * m = (Model *)gcu_allocator_calloc(alloc_default(), 1, sizeof *m);
+  GDEFCORE_Result rc;
+  if (m == NULL) {
+    return GDEFCORE_ERR_OOM;
+  }
+  if (GCU_MUTEX_CREATE(m->lock) != 0) {
+    gcu_allocator_free(alloc_default(), m);
+    return GDEFCORE_ERR_OOM;
+  }
+  m->lock_made = 1;
+  m->owner = owner;
+  m->epoch = epoch;
+  m->refs = 1;
+  rc = model_read(catalog, m);
+  if (rc != GDEFCORE_OK) {
+    model_free(m);
+    return rc;
+  }
+  *out = m;
+  return GDEFCORE_OK;
+}
+
+/*
+ * The model for one decision, with a reference the caller releases with
+ * model_release(). The epoch is read first. A request keeps the model it used
+ * under a name of its own and uses it again while the epoch has not moved, so
+ * that the many decisions of one request read the store once; the request
+ * drops it when the epoch moves (a write the request made itself, or anyone
+ * else's), and with itself.
+ */
+static GDEFCORE_Result model_acquire(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Request * request, Model ** out) {
+  AccessCache * cache;
+  void * object = NULL;
+  uint64_t epoch = 0;
+  Model * m = NULL;
+  GDEFCORE_Result rc = gdefcore_epoch(catalog, &epoch);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  rc = gdefcore_catalog_cache(catalog, kCacheKey, access_cache_create,
+      access_cache_release, NULL, &object);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  cache = (AccessCache *)object;
+  if (request != NULL) {
+    m = (Model *)gdefcore_request_attached(request, kModelKey);
+    if (m != NULL && m->owner == cache->nonce && m->epoch == epoch &&
+        epoch != 0) {
+      model_ref(m);
+      *out = m;
+      return GDEFCORE_OK;
+    }
+  }
+  rc = model_build(catalog, epoch, cache->nonce, &m);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  if (request != NULL && epoch != 0 &&
+      m->nroles + m->nperms <= (size_t)kModelKept) {
+    model_ref(m);
+    if (gdefcore_request_attach(request, kModelKey, m,
+            model_release_attached) != GDEFCORE_OK) {
+      model_release(m);
+    }
+  }
+  *out = m;
+  return GDEFCORE_OK;
+}
+
+/* The first role, in the order they were made, that is not retired and has
+ * the name: what find_role() finds in the store. */
+static GDEFCORE_Result model_find_role(const Model * m, const char * name,
+    size_t name_len, char * out_id) {
+  size_t i;
+  for (i = 0; i < m->nroles; i++) {
+    const ModelRole * role = &m->roles[i];
+    if (!role->retired && values_have(role->name.texts, role->name.lens,
+                              role->name.count, name, name_len)) {
+      memcpy(out_id, role->id, GDEFCORE_PUBLIC_ID_LEN + 1);
+      return GDEFCORE_OK;
+    }
+  }
+  return GDEFCORE_ERR_INVALID;
+}
+
+static const ModelRole * model_role(const Model * m, const char * id) {
+  size_t i;
+  for (i = 0; i < m->nroles; i++) {
+    if (memcmp(m->roles[i].id, id, GDEFCORE_PUBLIC_ID_LEN) == 0) {
+      return &m->roles[i];
+    }
+  }
+  return NULL;
+}
+
+/* The permission with the label, as permission_by_label() finds it. */
+static GDEFCORE_Result model_permission_by_label(const Model * m,
+    const char * label, size_t label_len, char * out_id, Grant * grant,
+    char * module_name, size_t module_cap, size_t * module_len) {
+  size_t i;
+  for (i = 0; i < m->nperms; i++) {
+    if (perm_grant(m->perms[i].f, label, label_len, grant, module_name,
+            module_cap, module_len)) {
+      if (out_id != NULL) {
+        memcpy(out_id, m->perms[i].id, GDEFCORE_PUBLIC_ID_LEN + 1);
+      }
+      return GDEFCORE_OK;
+    }
+  }
+  return GDEFCORE_ERR_INVALID;
+}
+
+/* The declarations of every permission, as the store's give them. */
+static GDEFCORE_Result model_decls(const Model * m, Grant * decls, size_t cap,
+    size_t * out_n) {
+  size_t i;
+  *out_n = 0;
+  for (i = 0; i < m->nperms; i++) {
+    const GDEFCORE_Field_Values * f = m->perms[i].f;
+    if (!perm_is_declared(f)) {
+      continue;
+    }
+    if (*out_n >= cap) {
+      return GDEFCORE_ERR_LIMIT;
+    }
+    if (perm_decl(f, &decls[*out_n])) {
+      *out_n += 1;
+    }
+  }
+  return GDEFCORE_OK;
+}
+
+/* A principal as the model holds it: whether it is retired and the roles it
+ * is assigned, in memory the caller owns (principal_free()). */
+typedef struct PrincipalView {
+  int retired;
+  GDEFCORE_Field_Values roles;
+} PrincipalView;
+
+static void principal_free(PrincipalView * view) {
+  fv_free(&view->roles);
+}
+
+static GDEFCORE_Result model_principal(Model * m, GDEFCORE_Catalog * catalog,
+    const char * id, PrincipalView * out) {
+  size_t i;
+  GDEFCORE_Field_Values f[2];
+  GDEFCORE_Field_Values roles;
+  int retired;
+  GDEFCORE_Result rc;
+  memset(out, 0, sizeof *out);
+  (void)GCU_MUTEX_LOCK(m->lock);
+  for (i = 0; i < kModelPrincipals; i++) {
+    const ModelPrincipal * kept = &m->principals[i];
+    if (kept->used && memcmp(kept->id, id, GDEFCORE_PUBLIC_ID_LEN) == 0) {
+      out->retired = kept->retired;
+      rc = fv_copy(&out->roles, &kept->roles);
+      (void)GCU_MUTEX_UNLOCK(m->lock);
+      return rc;
+    }
+  }
+  (void)GCU_MUTEX_UNLOCK(m->lock);
+  /* Not kept: read it, outside the lock. A principal that is not there is not
+   * retired and holds no role, as it was read before. */
+  many_init(&f[0], "retired");
+  many_init(&f[1], "role");
+  rc = read_many(catalog, id, f, 2);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  retired = values_have(f[0].texts, f[0].lens, f[0].count, kRetired,
+      strlen(kRetired));
+  rc = fv_copy(&roles, &f[1]);
+  many_free(catalog, f, 2);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  out->retired = retired;
+  rc = fv_copy(&out->roles, &roles);
+  if (rc != GDEFCORE_OK) {
+    fv_free(&roles);
+    return rc;
+  }
+  (void)GCU_MUTEX_LOCK(m->lock);
+  {
+    ModelPrincipal * slot = &m->principals[m->next_principal];
+    int present = 0;
+    for (i = 0; i < kModelPrincipals; i++) {
+      if (m->principals[i].used &&
+          memcmp(m->principals[i].id, id, GDEFCORE_PUBLIC_ID_LEN) == 0) {
+        present = 1;
+      }
+    }
+    if (present) {
+      fv_free(&roles);
+    } else {
+      fv_free(&slot->roles);
+      memcpy(slot->id, id, GDEFCORE_PUBLIC_ID_LEN + 1);
+      slot->used = 1;
+      slot->retired = retired;
+      slot->roles = roles;
+      m->next_principal = (m->next_principal + 1) % kModelPrincipals;
+    }
+  }
+  (void)GCU_MUTEX_UNLOCK(m->lock);
   return GDEFCORE_OK;
 }
 
@@ -609,7 +1219,7 @@ static GDEFCORE_Result permission_by_label(GDEFCORE_Catalog * catalog,
  * that is disabled has no grants here, with no leftover to clean up.
  */
 static GDEFCORE_Result load_module_grants(GDEFCORE_Catalog * catalog,
-    Grant * grants, size_t cap, size_t * out_n) {
+    const Model * model, Grant * grants, size_t cap, size_t * out_n) {
   GDEFCORE_Host * host = gdefcore_catalog_host(catalog);
   const GDEFCORE_Module_Declared_Grant ** items = NULL;
   size_t count = 0;
@@ -631,8 +1241,8 @@ static GDEFCORE_Result load_module_grants(GDEFCORE_Catalog * catalog,
     Grant * g;
     char owner[kPart];
     size_t owner_len = 0;
-    rc = permission_by_label(catalog, item->permission, item->permission_len,
-        NULL, &info, owner, sizeof owner, &owner_len);
+    rc = model_permission_by_label(model, item->permission,
+        item->permission_len, NULL, &info, owner, sizeof owner, &owner_len);
     if (rc == GDEFCORE_ERR_INVALID) {
       rc = GDEFCORE_OK;
       continue;
@@ -684,7 +1294,7 @@ static GDEFCORE_Result load_module_grants(GDEFCORE_Catalog * catalog,
  * the field, an operation callback's none), which the enable refuses.
  */
 static GDEFCORE_Result load_module_callbacks(GDEFCORE_Catalog * catalog,
-    Grant * grants, size_t cap, size_t * out_n) {
+    const Model * model, Grant * grants, size_t cap, size_t * out_n) {
   GDEFCORE_Host * host = gdefcore_catalog_host(catalog);
   const GDEFCORE_Module_Declared_Callback ** items = NULL;
   size_t count = 0;
@@ -707,8 +1317,8 @@ static GDEFCORE_Result load_module_callbacks(GDEFCORE_Catalog * catalog,
     Grant * g;
     char owner[kPart];
     size_t owner_len = 0;
-    rc = permission_by_label(catalog, item->permission, item->permission_len,
-        NULL, &info, owner, sizeof owner, &owner_len);
+    rc = model_permission_by_label(model, item->permission,
+        item->permission_len, NULL, &info, owner, sizeof owner, &owner_len);
     if (rc == GDEFCORE_ERR_INVALID) {
       rc = GDEFCORE_OK;
       continue;
@@ -757,116 +1367,97 @@ static GDEFCORE_Result load_module_callbacks(GDEFCORE_Catalog * catalog,
  * nothing before it in the list grants (the decisions stop at the first
  * grant that holds). */
 static GDEFCORE_Result load_module_all(GDEFCORE_Catalog * catalog,
-    Grant * grants, size_t cap, size_t * out_n) {
-  GDEFCORE_Result rc = load_module_grants(catalog, grants, cap, out_n);
+    const Model * model, Grant * grants, size_t cap, size_t * out_n) {
+  GDEFCORE_Result rc = load_module_grants(catalog, model, grants, cap, out_n);
   if (rc == GDEFCORE_OK) {
-    rc = load_module_callbacks(catalog, grants, cap, out_n);
+    rc = load_module_callbacks(catalog, model, grants, cap, out_n);
   }
   return rc;
 }
 
+/* The grants a principal holds, from the model: its roles' grants, and (when
+ * @p with_modules) those of the enabled modules, which are read from the module
+ * host and never from the model. */
 static GDEFCORE_Result load_effective_for(GDEFCORE_Catalog * catalog,
-    const char * principal, size_t principal_len, Grant * grants, size_t cap,
-    size_t * out_n, int * read_principal, int with_modules) {
+    Model * model, const char * principal, size_t principal_len, Grant * grants,
+    size_t cap, size_t * out_n, int * read_principal, int with_modules) {
   char principal_id[GDEFCORE_PUBLIC_ID_LEN + 1];
   const char * roles[kAssignedRoles + 1];
   size_t role_lens[kAssignedRoles + 1];
   size_t nroles = 0;
   size_t i;
+  int anonymous = 0;
+  PrincipalView view;
+  GDEFCORE_Result rc = GDEFCORE_OK;
   *out_n = 0;
   *read_principal = 0;
+  memset(&view, 0, sizeof view);
   if (principal == NULL || principal_len == 0) {
-    principal = NULL;
+    anonymous = 1;
     roles[nroles] = kAnonymous;
     role_lens[nroles] = strlen(kAnonymous);
     nroles += 1;
   } else {
-    GDEFCORE_Field_Values pf[2];
-    char ** held;
-    size_t * held_lens;
-    size_t held_n;
-    GDEFCORE_Result rc;
     if (principal_len > GDEFCORE_PUBLIC_ID_LEN) {
       return GDEFCORE_OK;
     }
-    memcpy(principal_id, principal, principal_len);
-    principal_id[principal_len] = '\0';
-    /* The retired flag and the roles from one read of the principal. */
-    many_init(&pf[0], "retired");
-    many_init(&pf[1], "role");
-    rc = read_many(catalog, principal_id, pf, 2);
-    if (rc != GDEFCORE_OK) {
-      return rc;
-    }
-    if (values_have(pf[0].texts, pf[0].lens, pf[0].count, kRetired,
-            strlen(kRetired))) {
-      many_free(catalog, pf, 2);
-      return GDEFCORE_OK;
-    }
-    held = pf[1].texts;
-    held_lens = pf[1].lens;
-    held_n = pf[1].count;
     roles[nroles] = kAuthenticated;
     role_lens[nroles] = strlen(kAuthenticated);
     nroles += 1;
-    for (i = 0; i < held_n && nroles < kAssignedRoles + 1; i++) {
-      if (same(held[i], held_lens[i], kEmptyMark, strlen(kEmptyMark))) {
-        continue;
-      }
-      roles[nroles] = held[i];
-      role_lens[nroles] = held_lens[i];
-      nroles += 1;
-    }
-    for (i = 0; i < nroles; i++) {
-      char role_id[GDEFCORE_PUBLIC_ID_LEN + 1];
-      size_t got = 0;
-      size_t g;
-      if (i > 0 &&
-          find_role(catalog, roles[i], role_lens[i], role_id) != GDEFCORE_OK) {
-        continue;
-      }
-      if (i == 0 &&
-          find_role(catalog, roles[0], role_lens[0], role_id) != GDEFCORE_OK) {
-        continue;
-      }
-      rc = load_role_grants(catalog, role_id, grants + *out_n, cap - *out_n,
-          &got);
+    /* A principal that is not a public id is not retired and holds no role,
+     * as a principal that is not there. */
+    if (gdefcore_id_canonical(principal, principal_len, principal_id) ==
+        GDEFCORE_OK) {
+      rc = model_principal(model, catalog, principal_id, &view);
       if (rc != GDEFCORE_OK) {
-        many_free(catalog, pf, 2);
         return rc;
       }
-      for (g = 0; g < got; g++) {
-        memcpy(grants[*out_n + g].role_id, role_id, sizeof role_id);
-        if (grants[*out_n + g].condition == GDEFCORE_ACCESS_OWN) {
-          *read_principal = 1;
-        }
+      if (view.retired) {
+        principal_free(&view);
+        return GDEFCORE_OK;
       }
-      *out_n += got;
     }
-    many_free(catalog, pf, 2);
-    return with_modules ? load_module_all(catalog, grants, cap, out_n)
-                        : GDEFCORE_OK;
+    for (i = 0; i < view.roles.count && nroles < kAssignedRoles + 1; i++) {
+      if (same(view.roles.texts[i], view.roles.lens[i], kEmptyMark,
+              strlen(kEmptyMark))) {
+        continue;
+      }
+      roles[nroles] = view.roles.texts[i];
+      role_lens[nroles] = view.roles.lens[i];
+      nroles += 1;
+    }
   }
-  {
+  for (i = 0; i < nroles; i++) {
     char role_id[GDEFCORE_PUBLIC_ID_LEN + 1];
+    const ModelRole * role;
     size_t got = 0;
     size_t g;
-    if (find_role(catalog, roles[0], role_lens[0], role_id) != GDEFCORE_OK) {
-      return with_modules ? load_module_all(catalog, grants, cap, out_n)
-                          : GDEFCORE_OK;
+    if (model_find_role(model, roles[i], role_lens[i], role_id) !=
+        GDEFCORE_OK) {
+      continue;
     }
-    if (load_role_grants(catalog, role_id, grants, cap, &got) != GDEFCORE_OK) {
-      return GDEFCORE_ERR_INVALID;
+    role = model_role(model, role_id);
+    rc = grants_from_texts(role->grant.texts, role->grant.lens,
+        role->grant.count, grants + *out_n, cap - *out_n, &got);
+    if (rc != GDEFCORE_OK) {
+      /* The anonymous role's grants that cannot be read are a refusal and
+       * not the store's error, as they were. */
+      rc = anonymous ? GDEFCORE_ERR_INVALID : rc;
+      break;
     }
     for (g = 0; g < got; g++) {
-      memcpy(grants[g].role_id, role_id, sizeof role_id);
-      if (grants[g].condition == GDEFCORE_ACCESS_OWN) {
+      memcpy(grants[*out_n + g].role_id, role_id, sizeof role_id);
+      if (grants[*out_n + g].condition == GDEFCORE_ACCESS_OWN) {
         *read_principal = 1;
       }
     }
-    *out_n = got;
+    *out_n += got;
   }
-  return with_modules ? load_module_all(catalog, grants, cap, out_n)
+  principal_free(&view);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  return with_modules ? load_module_all(catalog, model, grants, cap, out_n)
                       : GDEFCORE_OK;
 }
 
@@ -875,73 +1466,34 @@ static GDEFCORE_Result load_effective(GDEFCORE_Catalog * catalog,
     int * read_principal) {
   const char * principal = NULL;
   size_t principal_len = 0;
+  Model * model = NULL;
+  GDEFCORE_Result rc = model_acquire(catalog, request, &model);
+  if (rc != GDEFCORE_OK) {
+    *out_n = 0;
+    *read_principal = 0;
+    return rc;
+  }
   if (request != NULL) {
     principal = gdefcore_request_principal(request, &principal_len);
   }
-  return load_effective_for(catalog, principal, principal_len, grants, cap,
+  rc = load_effective_for(catalog, model, principal, principal_len, grants, cap,
       out_n, read_principal, 1);
+  model_release(model);
+  return rc;
 }
 
-static GDEFCORE_Result load_decls(GDEFCORE_Catalog * catalog, Grant * decls,
-    size_t cap, size_t * out_n) {
-  char ** ids = NULL;
-  size_t count = 0;
-  size_t i;
-  GDEFCORE_Result rc = gdefcore_entity_ids(catalog, kPermissionType,
-      strlen(kPermissionType), &ids, &count);
+/* The declarations of every permission, from the model. */
+static GDEFCORE_Result load_decls(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Request * request, Grant * decls, size_t cap, size_t * out_n) {
+  Model * model = NULL;
+  GDEFCORE_Result rc = model_acquire(catalog, request, &model);
   *out_n = 0;
   if (rc != GDEFCORE_OK) {
     return rc;
   }
-  for (i = 0; i < count; i++) {
-    /* One read of the permission for its five fields. */
-    GDEFCORE_Field_Values f[5];
-    Grant * decl;
-    many_init(&f[0], "label");
-    many_init(&f[1], "type");
-    many_init(&f[2], "field");
-    many_init(&f[3], "condition");
-    many_init(&f[4], "action");
-    if (read_many(catalog, ids[i], f, 5) != GDEFCORE_OK || f[0].count == 0 ||
-        f[1].count == 0) {
-      many_free(catalog, f, 5);
-      continue;
-    }
-    if (*out_n >= cap) {
-      many_free(catalog, f, 5);
-      gdefcore_ids_free(catalog, ids, count);
-      return GDEFCORE_ERR_LIMIT;
-    }
-    decl = &decls[*out_n];
-    memset(decl, 0, sizeof *decl);
-    copy_part(decl->label, sizeof decl->label, &decl->label_len, f[0].texts[0],
-        f[0].lens[0]);
-    copy_part(decl->type_name, sizeof decl->type_name, &decl->type_len,
-        f[1].texts[0], f[1].lens[0]);
-    if (f[2].count > 0) {
-      copy_part(decl->field, sizeof decl->field, &decl->field_len, f[2].texts[0],
-          f[2].lens[0]);
-    }
-    if (f[4].count > 0) {
-      copy_part(decl->action, sizeof decl->action, &decl->action_len,
-          f[4].texts[0], f[4].lens[0]);
-    }
-    if (f[3].count == 1 && same(f[3].texts[0], f[3].lens[0], "own", 3)) {
-      decl->condition = GDEFCORE_ACCESS_OWN;
-    } else if (f[3].count == 1 && same(f[3].texts[0], f[3].lens[0], "any", 3)) {
-      decl->condition = GDEFCORE_ACCESS_ANY;
-    } else if (f[3].count == 1 && f[3].lens[0] > 0) {
-      /* An expression. Only its field, if any, matters here. */
-      decl->condition = kCondExpr;
-    } else {
-      many_free(catalog, f, 5);
-      continue;
-    }
-    *out_n += 1;
-    many_free(catalog, f, 5);
-  }
-  gdefcore_ids_free(catalog, ids, count);
-  return GDEFCORE_OK;
+  rc = model_decls(model, decls, cap, out_n);
+  model_release(model);
+  return rc;
 }
 
 static int type_has_field(GDEFCORE_Catalog * catalog, const char * type,
@@ -1806,6 +2358,7 @@ static GDEFCORE_Result setup_ceiling(Eval * ev) {
   const char * principal;
   size_t principal_len = 0;
   int ignored = 0;
+  Model * model = NULL;
   GDEFCORE_Result rc;
   if (ev->request == NULL) {
     return GDEFCORE_OK;
@@ -1823,8 +2376,12 @@ static GDEFCORE_Result setup_ceiling(Eval * ev) {
     ev->failed = 1;
     return GDEFCORE_ERR_OOM;
   }
-  rc = load_effective_for(ev->catalog, acting, acting_len, ev->ceiling,
-      kGrantMax, &ev->nceiling, &ignored, 0);
+  rc = model_acquire(ev->catalog, ev->request, &model);
+  if (rc == GDEFCORE_OK) {
+    rc = load_effective_for(ev->catalog, model, acting, acting_len, ev->ceiling,
+        kGrantMax, &ev->nceiling, &ignored, 0);
+    model_release(model);
+  }
   if (rc != GDEFCORE_OK) {
     ev->nceiling = 0;
     ev->failed = 1;
@@ -1880,50 +2437,19 @@ static GDEFCORE_Result permission_by_label(GDEFCORE_Catalog * catalog,
   for (i = 0; i < count; i++) {
     /* One read of the permission: the label tells whether it is the one, the
      * rest are what it declares. */
-    GDEFCORE_Field_Values f[6];
-    many_init(&f[0], "label");
-    many_init(&f[1], "module");
-    many_init(&f[2], "action");
-    many_init(&f[3], "condition");
-    many_init(&f[4], "type");
-    many_init(&f[5], "field");
-    if (read_many(catalog, ids[i], f, 6) != GDEFCORE_OK ||
-        !values_have(f[0].texts, f[0].lens, f[0].count, label, label_len) ||
-        f[1].count == 0 || f[2].count == 0 || f[3].count == 0 ||
-        f[4].count == 0) {
-      many_free(catalog, f, 6);
-      continue;
+    GDEFCORE_Field_Values f[kPermFields];
+    perm_fields_init(f);
+    if (read_many(catalog, ids[i], f, kPermFields) == GDEFCORE_OK &&
+        perm_grant(f, label, label_len, grant, module_name, module_cap,
+            module_len)) {
+      if (out_id != NULL) {
+        memcpy(out_id, ids[i], GDEFCORE_PUBLIC_ID_LEN + 1);
+      }
+      many_free(catalog, f, kPermFields);
+      rc = GDEFCORE_OK;
+      break;
     }
-    memset(grant, 0, sizeof *grant);
-    copy_part(grant->label, sizeof grant->label, &grant->label_len, label,
-        label_len);
-    copy_part(grant->action, sizeof grant->action, &grant->action_len,
-        f[2].texts[0], f[2].lens[0]);
-    copy_part(grant->type_name, sizeof grant->type_name, &grant->type_len,
-        f[4].texts[0], f[4].lens[0]);
-    if (f[5].count > 0) {
-      copy_part(grant->field, sizeof grant->field, &grant->field_len,
-          f[5].texts[0], f[5].lens[0]);
-    }
-    if (module_name != NULL) {
-      copy_part(module_name, module_cap, module_len, f[1].texts[0],
-          f[1].lens[0]);
-    }
-    if (f[3].lens[0] == 3 && memcmp(f[3].texts[0], "own", 3) == 0) {
-      grant->condition = GDEFCORE_ACCESS_OWN;
-    } else if (f[3].lens[0] == 3 && memcmp(f[3].texts[0], "any", 3) == 0) {
-      grant->condition = GDEFCORE_ACCESS_ANY;
-    } else {
-      grant->condition = kCondExpr;
-    }
-    copy_part(grant->module_name, sizeof grant->module_name, &grant->module_len,
-        f[1].texts[0], f[1].lens[0]);
-    if (out_id != NULL) {
-      memcpy(out_id, ids[i], GDEFCORE_PUBLIC_ID_LEN + 1);
-    }
-    many_free(catalog, f, 6);
-    rc = GDEFCORE_OK;
-    break;
+    many_free(catalog, f, kPermFields);
   }
   gdefcore_ids_free(catalog, ids, count);
   return rc;
@@ -3063,7 +3589,7 @@ GDEFCORE_Result gdefcore_access_read(GDEFCORE_Catalog * catalog,
   rc = load_effective(catalog, request, grants, kGrantMax, &ngrants,
       &read_principal);
   if (rc == GDEFCORE_OK) {
-    rc = load_decls(catalog, decls, kGrantMax, &ndecls);
+    rc = load_decls(catalog, request, decls, kGrantMax, &ndecls);
   }
   if (rc != GDEFCORE_OK) {
     gdefcore_text_free(catalog, type_name);
@@ -3447,7 +3973,7 @@ GDEFCORE_Result gdefcore_access_tree(GDEFCORE_Catalog * catalog,
   rc = load_effective(catalog, request, grants, kGrantMax, &ngrants,
       &read_principal);
   if (rc == GDEFCORE_OK) {
-    rc = load_decls(catalog, decls, kGrantMax, &ndecls);
+    rc = load_decls(catalog, request, decls, kGrantMax, &ndecls);
   }
   if (rc != GDEFCORE_OK) {
     gdefcore_text_free(catalog, type_name);
@@ -3630,7 +4156,7 @@ GDEFCORE_Result gdefcore_access_revision_values(GDEFCORE_Catalog * catalog,
   rc = load_effective(catalog, request, grants, kGrantMax, &ngrants,
       &read_principal);
   if (rc == GDEFCORE_OK) {
-    rc = load_decls(catalog, decls, kGrantMax, &ndecls);
+    rc = load_decls(catalog, request, decls, kGrantMax, &ndecls);
   }
   if (rc != GDEFCORE_OK) {
     gdefcore_text_free(catalog, type_name);
@@ -4422,7 +4948,7 @@ static GDEFCORE_Result list_impl(Eval * ev, GDEFCORE_Catalog * catalog,
   rc = load_effective(catalog, request, grants, kGrantMax, &ngrants,
       &read_principal);
   if (rc == GDEFCORE_OK) {
-    rc = load_decls(catalog, decls, kGrantMax, &ndecls);
+    rc = load_decls(catalog, request, decls, kGrantMax, &ndecls);
   }
   if (rc != GDEFCORE_OK) {
     return rc;
@@ -7111,7 +7637,7 @@ static GDEFCORE_Result can_field_impl(GDEFCORE_Catalog * catalog,
   gdefcore_request_mark_principal_dependent(request);
   rc = ensure(catalog);
   if (rc == GDEFCORE_OK) {
-    rc = load_decls(catalog, decls, kGrantMax, &ndecls);
+    rc = load_decls(catalog, request, decls, kGrantMax, &ndecls);
   }
   if (rc != GDEFCORE_OK) {
     return rc;

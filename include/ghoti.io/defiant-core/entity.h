@@ -265,6 +265,37 @@ GDEFCORE_API GDEFCORE_Result gdefcore_catalog_open(GDEFSTOR_Store * store,
 /** @brief Close a catalog. NULL is ignored. The store stays open. */
 GDEFCORE_API void gdefcore_catalog_destroy(GDEFCORE_Catalog * catalog);
 
+/** @brief Makes the object a catalog keeps under a name; see
+ * gdefcore_catalog_cache(). */
+typedef void * (*GDEFCORE_Catalog_Create_Fn)(void * ctx);
+
+/** @brief Frees the object a catalog kept under a name, when the catalog is
+ * destroyed. */
+typedef void (*GDEFCORE_Catalog_Release_Fn)(void * object);
+
+/**
+ * @brief The object this catalog keeps under @p name, made the first time it
+ * is asked for.
+ *
+ * It is for a part of the library that caches what it reads from the
+ * catalog's store and needs the cache to live as long as the catalog and to be
+ * the catalog's alone. @p create is called with @p ctx the first time any
+ * caller asks for @p name on this catalog, once, even when several threads
+ * ask at the same moment, and what it returns is kept. @p release, if not
+ * NULL, is called with it when the catalog is destroyed. A @p create that
+ * returns NULL has made nothing and is called again on the next ask. The
+ * object is the caller's to synchronize: this call only makes and finds it.
+ * At most four names.
+ *
+ * @param out_object Receives the object. Not written on failure.
+ * @return ::GDEFCORE_OK, ::GDEFCORE_ERR_INVALID (a NULL argument or an empty
+ *   or over-long name), ::GDEFCORE_ERR_OOM (@p create made nothing) or
+ *   ::GDEFCORE_ERR_LIMIT (four names are kept already).
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_catalog_cache(GDEFCORE_Catalog * catalog,
+    const char * name, GDEFCORE_Catalog_Create_Fn create,
+    GDEFCORE_Catalog_Release_Fn release, void * ctx, void ** out_object);
+
 /**
  * @brief Encode 16 bytes as a canonical public id.
  *

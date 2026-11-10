@@ -1189,6 +1189,98 @@ TEST_F(Entity, ValuesManyReadsEachFieldAsTheSingleReadDoes) {
           strlen(id), "en", 2, NULL, 0));
 }
 
+namespace {
+
+struct CacheProbe {
+  int made = 0;
+  int released = 0;
+  bool fail_next = false;
+  int object = 0;
+};
+
+void * CacheMake(void * ctx) {
+  CacheProbe * probe = (CacheProbe *)ctx;
+  if (probe->fail_next) {
+    probe->fail_next = false;
+    return NULL;
+  }
+  probe->made += 1;
+  return &probe->object;
+}
+
+void CacheRelease(void * object) {
+  /* The object is the probe's own; its counter is the one thing to find. */
+  ++*(int *)object;
+}
+
+}  // namespace
+
+/* A catalog keeps one object under a name, made the first time it is asked
+ * for, found after that, and released with the catalog. */
+TEST_F(Entity, ACatalogKeepsOneObjectPerNameAndReleasesItWithTheCatalog) {
+  CacheProbe probe;
+  CacheProbe other;
+  void * got = NULL;
+  void * again = NULL;
+  /* A create that makes nothing is out of memory, and is asked again. */
+  probe.fail_next = true;
+  EXPECT_EQ(GDEFCORE_ERR_OOM,
+      gdefcore_catalog_cache(catalog_, "probe", CacheMake, CacheRelease, &probe,
+          &got));
+  EXPECT_EQ(0, probe.made);
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_catalog_cache(catalog_, "probe", CacheMake, CacheRelease, &probe,
+          &got));
+  EXPECT_EQ(&probe.object, got);
+  EXPECT_EQ(1, probe.made);
+  /* Found, not made again. */
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_catalog_cache(catalog_, "probe", CacheMake, CacheRelease, &probe,
+          &again));
+  EXPECT_EQ(got, again);
+  EXPECT_EQ(1, probe.made);
+  /* A name of its own is an object of its own. */
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_catalog_cache(catalog_, "other", CacheMake, CacheRelease, &other,
+          &again));
+  EXPECT_EQ(&other.object, again);
+  EXPECT_EQ(1, other.made);
+  /* Four names are kept, and no more. */
+  EXPECT_EQ(GDEFCORE_OK,
+      gdefcore_catalog_cache(catalog_, "third", CacheMake, NULL, &other, &again));
+  EXPECT_EQ(GDEFCORE_OK,
+      gdefcore_catalog_cache(catalog_, "fourth", CacheMake, NULL, &other, &again));
+  EXPECT_EQ(GDEFCORE_ERR_LIMIT,
+      gdefcore_catalog_cache(catalog_, "fifth", CacheMake, NULL, &other, &again));
+  /* A name asked for again is still found when the table is full. */
+  EXPECT_EQ(GDEFCORE_OK,
+      gdefcore_catalog_cache(catalog_, "probe", CacheMake, CacheRelease, &probe,
+          &again));
+  EXPECT_EQ(got, again);
+  /* A bad call. */
+  EXPECT_EQ(GDEFCORE_ERR_INVALID,
+      gdefcore_catalog_cache(catalog_, "", CacheMake, NULL, &probe, &again));
+  EXPECT_EQ(GDEFCORE_ERR_INVALID,
+      gdefcore_catalog_cache(catalog_, "a-name-that-is-longer-than-the-table-keeps",
+          CacheMake, NULL, &probe, &again));
+  EXPECT_EQ(GDEFCORE_ERR_INVALID,
+      gdefcore_catalog_cache(catalog_, "x", NULL, NULL, &probe, &again));
+  EXPECT_EQ(GDEFCORE_ERR_INVALID,
+      gdefcore_catalog_cache(NULL, "x", CacheMake, NULL, &probe, &again));
+  EXPECT_EQ(GDEFCORE_ERR_INVALID,
+      gdefcore_catalog_cache(catalog_, "x", CacheMake, NULL, &probe, NULL));
+  /* Released once, with the catalog, and only what has a release. */
+  EXPECT_EQ(0, probe.object);
+  EXPECT_EQ(0, other.object);
+  gdefcore_catalog_destroy(catalog_);
+  catalog_ = NULL;
+  EXPECT_EQ(1, probe.object);
+  EXPECT_EQ(1, other.object);
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_catalog_open(store_, (const uint8_t *)kTenant, 1, NULL, NULL,
+          &catalog_));
+}
+
 TEST_F(Entity, PatchSavesRequiredAfterOptional) {
   char id[GDEFCORE_PUBLIC_ID_LEN + 1];
   uint64_t row = 0;
