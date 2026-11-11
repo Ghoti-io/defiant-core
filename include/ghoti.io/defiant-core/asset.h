@@ -49,9 +49,11 @@ extern "C" {
 /**
  * @brief An asset as a lookup reports it. Begins with @ref size.
  *
- * The strings and bytes are borrowed from the module that ships it, and are
- * valid until that module is uninstalled or its host closed; copy them to keep
- * them longer.
+ * The strings and bytes of a module's file are borrowed from the module that
+ * ships it. The site's own files (siteasset.h, owner `site`) are copies the
+ * lookup made. Either way they are valid until gdefcore_asset_release() is
+ * called on the result, and the lookup's caller always calls it; copy anything
+ * to keep it longer.
  */
 typedef struct GDEFCORE_Asset {
   size_t size;                ///< `sizeof(GDEFCORE_Asset)`.
@@ -65,14 +67,15 @@ typedef struct GDEFCORE_Asset {
   const uint8_t * bytes;      ///< The file.
   size_t bytes_len;           ///< Length of @ref bytes.
   char hash[GDEFCORE_ASSET_HASH_LEN + 1]; ///< Content hash, hex, NUL-terminated.
+  void * owned;               ///< Private: what gdefcore_asset_release() frees.
 } GDEFCORE_Asset;
 
 /**
  * @brief Find the asset @p ref (`owner/name`) of the catalog's tenant.
  *
  * @param catalog The catalog.
- * @param projection A staged changeset whose module enables and disables are
- *   applied first, or NULL for what is in force.
+ * @param projection A staged changeset whose module enables and disables, and
+ *   whose site files, are applied first, or NULL for what is in force.
  * @param ref The reference, `owner/name`: exactly one `/`, both sides
  *   non-empty.
  * @param ref_len Length of @p ref.
@@ -84,6 +87,14 @@ typedef struct GDEFCORE_Asset {
 GDEFCORE_API GDEFCORE_Result gdefcore_asset_find(GDEFCORE_Catalog * catalog,
     const GDEFCORE_Changeset * projection, const char * ref, size_t ref_len,
     GDEFCORE_Asset * out);
+
+/**
+ * @brief End a lookup: free what gdefcore_asset_find() copied for @p asset.
+ *
+ * Call it once on every result of a lookup that returned ::GDEFCORE_OK. NULL, and
+ * an asset that was not found, are ignored.
+ */
+GDEFCORE_API void gdefcore_asset_release(GDEFCORE_Asset * asset);
 
 /**
  * @brief The address a page uses for @p ref: `/assets/owner/name?v=hash`.

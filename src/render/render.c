@@ -34,6 +34,7 @@
 #include <ghoti.io/defiant-core/access.h>
 #include <ghoti.io/defiant-core/asset.h>
 #include <ghoti.io/defiant-core/layout.h>
+#include <ghoti.io/defiant-core/siteasset.h>
 #include <ghoti.io/defiant-core/menu.h>
 #include <ghoti.io/defiant-core/message.h>
 #include <ghoti.io/defiant-core/module.h>
@@ -3445,6 +3446,10 @@ static GDEFCORE_Result write_kit(GDEFCORE_Catalog * catalog) {
   if (rc == GDEFCORE_OK) {
     /* The same for layouts and the rules that choose one. */
     rc = gdefcore_layout_declare(catalog);
+  }
+  if (rc == GDEFCORE_OK) {
+    /* The site's own stylesheets and scripts, and the two permissions. */
+    rc = gdefcore_siteasset_declare(catalog);
   }
   if (rc == GDEFCORE_OK) {
     /* The settings: the site's changed values and who may change them. */

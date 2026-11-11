@@ -20,6 +20,9 @@
 
 #include <ghoti.io/defiant-core/macros.h>
 #include <ghoti.io/defiant-core/asset.h>
+#include <ghoti.io/defiant-core/siteasset.h>
+
+#include "render_internal.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -61,6 +64,13 @@ GDEFCORE_Result gdefcore_asset_find(GDEFCORE_Catalog * catalog,
       !split_ref(ref, ref_len, &owner_len)) {
     return GDEFCORE_ERR_INVALID;
   }
+  out->owned = NULL;
+  /* The site's own files are the owner `site`, and no module is. */
+  if (owner_len == sizeof GDEFCORE_SITE_ASSET_OWNER - 1 &&
+      memcmp(ref, GDEFCORE_SITE_ASSET_OWNER, owner_len) == 0) {
+    return gdefcore_siteasset_lookup(catalog, projection, ref + owner_len + 1,
+        ref_len - owner_len - 1, out);
+  }
   host = gdefcore_catalog_host(catalog);
   tenant = gdefcore_catalog_tenant(catalog, &tenant_len);
   if (host == NULL || tenant == NULL) {
@@ -94,6 +104,13 @@ GDEFCORE_Result gdefcore_asset_find(GDEFCORE_Catalog * catalog,
   return rc;
 }
 
+void gdefcore_asset_release(GDEFCORE_Asset * asset) {
+  if (asset != NULL) {
+    free(asset->owned);
+    asset->owned = NULL;
+  }
+}
+
 GDEFCORE_Result gdefcore_asset_url(GDEFCORE_Catalog * catalog,
     const GDEFCORE_Changeset * projection, const char * ref, size_t ref_len,
     char ** out_url, size_t * out_len) {
@@ -117,6 +134,7 @@ GDEFCORE_Result gdefcore_asset_url(GDEFCORE_Catalog * catalog,
   buf = (char *)malloc(sizeof kPrefix - 1 + ref_len + sizeof kQuery - 1 +
       GDEFCORE_ASSET_HASH_LEN + 1);
   if (buf == NULL) {
+    gdefcore_asset_release(&a);
     return GDEFCORE_ERR_OOM;
   }
   memcpy(buf, kPrefix, sizeof kPrefix - 1);
@@ -127,6 +145,7 @@ GDEFCORE_Result gdefcore_asset_url(GDEFCORE_Catalog * catalog,
   at += sizeof kQuery - 1;
   memcpy(buf + at, a.hash, GDEFCORE_ASSET_HASH_LEN);
   at += GDEFCORE_ASSET_HASH_LEN;
+  gdefcore_asset_release(&a);
   buf[at] = '\0';
   rc = gdefcore_text_dup(catalog, buf, at, out_url);
   free(buf);

@@ -315,13 +315,14 @@ compiled for no request.
 | `gdefcore_render_sample`, `gdefcore_render_shareable_count` | The editor's preview, and the shared-cache count. |
 | `gdefcore_render_compile_count`, `gdefcore_render_run_count` | How many template bodies the process has compiled to render, and how many it has run. |
 
-## Naming a file a module ships
+## Naming a file a module or the site ships
 
 A page template links a stylesheet, a script or an image with
 `asset("owner/name")`, which gives `/assets/owner/name?v=<hash>`. The owner is the
-module that ships the file (assets.md). The name must be written in the template
+module that ships the file, or `site` for a stylesheet or script the site wrote
+itself (assets.md). The name must be written in the template
 as plain text, so the file it names can be known when the template is saved: a
-template that names a file no enabled module ships, or that computes the name,
+template that names a file no enabled module or the site ships, or that computes the name,
 is refused with the line, and a template saved while the module is disabled is
 refused the same way. A file that goes away later (the module is disabled)
 renders as an empty address, not a guess.

@@ -1464,15 +1464,15 @@ TEST_F(Layouts, AnAssetNameIsCheckedWhenATemplateIsSavedAndMustBeWrittenOut) {
   };
   EXPECT_EQ("", issues("asset(\"skin/site.css\")")) << "CONTROL: a file the module ships";
   EXPECT_NE(std::string::npos,
-      issues("asset(\"skin/missing.css\")").find("no enabled module ships"));
+      issues("asset(\"skin/missing.css\")").find("no enabled module or the site ships"));
   EXPECT_NE(std::string::npos,
-      issues("asset(\"other/site.css\")").find("no enabled module ships"))
+      issues("asset(\"other/site.css\")").find("no enabled module or the site ships"))
       << "the owner is part of the name";
-  EXPECT_NE(std::string::npos, issues("asset(\"site.css\")").find("no enabled module ships"))
+  EXPECT_NE(std::string::npos, issues("asset(\"site.css\")").find("no enabled module or the site ships"))
       << "no owner";
-  EXPECT_NE(std::string::npos, issues("asset(\"skin/\")").find("no enabled module ships"));
+  EXPECT_NE(std::string::npos, issues("asset(\"skin/\")").find("no enabled module or the site ships"));
   EXPECT_NE(std::string::npos,
-      issues("asset(\"skin/site.css/x\")").find("no enabled module ships"));
+      issues("asset(\"skin/site.css/x\")").find("no enabled module or the site ships"));
   EXPECT_NE(std::string::npos, issues("asset(region(\"main\"))").find("plain text"))
       << "a name that is computed cannot be checked";
   EXPECT_NE(std::string::npos, issues("asset()").find("takes 1 argument"));

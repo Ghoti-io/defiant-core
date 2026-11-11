@@ -1321,8 +1321,10 @@ static void check_asset_call(Ctx * ctx, GLTANG_Ast_Node * n,
   if (gdefcore_asset_find(ctx->catalog, ctx->projection, text.buffer,
           text.length, &found) != GDEFCORE_OK) {
     note(ctx, GDEFCORE_ISSUE_CALL, n, "asset", 5,
-        "`asset(\"%s\")` names a file that no enabled module ships.",
+        "`asset(\"%s\")` names a file that no enabled module or the site ships.",
         text.buffer);
+  } else {
+    gdefcore_asset_release(&found);
   }
   gcu_free(text.buffer);
 }

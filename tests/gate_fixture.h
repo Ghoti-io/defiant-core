@@ -1061,6 +1061,12 @@ inline std::string MenuLine(World & w, const std::string & who,
     Note("gdefcore_layout_may_edit");
     out += " layout-may-edit=" +
            std::to_string(gdefcore_layout_may_edit(w.site.catalog, req));
+    Note("gdefcore_siteasset_may_edit");
+    out += " siteasset-may-edit=" +
+           std::to_string(gdefcore_siteasset_may_edit(w.site.catalog, req,
+               GDEFCORE_ASSET_CSS)) +
+           std::to_string(gdefcore_siteasset_may_edit(w.site.catalog, req,
+               GDEFCORE_ASSET_JS));
   }
   {
     /* The settings form of a group, and whether settings may be edited at all:

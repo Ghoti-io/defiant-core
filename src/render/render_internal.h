@@ -29,6 +29,7 @@
 
 #include <ghoti.io/defiant-core/macros.h>
 #include <ghoti.io/defiant-core/render.h>
+#include <ghoti.io/defiant-core/asset.h>
 
 #include <ghoti.io/lang-tang/execution.h>
 #include <ghoti.io/lang-tang/library.h>
@@ -107,6 +108,13 @@ void gdefcore_render_ctx_close(GDEFCORE_RenderCtx * ctx);
 GDEFCORE_Result gdefcore_render_find_named(GDEFCORE_Catalog * catalog,
     const char * type, size_t type_len, const char * name, size_t name_len,
     char out_id[GDEFCORE_PUBLIC_ID_LEN + 1]);
+
+/** The site's own file called @p name (siteasset.h), as @p projection would leave
+ * the site, with its text copied into @p out (release it with
+ * gdefcore_asset_release()). ::GDEFCORE_ERR_INVALID when there is none. */
+GDEFCORE_Result gdefcore_siteasset_lookup(GDEFCORE_Catalog * catalog,
+    const GDEFCORE_Changeset * projection, const char * name, size_t name_len,
+    GDEFCORE_Asset * out);
 
 /** The regions a page template's source declares (render.h). */
 void gdefcore_render_scan_regions(const char * body, size_t n, char *** out_names,

@@ -36,6 +36,7 @@
 #include <ghoti.io/defiant-core/subject.h>
 #include <ghoti.io/defiant-core/menu.h>
 #include <ghoti.io/defiant-core/layout.h>
+#include <ghoti.io/defiant-core/siteasset.h>
 #include <ghoti.io/defiant-core/settings.h>
 #include <ghoti.io/defiant-core/template.h>
 
@@ -4764,6 +4765,11 @@ GDEFCORE_Result gdefcore_changeset_apply(GDEFCORE_Changeset * changeset,
     if (rc != GDEFCORE_OK) {
       return rc;
     }
+    /* And who may write a site stylesheet or script. */
+    rc = gdefcore_siteasset_authorize(changeset, changeset->request);
+    if (rc != GDEFCORE_OK) {
+      return rc;
+    }
   }
   rc = gdefcore_changeset_rate(changeset, &risk);
   if (rc != GDEFCORE_OK) {
@@ -4807,6 +4813,12 @@ GDEFCORE_Result gdefcore_changeset_apply(GDEFCORE_Changeset * changeset,
   /* A setting that nobody declares, or that holds a value it may not, is
    * refused here with nothing written (settings.h). */
   rc = gdefcore_settings_vet(changeset);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  /* A site file with a name or text it may not have, or a name used twice, is
+   * refused here with nothing written (siteasset.h). */
+  rc = gdefcore_siteasset_vet(changeset);
   if (rc != GDEFCORE_OK) {
     return rc;
   }

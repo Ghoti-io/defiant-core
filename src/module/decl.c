@@ -37,7 +37,7 @@
 #include <ghoti.io/defiant-core/settings.h>
 
 #include <ghoti.io/cutil/allocator.h>
-#include <ghoti.io/security/sha256.h>
+#include "../core/asset_util.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -675,10 +675,6 @@ static void build_assets(Build * b, const GDEFCORE_Module_Manifest * m) {
   for (i = 0; i < m->nassets && b->rc == GDEFCORE_OK; i++) {
     GDEFCORE_Module_Asset a;
     DeclAsset * da = &d->assets[i];
-    GSEC_Sha256 ctx;
-    uint8_t dig[GSEC_SHA256_DIGEST_LEN];
-    static const char kHex[] = "0123456789abcdef";
-    size_t k;
     if (!TAKE_EXACT(b, GDEFCORE_Module_Asset, a, &m->assets[i], i)) {
       break;
     }
@@ -707,17 +703,11 @@ static void build_assets(Build * b, const GDEFCORE_Module_Manifest * m) {
     if (b->rc != GDEFCORE_OK) {
       break;
     }
-    if (gsec_sha256_init(&ctx) != GSEC_OK ||
-        gsec_sha256_update(&ctx, da->pub.bytes, da->pub.bytes_len) != GSEC_OK ||
-        gsec_sha256_final(&ctx, dig) != GSEC_OK) {
+    if (gdefcore_asset_hash(da->pub.bytes, da->pub.bytes_len, da->pub.hash) !=
+        GDEFCORE_OK) {
       build_fail(b, GDEFCORE_ERR_INTERNAL, "asset", i);
       break;
     }
-    for (k = 0; k < GDEFCORE_ASSET_HASH_LEN / 2; k++) {
-      da->pub.hash[k * 2] = kHex[dig[k] >> 4];
-      da->pub.hash[k * 2 + 1] = kHex[dig[k] & 0x0fu];
-    }
-    da->pub.hash[GDEFCORE_ASSET_HASH_LEN] = '\0';
     d->nassets = i + 1;
   }
   if (b->rc == GDEFCORE_OK && d->nassets > 1) {
@@ -1108,59 +1098,7 @@ GDEFCORE_Result gdefcore_decl_build(const GDEFCORE_Allocator * alloc,
 
 /* ----------------------------------------------------------- validation */
 
-/* Well-formed UTF-8 with no control character (newline and tab when asked), no
- * overlong form, no surrogate and nothing above U+10FFFF. */
-static int text_ok(const char * s, size_t n, int allow_ws) {
-  size_t i = 0;
-  while (i < n) {
-    unsigned char c = (unsigned char)s[i];
-    size_t more;
-    uint32_t cp;
-    uint32_t min;
-    size_t k;
-    if (c < 0x20 || c == 0x7f) {
-      if (allow_ws && (c == '\n' || c == '\t')) {
-        i += 1;
-        continue;
-      }
-      return 0;
-    }
-    if (c < 0x80) {
-      i += 1;
-      continue;
-    }
-    if (c >= 0xc2 && c <= 0xdf) {
-      more = 1;
-      cp = c & 0x1f;
-      min = 0x80;
-    } else if ((c & 0xf0) == 0xe0) {
-      more = 2;
-      cp = c & 0x0f;
-      min = 0x800;
-    } else if (c >= 0xf0 && c <= 0xf4) {
-      more = 3;
-      cp = c & 0x07;
-      min = 0x10000;
-    } else {
-      return 0;
-    }
-    if (i + more >= n) {
-      return 0;
-    }
-    for (k = 1; k <= more; k++) {
-      unsigned char e = (unsigned char)s[i + k];
-      if ((e & 0xc0) != 0x80) {
-        return 0;
-      }
-      cp = (cp << 6) | (e & 0x3f);
-    }
-    if (cp < min || cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff)) {
-      return 0;
-    }
-    i += more + 1;
-  }
-  return 1;
-}
+#define text_ok gdefcore_text_ok
 
 /* A short, printable rendering of a name for a message. Hostile bytes and
  * long names never reach the message whole. */
@@ -1920,24 +1858,7 @@ static int check_widgets(const DeclRef * refs, size_t n, Say * say) {
   return 0;
 }
 
-static int asset_name_ok(const char * s, size_t n) {
-  size_t i;
-  if (n == 0 || n > GDEFCORE_ASSET_NAME_MAX) {
-    return 0;
-  }
-  if (!((s[0] >= 'a' && s[0] <= 'z') || (s[0] >= '0' && s[0] <= '9'))) {
-    return 0;
-  }
-  for (i = 0; i < n; i++) {
-    if (!machine_char(s[i])) {
-      return 0;
-    }
-    if (s[i] == '.' && i + 1 < n && s[i + 1] == '.') {
-      return 0;
-    }
-  }
-  return 1;
-}
+#define asset_name_ok gdefcore_asset_name_ok
 
 static const char * const kImageTypes[] = {"image/png", "image/jpeg",
     "image/gif", "image/webp", "image/avif", "image/svg+xml", NULL};
@@ -1959,6 +1880,11 @@ static int check_assets(const DeclRef * refs, size_t n, Say * say) {
   size_t j;
   for (m = 0; m < n; m++) {
     const Decl * d = refs[m].decl;
+    if (d->nassets > 0 && d->module_len == 4 && memcmp(d->module, "site", 4) == 0) {
+      SAY(say, "Module site: the owner name 'site' is the site's own files, so "
+               "a module of that name ships none.");
+      return 1;
+    }
     for (i = 0; i < d->nassets; i++) {
       const GDEFCORE_Module_Declared_Asset * p = &d->assets[i].pub;
       char a[kShow + 8];
@@ -1979,7 +1905,7 @@ static int check_assets(const DeclRef * refs, size_t n, Say * say) {
               d->module, show(a, p->name, p->name_len));
           return 1;
         }
-        if (!text_ok((const char *)p->bytes, p->bytes_len, 1)) {
+        if (!text_ok((const char *)p->bytes, p->bytes_len, 2)) {
           SAY(say, "Module %s: asset '%s' is a stylesheet or script and is not "
                    "UTF-8 text.",
               d->module, show(a, p->name, p->name_len));

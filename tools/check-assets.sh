@@ -38,25 +38,28 @@ plant_setup "$@"
 
 plant_control testAssets 'Assets.*'
 plant_control testLayout 'Layouts.*Asset*:Layouts.AFile*'
+plant_control testSiteasset 'SiteAssets.*'
 
 DECL=src/module/decl.c
+UTIL=src/core/asset_util.c
 TEMPLATE=src/template/template.c
 T_LIST='Assets.AShippedFileIsListedWithItsTypeAndAContentHashWhileItsModuleIsEnabled'
 T_REFUSE='Assets.AnAssetThatBreaksARuleIsRefusedAndTheErrorNamesIt'
 T_LIMITS='Assets.EmptyOversizeAndRepeatedAssetsAreRefused'
 
-DOTDOT_OLD="    if (s[i] == '.' && i + 1 < n && s[i + 1] == '.') {"
+DOTDOT_OLD="    if (c == '.' && i + 1 < n && s[i + 1] == '.') {"
 DOTDOT_NEW="    if (0) {"
 
-plant_stale stale-object $DECL testAssets "$T_LIST" \
+plant_stale stale-object $UTIL testAssets "$T_LIST" \
   "$DOTDOT_OLD" "$DOTDOT_NEW" 
 
-# Plant 1: the hash is of the file's name, so two files that differ have one
-# hash when they share a name and the same bytes differ.
-plant hash-of-the-name $DECL testAssets \
+# Plant 1: the hash is of the file's first byte, so two files that differ after
+# it have one hash. (The hash is made in one place for a module's file and the
+# site's.)
+plant hash-of-the-first-byte $UTIL testAssets \
   "$T_LIST Assets.TheSameBytesGiveTheSameHashInAnyModule" \
-  '        gsec_sha256_update(&ctx, da->pub.bytes, da->pub.bytes_len) != GSEC_OK ||' \
-  '        gsec_sha256_update(&ctx, da->pub.name, da->pub.name_len) != GSEC_OK ||'
+  '      (n > 0 && gsec_sha256_update(&ctx, bytes, n) != GSEC_OK) ||' \
+  '      (n > 0 && gsec_sha256_update(&ctx, bytes, 1) != GSEC_OK) ||'
 
 # Plant 2: a script is served as a stylesheet.
 plant script-typed-as-css $DECL testAssets "$T_LIST" \
@@ -64,19 +67,14 @@ plant script-typed-as-css $DECL testAssets "$T_LIST" \
   '                               : "text/css; charset=utf-8";'
 
 # Plant 3: a name may hold `..`.
-plant dotdot-in-a-name $DECL testAssets "$T_REFUSE" \
+plant dotdot-in-a-name $UTIL testAssets "$T_REFUSE" \
   "$DOTDOT_OLD" "$DOTDOT_NEW"
 
 # Plant 4: a name may hold any character.
-plant any-character-in-a-name $DECL testAssets "$T_REFUSE" \
-  "    if (!machine_char(s[i])) {
-      return 0;
-    }
-    if (s[i] == '.' && i + 1 < n" \
-  "    if (0) {
-      return 0;
-    }
-    if (s[i] == '.' && i + 1 < n"
+plant any-character-in-a-name $UTIL testAssets "$T_REFUSE" \
+  "    if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' ||
+            c == '_' || c == '-')) {" \
+  "    if (0) {"
 
 # Plant 5: a stylesheet may name a media type of its own.
 plant media-type-on-a-stylesheet $DECL testAssets "$T_REFUSE" \
@@ -93,7 +91,7 @@ plant font-type-unchecked $DECL testAssets "$T_REFUSE" \
 
 # Plant 8: a stylesheet or script may be any bytes.
 plant text-asset-not-checked $DECL testAssets "$T_REFUSE" \
-  '        if (!text_ok((const char *)p->bytes, p->bytes_len, 1)) {' \
+  '        if (!text_ok((const char *)p->bytes, p->bytes_len, 2)) {' \
   '        if (0) {'
 
 # Plant 9: one asset may be any size.
@@ -146,5 +144,90 @@ plant computed-asset-name-allowed $TEMPLATE testLayout "$T_NAME" \
   '  if (arg == NULL || !IS(arg, STRING)) {
     return;
     note('
+
+# ---- the site's own files (siteasset.h) ------------------------------------------
+
+SA=src/render/siteasset.c
+T_FOUND='SiteAssets.AFileTheSiteWritesIsFoundUnderTheOwnerSiteWithTheHashOfItsText'
+T_EDIT='SiteAssets.AnEditChangesTheAddressAtOnceAndARemovalEndsIt'
+T_STAGED='SiteAssets.AStagedFileIsSeenThroughItsChangesetAndNotWithout'
+T_RULES='SiteAssets.AFileThatBreaksARuleIsRefusedAtStageAndAtApply'
+T_ONCE='SiteAssets.ANameIsUsedOnceAcrossBothKindsAndEverywhereAnEntityCanComeFrom'
+T_PERM='SiteAssets.TheTwoKindsHaveTwoPermissionsAndNeitherIsTheOthersOrLayoutEdit'
+
+# The owner `site` is looked up in the module registry like any other.
+plant site-owner-not-special src/render/asset.c testSiteasset "$T_FOUND" \
+  '  if (owner_len == sizeof GDEFCORE_SITE_ASSET_OWNER - 1 &&' \
+  '  if (0 &&'
+
+# The hash is of the file's name, so an edit leaves the address as it was.
+plant site-hash-of-the-name $SA testSiteasset "$T_FOUND $T_EDIT" \
+  '  rc = gdefcore_asset_hash(block, text_len, out->hash);' \
+  '  rc = gdefcore_asset_hash(block + text_len + 1, name_len, out->hash);'
+
+# A script is served as a stylesheet.
+plant site-script-typed-as-css $SA testSiteasset "$T_FOUND" \
+  '  out->media_type = kind == GDEFCORE_ASSET_CSS ? kCssMedia : kJsMedia;' \
+  '  out->media_type = kCssMedia;'
+
+# A staged file is not seen through its changeset.
+plant site-projection-ignored $SA testSiteasset "$T_STAGED" \
+  '  GDEFCORE_Result rc = locate(catalog, projection, name, name_len, NULL, id, &kind);' \
+  '  GDEFCORE_Result rc = locate(catalog, NULL, name, name_len, NULL, id, &kind);'
+
+# A name that is a stylesheet's may be staged as a script, which replaces it.
+plant site-name-reused-across-kinds-at-stage $SA testSiteasset "$T_ONCE" \
+  '  if (rc == GDEFCORE_OK && have_kind != kind) {' \
+  '  if (0) {'
+
+# The vet does not look for a second file of the same name.
+plant site-name-reused-at-vet $SA testSiteasset "$T_ONCE" \
+  '      if (rc == GDEFCORE_OK) {
+        out = refuse(changeset, name, name_len,
+            "the site already has a file of that name.");' \
+  '      if (0) {
+        out = refuse(changeset, name, name_len,
+            "the site already has a file of that name.");'
+
+# A file may be any size.
+plant site-size-unbounded $SA testSiteasset "$T_RULES" \
+  '  if (s == NULL || n == 0 || n > GDEFCORE_ASSET_BYTES_MAX) {' \
+  '  if (s == NULL || n == 0 || n > 0xFFFFFFFFu) {'
+
+# A line end of a form is refused.
+plant site-crlf-refused $SA testSiteasset "$T_RULES" \
+  '  return gdefcore_text_ok(s, n, 2);' \
+  '  return gdefcore_text_ok(s, n, 1);'
+
+# The name is not checked when a file is staged.
+plant site-name-unchecked-at-stage $SA testSiteasset "$T_RULES" \
+  '  if (changeset == NULL || type == NULL || !gdefcore_asset_name_ok(name, name_len) ||' \
+  '  if (changeset == NULL || type == NULL || 0 ||'
+
+# The vet does not check a name, or a text.
+plant site-name-unchecked-at-vet $SA testSiteasset "$T_RULES" \
+  '    if (!gdefcore_asset_name_ok(name, name_len)) {' \
+  '    if (0) {'
+plant site-text-unchecked-at-vet $SA testSiteasset "$T_RULES" \
+  '    } else if (!file_text_ok(text, text_len)) {' \
+  '    } else if (0) {'
+
+# A script is written on the stylesheet permission.
+plant site-script-on-the-css-permission $SA testSiteasset "$T_PERM" \
+  '                                                   : GDEFCORE_ASSET_JS_EDIT;' \
+  '                                                   : GDEFCORE_ASSET_CSS_EDIT;'
+
+# The button's question is not the apply's: a script asks the stylesheet permission.
+plant site-may-edit-asks-the-wrong-permission $SA testSiteasset "$T_PERM" \
+  '                        : kind == GDEFCORE_ASSET_JS ? GDEFCORE_ASSET_JS_EDIT' \
+  '                        : kind == GDEFCORE_ASSET_JS ? GDEFCORE_ASSET_CSS_EDIT'
+
+# The apply does not ask who may write a site file, or does not vet one.
+plant site-authorize-not-asked src/entity/entity.c testSiteasset "$T_PERM" \
+  '    rc = gdefcore_siteasset_authorize(changeset, changeset->request);' \
+  '    rc = GDEFCORE_OK;'
+plant site-vet-not-asked src/entity/entity.c testSiteasset "$T_ONCE" \
+  '  rc = gdefcore_siteasset_vet(changeset);' \
+  '  rc = GDEFCORE_OK;'
 
 plant_finish
