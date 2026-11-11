@@ -4484,6 +4484,26 @@ static int64_t offer_rank(int score, size_t nsegs, int exact, int refined) {
          (refined ? 1 : 0);
 }
 
+GDEFCORE_Result gdefcore_route_pattern_rank(const char * pattern, size_t pattern_len,
+    int exact, int refined, int64_t * out_rank) {
+  GDEFCORE_Allocator alloc;
+  Seg * segs = NULL;
+  size_t n = 0;
+  int score = 0;
+  GDEFCORE_Result rc;
+  if (pattern == NULL || out_rank == NULL || pattern_len > GDEFCORE_ROUTE_PATH_MAX) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  alloc = *gdefcore_allocator_default();
+  rc = split_path(&alloc, pattern, pattern_len, 1, &segs, &n, &score, NULL);
+  if (rc != GDEFCORE_OK) {
+    return rc == GDEFCORE_ERR_OOM ? rc : GDEFCORE_ERR_INVALID;
+  }
+  seg_free(&alloc, segs, n);
+  *out_rank = offer_rank(score, n, exact, refined);
+  return GDEFCORE_OK;
+}
+
 GDEFCORE_Result gdefcore_contributor_offer(
     const GDEFCORE_Contributor_Call * call, const GDEFCORE_Offer * offer) {
   Gather * g;

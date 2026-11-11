@@ -698,6 +698,7 @@
 #define gdefcore_offers_count GHOTIIO_DEFCORE(gdefcore_offers_count)
 #define gdefcore_offers_at GHOTIIO_DEFCORE(gdefcore_offers_at)
 #define gdefcore_offers_detail_at GHOTIIO_DEFCORE(gdefcore_offers_detail_at)
+#define gdefcore_route_pattern_rank GHOTIIO_DEFCORE(gdefcore_route_pattern_rank)
 #define gdefcore_offers_free GHOTIIO_DEFCORE(gdefcore_offers_free)
 #define gdefcore_route_pattern_ok GHOTIIO_DEFCORE(gdefcore_route_pattern_ok)
 #define gdefcore_widget_bind_text GHOTIIO_DEFCORE(gdefcore_widget_bind_text)

@@ -410,6 +410,7 @@ static const Surface kSurface[] = {
     {"gdefcore_offers_count", "P"},
     {"gdefcore_offers_at", "P"},
     {"gdefcore_offers_detail_at", "P"},
+    {"gdefcore_route_pattern_rank", "P"},
     {"gdefcore_offers_free", "P"},
     {"gdefcore_route_pattern_ok", "P"},
     {"gdefcore_widget_bind_text", "P"},

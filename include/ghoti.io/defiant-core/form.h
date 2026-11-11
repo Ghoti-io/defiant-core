@@ -870,6 +870,20 @@ GDEFCORE_API void gdefcore_offers_free(GDEFCORE_Offers * offers);
 GDEFCORE_API int gdefcore_route_pattern_ok(const char * pattern,
     size_t pattern_len, const char ** out_why);
 
+/**
+ * @brief The rank the engine gives a rule's @p pattern: the number the order of
+ * offers is made from (larger is more specific).
+ *
+ * More literal segments rank higher, the earlier ones counting more; then more
+ * segments; then @p exact; then @p refined (a rule that names a type). The same
+ * number is in each offer (gdefcore_offers_detail_at()).
+ *
+ * @return ::GDEFCORE_OK, or ::GDEFCORE_ERR_INVALID for a pattern a table would
+ *   not take.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_route_pattern_rank(const char * pattern,
+    size_t pattern_len, int exact, int refined, int64_t * out_rank);
+
 /** @brief Free bytes from the route functions that return them. NULL is ignored. */
 GDEFCORE_API void gdefcore_routes_free(GDEFCORE_Routes * routes, void * bytes);
 

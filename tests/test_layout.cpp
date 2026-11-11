@@ -980,6 +980,7 @@ TEST_F(Layouts, TheMainContentIsTheSameWithAndWithoutAContributor) {
 namespace {
 struct Why {
   std::vector<std::string> offers;   /* "layout@source:why" in the engine's order */
+  std::vector<int64_t> ranks;
   std::string ordered;
   std::string final;
   bool refined = false;
@@ -1004,6 +1005,7 @@ TEST_F(Layouts, TheCheckerNamesTheWinnerAndWhyEachOtherOfferLost) {
     for (size_t i = 0; i < w.noffers; i++) {
       out.offers.push_back(std::string(w.offers[i].layout) + "@" + w.offers[i].source + ":" +
           std::to_string(w.offers[i].why));
+      out.ranks.push_back(w.offers[i].rank);
     }
     out.ordered = w.ordered;
     out.final = w.final;
@@ -1021,6 +1023,22 @@ TEST_F(Layouts, TheCheckerNamesTheWinnerAndWhyEachOtherOfferLost) {
   EXPECT_EQ("a", deep.final);
   EXPECT_EQ("a", deep.ordered);
   EXPECT_FALSE(deep.refined);
+  /* The rank a rule's pattern is given, before any page, is the rank its offer has. */
+  int64_t rank = 0;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_route_pattern_rank("/page/x/*", 9, 0, 0, &rank));
+  EXPECT_EQ(rank, deep.ranks[0]);
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_route_pattern_rank("/page/*", 7, 0, 0, &rank));
+  EXPECT_EQ(rank, deep.ranks[1]);
+  int64_t exact = 0;
+  int64_t typed = 0;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_route_pattern_rank("/page", 5, 0, 0, &rank));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_route_pattern_rank("/page", 5, 1, 0, &exact));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_route_pattern_rank("/page", 5, 0, 1, &typed));
+  EXPECT_GT(exact, rank) << "an exact pattern outranks the same one that is not";
+  EXPECT_GT(typed, rank) << "a rule that names a type outranks the same one without";
+  EXPECT_GT(deep.ranks[0], deep.ranks[1]);
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, gdefcore_route_pattern_rank("no-slash", 8, 0, 0, &rank));
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, gdefcore_route_pattern_rank("/a", 2, 0, 0, NULL));
   /* Equal rank: the lighter weight wins, the heavier says so. */
   Why shallow = why("/page");
   ASSERT_EQ(2u, shallow.offers.size());
