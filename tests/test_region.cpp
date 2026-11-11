@@ -36,6 +36,7 @@
 
 #include "grants_fixture.h"
 #include "size_structs.h"
+#include "../src/render/render_internal.h"
 
 using namespace gfx;
 
@@ -235,13 +236,7 @@ TEST_F(Regions, ASharedDescriptorIsMadeChangedAndRemovedByChangeset) {
   EXPECT_EQ("Promo||2", Describe(NULL, "promo")) << "the description is taken away";
   /* A site's own descriptor for a default name wins, and the seed leaves it. */
   ASSERT_EQ(GDEFCORE_OK, Shared("main", "The content", "Mine.")) << refusal_;
-  {
-    uint8_t * bytes = NULL;
-    size_t n = 0;
-    ASSERT_EQ(GDEFCORE_OK, gdefcore_render_kit(catalog_, &bytes, &n));
-    ASSERT_EQ(GDEFCORE_OK, gdefcore_render_install(catalog_, bytes, n));
-    gdefcore_text_free(catalog_, (char *)bytes);
-  }
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_render_region_seed(catalog_)) << "the seed again";
   EXPECT_EQ("The content|Mine.|2", Describe(NULL, "main"));
   /* Removing a default leaves the name. */
   ASSERT_EQ(GDEFCORE_OK, Forget("promo")) << refusal_;

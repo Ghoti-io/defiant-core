@@ -471,6 +471,16 @@ TEST_F(Structures, ACustomTemplateIsNeverOverwrittenExceptByAnExplicitNewStructu
   EXPECT_EQ(GDEFCORE_ERR_INVALID, Stage("grail", two)) << "not without saying so";
   EXPECT_EQ(mine, Body("grail"));
   EXPECT_EQ("custom", Read("grail"));
+  /* The refusal is the template's own, not only the stylesheet's: with the
+   * stylesheet gone there is nothing else to stop it. */
+  GDEFCORE_Changeset * gone = NULL;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &gone));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_siteasset_stage_forget(gone, "layout-grail.css", 16));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(gone, kCss, strlen(kCss)));
+  gdefcore_changeset_destroy(gone);
+  EXPECT_EQ("<none>", Css("grail"));
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, Stage("grail", two)) << "not without saying so, with no file in the way";
+  EXPECT_EQ(mine, Body("grail"));
   ASSERT_EQ(GDEFCORE_OK, Stage("grail", two, 1)) << refusal_;
   EXPECT_NE(mine, Body("grail"));
   EXPECT_EQ(two, Read("grail"));
