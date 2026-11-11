@@ -294,3 +294,34 @@ permissions and, for each layout carried, the layout permission.
 The starting points are a fixed table of structure documents in the library, not
 stored data: a site's own named structures are a later addition that needs a
 stored type and a permission of its own.
+
+## Previewing a layout
+
+`gdefcore_layout_preview()` answers what a visitor would see of a layout without a
+request: it reads the published layout and decides, for a viewer given as data (a
+role, a page's path and an entity type), which placements show. An empty role is a
+visitor who is not signed in, `authenticated` is anyone signed in, and any other
+name is a signed-in person holding that role (who therefore also matches a
+placement for `authenticated`). A placement that names a path or a type shows only
+on a matching page. The result flags each placement shown or not and counts both;
+**a placement that is not shown is counted and never named**, so previewing as
+another role cannot find out what that role is not given. Nothing is written,
+cached or kept. It does not run widgets: a preview is the layout's structure with
+its widgets' names, because running a widget as another role is the leak a preview
+must not be. Measured on a layout of 31 placements, a preview takes about 440
+microseconds on the development host (the read of the one layout).
+
+## A page template's body and the layouts that draw with it
+
+A page template's body calls the regions a layout may place widgets in. When the
+body is edited, `gdefcore_layout_stage_template_carry()` stages, beside the
+template's own change and in the same changeset, what each layout that draws with
+the template becomes: a placement in a region the new body no longer calls is set
+aside in the layout's Not placed list, and one line `layout widget region` per
+placement is returned for the editor to say so. No placement is lost, and none is
+left naming a region the template lacks. An edit of a structure does the same and
+also carries a rename (see *Editing a page structure*).
+
+Disabling a module whose widget a layout places is refused, so a placed widget is
+never orphaned by a disable; a Not placed entry of a disabled module's widget is
+kept and cannot be placed until the module is enabled.
