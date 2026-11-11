@@ -1085,21 +1085,6 @@ static int widths_for(Row * row) {
   return 1;
 }
 
-static int find_region(const Doc * doc, const char * region, size_t n, int * r, int * k) {
-  int i;
-  int j;
-  for (i = 0; i < doc->nrows; i++) {
-    for (j = 0; j < doc->rows[i].ncells; j++) {
-      if (span_eq(doc->rows[i].cells[j].region, strlen(doc->rows[i].cells[j].region), region, n)) {
-        *r = i;
-        *k = j;
-        return 1;
-      }
-    }
-  }
-  return 0;
-}
-
 static void remove_cell_at(Row * row, int k) {
   int j;
   int gone = row->cells[k].stacked;
