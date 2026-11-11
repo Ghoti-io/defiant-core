@@ -30,6 +30,7 @@
 #include <ghoti.io/defiant-core/structure.h>
 
 #include "render_internal.h"
+#include "../core/asset_util.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -887,4 +888,708 @@ GDEFCORE_Result gdefcore_structure_vet(GDEFCORE_Changeset * changeset) {
     }
   }
   return GDEFCORE_OK;
+}
+
+/* ---- editing ---------------------------------------------------------------------- */
+
+static const struct {
+  const char * name;
+  const char * label;
+  const char * document;
+} kStarts[] = {
+    {"one-column", "One column",
+        "row stack medium\ncell main 12 1\n"},
+    {"two-columns-right", "Two columns, sidebar on the right",
+        "row stack medium\ncell main 8 1\ncell side 4 2\n"},
+    {"two-columns-left", "Two columns, sidebar on the left",
+        "row stack medium\ncell side 4 2\ncell main 8 1\n"},
+    {"three-columns", "Three columns",
+        "row stack medium\ncell navigation 3 2\ncell main 6 1\ncell side 3 3\n"},
+    {"header-two-columns-footer", "Header, two columns, footer",
+        "row fixed\ncell header 12\nrow stack medium\ncell main 8 1\ncell side 4 2\n"
+        "row fixed\ncell footer 12\n"},
+    {"holy-grail", "Header, left rail, main, right rail, footer",
+        "row fixed\ncell header 12\nrow stack wide\ncell navigation 2 2\ncell main 8 1\n"
+        "cell side 2 3\nrow fixed\ncell footer 12\n"},
+    {"landing-page", "Landing page: header, feature row, main, footer",
+        "row fixed\ncell header 12\nrow wrap\ncell feature-one\ncell feature-two\n"
+        "cell feature-three\nrow fixed\ncell main 12\nrow fixed\ncell footer 12\n"},
+};
+
+int gdefcore_structure_starting_point(size_t index, const char ** name, const char ** label,
+    const char ** document) {
+  if (index >= sizeof kStarts / sizeof kStarts[0]) {
+    return 0;
+  }
+  if (name != NULL) {
+    *name = kStarts[index].name;
+  }
+  if (label != NULL) {
+    *label = kStarts[index].label;
+  }
+  if (document != NULL) {
+    *document = kStarts[index].document;
+  }
+  return 1;
+}
+
+static void version_text(const char * text, size_t n, char out[GDEFCORE_STRUCTURE_VERSION_LEN + 1]) {
+  if (gdefcore_asset_hash((const uint8_t *)text, n, out) != GDEFCORE_OK) {
+    out[0] = '\0';
+  }
+}
+
+/* The stored structure of @p name: 1 with the text malloc'd (empty when it has
+ * none), 0 when there is no such template. */
+static GDEFCORE_Result stored_text(GDEFCORE_Catalog * catalog, const char * name, size_t n,
+    int * exists, char ** text, size_t * text_len) {
+  char * got = NULL;
+  size_t got_len = 0;
+  GDEFCORE_Result rc = gdefcore_structure_read(catalog, name, n, &got, &got_len);
+  *exists = 1;
+  *text = NULL;
+  *text_len = 0;
+  if (rc == GDEFCORE_ERR_INVALID) {
+    *exists = 0;
+    return GDEFCORE_OK;
+  }
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  *text = (char *)malloc(got_len + 1);
+  if (*text == NULL) {
+    gdefcore_text_free(catalog, got);
+    return GDEFCORE_ERR_OOM;
+  }
+  memcpy(*text, got, got_len);
+  (*text)[got_len] = '\0';
+  *text_len = got_len;
+  gdefcore_text_free(catalog, got);
+  return GDEFCORE_OK;
+}
+
+void gdefcore_structure_view_free(GDEFCORE_Structure_View * view) {
+  if (view == NULL) {
+    return;
+  }
+  free(view->rows);
+  free(view->document);
+  view->rows = NULL;
+  view->document = NULL;
+  view->nrows = 0;
+  view->document_len = 0;
+}
+
+GDEFCORE_Result gdefcore_structure_view(GDEFCORE_Catalog * catalog, const char * name,
+    size_t name_len, GDEFCORE_Structure_View * out) {
+  char * text = NULL;
+  size_t n = 0;
+  int exists = 0;
+  Doc * doc = NULL;
+  GDEFCORE_Result rc;
+  int r;
+  int k;
+  if (catalog == NULL || name == NULL || out == NULL || out->size != sizeof *out) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  memset((char *)out + sizeof out->size, 0, sizeof *out - sizeof out->size);
+  rc = stored_text(catalog, name, name_len, &exists, &text, &n);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  if (!exists) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  out->document = text;
+  out->document_len = n;
+  version_text(text, n, out->version);
+  if (n == 0) {
+    out->kind = GDEFCORE_STRUCTURE_KIND_NONE;
+    return GDEFCORE_OK;
+  }
+  if (span_eq(text, n, GDEFCORE_STRUCTURE_CUSTOM, sizeof GDEFCORE_STRUCTURE_CUSTOM - 1)) {
+    out->kind = GDEFCORE_STRUCTURE_KIND_CUSTOM;
+    return GDEFCORE_OK;
+  }
+  doc = (Doc *)malloc(sizeof *doc);
+  if (doc == NULL) {
+    gdefcore_structure_view_free(out);
+    return GDEFCORE_ERR_OOM;
+  }
+  if (!parse(text, n, doc, NULL, 0)) {
+    free(doc);
+    gdefcore_structure_view_free(out);
+    return GDEFCORE_ERR_INVALID;
+  }
+  out->rows = (GDEFCORE_Structure_Row *)calloc(doc->nrows == 0 ? 1 : (size_t)doc->nrows,
+      sizeof *out->rows);
+  if (out->rows == NULL) {
+    free(doc);
+    gdefcore_structure_view_free(out);
+    return GDEFCORE_ERR_OOM;
+  }
+  out->kind = GDEFCORE_STRUCTURE_KIND_DOCUMENT;
+  out->nrows = (size_t)doc->nrows;
+  for (r = 0; r < doc->nrows; r++) {
+    out->rows[r].behavior = doc->rows[r].behavior;
+    out->rows[r].breakpoint = doc->rows[r].breakpoint;
+    out->rows[r].ncells = (size_t)doc->rows[r].ncells;
+    for (k = 0; k < doc->rows[r].ncells; k++) {
+      memcpy(out->rows[r].cells[k].region, doc->rows[r].cells[k].region,
+          sizeof out->rows[r].cells[k].region);
+      out->rows[r].cells[k].width = doc->rows[r].cells[k].width;
+      out->rows[r].cells[k].stacked = doc->rows[r].cells[k].stacked;
+    }
+  }
+  free(doc);
+  return GDEFCORE_OK;
+}
+
+/* A stacked position 1..n for each cell of @p row, closing any gap and keeping the order. */
+static void restack(Row * row) {
+  int k;
+  int j;
+  int rank;
+  int used[GDEFCORE_STRUCTURE_ROW_CELLS_MAX];
+  for (k = 0; k < row->ncells; k++) {
+    rank = 1;
+    for (j = 0; j < row->ncells; j++) {
+      if (row->cells[j].stacked < row->cells[k].stacked ||
+          (row->cells[j].stacked == row->cells[k].stacked && j < k)) {
+        rank++;
+      }
+    }
+    used[k] = rank;
+  }
+  for (k = 0; k < row->ncells; k++) {
+    row->cells[k].stacked = used[k];
+  }
+}
+
+/* Give a row's cells widths that fit when it becomes a stack or fixed row. */
+static int widths_for(Row * row) {
+  int k;
+  int each;
+  if (row->ncells == 0) {
+    return 1;
+  }
+  each = 12 / row->ncells;
+  if (each < 1) {
+    return 0;
+  }
+  for (k = 0; k < row->ncells; k++) {
+    row->cells[k].width = each;
+  }
+  return 1;
+}
+
+static int find_region(const Doc * doc, const char * region, size_t n, int * r, int * k) {
+  int i;
+  int j;
+  for (i = 0; i < doc->nrows; i++) {
+    for (j = 0; j < doc->rows[i].ncells; j++) {
+      if (span_eq(doc->rows[i].cells[j].region, strlen(doc->rows[i].cells[j].region), region, n)) {
+        *r = i;
+        *k = j;
+        return 1;
+      }
+    }
+  }
+  return 0;
+}
+
+static void remove_cell_at(Row * row, int k) {
+  int j;
+  int gone = row->cells[k].stacked;
+  for (j = k; j + 1 < row->ncells; j++) {
+    row->cells[j] = row->cells[j + 1];
+  }
+  row->ncells--;
+  for (j = 0; j < row->ncells; j++) {
+    if (row->cells[j].stacked > gone) {
+      row->cells[j].stacked--;
+    }
+  }
+}
+
+static void insert_cell_at(Row * row, int at, const Cell * cell) {
+  int j;
+  for (j = row->ncells; j > at; j--) {
+    row->cells[j] = row->cells[j - 1];
+  }
+  row->cells[at] = *cell;
+  row->ncells++;
+}
+
+static void drop_row(Doc * doc, int r) {
+  int j;
+  for (j = r; j + 1 < doc->nrows; j++) {
+    doc->rows[j] = doc->rows[j + 1];
+  }
+  doc->nrows--;
+}
+
+/* Apply @p edit to @p doc. 0 with a sentence in @p why when it cannot be. */
+static int apply_edit(Doc * doc, const GDEFCORE_Structure_Edit * e, const char ** why,
+    char renamed_from[GDEFCORE_REGION_NAME_MAX + 1], int * renamed) {
+  static const char kThere[] = GDEFCORE_STRUCTURE_REFUSED_THERE;
+  int r = (int)e->row;
+  int k = (int)e->cell;
+  Cell cell;
+  *renamed = 0;
+  if (e->row > 4096 || e->cell > 4096 || e->to_row > 4096 || e->to_cell > 4096) {
+    *why = kThere;   /* past anything a structure holds; keeps the casts below safe */
+    return 0;
+  }
+  switch (e->act) {
+    case GDEFCORE_STRUCTURE_ACT_ADD_ROW: {
+      Row row;
+      int at = r > doc->nrows ? doc->nrows : r;
+      int j;
+      if (doc->nrows >= GDEFCORE_STRUCTURE_ROWS_MAX) {
+        *why = "A structure has at most 32 rows.";
+        return 0;
+      }
+      if (e->behavior < kStack || e->behavior > kFixed) {
+        *why = "A row is stack, wrap or fixed.";
+        return 0;
+      }
+      if (e->region == NULL || !gdefcore_region_name_ok(e->region, e->region_len)) {
+        *why = "A cell names a region: a-z first, then a-z, 0-9, '_' and '-'.";
+        return 0;
+      }
+      memset(&row, 0, sizeof row);
+      row.behavior = e->behavior;
+      row.ncells = 1;
+      memcpy(row.cells[0].region, e->region, e->region_len);
+      if (e->behavior != kWrap) {
+        row.cells[0].width = e->width > 0 ? e->width : 12;
+        row.cells[0].stacked = 1;
+      }
+      row.breakpoint = e->behavior == kStack ? (e->breakpoint == 0 ? kMedium : e->breakpoint) : 0;
+      if (row.breakpoint < 0 || row.breakpoint > kWide) {
+        *why = "A stack row folds at narrow, medium or wide.";
+        return 0;
+      }
+      for (j = doc->nrows; j > at; j--) {
+        doc->rows[j] = doc->rows[j - 1];
+      }
+      doc->rows[at] = row;
+      doc->nrows++;
+      return 1;
+    }
+    case GDEFCORE_STRUCTURE_ACT_REMOVE_ROW: {
+      int j;
+      if (r >= doc->nrows) {
+        *why = kThere;
+        return 0;
+      }
+      for (j = r; j + 1 < doc->nrows; j++) {
+        doc->rows[j] = doc->rows[j + 1];
+      }
+      doc->nrows--;
+      return 1;
+    }
+    case GDEFCORE_STRUCTURE_ACT_MOVE_ROW: {
+      Row row;
+      int to = (int)e->to_row;
+      int j;
+      if (r >= doc->nrows) {
+        *why = kThere;
+        return 0;
+      }
+      if (to >= doc->nrows) {
+        to = doc->nrows - 1;
+      }
+      row = doc->rows[r];
+      for (j = r; j + 1 < doc->nrows; j++) {
+        doc->rows[j] = doc->rows[j + 1];
+      }
+      for (j = doc->nrows - 1; j > to; j--) {
+        doc->rows[j] = doc->rows[j - 1];
+      }
+      doc->rows[to] = row;
+      return 1;
+    }
+    case GDEFCORE_STRUCTURE_ACT_SET_ROW: {
+      Row * row;
+      if (r >= doc->nrows) {
+        *why = kThere;
+        return 0;
+      }
+      row = &doc->rows[r];
+      if (e->behavior < kStack || e->behavior > kFixed) {
+        *why = "A row is stack, wrap or fixed.";
+        return 0;
+      }
+      if (e->breakpoint < 0 || e->breakpoint > kWide) {
+        *why = "A stack row folds at narrow, medium or wide.";
+        return 0;
+      }
+      if (row->behavior == kWrap && e->behavior != kWrap && !widths_for(row)) {
+        *why = "A row has at most 12 cells.";
+        return 0;
+      }
+      if (e->behavior == kWrap) {
+        int j;
+        for (j = 0; j < row->ncells; j++) {
+          row->cells[j].width = 0;
+          row->cells[j].stacked = 0;
+        }
+      } else if (row->behavior == kWrap) {
+        int j;
+        for (j = 0; j < row->ncells; j++) {
+          row->cells[j].stacked = j + 1;
+        }
+      }
+      row->behavior = e->behavior;
+      row->breakpoint = e->behavior == kStack ? (e->breakpoint == 0 ? kMedium : e->breakpoint) : 0;
+      return 1;
+    }
+    case GDEFCORE_STRUCTURE_ACT_ADD_CELL: {
+      Row * row;
+      int at;
+      if (r >= doc->nrows) {
+        *why = kThere;
+        return 0;
+      }
+      row = &doc->rows[r];
+      if (row->ncells >= GDEFCORE_STRUCTURE_ROW_CELLS_MAX) {
+        *why = "A row has at most 12 cells.";
+        return 0;
+      }
+      if (e->region == NULL || !gdefcore_region_name_ok(e->region, e->region_len)) {
+        *why = "A cell names a region: a-z first, then a-z, 0-9, '_' and '-'.";
+        return 0;
+      }
+      memset(&cell, 0, sizeof cell);
+      memcpy(cell.region, e->region, e->region_len);
+      if (row->behavior != kWrap) {
+        cell.width = e->width;
+        cell.stacked = e->stacked > 0 && e->stacked <= row->ncells + 1 ? e->stacked : row->ncells + 1;
+        for (at = 0; at < row->ncells; at++) {
+          if (row->cells[at].stacked >= cell.stacked) {
+            row->cells[at].stacked++;
+          }
+        }
+      }
+      insert_cell_at(row, row->ncells, &cell);
+      return 1;
+    }
+    case GDEFCORE_STRUCTURE_ACT_REMOVE_CELL:
+      if (r >= doc->nrows || k >= doc->rows[r].ncells) {
+        *why = kThere;
+        return 0;
+      }
+      remove_cell_at(&doc->rows[r], k);
+      if (doc->rows[r].behavior != kWrap) {
+        restack(&doc->rows[r]);
+      }
+      if (doc->rows[r].ncells == 0) {
+        drop_row(doc, r);   /* a row with no cell is no row */
+      }
+      return 1;
+    case GDEFCORE_STRUCTURE_ACT_MOVE_CELL: {
+      int tr = (int)e->to_row;
+      int tk;
+      if (r >= doc->nrows || k >= doc->rows[r].ncells || tr >= doc->nrows) {
+        *why = kThere;
+        return 0;
+      }
+      cell = doc->rows[r].cells[k];
+      if (tr == r) {
+        Row * row = &doc->rows[r];
+        tk = (int)e->to_cell;
+        if (tk >= row->ncells) {
+          tk = row->ncells - 1;
+        }
+        {
+          int j;
+          for (j = k; j + 1 < row->ncells; j++) {
+            row->cells[j] = row->cells[j + 1];
+          }
+          row->ncells--;
+          insert_cell_at(row, tk, &cell);
+        }
+        return 1;
+      }
+      if (doc->rows[tr].ncells >= GDEFCORE_STRUCTURE_ROW_CELLS_MAX) {
+        *why = "A row has at most 12 cells.";
+        return 0;
+      }
+      remove_cell_at(&doc->rows[r], k);
+      if (doc->rows[r].behavior != kWrap) {
+        restack(&doc->rows[r]);
+      }
+      tk = (int)e->to_cell;
+      if (tk > doc->rows[tr].ncells) {
+        tk = doc->rows[tr].ncells;
+      }
+      if (doc->rows[tr].behavior == kWrap) {
+        cell.width = 0;
+        cell.stacked = 0;
+      } else {
+        int used = 0;
+        int j;
+        for (j = 0; j < doc->rows[tr].ncells; j++) {
+          used += doc->rows[tr].cells[j].width;
+        }
+        cell.stacked = doc->rows[tr].ncells + 1;
+        /* It takes what room the row has left, at least one column. */
+        if (cell.width < 1 || cell.width > 12 - used) {
+          cell.width = 12 - used < 1 ? 1 : (cell.width < 1 ? 1 : 12 - used);
+        }
+      }
+      insert_cell_at(&doc->rows[tr], tk, &cell);
+      if (doc->rows[r].ncells == 0) {
+        drop_row(doc, r);
+      }
+      return 1;
+    }
+    case GDEFCORE_STRUCTURE_ACT_SET_WIDTH:
+      if (r >= doc->nrows || k >= doc->rows[r].ncells) {
+        *why = kThere;
+        return 0;
+      }
+      if (doc->rows[r].behavior == kWrap) {
+        *why = "A cell of a wrap row has no width.";
+        return 0;
+      }
+      doc->rows[r].cells[k].width = e->width;
+      return 1;
+    case GDEFCORE_STRUCTURE_ACT_SET_STACKED: {
+      Row * row;
+      int j;
+      if (r >= doc->nrows || k >= doc->rows[r].ncells) {
+        *why = kThere;
+        return 0;
+      }
+      row = &doc->rows[r];
+      if (row->behavior == kWrap) {
+        *why = "A cell of a wrap row has no stacked position.";
+        return 0;
+      }
+      if (e->stacked < 1 || e->stacked > row->ncells) {
+        *why = "A stacked position is 1 up to the cells in the row.";
+        return 0;
+      }
+      for (j = 0; j < row->ncells; j++) {
+        if (j != k && row->cells[j].stacked == e->stacked) {
+          row->cells[j].stacked = row->cells[k].stacked;
+        }
+      }
+      row->cells[k].stacked = e->stacked;
+      return 1;
+    }
+    case GDEFCORE_STRUCTURE_ACT_RENAME_CELL:
+      if (r >= doc->nrows || k >= doc->rows[r].ncells) {
+        *why = kThere;
+        return 0;
+      }
+      if (e->region == NULL || !gdefcore_region_name_ok(e->region, e->region_len)) {
+        *why = "A cell names a region: a-z first, then a-z, 0-9, '_' and '-'.";
+        return 0;
+      }
+      memcpy(renamed_from, doc->rows[r].cells[k].region, sizeof doc->rows[r].cells[k].region);
+      memset(doc->rows[r].cells[k].region, 0, sizeof doc->rows[r].cells[k].region);
+      memcpy(doc->rows[r].cells[k].region, e->region, e->region_len);
+      *renamed = 1;
+      return 1;
+    default:
+      *why = kThere;
+      return 0;
+  }
+}
+
+GDEFCORE_Result gdefcore_structure_stage_edit(GDEFCORE_Changeset * changeset, const char * name,
+    size_t name_len, const GDEFCORE_Structure_Edit * edit, char ** moved, size_t * moved_len) {
+  GDEFCORE_Catalog * catalog;
+  char * text = NULL;
+  size_t n = 0;
+  int exists = 0;
+  Doc * doc = NULL;
+  char version[GDEFCORE_STRUCTURE_VERSION_LEN + 1];
+  char renamed_from[GDEFCORE_REGION_NAME_MAX + 1];
+  int renamed = 0;
+  const char * why = NULL;
+  char say_why[200];
+  char * canon = NULL;
+  const char * document = NULL;
+  const char * start_doc = NULL;
+  int replace = 0;
+  int is_custom = 0;
+  GDEFCORE_Result rc;
+  if (moved != NULL) {
+    *moved = NULL;
+  }
+  if (moved_len != NULL) {
+    *moved_len = 0;
+  }
+  if (changeset == NULL || name == NULL || edit == NULL || edit->size != sizeof *edit ||
+      !gdefcore_structure_name_ok(name, name_len)) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  catalog = gdefcore_changeset_catalog(changeset);
+  rc = stored_text(catalog, name, name_len, &exists, &text, &n);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  version_text(text == NULL ? "" : text, n, version);
+  if (edit->version == NULL || !span_eq(edit->version, edit->version_len, version, strlen(version))) {
+    (void)gdefcore_changeset_set_refusal(changeset, GDEFCORE_STRUCTURE_REFUSED_STALE,
+        sizeof GDEFCORE_STRUCTURE_REFUSED_STALE - 1);
+    free(text);
+    return GDEFCORE_ERR_INVALID;
+  }
+  is_custom = span_eq(text, n, GDEFCORE_STRUCTURE_CUSTOM, sizeof GDEFCORE_STRUCTURE_CUSTOM - 1);
+  if (edit->act == GDEFCORE_STRUCTURE_ACT_CUSTOM) {
+    free(text);
+    if (!exists) {
+      (void)gdefcore_changeset_set_refusal(changeset, GDEFCORE_STRUCTURE_REFUSED_THERE,
+          sizeof GDEFCORE_STRUCTURE_REFUSED_THERE - 1);
+      return GDEFCORE_ERR_INVALID;
+    }
+    return gdefcore_structure_stage_custom(changeset, name, name_len);
+  }
+  if (is_custom && edit->act != GDEFCORE_STRUCTURE_ACT_START &&
+      edit->act != GDEFCORE_STRUCTURE_ACT_START_NEW) {
+    (void)gdefcore_changeset_set_refusal(changeset, GDEFCORE_STRUCTURE_REFUSED_CUSTOM,
+        sizeof GDEFCORE_STRUCTURE_REFUSED_CUSTOM - 1);
+    free(text);
+    return GDEFCORE_ERR_INVALID;
+  }
+  if (!exists && edit->act != GDEFCORE_STRUCTURE_ACT_START &&
+      edit->act != GDEFCORE_STRUCTURE_ACT_START_NEW) {
+    (void)gdefcore_changeset_set_refusal(changeset, GDEFCORE_STRUCTURE_REFUSED_THERE,
+        sizeof GDEFCORE_STRUCTURE_REFUSED_THERE - 1);
+    free(text);
+    return GDEFCORE_ERR_INVALID;
+  }
+  doc = (Doc *)calloc(1, sizeof *doc);
+  if (doc == NULL) {
+    free(text);
+    return GDEFCORE_ERR_OOM;
+  }
+  if (edit->act == GDEFCORE_STRUCTURE_ACT_START) {
+    size_t i;
+    const char * sname;
+    for (i = 0; gdefcore_structure_starting_point(i, &sname, NULL, &start_doc); i++) {
+      if (span_eq(sname, strlen(sname), edit->region, edit->region_len)) {
+        break;
+      }
+      start_doc = NULL;
+    }
+    if (start_doc == NULL) {
+      (void)gdefcore_changeset_set_refusal(changeset, GDEFCORE_STRUCTURE_REFUSED_START,
+          sizeof GDEFCORE_STRUCTURE_REFUSED_START - 1);
+      free(doc);
+      free(text);
+      return GDEFCORE_ERR_INVALID;
+    }
+    document = start_doc;
+    replace = 1;
+  } else if (edit->act == GDEFCORE_STRUCTURE_ACT_START_NEW) {
+    char one[160];
+    int len;
+    if (edit->region == NULL || !gdefcore_region_name_ok(edit->region, edit->region_len)) {
+      (void)gdefcore_changeset_set_refusal(changeset,
+          "A cell names a region: a-z first, then a-z, 0-9, '_' and '-'.", 62);
+      free(doc);
+      free(text);
+      return GDEFCORE_ERR_INVALID;
+    }
+    len = snprintf(one, sizeof one, "row stack medium\ncell %.*s 12 1\n", (int)edit->region_len,
+        edit->region);
+    canon = (char *)malloc((size_t)len + 1);
+    if (canon == NULL) {
+      free(doc);
+      free(text);
+      return GDEFCORE_ERR_OOM;
+    }
+    memcpy(canon, one, (size_t)len + 1);
+    document = canon;
+    replace = 1;
+  } else {
+    if (n > 0 && !parse(text, n, doc, say_why, sizeof say_why)) {
+      (void)gdefcore_changeset_set_refusal(changeset, say_why, strlen(say_why));
+      free(doc);
+      free(text);
+      return GDEFCORE_ERR_INVALID;
+    }
+    if (!apply_edit(doc, edit, &why, renamed_from, &renamed)) {
+      (void)gdefcore_changeset_set_refusal(changeset, why, strlen(why));
+      free(doc);
+      free(text);
+      return GDEFCORE_ERR_INVALID;
+    }
+    {
+      size_t len = 0;
+      char * made = canonical(doc, &len);
+      if (made == NULL) {
+        free(doc);
+        free(text);
+        return GDEFCORE_ERR_OOM;
+      }
+      canon = (char *)realloc(made, len + 1);
+      if (canon == NULL) {
+        free(made);
+        free(doc);
+        free(text);
+        return GDEFCORE_ERR_OOM;
+      }
+      canon[len] = '\0';
+      document = canon;
+    }
+  }
+  {
+    char * again = NULL;
+    size_t again_len = 0;
+    rc = gdefcore_structure_check(document, strlen(document), &again, &again_len, say_why,
+        sizeof say_why);
+    if (rc == GDEFCORE_ERR_INVALID) {
+      (void)gdefcore_changeset_set_refusal(changeset, say_why, strlen(say_why));
+    }
+    if (rc == GDEFCORE_OK) {
+      Doc * fresh = (Doc *)malloc(sizeof *fresh);
+      if (fresh == NULL) {
+        rc = GDEFCORE_ERR_OOM;
+      } else {
+        const char ** names;
+        size_t total = 0;
+        int i;
+        int j;
+        size_t at = 0;
+        (void)parse(again, again_len, fresh, NULL, 0);
+        for (i = 0; i < fresh->nrows; i++) {
+          total += (size_t)fresh->rows[i].ncells;
+        }
+        names = (const char **)calloc(total == 0 ? 1 : total, sizeof *names);
+        if (names == NULL) {
+          rc = GDEFCORE_ERR_OOM;
+        } else {
+          for (i = 0; i < fresh->nrows; i++) {
+            for (j = 0; j < fresh->rows[i].ncells; j++) {
+              names[at++] = fresh->rows[i].cells[j].region;
+            }
+          }
+          rc = gdefcore_structure_stage(changeset, name, name_len, again, again_len, replace);
+          if (rc == GDEFCORE_OK) {
+            const char * rf[1];
+            const char * rt[1];
+            rf[0] = renamed_from;
+            rt[0] = renamed ? edit->region : NULL;
+            rc = gdefcore_layout_stage_carry_all(changeset, name, name_len, names, total,
+                rf, rt, renamed ? 1 : 0, moved, moved_len);
+          }
+          free(names);
+        }
+        free(fresh);
+      }
+    }
+    gdefcore_text_free(catalog, again);
+  }
+  free(canon);
+  free(doc);
+  free(text);
+  return rc;
 }

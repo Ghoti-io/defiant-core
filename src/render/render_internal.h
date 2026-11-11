@@ -153,6 +153,24 @@ GDEFCORE_Result gdefcore_siteasset_stage_generated(GDEFCORE_Changeset * changese
 GDEFCORE_Result gdefcore_siteasset_stage_forget_generated(
     GDEFCORE_Changeset * changeset, const char * name, size_t name_len);
 
+/** Stage, in @p changeset, what layout @p layout's placements become when its page
+ * template's regions become @p regions: a placement in a region that is not one
+ * is carried to the region the rename pairs name, else set aside in the Not placed
+ * list. @p report (may be NULL) gets a line `layout widget region` for each one set
+ * aside, appended. Nothing is staged when nothing changes. ::GDEFCORE_ERR_INVALID
+ * (with the layout refusal) when the Not placed list would pass 32. */
+GDEFCORE_Result gdefcore_layout_stage_carry(GDEFCORE_Changeset * changeset, const char * layout,
+    size_t layout_len, const char * const * regions, size_t nregions,
+    const char * const * rename_from, const char * const * rename_to, size_t nrenames,
+    char ** report, size_t * report_len);
+
+/** gdefcore_layout_stage_carry() for every layout that draws with page template
+ * @p template_name. */
+GDEFCORE_Result gdefcore_layout_stage_carry_all(GDEFCORE_Changeset * changeset,
+    const char * template_name, size_t template_len, const char * const * regions,
+    size_t nregions, const char * const * rename_from, const char * const * rename_to,
+    size_t nrenames, char ** report, size_t * report_len);
+
 /** Write the default shared region descriptors a new site starts with
  * (region.h), leaving any a site has made. */
 GDEFCORE_Result gdefcore_render_region_seed(GDEFCORE_Catalog * catalog);

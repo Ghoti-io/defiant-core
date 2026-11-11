@@ -31,6 +31,7 @@
 #include <gtest/gtest.h>
 
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -152,6 +153,88 @@ class LayoutEdit : public GrantsFixture {
     e.position = position;
     return Do(e);
   }
+
+
+  /* ---- structure edits: the page template "layout" ---------------------------------- */
+
+  GDEFCORE_Structure_Edit SEdit(int act, const std::string & version) {
+    GDEFCORE_Structure_Edit e;
+    memset(&e, 0, sizeof e);
+    e.size = sizeof e;
+    e.act = act;
+    version_ = version;
+    e.version = version_.c_str();
+    e.version_len = version_.size();
+    return e;
+  }
+
+  std::string SVersion(const char * name = "layout") {
+    GDEFCORE_Structure_View v;
+    memset(&v, 0, sizeof v);
+    v.size = sizeof v;
+    EXPECT_EQ(GDEFCORE_OK, gdefcore_structure_view(catalog_, name, strlen(name), &v));
+    std::string out = v.version;
+    gdefcore_structure_view_free(&v);
+    return out;
+  }
+
+  std::string Document(const char * name = "layout") {
+    GDEFCORE_Structure_View v;
+    memset(&v, 0, sizeof v);
+    v.size = sizeof v;
+    if (gdefcore_structure_view(catalog_, name, strlen(name), &v) != GDEFCORE_OK) {
+      return "<none>";
+    }
+    std::string out(v.document, v.document_len);
+    gdefcore_structure_view_free(&v);
+    return out;
+  }
+
+  /* Stage and apply a structure edit; the stage's result, or the apply's. */
+  GDEFCORE_Result SDo(const GDEFCORE_Structure_Edit & e, GDEFCORE_Request * request = NULL,
+      const char * name = "layout") {
+    GDEFCORE_Changeset * cs = NULL;
+    char * moved = NULL;
+    size_t moved_len = 0;
+    EXPECT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
+    if (request != NULL) {
+      gdefcore_changeset_set_request(cs, request);
+    }
+    GDEFCORE_Result rc = gdefcore_structure_stage_edit(cs, name, strlen(name), &e, &moved,
+        &moved_len);
+    if (rc == GDEFCORE_OK) {
+      /* The confirmation is the touched machine names, so it is read off the stage. */
+      std::set<std::string> types;
+      for (size_t i = 0; i < gdefcore_changeset_touched_count(cs); i++) {
+        const char * id;
+        size_t id_len;
+        const char * type;
+        size_t type_len;
+        int op;
+        EXPECT_EQ(GDEFCORE_OK, gdefcore_changeset_touched_at(cs, i, &id, &id_len, &type, &type_len, &op));
+        types.insert(std::string(type, type_len));
+      }
+      std::string confirm;
+      for (const std::string & t : types) {
+        confirm += (confirm.empty() ? "" : "\n") + t;
+      }
+      rc = gdefcore_changeset_apply(cs, confirm.data(), confirm.size());
+    }
+    moved_ = moved == NULL ? "" : std::string(moved, moved_len);
+    free(moved);
+    Remember(cs);
+    gdefcore_changeset_destroy(cs);
+    return rc;
+  }
+
+  GDEFCORE_Result SStart(const char * point, const char * name = "layout") {
+    GDEFCORE_Structure_Edit e = SEdit(GDEFCORE_STRUCTURE_ACT_START, SVersion(name));
+    e.region = point;
+    e.region_len = strlen(point);
+    return SDo(e, NULL, name);
+  }
+
+  std::string moved_;
 
   size_t Revisions(const char * name) {
     char ** ids = NULL;
@@ -601,6 +684,253 @@ TEST_F(LayoutEdit, TheApplyStillAsksThePermissionAndChecksTheLayoutAsItIsLeft) {
   EXPECT_EQ(GDEFCORE_ERR_INVALID, Do(e));
 }
 
+
+TEST_F(LayoutEdit, EveryStartingPointIsAValidStructureAndTheTableIsTheSameEveryTime) {
+  std::set<std::string> names;
+  size_t count = 0;
+  const char * name;
+  const char * label;
+  const char * document;
+  while (gdefcore_structure_starting_point(count, &name, &label, &document)) {
+    char why[200];
+    EXPECT_EQ(GDEFCORE_OK, gdefcore_structure_check(document, strlen(document), NULL, NULL, why,
+                               sizeof why)) << name << ": " << why;
+    EXPECT_TRUE(names.insert(name).second) << name << " twice";
+    EXPECT_GT(strlen(label), 0u);
+    const char * again;
+    ASSERT_EQ(1, gdefcore_structure_starting_point(count, NULL, NULL, &again));
+    EXPECT_STREQ(document, again);
+    count++;
+  }
+  EXPECT_EQ(7u, count);
+  EXPECT_EQ(0, gdefcore_structure_starting_point(count, &name, &label, &document));
+}
+
+TEST_F(LayoutEdit, AStructureIsReadAsRowsAndEveryEditIsOneChangesetOneRevisionOnTheTemplate) {
+  GDEFCORE_Structure_View v;
+  memset(&v, 0, sizeof v);
+  v.size = sizeof v;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_structure_view(catalog_, "layout", 6, &v));
+  EXPECT_EQ(GDEFCORE_STRUCTURE_KIND_NONE, v.kind);
+  gdefcore_structure_view_free(&v);
+  ASSERT_EQ(GDEFCORE_OK, SStart("two-columns-right")) << refusal_;
+  memset(&v, 0, sizeof v);
+  v.size = sizeof v;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_structure_view(catalog_, "layout", 6, &v));
+  EXPECT_EQ(GDEFCORE_STRUCTURE_KIND_DOCUMENT, v.kind);
+  ASSERT_EQ(1u, v.nrows);
+  EXPECT_EQ(GDEFCORE_STRUCTURE_STACK, v.rows[0].behavior);
+  EXPECT_EQ(GDEFCORE_STRUCTURE_MEDIUM, v.rows[0].breakpoint);
+  ASSERT_EQ(2u, v.rows[0].ncells);
+  EXPECT_STREQ("main", v.rows[0].cells[0].region);
+  EXPECT_EQ(8, v.rows[0].cells[0].width);
+  gdefcore_structure_view_free(&v);
+  /* A row, a cell that does not fit, one that does, a move and a stacked place. */
+  GDEFCORE_Structure_Edit e = SEdit(GDEFCORE_STRUCTURE_ACT_ADD_ROW, SVersion());
+  e.behavior = GDEFCORE_STRUCTURE_FIXED;
+  e.row = 99;
+  e.region = "footer";
+  e.region_len = 6;
+  ASSERT_EQ(GDEFCORE_OK, SDo(e)) << refusal_;
+  EXPECT_EQ("row stack medium\ncell main 8 1\ncell side 4 2\nrow fixed\ncell footer 12\n", Document());
+}
+
+
+TEST_F(LayoutEdit, TheCellsOfARowAreWidenedMovedAndStackedAndARowNeverPassesTwelve) {
+  ASSERT_EQ(GDEFCORE_OK, SStart("two-columns-right")) << refusal_;
+  /* 8 + 4 is 12: a third cell does not fit until main gives some up. */
+  GDEFCORE_Structure_Edit e = SEdit(GDEFCORE_STRUCTURE_ACT_ADD_CELL, SVersion());
+  e.row = 0;
+  e.region = "extra";
+  e.region_len = 5;
+  e.width = 2;
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, SDo(e));
+  EXPECT_NE(std::string::npos, refusal_.find("more than 12")) << refusal_;
+  const std::string before = Document();
+  e = SEdit(GDEFCORE_STRUCTURE_ACT_SET_WIDTH, SVersion());
+  e.row = 0;
+  e.cell = 0;
+  e.width = 6;
+  ASSERT_EQ(GDEFCORE_OK, SDo(e)) << refusal_;
+  EXPECT_EQ("row stack medium\ncell main 6 1\ncell side 4 2\n", Document());
+  e = SEdit(GDEFCORE_STRUCTURE_ACT_ADD_CELL, SVersion());
+  e.region = "extra";
+  e.region_len = 5;
+  e.width = 2;
+  ASSERT_EQ(GDEFCORE_OK, SDo(e)) << refusal_;
+  EXPECT_EQ("row stack medium\ncell main 6 1\ncell side 4 2\ncell extra 2 3\n", Document());
+  /* The third cell stacks first. */
+  e = SEdit(GDEFCORE_STRUCTURE_ACT_SET_STACKED, SVersion());
+  e.cell = 2;
+  e.stacked = 1;
+  ASSERT_EQ(GDEFCORE_OK, SDo(e)) << refusal_;
+  EXPECT_EQ("row stack medium\ncell main 6 3\ncell side 4 2\ncell extra 2 1\n", Document());
+  e = SEdit(GDEFCORE_STRUCTURE_ACT_SET_STACKED, SVersion());
+  e.cell = 2;
+  e.stacked = 4;
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, SDo(e));
+  /* Move the last cell first. */
+  e = SEdit(GDEFCORE_STRUCTURE_ACT_MOVE_CELL, SVersion());
+  e.cell = 2;
+  e.to_row = 0;
+  e.to_cell = 0;
+  ASSERT_EQ(GDEFCORE_OK, SDo(e)) << refusal_;
+  EXPECT_EQ("row stack medium\ncell extra 2 1\ncell main 6 3\ncell side 4 2\n", Document());
+  /* A second row, a cell moved to it, and the row it left stays. */
+  e = SEdit(GDEFCORE_STRUCTURE_ACT_ADD_ROW, SVersion());
+  e.behavior = GDEFCORE_STRUCTURE_WRAP;
+  e.region = "card";
+  e.region_len = 4;
+  e.row = 99;
+  ASSERT_EQ(GDEFCORE_OK, SDo(e)) << refusal_;
+  EXPECT_EQ("row stack medium\ncell extra 2 1\ncell main 6 3\ncell side 4 2\nrow wrap\ncell card\n",
+      Document());
+  e = SEdit(GDEFCORE_STRUCTURE_ACT_MOVE_CELL, SVersion());
+  e.cell = 0;
+  e.to_row = 1;
+  e.to_cell = 0;
+  ASSERT_EQ(GDEFCORE_OK, SDo(e)) << refusal_;
+  EXPECT_EQ("row stack medium\ncell main 6 2\ncell side 4 1\nrow wrap\ncell extra\ncell card\n",
+      Document());
+  /* A wrap row made a stack row gets widths that fit; made a wrap row again, none. */
+  e = SEdit(GDEFCORE_STRUCTURE_ACT_SET_ROW, SVersion());
+  e.row = 1;
+  e.behavior = GDEFCORE_STRUCTURE_STACK;
+  e.breakpoint = GDEFCORE_STRUCTURE_WIDE;
+  ASSERT_EQ(GDEFCORE_OK, SDo(e)) << refusal_;
+  EXPECT_EQ("row stack medium\ncell main 6 2\ncell side 4 1\nrow stack wide\ncell extra 6 1\ncell card 6 2\n",
+      Document());
+  /* Moving the only cell of a row takes the row with it. */
+  e = SEdit(GDEFCORE_STRUCTURE_ACT_REMOVE_CELL, SVersion());
+  e.row = 1;
+  e.cell = 1;
+  ASSERT_EQ(GDEFCORE_OK, SDo(e)) << refusal_;
+  e = SEdit(GDEFCORE_STRUCTURE_ACT_MOVE_CELL, SVersion());
+  e.row = 1;
+  e.cell = 0;
+  e.to_row = 0;
+  e.to_cell = 9;
+  ASSERT_EQ(GDEFCORE_OK, SDo(e)) << refusal_;
+  EXPECT_EQ("row stack medium\ncell main 6 2\ncell side 4 1\ncell extra 2 3\n", Document());
+  /* Removing the only cell of a row takes the row. */
+  e = SEdit(GDEFCORE_STRUCTURE_ACT_ADD_ROW, SVersion());
+  e.behavior = GDEFCORE_STRUCTURE_FIXED;
+  e.region = "tmp";
+  e.region_len = 3;
+  e.row = 99;
+  ASSERT_EQ(GDEFCORE_OK, SDo(e)) << refusal_;
+  e = SEdit(GDEFCORE_STRUCTURE_ACT_REMOVE_CELL, SVersion());
+  e.row = 1;
+  e.cell = 0;
+  ASSERT_EQ(GDEFCORE_OK, SDo(e)) << refusal_;
+  EXPECT_EQ("row stack medium\ncell main 6 2\ncell side 4 1\ncell extra 2 3\n", Document());
+  /* Rows move. */
+  e = SEdit(GDEFCORE_STRUCTURE_ACT_ADD_ROW, SVersion());
+  e.behavior = GDEFCORE_STRUCTURE_FIXED;
+  e.region = "header";
+  e.region_len = 6;
+  e.row = 0;
+  ASSERT_EQ(GDEFCORE_OK, SDo(e)) << refusal_;
+  EXPECT_EQ("row fixed\ncell header 12\nrow stack medium\ncell main 6 2\ncell side 4 1\ncell extra 2 3\n",
+      Document());
+  e = SEdit(GDEFCORE_STRUCTURE_ACT_MOVE_ROW, SVersion());
+  e.row = 0;
+  e.to_row = 1;
+  ASSERT_EQ(GDEFCORE_OK, SDo(e)) << refusal_;
+  EXPECT_EQ("row stack medium\ncell main 6 2\ncell side 4 1\ncell extra 2 3\nrow fixed\ncell header 12\n",
+      Document());
+  /* Out of range is not there. */
+  e = SEdit(GDEFCORE_STRUCTURE_ACT_REMOVE_ROW, SVersion());
+  e.row = 7;
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, SDo(e));
+  EXPECT_EQ(GDEFCORE_STRUCTURE_REFUSED_THERE, refusal_);
+  (void)before;
+}
+
+TEST_F(LayoutEdit, RenamingACellCarriesEveryLayoutsPlacementsAndRemovingOneSetsThemAside) {
+  ASSERT_EQ(GDEFCORE_OK, SStart("two-columns-right")) << refusal_;
+  ASSERT_EQ(GDEFCORE_OK, Place("post", "recent", "side", 0)) << refusal_;
+  EXPECT_EQ("main content\nside recent\n", Lines("post"));
+  const size_t revisions = Revisions("post");
+  /* A rename: the placements follow, in the same changeset. */
+  GDEFCORE_Structure_Edit e = SEdit(GDEFCORE_STRUCTURE_ACT_RENAME_CELL, SVersion());
+  e.row = 0;
+  e.cell = 1;
+  e.region = "rail";
+  e.region_len = 4;
+  ASSERT_EQ(GDEFCORE_OK, SDo(e)) << refusal_;
+  EXPECT_EQ("row stack medium\ncell main 8 1\ncell rail 4 2\n", Document());
+  EXPECT_EQ("main content\nrail recent\n", Lines("post"));
+  EXPECT_EQ("", Lines("post", true));
+  EXPECT_EQ("", moved_);
+  EXPECT_EQ(revisions + 1, Revisions("post")) << "one revision for the layout";
+  /* A region used elsewhere cannot be the new name. */
+  e = SEdit(GDEFCORE_STRUCTURE_ACT_RENAME_CELL, SVersion());
+  e.cell = 1;
+  e.region = "main";
+  e.region_len = 4;
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, SDo(e));
+  EXPECT_NE(std::string::npos, refusal_.find("used once")) << refusal_;
+  EXPECT_EQ("main content\nrail recent\n", Lines("post"));
+  /* Removing a cell sets its placements aside and says so. */
+  e = SEdit(GDEFCORE_STRUCTURE_ACT_REMOVE_CELL, SVersion());
+  e.cell = 1;
+  ASSERT_EQ(GDEFCORE_OK, SDo(e)) << refusal_;
+  EXPECT_EQ("row stack medium\ncell main 8 1\n", Document());
+  EXPECT_EQ("main content\n", Lines("post"));
+  EXPECT_EQ("recent\n", Lines("post", true));
+  EXPECT_EQ("post recent rail\n", moved_);
+  /* A cell that is added again does not take them back: they are set aside until placed. */
+  e = SEdit(GDEFCORE_STRUCTURE_ACT_ADD_CELL, SVersion());
+  e.region = "rail";
+  e.region_len = 4;
+  e.width = 4;
+  ASSERT_EQ(GDEFCORE_OK, SDo(e)) << refusal_;
+  EXPECT_EQ("main content\n", Lines("post"));
+  EXPECT_EQ("recent\n", Lines("post", true));
+}
+
+TEST_F(LayoutEdit, AStaleStructureFormAHandWrittenTemplateAndAMissingPermissionWriteNothing) {
+  ASSERT_EQ(GDEFCORE_OK, SStart("two-columns-right")) << refusal_;
+  const std::string old_version = SVersion();
+  GDEFCORE_Structure_Edit e = SEdit(GDEFCORE_STRUCTURE_ACT_SET_WIDTH, old_version);
+  e.cell = 0;
+  e.width = 6;
+  ASSERT_EQ(GDEFCORE_OK, SDo(e)) << refusal_;
+  /* The same form again is stale. */
+  e = SEdit(GDEFCORE_STRUCTURE_ACT_SET_WIDTH, old_version);
+  e.cell = 0;
+  e.width = 5;
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, SDo(e));
+  EXPECT_EQ(GDEFCORE_STRUCTURE_REFUSED_STALE, refusal_);
+  EXPECT_EQ("row stack medium\ncell main 6 1\ncell side 4 2\n", Document());
+  /* No permission to the template or the stylesheet: nothing is written. */
+  e = SEdit(GDEFCORE_STRUCTURE_ACT_SET_WIDTH, SVersion());
+  e.cell = 0;
+  e.width = 5;
+  GDEFCORE_Request * layouter = Req(layouter_);
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, SDo(e, layouter));
+  EXPECT_EQ("row stack medium\ncell main 6 1\ncell side 4 2\n", Document());
+  /* A starting point that is not one. */
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, SStart("no-such-point"));
+  EXPECT_EQ(GDEFCORE_STRUCTURE_REFUSED_START, refusal_);
+  /* Written by hand: every edit but a new start is refused, and a start takes over. */
+  e = SEdit(GDEFCORE_STRUCTURE_ACT_CUSTOM, SVersion());
+  ASSERT_EQ(GDEFCORE_OK, SDo(e)) << refusal_;
+  EXPECT_EQ("custom", Document());
+  e = SEdit(GDEFCORE_STRUCTURE_ACT_SET_WIDTH, SVersion());
+  e.cell = 0;
+  e.width = 5;
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, SDo(e));
+  EXPECT_EQ(GDEFCORE_STRUCTURE_REFUSED_CUSTOM, refusal_);
+  e = SEdit(GDEFCORE_STRUCTURE_ACT_START_NEW, SVersion());
+  e.region = "main";
+  e.region_len = 4;
+  ASSERT_EQ(GDEFCORE_OK, SDo(e)) << refusal_;
+  EXPECT_EQ("row stack medium\ncell main 12 1\n", Document());
+  EXPECT_EQ("<none>", Document("no-such-template"));
+}
+
 TEST_F(LayoutEdit, TheStructsHereAreAcceptedAtOnlyTheirOwnSize) {
   auto placement = [](size_t size) {
     GDEFCORE_Placement p;
@@ -632,9 +962,31 @@ TEST_F(LayoutEdit, TheStructsHereAreAcceptedAtOnlyTheirOwnSize) {
     gdefcore_changeset_destroy(cs);
     return ok;
   };
+  auto sview = [this](size_t size) {
+    GDEFCORE_Structure_View v;
+    memset(&v, 0, sizeof v);
+    v.size = size;
+    GDEFCORE_Result rc = gdefcore_structure_view(catalog_, "layout", 6, &v);
+    if (rc == GDEFCORE_OK) {
+      gdefcore_structure_view_free(&v);
+    }
+    return rc == GDEFCORE_OK;
+  };
+  auto sedit = [this](size_t size) {
+    GDEFCORE_Structure_Edit e = SEdit(GDEFCORE_STRUCTURE_ACT_START, SVersion());
+    GDEFCORE_Changeset * cs = NULL;
+    e.region = "one-column";
+    e.region_len = 10;
+    e.size = size;
+    EXPECT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
+    bool ok = gdefcore_structure_stage_edit(cs, "layout", 6, &e, NULL, NULL) == GDEFCORE_OK;
+    gdefcore_changeset_destroy(cs);
+    return ok;
+  };
   size_structs::Run("tests/test_layoutedit.cpp",
       {{"GDEFCORE_Placement", placement}, {"GDEFCORE_Layout_View", view},
-          {"GDEFCORE_Layout_Edit", edit}});
+          {"GDEFCORE_Layout_Edit", edit}, {"GDEFCORE_Structure_View", sview},
+          {"GDEFCORE_Structure_Edit", sedit}});
 }
 
 int main(int argc, char ** argv) {

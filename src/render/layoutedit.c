@@ -652,3 +652,179 @@ done:
   gdefcore_layout_view_free(&view);
   return out;
 }
+
+/* ---- carrying placements when a template's regions change ---------------------------- */
+
+static int in_list(const char * const * list, size_t n, const char * name) {
+  size_t i;
+  for (i = 0; i < n; i++) {
+    if (strcmp(list[i], name) == 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+GDEFCORE_Result gdefcore_layout_stage_carry(GDEFCORE_Changeset * changeset, const char * layout,
+    size_t layout_len, const char * const * regions, size_t nregions,
+    const char * const * rename_from, const char * const * rename_to, size_t nrenames,
+    char ** report, size_t * report_len) {
+  GDEFCORE_Catalog * catalog = gdefcore_changeset_catalog(changeset);
+  GDEFCORE_Layout_View view;
+  GDEFCORE_Placement * placed;
+  GDEFCORE_Placement * unplaced;
+  size_t n;
+  size_t un;
+  size_t i;
+  size_t k;
+  size_t out_n = 0;
+  int changed = 0;
+  char id[GDEFCORE_PUBLIC_ID_LEN + 1];
+  char ** lines = NULL;
+  size_t * lens = NULL;
+  char ** ulines = NULL;
+  size_t * ulens = NULL;
+  const char ** slots1 = NULL;
+  const char ** slots2 = NULL;
+  GDEFCORE_Value values[2];
+  GDEFCORE_Result rc;
+  GDEFCORE_Result out = GDEFCORE_OK;
+  memset(&view, 0, sizeof view);
+  view.size = sizeof view;
+  rc = gdefcore_layout_view(catalog, layout, layout_len, &view);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  placed = (GDEFCORE_Placement *)calloc(GDEFCORE_LAYOUT_PANES_MAX + 2, sizeof *placed);
+  unplaced = (GDEFCORE_Placement *)calloc(GDEFCORE_LAYOUT_PANES_MAX + 2, sizeof *unplaced);
+  if (placed == NULL || unplaced == NULL) {
+    free(placed);
+    free(unplaced);
+    gdefcore_layout_view_free(&view);
+    return GDEFCORE_ERR_OOM;
+  }
+  n = view.nplaced;
+  un = view.nunplaced;
+  memcpy(placed, view.placed, n * sizeof *placed);
+  memcpy(unplaced, view.unplaced, un * sizeof *unplaced);
+  k = 0;
+  for (i = 0; i < n; i++) {
+    GDEFCORE_Placement p = placed[i];
+    size_t r;
+    if (in_list(regions, nregions, p.region)) {
+      placed[k++] = p;
+      continue;
+    }
+    changed = 1;
+    for (r = 0; r < nrenames; r++) {
+      if (strcmp(rename_from[r], p.region) == 0 && in_list(regions, nregions, rename_to[r])) {
+        snprintf(p.region, sizeof p.region, "%s", rename_to[r]);
+        break;
+      }
+    }
+    if (r < nrenames) {
+      placed[k++] = p;
+      continue;
+    }
+    if (un >= GDEFCORE_LAYOUT_PANES_MAX) {
+      (void)gdefcore_changeset_set_refusal(changeset, GDEFCORE_LAYOUT_REFUSED_FULL,
+          sizeof GDEFCORE_LAYOUT_REFUSED_FULL - 1);
+      out = GDEFCORE_ERR_INVALID;
+      goto done;
+    }
+    if (report != NULL) {
+      char piece[512];
+      int pn = snprintf(piece, sizeof piece, "%.*s %s %s\n", (int)layout_len, layout, p.widget,
+          p.region);
+      char * grown = (char *)realloc(*report, out_n + (size_t)pn + 1);
+      if (grown == NULL) {
+        out = GDEFCORE_ERR_OOM;
+        goto done;
+      }
+      memcpy(grown + out_n, piece, (size_t)pn + 1);
+      *report = grown;
+      out_n += (size_t)pn;
+      *report_len = out_n;
+    }
+    p.region[0] = '\0';
+    unplaced[un++] = p;
+  }
+  n = k;
+  if (!changed) {
+    goto done;
+  }
+  rc = gdefcore_render_find_named(catalog, kDisplay, sizeof kDisplay - 1, layout, layout_len, id);
+  if (rc != GDEFCORE_OK || !lines_of(placed, n, 1, &lines, &lens) ||
+      !lines_of(unplaced, un, 0, &ulines, &ulens)) {
+    out = rc != GDEFCORE_OK ? rc : GDEFCORE_ERR_OOM;
+    goto done;
+  }
+  slots1 = (const char **)calloc(n == 0 ? 1 : n, sizeof *slots1);
+  slots2 = (const char **)calloc(un == 0 ? 1 : un, sizeof *slots2);
+  if (slots1 == NULL || slots2 == NULL) {
+    out = GDEFCORE_ERR_OOM;
+    goto done;
+  }
+  for (i = 0; i < n; i++) {
+    slots1[i] = lines[i];
+  }
+  for (i = 0; i < un; i++) {
+    slots2[i] = ulines[i];
+  }
+  memset(values, 0, sizeof values);
+  values[0].size = sizeof values[0];
+  values[0].field = "panes";
+  values[0].field_len = 5;
+  values[0].texts = slots1;
+  values[0].text_lens = lens;
+  values[0].count = n;
+  values[1].size = sizeof values[1];
+  values[1].field = "unplaced";
+  values[1].field_len = 8;
+  values[1].texts = slots2;
+  values[1].text_lens = ulens;
+  values[1].count = un;
+  out = gdefcore_entity_save(changeset, id, GDEFCORE_PUBLIC_ID_LEN, kLang, sizeof kLang - 1,
+      values, 2);
+done:
+  free(slots1);
+  free(slots2);
+  free_lines(lines, lens, n);
+  free_lines(ulines, ulens, un);
+  free(placed);
+  free(unplaced);
+  gdefcore_layout_view_free(&view);
+  return out;
+}
+
+GDEFCORE_Result gdefcore_layout_stage_carry_all(GDEFCORE_Changeset * changeset,
+    const char * template_name, size_t template_len, const char * const * regions,
+    size_t nregions, const char * const * rename_from, const char * const * rename_to,
+    size_t nrenames, char ** report, size_t * report_len) {
+  GDEFCORE_Catalog * catalog = gdefcore_changeset_catalog(changeset);
+  char ** ids = NULL;
+  size_t count = 0;
+  size_t i;
+  GDEFCORE_Result rc = gdefcore_entity_ids(catalog, kDisplay, sizeof kDisplay - 1, &ids, &count);
+  for (i = 0; rc == GDEFCORE_OK && i < count; i++) {
+    char * layout = NULL;
+    size_t layout_len = 0;
+    char * uses = NULL;
+    size_t uses_len = 0;
+    rc = gdefcore_render_field_text(catalog, NULL, GDEFCORE_VIEW_PUBLISHED, ids[i], "layout",
+        &uses, &uses_len);
+    if (rc == GDEFCORE_OK && uses_len == template_len &&
+        (template_len == 0 || memcmp(uses, template_name, template_len) == 0)) {
+      rc = gdefcore_render_field_text(catalog, NULL, GDEFCORE_VIEW_PUBLISHED, ids[i], "name",
+          &layout, &layout_len);
+      if (rc == GDEFCORE_OK) {
+        rc = gdefcore_layout_stage_carry(changeset, layout, layout_len, regions, nregions,
+            rename_from, rename_to, nrenames, report, report_len);
+      }
+    }
+    free(layout);
+    free(uses);
+  }
+  gdefcore_ids_free(catalog, ids, count);
+  return rc;
+}

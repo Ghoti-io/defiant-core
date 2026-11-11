@@ -115,4 +115,64 @@ plant unavailable-widget-placed $EDIT testLayoutedit "$T_GHOST" \
     } else {
       delete_at(unplaced, &un, edit->index);'
 
+# ---- structure edits (site admin story 27) -------------------------------------------
+
+SEDIT=src/render/structure.c
+CARRY=src/render/layoutedit.c
+T_CELLS='LayoutEdit.TheCellsOfARowAreWidenedMovedAndStackedAndARowNeverPassesTwelve'
+T_CARRY='LayoutEdit.RenamingACellCarriesEveryLayoutsPlacementsAndRemovingOneSetsThemAside'
+T_SSTALE='LayoutEdit.AStaleStructureFormAHandWrittenTemplateAndAMissingPermissionWriteNothing'
+
+# A rename names no pair, so the placements of the old name are set aside.
+plant rename-loses-placements $SEDIT testLayoutedit "$T_CARRY" \
+  '                rf, rt, renamed ? 1 : 0, moved, moved_len);' \
+  '                rf, rt, 0 && renamed, moved, moved_len);'
+
+# A placement in a region that is gone is dropped, not set aside.
+plant orphan-dropped $CARRY testLayoutedit "$T_CARRY" \
+  "    p.region[0] = '\\0';
+    unplaced[un++] = p;" \
+  "    p.region[0] = '\\0';
+    (void)p;"
+
+# What was set aside is not reported.
+plant orphans-not-reported $SEDIT testLayoutedit "$T_CARRY" \
+  '                rf, rt, renamed ? 1 : 0, moved, moved_len);' \
+  '                rf, rt, renamed ? 1 : 0, NULL, NULL);'
+
+# A form drawn before another change is applied over it.
+plant stale-structure-accepted $SEDIT testLayoutedit "$T_SSTALE" \
+  '  if (edit->version == NULL || !span_eq(edit->version, edit->version_len, version, strlen(version))) {' \
+  '  if (edit->version == NULL || (0 && !span_eq(edit->version, edit->version_len, version, strlen(version)))) {'
+
+# A template written by hand is changed by an edit of rows and cells.
+plant custom-edited-without-a-new-start $SEDIT testLayoutedit "$T_SSTALE" \
+  '  if (is_custom && edit->act != GDEFCORE_STRUCTURE_ACT_START &&' \
+  '  if (0 && is_custom && edit->act != GDEFCORE_STRUCTURE_ACT_START &&'
+
+# A row left with no cell stays, so the structure is refused.
+plant emptied-row-kept $SEDIT testLayoutedit "$T_CELLS" \
+  '        drop_row(doc, r);   /* a row with no cell is no row */' \
+  '        if (0) { drop_row(doc, r); }'
+
+plant emptied-row-kept-by-a-move $SEDIT testLayoutedit "$T_CELLS" \
+  '      insert_cell_at(&doc->rows[tr], tk, &cell);
+      if (doc->rows[r].ncells == 0) {
+        drop_row(doc, r);
+      }' \
+  '      insert_cell_at(&doc->rows[tr], tk, &cell);
+      if (0 && doc->rows[r].ncells == 0) {
+        drop_row(doc, r);
+      }'
+
+# A cell moved to another row keeps the width it had, past what the row has left.
+plant moved-cell-overflows-its-new-row $SEDIT testLayoutedit "$T_CELLS" \
+  '        if (cell.width < 1 || cell.width > 12 - used) {' \
+  '        if (cell.width < 1 || (0 && cell.width > 12 - used)) {'
+
+# A stacked position set on one cell leaves two cells with the same place.
+plant stacked-set-without-the-swap $SEDIT testLayoutedit "$T_CELLS" \
+  '        if (j != k && row->cells[j].stacked == e->stacked) {' \
+  '        if (0 && j != k && row->cells[j].stacked == e->stacked) {'
+
 plant_finish

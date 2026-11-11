@@ -157,6 +157,139 @@ GDEFCORE_API GDEFCORE_Result gdefcore_structure_stage_custom(
  */
 GDEFCORE_API GDEFCORE_Result gdefcore_structure_vet(GDEFCORE_Changeset * changeset);
 
+
+/* ---- editing a structure ---------------------------------------------------------- */
+
+/** @name What a refused structure edit says (gdefcore_changeset_refusal()). @{ */
+#define GDEFCORE_STRUCTURE_REFUSED_STALE "This structure changed. Showing the current structure."
+#define GDEFCORE_STRUCTURE_REFUSED_CUSTOM \
+  "This template is written by hand. Start a new structure to replace it."
+#define GDEFCORE_STRUCTURE_REFUSED_THERE "That row or cell is not there."
+#define GDEFCORE_STRUCTURE_REFUSED_START "That starting point is not there."
+#define GDEFCORE_STRUCTURE_REFUSED_NOT_PAGE "That template is not a page template."
+/** @} */
+
+/** @brief Length of a structure's version, without the NUL. */
+#define GDEFCORE_STRUCTURE_VERSION_LEN 32
+
+/** @brief A row's behavior (::GDEFCORE_Structure_Row::behavior). */
+enum {
+  GDEFCORE_STRUCTURE_STACK = 1,   ///< Folds to one column below its breakpoint.
+  GDEFCORE_STRUCTURE_WRAP = 2,    ///< Flows into as many columns as fit.
+  GDEFCORE_STRUCTURE_FIXED = 3    ///< Never folds.
+};
+
+/** @brief A stack row's breakpoint (::GDEFCORE_Structure_Row::breakpoint). */
+enum {
+  GDEFCORE_STRUCTURE_NARROW = 1,  ///< 480 CSS pixels.
+  GDEFCORE_STRUCTURE_MEDIUM = 2,  ///< 720 CSS pixels.
+  GDEFCORE_STRUCTURE_WIDE = 3     ///< 960 CSS pixels.
+};
+
+/** @brief What a template's structure is (::GDEFCORE_Structure_View::kind). */
+enum {
+  GDEFCORE_STRUCTURE_KIND_NONE = 0,      ///< The template has none.
+  GDEFCORE_STRUCTURE_KIND_DOCUMENT = 1,  ///< A document its source is made from.
+  GDEFCORE_STRUCTURE_KIND_CUSTOM = 2     ///< Written by hand.
+};
+
+/** @brief One cell of a row. A width of 0 is a wrap row's cell. */
+typedef struct GDEFCORE_Structure_Cell {
+  char region[64];            ///< The region it holds.
+  int width;                  ///< 1 to 12, or 0 in a wrap row.
+  int stacked;                ///< Its place when the row is folded, 1 up; 0 in a wrap row.
+} GDEFCORE_Structure_Cell;
+
+/** @brief One row. */
+typedef struct GDEFCORE_Structure_Row {
+  int behavior;               ///< A GDEFCORE_STRUCTURE_STACK, _WRAP or _FIXED.
+  int breakpoint;             ///< A GDEFCORE_STRUCTURE_NARROW.. value for a stack row, else 0.
+  size_t ncells;              ///< How many cells.
+  GDEFCORE_Structure_Cell cells[GDEFCORE_STRUCTURE_ROW_CELLS_MAX]; ///< In order.
+} GDEFCORE_Structure_Row;
+
+/** @brief A template's structure as an editor draws it. Free with gdefcore_structure_view_free(). */
+typedef struct GDEFCORE_Structure_View {
+  size_t size;                ///< `sizeof(GDEFCORE_Structure_View)`.
+  int kind;                   ///< A GDEFCORE_STRUCTURE_KIND_* value.
+  GDEFCORE_Structure_Row * rows;  ///< The rows of a document.
+  size_t nrows;               ///< How many.
+  char * document;            ///< The canonical document, or "" (custom is the word custom).
+  size_t document_len;        ///< Its length.
+  char version[GDEFCORE_STRUCTURE_VERSION_LEN + 1]; ///< What an edit names.
+} GDEFCORE_Structure_View;
+
+/**
+ * @brief Read the structure of page template @p name as it is published.
+ *
+ * A template that does not exist is ::GDEFCORE_ERR_INVALID.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_structure_view(GDEFCORE_Catalog * catalog,
+    const char * name, size_t name_len, GDEFCORE_Structure_View * out);
+
+/** @brief Free what gdefcore_structure_view() allocated. NULL is ignored. */
+GDEFCORE_API void gdefcore_structure_view_free(GDEFCORE_Structure_View * view);
+
+/** @brief The actions of ::GDEFCORE_Structure_Edit. */
+enum {
+  GDEFCORE_STRUCTURE_ACT_ADD_ROW = 1,    ///< Insert a row at `row` (or at the end) of `behavior`, `breakpoint`, holding one cell of `region` and `width` (12 when 0).
+  GDEFCORE_STRUCTURE_ACT_REMOVE_ROW,     ///< Remove row `row`; its regions' placements are set aside.
+  GDEFCORE_STRUCTURE_ACT_MOVE_ROW,       ///< Move row `row` to place `to_row`.
+  GDEFCORE_STRUCTURE_ACT_SET_ROW,        ///< Give row `row` a `behavior` and `breakpoint`.
+  GDEFCORE_STRUCTURE_ACT_ADD_CELL,       ///< Add a cell of region `region`, `width` and `stacked`, to row `row`.
+  GDEFCORE_STRUCTURE_ACT_REMOVE_CELL,    ///< Remove cell `cell` of row `row`; a row left with no cell goes too.
+  GDEFCORE_STRUCTURE_ACT_MOVE_CELL,      ///< Move cell `cell` of row `row` to place `to_cell` of row `to_row`.
+  GDEFCORE_STRUCTURE_ACT_SET_WIDTH,      ///< Give that cell `width`.
+  GDEFCORE_STRUCTURE_ACT_SET_STACKED,    ///< Give that cell the folded place `stacked`.
+  GDEFCORE_STRUCTURE_ACT_RENAME_CELL,    ///< Name that cell's region `region`; every layout's placements follow.
+  GDEFCORE_STRUCTURE_ACT_START,          ///< Replace the structure by starting point `region` (a name).
+  GDEFCORE_STRUCTURE_ACT_START_NEW,      ///< Replace it by one row holding `region`.
+  GDEFCORE_STRUCTURE_ACT_CUSTOM          ///< Write the template by hand from now on.
+};
+
+/** @brief One edit of a structure. Begins with @ref size. */
+typedef struct GDEFCORE_Structure_Edit {
+  size_t size;                ///< `sizeof(GDEFCORE_Structure_Edit)`.
+  int act;                    ///< A GDEFCORE_STRUCTURE_ACT_* value.
+  const char * version;       ///< The version the editor was shown.
+  size_t version_len;         ///< Its length.
+  size_t row;                 ///< A row, 0 up. For an add, the place to insert (past the end adds).
+  size_t cell;                ///< A cell, 0 up.
+  size_t to_row;              ///< Where a move goes.
+  size_t to_cell;             ///< Where a cell move goes (past the end appends).
+  const char * region;        ///< A region name, or a starting point's name.
+  size_t region_len;          ///< Its length.
+  int width;                  ///< A cell's width.
+  int stacked;                ///< A cell's folded place; 0 for the end.
+  int behavior;               ///< A row's behavior.
+  int breakpoint;             ///< A stack row's breakpoint; 0 for medium.
+} GDEFCORE_Structure_Edit;
+
+/**
+ * @brief Stage one edit of page template @p name's structure in @p changeset.
+ *
+ * The template's source and stylesheet are made again from the result, and every
+ * layout that draws with the template is carried along in the same changeset: a
+ * placement in a region the structure no longer has goes to the layout's Not
+ * placed list, and a renamed region's placements follow it. A start on a template
+ * that is custom replaces it; any other edit of one is refused. A stale or
+ * impossible edit is ::GDEFCORE_ERR_INVALID with the refusal naming why.
+ *
+ * @param moved Where to put a text of one line, `layout widget region`, for each
+ *   placement set aside (free with free()), or NULL.
+ * @param moved_len Its length.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_structure_stage_edit(GDEFCORE_Changeset * changeset,
+    const char * name, size_t name_len, const GDEFCORE_Structure_Edit * edit, char ** moved,
+    size_t * moved_len);
+
+/**
+ * @brief Starting point @p index: its name, its label and its document. The
+ * table is the same every time; 0 past the last.
+ */
+GDEFCORE_API int gdefcore_structure_starting_point(size_t index, const char ** name,
+    const char ** label, const char ** document);
+
 #ifdef __cplusplus
 }
 #endif

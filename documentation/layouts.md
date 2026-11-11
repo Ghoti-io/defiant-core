@@ -258,3 +258,39 @@ not one, a layout that would hold more than 32 placements, and a placement that 
 not there. An edit that changes nothing is success and stages nothing. The apply
 still asks the layout permission for the layout and checks the layout as it is
 left.
+
+## Editing a page structure
+
+An editor reads a page template's structure with `gdefcore_structure_view()`: its
+kind (none, a document, or custom), the rows with their behavior, breakpoint and
+cells (region, width, stacked position), and a version, the hash of the stored
+text. It changes it with `gdefcore_structure_stage_edit()`, one action at a time:
+add a row (it holds one cell, so a row is never empty), remove or move a row, give
+a row another behavior or breakpoint, add, remove, move, widen, stack or rename a
+cell, start from one of the built-in starting points
+(`gdefcore_structure_starting_point()`: one column, two columns with the sidebar
+on either side, three columns, header with two columns and footer, the holy grail,
+and a landing page), start a new structure from a single region, or make the
+template custom.
+
+Each edit is one changeset: the structure, the template's source and the
+stylesheet made from the result, and **every layout that draws with the template**,
+so a layout is never left naming a region the template no longer has. A placement
+of a region that is renamed follows it. A placement of a region that is gone (a
+cell removed, a row removed, a new start) is set aside in that layout's Not placed
+list, and the call returns one line `layout widget region` for each, which an
+editor shows; nothing is lost, and placing it again puts it where it is wanted.
+Removing a template's last cell of a row removes the row; a cell moved to another
+row takes the width the row has left (at least one column); a stacked position set
+on one cell swaps with the cell that held it.
+
+An edit carries the version it was drawn from, and a stale one is refused with
+"This structure changed. Showing the current structure." and writes nothing. A
+custom template is refused every edit but a new start ("This template is written
+by hand. Start a new structure to replace it."), so a hand-written template is
+never overwritten by accident. The apply asks the template and stylesheet
+permissions and, for each layout carried, the layout permission.
+
+The starting points are a fixed table of structure documents in the library, not
+stored data: a site's own named structures are a later addition that needs a
+stored type and a permission of its own.
