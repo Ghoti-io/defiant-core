@@ -36,6 +36,7 @@
 #include <ghoti.io/defiant-core/entity.h>
 #include <ghoti.io/defiant-core/form.h>
 #include <ghoti.io/defiant-core/layout.h>
+#include <ghoti.io/defiant-core/structure.h>
 #include <ghoti.io/defiant-core/layoutwhy.h>
 #include <ghoti.io/defiant-core/module.h>
 #include <ghoti.io/defiant-core/render.h>
@@ -581,6 +582,9 @@ GDEFCORE_Result gdefcore_layout_declare(GDEFCORE_Catalog * catalog) {
   }
   if (rc == GDEFCORE_OK) {
     rc = declare_edit(catalog, GDEFCORE_LAYOUT_EDIT_RULE_LABEL, kRuleType);
+  }
+  if (rc == GDEFCORE_OK) {
+    rc = gdefcore_structure_declare(catalog);
   }
   return rc;
 }

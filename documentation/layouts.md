@@ -322,7 +322,8 @@ the template becomes: a placement in a region the new body no longer calls is se
 aside in the layout's Not placed list, and one line `layout widget region` per
 placement is returned for the editor to say so. No placement is lost, and none is
 left naming a region the template lacks. An edit of a structure does the same and
-also carries a rename (see *Editing a page structure*).
+also carries a rename (see *Editing a page structure*). Either is undone whole
+(see *Undoing a structure edit*).
 
 Disabling a module is never refused because of a layout. A placement of its
 widget stays stored, in its region, and is **unavailable**: the page is built
@@ -332,3 +333,29 @@ removed; the layout can be saved with it in place. A *new* placement of that
 widget is refused ("That widget is not available.") until the module is
 enabled, and when it is, the placement draws again as it was. A Not placed
 entry of the widget is kept the same way.
+
+## Undoing a structure edit
+
+A structure edit, and a template save that carried layouts, write several entities
+at once: the template, the stylesheet it generates and every layout it moved. They
+are not one entity's revision, so reverting an entity cannot take them back whole.
+`gdefcore_structure_stage_edit()` and `gdefcore_layout_stage_template_carry()`
+therefore stage a record of the change (`core.structure-change`: one line
+`<id> <revision> <S|C>` for each entity, the revision it had before and whether the
+change cleared it), and `gdefcore_structure_stage_undo()` puts each entity back as it
+was in one changeset: an entity the change made is cleared, one it cleared is
+restored, one it changed gets the values of its earlier revision, a new revision as
+every revert is. The record is then emptied, so a change is undone once.
+
+Everything is decided before anything is staged. If any entity the change wrote has
+been written since, the whole undo is refused ("That page was changed after that
+edit, so the edit cannot be undone.") and nothing is written, so an undo never
+overwrites a later edit. A request that may edit neither layouts nor page templates
+is told "That edit is not allowed." whether or not there is a change to undo, and
+nothing is read. The apply then decides each write as it decides any other (the
+template and stylesheet grants, the layout grant). A change that writes more than 32
+entities is made normally but cannot be undone as a whole, and it empties the record
+so that an older change is not taken back in its place; a template save that moves no
+layout is not recorded (it is undone as a template is). The record is a config type,
+so a change that writes it names `core.structure-change` among the types its
+confirmation lists.

@@ -26,7 +26,9 @@
 #include <ghoti.io/defiant-core/macros.h>
 #include <ghoti.io/defiant-core/asset.h>
 #include <ghoti.io/defiant-core/entity.h>
+#include <ghoti.io/defiant-core/layout.h>
 #include <ghoti.io/defiant-core/region.h>
+#include <ghoti.io/defiant-core/template.h>
 #include <ghoti.io/defiant-core/structure.h>
 
 #include "render_internal.h"
@@ -1451,7 +1453,8 @@ GDEFCORE_Result gdefcore_structure_stage_edit(GDEFCORE_Changeset * changeset, co
           sizeof GDEFCORE_STRUCTURE_REFUSED_THERE - 1);
       return GDEFCORE_ERR_INVALID;
     }
-    return gdefcore_structure_stage_custom(changeset, name, name_len);
+    rc = gdefcore_structure_stage_custom(changeset, name, name_len);
+    return rc == GDEFCORE_OK ? gdefcore_structure_stage_record(changeset) : rc;
   }
   if (is_custom && edit->act != GDEFCORE_STRUCTURE_ACT_START &&
       edit->act != GDEFCORE_STRUCTURE_ACT_START_NEW) {
@@ -1583,6 +1586,9 @@ GDEFCORE_Result gdefcore_structure_stage_edit(GDEFCORE_Changeset * changeset, co
             rc = gdefcore_layout_stage_carry_all(changeset, name, name_len, names, total,
                 rf, rt, renamed ? 1 : 0, moved, moved_len);
           }
+          if (rc == GDEFCORE_OK) {
+            rc = gdefcore_structure_stage_record(changeset);
+          }
           free(names);
         }
         free(fresh);
@@ -1593,5 +1599,389 @@ GDEFCORE_Result gdefcore_structure_stage_edit(GDEFCORE_Changeset * changeset, co
   free(canon);
   free(doc);
   free(text);
+  return rc;
+}
+
+/* ---- undoing a structure edit or a template save that carried layouts ------------ */
+
+static const char kChangeType[] = GDEFCORE_STRUCTURE_CHANGE_TYPE;
+static const char kChangeTemplate[] = "core.template";
+static const char kChangeDisplay[] = "core.display";
+static const char kChangeAsset[] = "core.css-asset";
+static const char kChangeNotAllowed[] = "That edit is not allowed.";
+
+GDEFCORE_Result gdefcore_structure_declare(GDEFCORE_Catalog * catalog) {
+  GDEFCORE_Field fields[2];
+  int kind = 0;
+  size_t i;
+  if (catalog == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  if (gdefcore_type_kind(catalog, kChangeType, strlen(kChangeType), &kind) == GDEFCORE_OK) {
+    return GDEFCORE_OK;
+  }
+  memset(fields, 0, sizeof fields);
+  for (i = 0; i < 2; i++) {
+    fields[i].size = sizeof fields[i];
+    fields[i].name = i == 0 ? "name" : "entities";
+    fields[i].name_len = strlen(fields[i].name);
+    fields[i].required = i == 0;
+    fields[i].many = i != 0;
+  }
+  return gdefcore_type_define(catalog, kChangeType, strlen(kChangeType), GDEFCORE_TYPE_CONFIG,
+      fields, 2);
+}
+
+/* The id of the record, or ::GDEFCORE_ERR_INVALID when there is none. */
+static GDEFCORE_Result change_find(GDEFCORE_Catalog * catalog, int made,
+    char id[GDEFCORE_PUBLIC_ID_LEN + 1]) {
+  char ** ids = NULL;
+  size_t count = 0;
+  size_t i;
+  GDEFCORE_Result rc = gdefcore_entity_ids(catalog, kChangeType, strlen(kChangeType), &ids, &count);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  rc = GDEFCORE_ERR_INVALID;
+  for (i = 0; i < count && rc == GDEFCORE_ERR_INVALID; i++) {
+    if (strlen(ids[i]) == GDEFCORE_PUBLIC_ID_LEN) {
+      memcpy(id, ids[i], GDEFCORE_PUBLIC_ID_LEN + 1);
+      rc = GDEFCORE_OK;
+    }
+  }
+  gdefcore_ids_free(catalog, ids, count);
+  if (rc == GDEFCORE_ERR_INVALID && made) {
+    rc = gdefcore_entity_create(catalog, kChangeType, strlen(kChangeType), id, NULL);
+  }
+  return rc;
+}
+
+static GDEFCORE_Result change_save(GDEFCORE_Changeset * cs, const char * const * lines,
+    const size_t * lens, size_t n) {
+  char id[GDEFCORE_PUBLIC_ID_LEN + 1];
+  GDEFCORE_Value values[2];
+  const char * slot;
+  size_t len;
+  GDEFCORE_Result rc = change_find(gdefcore_changeset_catalog(cs), 1, id);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  value_set(&values[0], "name", &slot, &len, "last", 4);
+  memset(&values[1], 0, sizeof values[1]);
+  values[1].size = sizeof values[1];
+  values[1].field = "entities";
+  values[1].field_len = 8;
+  values[1].texts = lines;
+  values[1].text_lens = lens;
+  values[1].count = n;
+  return gdefcore_entity_save(cs, id, GDEFCORE_PUBLIC_ID_LEN, kLang, sizeof kLang - 1, values, 2);
+}
+
+static int change_type_is(const char * type, size_t n) {
+  return span_eq(type, n, kChangeTemplate, sizeof kChangeTemplate - 1) ||
+         span_eq(type, n, kChangeDisplay, sizeof kChangeDisplay - 1) ||
+         span_eq(type, n, kChangeAsset, sizeof kChangeAsset - 1);
+}
+
+GDEFCORE_Result gdefcore_structure_stage_record(GDEFCORE_Changeset * changeset) {
+  enum { kLineMax = 64 };
+  size_t touched;
+  size_t i;
+  size_t n = 0;
+  size_t nonroot = 0;
+  char (*text)[kLineMax];
+  const char ** lines;
+  size_t * lens;
+  GDEFCORE_Result rc = GDEFCORE_OK;
+  if (changeset == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  touched = gdefcore_changeset_touched_count(changeset);
+  text = (char (*)[kLineMax])malloc((touched == 0 ? 1 : touched) * sizeof *text);
+  lines = (const char **)malloc((touched == 0 ? 1 : touched) * sizeof *lines);
+  lens = (size_t *)malloc((touched == 0 ? 1 : touched) * sizeof *lens);
+  if (text == NULL || lines == NULL || lens == NULL) {
+    rc = GDEFCORE_ERR_OOM;
+    goto done;
+  }
+  for (i = 0; i < touched; i++) {
+    const char * id = NULL;
+    size_t id_len = 0;
+    const char * type = NULL;
+    size_t type_len = 0;
+    int op = 0;
+    char canon[GDEFCORE_PUBLIC_ID_LEN + 1];
+    uint64_t seq = 0;
+    int w;
+    if (gdefcore_changeset_touched_at(changeset, i, &id, &id_len, &type, &type_len, &op) !=
+            GDEFCORE_OK ||
+        type == NULL || !change_type_is(type, type_len)) {
+      continue;
+    }
+    /* A template alone is an ordinary revision: only a change that wrote a layout
+     * or a stylesheet with it is one this record takes back whole. */
+    if (!span_eq(type, type_len, kChangeTemplate, sizeof kChangeTemplate - 1)) {
+      nonroot += 1;
+    }
+    if (gdefcore_id_canonical(id, id_len, canon) != GDEFCORE_OK ||
+        gdefcore_changeset_base_seq(changeset, canon, GDEFCORE_PUBLIC_ID_LEN, &seq) !=
+            GDEFCORE_OK) {
+      rc = GDEFCORE_ERR_INTERNAL;
+      goto done;
+    }
+    w = snprintf(text[n], kLineMax, "%s %llu %c", canon, (unsigned long long)seq,
+        op == GDEFCORE_TOUCH_CLEAR ? 'C' : 'S');
+    if (w <= 0 || w >= kLineMax) {
+      rc = GDEFCORE_ERR_INTERNAL;
+      goto done;
+    }
+    lines[n] = text[n];
+    lens[n] = (size_t)w;
+    n += 1;
+  }
+  if (nonroot == 0) {
+    goto done;
+  }
+  rc = change_save(changeset, lines, lens, n > GDEFCORE_STRUCTURE_UNDO_MAX ? 0 : n);
+done:
+  free(text);
+  free(lines);
+  free(lens);
+  return rc;
+}
+
+/* One line of the record: the entity, the revision it had before the change and
+ * whether the change cleared it. */
+static int change_line(const char * s, size_t n, char id[GDEFCORE_PUBLIC_ID_LEN + 1], uint64_t * seq,
+    int * cleared) {
+  size_t i = GDEFCORE_PUBLIC_ID_LEN + 1;
+  uint64_t v = 0;
+  size_t digits = 0;
+  if (n < GDEFCORE_PUBLIC_ID_LEN + 4 || s[GDEFCORE_PUBLIC_ID_LEN] != ' ') {
+    return 0;
+  }
+  memcpy(id, s, GDEFCORE_PUBLIC_ID_LEN);
+  id[GDEFCORE_PUBLIC_ID_LEN] = '\0';
+  for (; i < n && s[i] >= '0' && s[i] <= '9' && digits < 19; i++) {
+    v = v * 10 + (uint64_t)(s[i] - '0');
+    digits += 1;
+  }
+  if (digits == 0 || i + 2 != n || s[i] != ' ' || (s[i + 1] != 'S' && s[i + 1] != 'C')) {
+    return 0;
+  }
+  *seq = v;
+  *cleared = s[i + 1] == 'C';
+  return 1;
+}
+
+int gdefcore_structure_can_undo(GDEFCORE_Catalog * catalog) {
+  char id[GDEFCORE_PUBLIC_ID_LEN + 1];
+  char ** texts = NULL;
+  size_t * lens = NULL;
+  size_t n = 0;
+  if (catalog == NULL || change_find(catalog, 0, id) != GDEFCORE_OK ||
+      gdefcore_entity_values(catalog, NULL, GDEFCORE_VIEW_CURRENT, id, GDEFCORE_PUBLIC_ID_LEN, kLang,
+          sizeof kLang - 1, "entities", 8, &texts, &lens, &n) != GDEFCORE_OK) {
+    return 0;
+  }
+  gdefcore_values_free(catalog, texts, lens, n);
+  return n > 0;
+}
+
+/* Write the values entity @p id had at revision @p seq as its newest: every field
+ * of its type that had a value then, with each value it had, and a field that has
+ * one now and had none then, cleared. */
+static GDEFCORE_Result change_restore(GDEFCORE_Changeset * cs, const char * id, uint64_t seq) {
+  GDEFCORE_Catalog * catalog = gdefcore_changeset_catalog(cs);
+  char * type = NULL;
+  size_t type_n = 0;
+  size_t nfields = 0;
+  size_t nv = 0;
+  GDEFCORE_Value * values = NULL;
+  char *** texts = NULL;
+  size_t ** lens = NULL;
+  size_t * counts = NULL;
+  char ** names = NULL;
+  size_t k;
+  GDEFCORE_Result rc;
+  rc = gdefcore_entity_type(catalog, id, GDEFCORE_PUBLIC_ID_LEN, &type, &type_n);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  rc = gdefcore_type_field_count(catalog, type, type_n, &nfields);
+  if (rc != GDEFCORE_OK || nfields == 0) {
+    gdefcore_text_free(catalog, type);
+    return rc != GDEFCORE_OK ? rc : GDEFCORE_ERR_INTERNAL;
+  }
+  values = (GDEFCORE_Value *)calloc(nfields, sizeof *values);
+  texts = (char ***)calloc(nfields, sizeof *texts);
+  lens = (size_t **)calloc(nfields, sizeof *lens);
+  counts = (size_t *)calloc(nfields, sizeof *counts);
+  names = (char **)calloc(nfields, sizeof *names);
+  if (values == NULL || texts == NULL || lens == NULL || counts == NULL || names == NULL) {
+    rc = GDEFCORE_ERR_OOM;
+  }
+  for (k = 0; rc == GDEFCORE_OK && k < nfields; k++) {
+    char * name = NULL;
+    size_t name_n = 0;
+    int req = 0;
+    int many = 0;
+    int keep = 1;
+    GDEFCORE_Result got = gdefcore_type_field(catalog, type, type_n, k, &name, &name_n, &req, &many);
+    if (got != GDEFCORE_OK) {
+      rc = got;
+      break;
+    }
+    got = gdefcore_entity_revision_values(catalog, id, GDEFCORE_PUBLIC_ID_LEN, seq, kLang,
+        sizeof kLang - 1, name, name_n, &texts[nv], &lens[nv], &counts[nv]);
+    if (got == GDEFCORE_ERR_INVALID) {
+      counts[nv] = 0;   /* a field that revision did not have */
+    } else if (got != GDEFCORE_OK) {
+      rc = got;
+    }
+    if (rc == GDEFCORE_OK && counts[nv] == 0) {
+      /* Nothing then: it is cleared only if something is there now. */
+      char ** now = NULL;
+      size_t * now_lens = NULL;
+      size_t now_n = 0;
+      if (gdefcore_entity_values(catalog, NULL, GDEFCORE_VIEW_CURRENT, id, GDEFCORE_PUBLIC_ID_LEN,
+              kLang, sizeof kLang - 1, name, name_n, &now, &now_lens, &now_n) == GDEFCORE_OK) {
+        gdefcore_values_free(catalog, now, now_lens, now_n);
+      }
+      keep = now_n > 0;
+    }
+    if (rc == GDEFCORE_OK && keep) {
+      names[nv] = (char *)malloc(name_n + 1);
+      if (names[nv] == NULL) {
+        rc = GDEFCORE_ERR_OOM;
+      } else {
+        memcpy(names[nv], name, name_n);
+        names[nv][name_n] = '\0';
+        values[nv].size = sizeof values[nv];
+        values[nv].field = names[nv];
+        values[nv].field_len = name_n;
+        values[nv].texts = (const char * const *)texts[nv];
+        values[nv].text_lens = lens[nv];
+        values[nv].count = counts[nv];
+        nv += 1;
+      }
+    }
+    gdefcore_text_free(catalog, name);
+  }
+  if (rc == GDEFCORE_OK && nv > 0) {
+    rc = gdefcore_entity_save(cs, id, GDEFCORE_PUBLIC_ID_LEN, kLang, sizeof kLang - 1, values, nv);
+  }
+  for (k = 0; k < nv; k++) {
+    free(names[k]);
+    if (counts[k] > 0) {
+      gdefcore_values_free(catalog, texts[k], lens[k], counts[k]);
+    }
+  }
+  free(names);
+  free(values);
+  free(texts);
+  free(lens);
+  free(counts);
+  gdefcore_text_free(catalog, type);
+  return rc;
+}
+
+typedef enum { kUndoSkip, kUndoClear, kUndoRestore } UndoAct;
+
+GDEFCORE_Result gdefcore_structure_stage_undo(GDEFCORE_Changeset * changeset,
+    GDEFCORE_Request * request) {
+  GDEFCORE_Catalog * catalog;
+  char journal[GDEFCORE_PUBLIC_ID_LEN + 1];
+  char ** texts = NULL;
+  size_t * lens = NULL;
+  size_t n = 0;
+  UndoAct * act = NULL;
+  uint64_t * base = NULL;
+  size_t k;
+  GDEFCORE_Result rc;
+  if (changeset == NULL || request == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  catalog = gdefcore_changeset_catalog(changeset);
+  if (!gdefcore_layout_may_edit(catalog, request) &&
+      !gdefcore_template_may_edit(catalog, request, "core.page", 9)) {
+    (void)gdefcore_changeset_set_refusal(changeset, kChangeNotAllowed, sizeof kChangeNotAllowed - 1);
+    return GDEFCORE_ERR_INVALID;
+  }
+  rc = change_find(catalog, 0, journal);
+  if (rc == GDEFCORE_OK) {
+    rc = gdefcore_entity_values(catalog, NULL, GDEFCORE_VIEW_CURRENT, journal, GDEFCORE_PUBLIC_ID_LEN,
+        kLang, sizeof kLang - 1, "entities", 8, &texts, &lens, &n);
+  }
+  if (rc == GDEFCORE_ERR_INVALID || (rc == GDEFCORE_OK && n == 0)) {
+    if (rc == GDEFCORE_OK) {
+      gdefcore_values_free(catalog, texts, lens, n);
+    }
+    (void)gdefcore_changeset_set_refusal(changeset, GDEFCORE_STRUCTURE_REFUSED_NOTHING,
+        sizeof GDEFCORE_STRUCTURE_REFUSED_NOTHING - 1);
+    return GDEFCORE_ERR_INVALID;
+  }
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  act = (UndoAct *)calloc(n, sizeof *act);
+  base = (uint64_t *)calloc(n, sizeof *base);
+  if (act == NULL || base == NULL) {
+    rc = GDEFCORE_ERR_OOM;
+  }
+  /* Everything is decided before anything is staged: an entity written since the
+   * change refuses the whole undo. */
+  for (k = 0; rc == GDEFCORE_OK && k < n; k++) {
+    char id[GDEFCORE_PUBLIC_ID_LEN + 1];
+    int cleared = 0;
+    int has = 0;
+    uint64_t seq = 0;
+    uint64_t latest = 0;
+    if (!change_line(texts[k], lens[k], id, &base[k], &cleared) ||
+        gdefcore_entity_current_revision(catalog, id, GDEFCORE_PUBLIC_ID_LEN, &has, &seq) !=
+            GDEFCORE_OK ||
+        gdefcore_entity_revision(catalog, id, GDEFCORE_PUBLIC_ID_LEN, &latest) != GDEFCORE_OK) {
+      rc = GDEFCORE_ERR_INVALID;
+      break;
+    }
+    if (cleared) {
+      if (!has && latest == base[k] && base[k] > 0) {
+        act[k] = kUndoRestore;
+      } else {
+        rc = GDEFCORE_ERR_INVALID;
+      }
+    } else if (has && seq == base[k] + 1) {
+      act[k] = base[k] == 0 ? kUndoClear : kUndoRestore;
+    } else if (has && seq == base[k] && base[k] > 0) {
+      act[k] = kUndoSkip;   /* the change saved what the entity already held */
+    } else {
+      rc = GDEFCORE_ERR_INVALID;
+    }
+  }
+  if (rc == GDEFCORE_ERR_INVALID) {
+    (void)gdefcore_changeset_set_refusal(changeset, GDEFCORE_STRUCTURE_REFUSED_UNDO,
+        sizeof GDEFCORE_STRUCTURE_REFUSED_UNDO - 1);
+  }
+  for (k = 0; rc == GDEFCORE_OK && k < n; k++) {
+    char id[GDEFCORE_PUBLIC_ID_LEN + 1];
+    int cleared = 0;
+    uint64_t seq = 0;
+    if (act[k] == kUndoSkip) {
+      continue;
+    }
+    if (!change_line(texts[k], lens[k], id, &seq, &cleared)) {
+      rc = GDEFCORE_ERR_INTERNAL;
+    } else if (act[k] == kUndoClear) {
+      rc = gdefcore_entity_clear(changeset, id, GDEFCORE_PUBLIC_ID_LEN);
+    } else {
+      rc = change_restore(changeset, id, base[k]);
+    }
+  }
+  if (rc == GDEFCORE_OK) {
+    rc = change_save(changeset, NULL, NULL, 0);
+  }
+  gdefcore_values_free(catalog, texts, lens, n);
+  free(act);
+  free(base);
   return rc;
 }

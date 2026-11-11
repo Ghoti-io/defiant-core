@@ -229,4 +229,57 @@ plant template-carry-reports-nothing $CARRY testLayoutedit "$T_TEMPLATE" \
   '      (const char * const *)names, count, NULL, NULL, 0, moved, moved_len);' \
   '      (const char * const *)names, count, NULL, NULL, 0, NULL, NULL);'
 
+# ---- undoing a structure edit or a template save that carried layouts ------------------
+
+STRUCT=src/render/structure.c
+T_UNDO='LayoutEdit.AStructureEditThatSetsPlacementsAsideIsUndoneWholeAndOnlyOnce'
+T_SINCE='LayoutEdit.AnUndoOfAStructureEditIsRefusedOnceAnythingItWroteWasWrittenSince'
+T_WHO='LayoutEdit.TheUndoOfAStructureEditIsForWhoMayEditAndSaysNothingToWhoMayNot'
+T_SAVED='LayoutEdit.ATemplateSaveThatCarriedLayoutsIsUndoneWhole'
+T_MANY='LayoutEdit.AChangeOfMoreThanTheMostEntitiesCannotBeUndoneAndLeavesNoStaleRecord'
+
+# A structure edit leaves no record, so there is nothing to undo.
+plant structure-edit-records-nothing $STRUCT testLayoutedit "$T_UNDO" \
+  '          if (rc == GDEFCORE_OK) {
+            rc = gdefcore_structure_stage_record(changeset);
+          }' \
+  '          (void)0;'
+
+# A template save that carried layouts leaves no record.
+plant template-carry-records-nothing $CARRY testLayoutedit "$T_SAVED" \
+  '  return rc == GDEFCORE_OK ? gdefcore_structure_stage_record(changeset) : rc;' \
+  '  return rc;'
+
+# The undo puts back what the edit wrote over, not what it made: the layouts and
+# the stylesheet stay as the edit left them.
+plant structure-undo-skips-what-it-changed $STRUCT testLayoutedit "$T_UNDO" \
+  '      act[k] = base[k] == 0 ? kUndoClear : kUndoRestore;' \
+  '      act[k] = base[k] == 0 ? kUndoClear : kUndoSkip;'
+
+# An entity written since the change is overwritten by the undo.
+plant structure-undo-overwrites-later-writes $STRUCT testLayoutedit "$T_SINCE" \
+  '    } else if (has && seq == base[k] + 1) {' \
+  '    } else if (has) {'
+
+# A change is undone more than once: the record is not emptied.
+plant structure-undo-keeps-the-record $STRUCT testLayoutedit "$T_UNDO" \
+  '    rc = change_save(changeset, NULL, NULL, 0);
+  }
+  gdefcore_values_free(catalog, texts, lens, n);' \
+  '    (void)0;
+  }
+  gdefcore_values_free(catalog, texts, lens, n);'
+
+# Anyone is told whether there is a change, and may stage its undo.
+plant structure-undo-open-to-all $STRUCT testLayoutedit "$T_WHO" \
+  '  if (!gdefcore_layout_may_edit(catalog, request) &&
+      !gdefcore_template_may_edit(catalog, request, "core.page", 9)) {' \
+  '  if (0 && !gdefcore_layout_may_edit(catalog, request) &&
+      !gdefcore_template_may_edit(catalog, request, "core.page", 9)) {'
+
+# A change of more than the most entities leaves the older record to be undone in its place.
+plant structure-undo-stale-record-kept $STRUCT testLayoutedit "$T_MANY" \
+  '  rc = change_save(changeset, lines, lens, n > GDEFCORE_STRUCTURE_UNDO_MAX ? 0 : n);' \
+  '  rc = n > GDEFCORE_STRUCTURE_UNDO_MAX ? GDEFCORE_OK : change_save(changeset, lines, lens, n);'
+
 plant_finish

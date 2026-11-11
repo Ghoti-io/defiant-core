@@ -235,6 +235,38 @@ class LayoutEdit : public GrantsFixture {
     return SDo(e, NULL, name);
   }
 
+  /* Stage and apply the undo of the last structure change; the stage's result, or
+   * the apply's. The confirmation is read off the stage, as a structure edit's is. */
+  GDEFCORE_Result SUndo(GDEFCORE_Request * request = NULL, bool attach = false) {
+    GDEFCORE_Changeset * cs = NULL;
+    EXPECT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
+    GDEFCORE_Request * as = request != NULL ? request : Req(layouter_);
+    if (attach) {
+      gdefcore_changeset_set_request(cs, as);   /* else the operator's, who is not asked at apply */
+    }
+    GDEFCORE_Result rc = gdefcore_structure_stage_undo(cs, as);
+    if (rc == GDEFCORE_OK) {
+      std::set<std::string> types;
+      for (size_t i = 0; i < gdefcore_changeset_touched_count(cs); i++) {
+        const char * id;
+        size_t id_len;
+        const char * type;
+        size_t type_len;
+        int op;
+        EXPECT_EQ(GDEFCORE_OK, gdefcore_changeset_touched_at(cs, i, &id, &id_len, &type, &type_len, &op));
+        types.insert(std::string(type, type_len));
+      }
+      std::string confirm;
+      for (const std::string & t : types) {
+        confirm += (confirm.empty() ? "" : "\n") + t;
+      }
+      rc = gdefcore_changeset_apply(cs, confirm.data(), confirm.size());
+    }
+    Remember(cs);
+    gdefcore_changeset_destroy(cs);
+    return rc;
+  }
+
   std::string moved_;
 
   size_t Revisions(const char * name) {
@@ -1081,7 +1113,7 @@ TEST_F(LayoutEdit, ATemplateEditThatDropsARegionSetsItsPlacementsAsideAndLosesNo
   for (const std::string & t : types) {
     confirm += (confirm.empty() ? "" : "\n") + t;
   }
-  EXPECT_EQ("core.display\ncore.template", confirm);
+  EXPECT_EQ("core.display\ncore.structure-change\ncore.template", confirm);
   ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, confirm.data(), confirm.size())) << [&] {
     size_t rn = 0;
     const char * r = gdefcore_changeset_refusal(cs, &rn);
@@ -1098,6 +1130,155 @@ TEST_F(LayoutEdit, ATemplateEditThatDropsARegionSetsItsPlacementsAsideAndLosesNo
   gdefcore_changeset_destroy(cs);
 }
 
+
+
+/* ---- undoing a structure edit -------------------------------------------------- */
+
+TEST_F(LayoutEdit, AStructureEditThatSetsPlacementsAsideIsUndoneWholeAndOnlyOnce) {
+  ASSERT_EQ(GDEFCORE_OK, SStart("two-columns-right")) << refusal_;
+  ASSERT_EQ(GDEFCORE_OK, Place("post", "recent", "side", 0)) << refusal_;
+  const std::string document = Document();
+  const std::string placed = Lines("post");
+  EXPECT_EQ("main content\nside recent\n", placed);
+  /* Remove the side cell: its placement is set aside, in the same change. */
+  GDEFCORE_Structure_Edit e = SEdit(GDEFCORE_STRUCTURE_ACT_REMOVE_CELL, SVersion());
+  e.row = 0;
+  e.cell = 1;
+  ASSERT_EQ(GDEFCORE_OK, SDo(e)) << refusal_;
+  EXPECT_EQ("main content\n", Lines("post"));
+  EXPECT_EQ("recent\n", Lines("post", true));
+  EXPECT_NE(document, Document());
+  ASSERT_TRUE(gdefcore_structure_can_undo(catalog_));
+  /* Undo: the structure, the layout and what was set aside, in one changeset. */
+  ASSERT_EQ(GDEFCORE_OK, SUndo()) << refusal_;
+  EXPECT_EQ(document, Document()) << "the structure is back";
+  EXPECT_EQ(placed, Lines("post")) << "the placement is back where it was";
+  EXPECT_EQ("", Lines("post", true)) << "nothing is left set aside";
+  /* A change is undone once. */
+  EXPECT_FALSE(gdefcore_structure_can_undo(catalog_));
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, SUndo());
+  EXPECT_EQ(GDEFCORE_STRUCTURE_REFUSED_NOTHING, refusal_);
+}
+
+TEST_F(LayoutEdit, AnUndoOfAStructureEditIsRefusedOnceAnythingItWroteWasWrittenSince) {
+  ASSERT_EQ(GDEFCORE_OK, SStart("two-columns-right")) << refusal_;
+  ASSERT_EQ(GDEFCORE_OK, Place("post", "recent", "side", 0)) << refusal_;
+  GDEFCORE_Structure_Edit e = SEdit(GDEFCORE_STRUCTURE_ACT_REMOVE_CELL, SVersion());
+  e.row = 0;
+  e.cell = 1;
+  ASSERT_EQ(GDEFCORE_OK, SDo(e)) << refusal_;
+  const std::string after = Document();
+  /* The layout is written again by hand. */
+  ASSERT_EQ(GDEFCORE_OK, Place("post", "menu", "main", 0)) << refusal_;
+  const std::string lines = Lines("post");
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, SUndo());
+  EXPECT_EQ(GDEFCORE_STRUCTURE_REFUSED_UNDO, refusal_);
+  EXPECT_EQ(after, Document()) << "nothing was undone";
+  EXPECT_EQ(lines, Lines("post")) << "nothing was undone";
+  /* CONTROL: the record is kept, so it is the later write that refuses it. */
+  EXPECT_TRUE(gdefcore_structure_can_undo(catalog_));
+}
+
+TEST_F(LayoutEdit, TheUndoOfAStructureEditIsForWhoMayEditAndSaysNothingToWhoMayNot) {
+  ASSERT_EQ(GDEFCORE_OK, SStart("two-columns-right")) << refusal_;
+  const std::string start = Document();
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, SUndo(Req(nobody_)));
+  EXPECT_EQ("That edit is not allowed.", refusal_);
+  /* The same sentence whether or not there is a change to undo. */
+  GDEFCORE_Structure_Edit e = SEdit(GDEFCORE_STRUCTURE_ACT_REMOVE_CELL, SVersion());
+  e.row = 0;
+  e.cell = 1;
+  ASSERT_EQ(GDEFCORE_OK, SDo(e)) << refusal_;
+  const std::string edited = Document();
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, SUndo(Req(nobody_)));
+  EXPECT_EQ("That edit is not allowed.", refusal_);
+  EXPECT_TRUE(gdefcore_structure_can_undo(catalog_)) << "the refusal took nothing";
+  /* The layouter is let in to ask, and apply decides each write again: that
+   * principal holds no grant on a template, so the whole undo is refused. */
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, SUndo(Req(layouter_), true));
+  EXPECT_EQ("That edit is not allowed.", refusal_);
+  EXPECT_TRUE(gdefcore_structure_can_undo(catalog_)) << "a refused apply took nothing";
+  EXPECT_EQ(edited, Document()) << "not even the part the layouter may write";
+  /* CONTROL: the operator's undo of the same change. */
+  EXPECT_EQ(GDEFCORE_OK, SUndo()) << refusal_;
+  EXPECT_EQ(start, Document());
+}
+
+TEST_F(LayoutEdit, ATemplateSaveThatCarriedLayoutsIsUndoneWhole) {
+  ASSERT_EQ(GDEFCORE_OK, Place("post", "recent", "side", 0)) << refusal_;
+  /* The same edit as above, by the template editor's route: a body that drops a region. */
+  char ** ids = NULL;
+  size_t n = 0;
+  std::string tid;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_entity_ids(catalog_, "core.template", 13, &ids, &n));
+  for (size_t i = 0; i < n && tid.empty(); i++) {
+    char ** t = NULL;
+    size_t * l = NULL;
+    size_t c = 0;
+    if (gdefcore_entity_values(catalog_, NULL, GDEFCORE_VIEW_PUBLISHED, ids[i], strlen(ids[i]), "en", 2,
+            "name", 4, &t, &l, &c) == GDEFCORE_OK && c > 0 && std::string(t[0], l[0]) == "layout") {
+      tid = ids[i];
+    }
+    if (c > 0) {
+      gdefcore_values_free(catalog_, t, l, c);
+    }
+  }
+  gdefcore_ids_free(catalog_, ids, n);
+  ASSERT_FALSE(tid.empty());
+  const std::string body = "<% use region; %><div><%= region(\"main\") %></div>";
+  const char * slot = body.c_str();
+  size_t len = body.size();
+  GDEFCORE_Value value;
+  memset(&value, 0, sizeof value);
+  value.size = sizeof value;
+  value.field = "body";
+  value.field_len = 4;
+  value.texts = &slot;
+  value.text_lens = &len;
+  value.count = 1;
+  GDEFCORE_Changeset * cs = NULL;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_entity_save(cs, tid.data(), tid.size(), "en", 2, &value, 1));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_layout_stage_template_carry(cs, "layout", 6, body.data(), body.size(),
+                             NULL, NULL));
+  const std::string confirm = "core.display\ncore.structure-change\ncore.template";
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, confirm.data(), confirm.size()));
+  gdefcore_changeset_destroy(cs);
+  EXPECT_EQ("main content\n", Lines("post"));
+  EXPECT_EQ("recent\n", Lines("post", true));
+  ASSERT_EQ(GDEFCORE_OK, SUndo()) << refusal_;
+  EXPECT_EQ("main content\nside recent\n", Lines("post"));
+  EXPECT_EQ("", Lines("post", true));
+  EXPECT_FALSE(gdefcore_structure_can_undo(catalog_));
+}
+
+TEST_F(LayoutEdit, AChangeOfMoreThanTheMostEntitiesCannotBeUndoneAndLeavesNoStaleRecord) {
+  ASSERT_EQ(GDEFCORE_OK, SStart("two-columns-right")) << refusal_;
+  GDEFCORE_Structure_Edit e = SEdit(GDEFCORE_STRUCTURE_ACT_SET_WIDTH, SVersion());
+  e.row = 0;
+  e.cell = 0;
+  e.width = 7;
+  ASSERT_EQ(GDEFCORE_OK, SDo(e)) << refusal_;
+  ASSERT_TRUE(gdefcore_structure_can_undo(catalog_));
+  /* A change that writes more than the most: the record is emptied, so the older
+   * change cannot be taken back by mistake in its place. */
+  static const char kOneCell[] = "row stack medium\ncell main 12 1\n";
+  GDEFCORE_Changeset * cs = NULL;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
+  for (size_t i = 0; i < GDEFCORE_STRUCTURE_UNDO_MAX + 1; i++) {
+    char name[32];
+    snprintf(name, sizeof name, "many%02zu", i);
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_structure_stage(cs, name, strlen(name),
+        kOneCell, strlen(kOneCell), 0)) << i;
+  }
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_structure_stage_record(cs));
+  const std::string confirm = "core.css-asset\ncore.structure-change\ncore.template";
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, confirm.data(), confirm.size()));
+  gdefcore_changeset_destroy(cs);
+  EXPECT_FALSE(gdefcore_structure_can_undo(catalog_)) << "the record is empty, not the older change's";
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, SUndo());
+  EXPECT_EQ(GDEFCORE_STRUCTURE_REFUSED_NOTHING, refusal_);
+}
 
 TEST_F(LayoutEdit, ATemplateOfThreeRegionsAndOneOfThirtyBothAppearFullyAndARegionAddedAppearsOnTheNextOpen) {
   /* Three regions: a structure of three cells. */

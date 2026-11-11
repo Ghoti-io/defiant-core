@@ -26,6 +26,7 @@
 #include <ghoti.io/defiant-core/entity.h>
 #include <ghoti.io/defiant-core/layout.h>
 #include <ghoti.io/defiant-core/layoutedit.h>
+#include <ghoti.io/defiant-core/structure.h>
 #include <ghoti.io/defiant-core/render.h>
 
 #include "../core/asset_util.h"
@@ -931,5 +932,6 @@ GDEFCORE_Result gdefcore_layout_stage_template_carry(GDEFCORE_Changeset * change
   rc = gdefcore_layout_stage_carry_all(changeset, template_name, template_len,
       (const char * const *)names, count, NULL, NULL, 0, moved, moved_len);
   gdefcore_render_names_free(catalog, names, count);
-  return rc;
+  /* The template and the layouts it carried are one change; it can be undone whole. */
+  return rc == GDEFCORE_OK ? gdefcore_structure_stage_record(changeset) : rc;
 }

@@ -290,6 +290,66 @@ GDEFCORE_API GDEFCORE_Result gdefcore_structure_stage_edit(GDEFCORE_Changeset * 
 GDEFCORE_API int gdefcore_structure_starting_point(size_t index, const char ** name,
     const char ** label, const char ** document);
 
+/* ---- undoing a structure edit or a template save that carried layouts ------------ */
+
+/** The entity type of the record of the last such change, which undo reads. Its
+ * fields: `name` (always `last`) and `entities`, one `<id> <seq> <S|C>` line for
+ * each template, layout or generated stylesheet the change wrote. It holds ids
+ * and revision numbers and no one's text, so it needs no grant of its own. It is a
+ * config type like the others, so a change that writes it names it among the
+ * machine names its typed confirmation lists. */
+#define GDEFCORE_STRUCTURE_CHANGE_TYPE "core.structure-change"
+/** Most entities one undoable change writes. A change that writes more is made,
+ * and cannot be undone as a whole: the record is emptied. */
+#define GDEFCORE_STRUCTURE_UNDO_MAX 32
+/** The refusal of an undo when there is no change to undo. */
+#define GDEFCORE_STRUCTURE_REFUSED_NOTHING "There is no page structure change to undo."
+/** The refusal of an undo of a change whose writes have been written over since. */
+#define GDEFCORE_STRUCTURE_REFUSED_UNDO \
+  "That page was changed after that edit, so the edit cannot be undone."
+
+/**
+ * @brief Stage the record of what @p changeset writes of templates, layouts and
+ * generated stylesheets, so that gdefcore_structure_stage_undo() can undo it.
+ *
+ * gdefcore_structure_stage_edit() does this itself. A caller that stages a
+ * template with its carried layouts by hand (gdefcore_layout_stage_template_carry())
+ * calls it last, once the changeset names everything it writes. It replaces the
+ * record of the earlier change, and stages nothing when the changeset writes no
+ * layout or stylesheet (a plain template save is undone as any revision is). A
+ * change of more than ::GDEFCORE_STRUCTURE_UNDO_MAX entities empties the record
+ * instead, so that a later undo cannot take back an older change by mistake.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_structure_stage_record(GDEFCORE_Changeset * changeset);
+
+/**
+ * @brief Stage the undo of the last recorded change in @p changeset.
+ *
+ * Every entity it wrote is put back as it was before, in this one changeset: one
+ * the change made is cleared, one it cleared is restored, one it changed gets its
+ * earlier values again, a new revision as every revert is. The record is then
+ * emptied, so a change is undone once.
+ *
+ * Refused with ::GDEFCORE_ERR_INVALID and the fixed sentence "That edit is not
+ * allowed." (nothing read) when @p request may edit neither layouts nor page
+ * templates, with ::GDEFCORE_STRUCTURE_REFUSED_NOTHING when there is no change
+ * to undo, and with ::GDEFCORE_STRUCTURE_REFUSED_UNDO when anything the change
+ * wrote has been written since, so that an undo never overwrites a later edit.
+ * Apply decides every write again as it decides any other.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_structure_stage_undo(GDEFCORE_Changeset * changeset,
+    GDEFCORE_Request * request);
+
+/**
+ * @brief Whether there is a change for gdefcore_structure_stage_undo() to take back.
+ * Asks nothing about who may.
+ */
+GDEFCORE_API int gdefcore_structure_can_undo(GDEFCORE_Catalog * catalog);
+
+/** @brief Define ::GDEFCORE_STRUCTURE_CHANGE_TYPE. Repeating it changes nothing. */
+GDEFCORE_API GDEFCORE_Result gdefcore_structure_declare(GDEFCORE_Catalog * catalog);
+
+
 #ifdef __cplusplus
 }
 #endif
