@@ -215,18 +215,24 @@ plant tenant-layout-leak $LAYOUT testLayout \
     return GDEFCORE_OK;
   }
   /* An alias is spelled without its slash' \
-  '  free(slashed);
-  *out_name = chosen;
-  *out_len = chosen_len;' \
+  '  *out_name = chosen;
+  *out_len = chosen_len;
+  return GDEFCORE_OK;
+}
+
+GDEFCORE_Result gdefcore_layout_select(' \
   '  if (path_len < sizeof memo_path && chosen_len < sizeof memo_name) {
     memcpy(memo_path, path, path_len);
     memo_path[path_len] = 0;
     memcpy(memo_name, chosen, chosen_len);
     memo_name[chosen_len] = 0;
   }
-  free(slashed);
   *out_name = chosen;
-  *out_len = chosen_len;'
+  *out_len = chosen_len;
+  return GDEFCORE_OK;
+}
+
+GDEFCORE_Result gdefcore_layout_select('
 
 # Plant 15: apply does not ask whether the principal may edit a layout.
 plant authorize-not-called src/entity/entity.c testLayout \
