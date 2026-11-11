@@ -86,10 +86,10 @@ plant media-type-on-a-stylesheet $DECL testAssets "$T_REFUSE" \
 # Plant 6 and 7: an image or a font may be of any type.
 plant image-type-unchecked $DECL testAssets "$T_REFUSE" \
   '        if (!type_listed(kImageTypes, p->media_type, p->media_type_len)) {' \
-  '        if (0) {'
+  '        if (!type_listed(kImageTypes, p->media_type, p->media_type_len) && 0) {'
 plant font-type-unchecked $DECL testAssets "$T_REFUSE" \
   '        if (!type_listed(kFontTypes, p->media_type, p->media_type_len)) {' \
-  '        if (0) {'
+  '        if (!type_listed(kFontTypes, p->media_type, p->media_type_len) && 0) {'
 
 # Plant 8: a stylesheet or script may be any bytes.
 plant text-asset-not-checked $DECL testAssets "$T_REFUSE" \
