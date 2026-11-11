@@ -1098,6 +1098,93 @@ TEST_F(LayoutEdit, ATemplateEditThatDropsARegionSetsItsPlacementsAsideAndLosesNo
   gdefcore_changeset_destroy(cs);
 }
 
+
+TEST_F(LayoutEdit, ATemplateOfThreeRegionsAndOneOfThirtyBothAppearFullyAndARegionAddedAppearsOnTheNextOpen) {
+  /* Three regions: a structure of three cells. */
+  struct Case {
+    const char * name;
+    size_t regions;
+  };
+  for (const Case c : {Case{"triple", 3}, Case{"thirty", 30}}) {
+    std::string doc;
+    for (size_t r = 0; r < c.regions; r++) {
+      if (r % 10 == 0) {
+        doc += "row fixed\n";
+      }
+      char line[64];
+      snprintf(line, sizeof line, "cell r%02zu 1\n", r + 1);
+      doc += line;
+    }
+    GDEFCORE_Changeset * cs = NULL;
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_structure_stage(cs, c.name, strlen(c.name), doc.data(), doc.size(), 0));
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, "core.css-asset\ncore.template", sizeof "core.css-asset\ncore.template" - 1)) << c.name;
+    gdefcore_changeset_destroy(cs);
+    /* A layout that draws with it, made as any other. */
+    char fresh[GDEFCORE_PUBLIC_ID_LEN + 1];
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_entity_create(catalog_, kDisplay, strlen(kDisplay), fresh, NULL));
+    GDEFCORE_Value values[2];
+    const char * n_slot = c.name;
+    size_t n_len = strlen(c.name);
+    const char * t_slot = c.name;
+    size_t t_len = strlen(c.name);
+    memset(values, 0, sizeof values);
+    values[0].size = sizeof values[0];
+    values[0].field = "name";
+    values[0].field_len = 4;
+    values[0].texts = &n_slot;
+    values[0].text_lens = &n_len;
+    values[0].count = 1;
+    values[1].size = sizeof values[1];
+    values[1].field = "layout";
+    values[1].field_len = 6;
+    values[1].texts = &t_slot;
+    values[1].text_lens = &t_len;
+    values[1].count = 1;
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_entity_save(cs, fresh, GDEFCORE_PUBLIC_ID_LEN, "en", 2, values, 2));
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, kDisplay, strlen(kDisplay))) << c.name;
+    gdefcore_changeset_destroy(cs);
+    /* Every region appears, in the template's order, and the last takes a placement. */
+    GDEFCORE_Layout_View v;
+    memset(&v, 0, sizeof v);
+    v.size = sizeof v;
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_layout_view(catalog_, c.name, strlen(c.name), &v));
+    ASSERT_EQ(c.regions, v.nregions) << c.name;
+    for (size_t r = 0; r < c.regions; r++) {
+      char want[40];
+      snprintf(want, sizeof want, "r%02zu", r + 1);
+      EXPECT_STREQ(want, v.regions[r]) << c.name;
+    }
+    gdefcore_layout_view_free(&v);
+    char last[40];
+    snprintf(last, sizeof last, "r%02zu", c.regions);
+    ASSERT_EQ(GDEFCORE_OK, Place(c.name, "recent", last, 0)) << c.name << refusal_;
+    EXPECT_EQ(std::string(last) + " recent\n", Lines(c.name));
+    /* A region added in the template is there the next time the layout is opened. */
+    GDEFCORE_Structure_Edit e;
+    memset(&e, 0, sizeof e);
+    e.size = sizeof e;
+    e.act = GDEFCORE_STRUCTURE_ACT_ADD_CELL;
+    const std::string version = SVersion(c.name);
+    e.version = version.c_str();
+    e.version_len = version.size();
+    e.row = 0;
+    e.region = "added";
+    e.region_len = 5;
+    e.width = 1;
+    ASSERT_EQ(GDEFCORE_OK, SDo(e, NULL, c.name)) << c.name << refusal_;
+    memset(&v, 0, sizeof v);
+    v.size = sizeof v;
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_layout_view(catalog_, c.name, strlen(c.name), &v));
+    ASSERT_EQ(c.regions + 1, v.nregions) << c.name;
+    EXPECT_STREQ("added", v.regions[c.regions < 10 ? c.regions : 10]) << c.name
+        << " (it ends the first row, which holds at most ten of these)";
+    gdefcore_layout_view_free(&v);
+    EXPECT_EQ(std::string(last) + " recent\n", Lines(c.name)) << "what was placed stays";
+  }
+}
+
 TEST_F(LayoutEdit, TheStructsHereAreAcceptedAtOnlyTheirOwnSize) {
   auto placement = [](size_t size) {
     GDEFCORE_Placement p;
