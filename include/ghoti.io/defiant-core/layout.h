@@ -33,7 +33,9 @@
  * its regions) and an ordered list of placements, `region widget [target]`. A
  * layout that names a region its page template does not declare, or a widget
  * type nobody offers, is refused when it is saved (gdefcore_layout_vet(), at
- * apply) and is never applied to a page (gdefcore_layout_check()).
+ * apply) and is never applied to a page (gdefcore_layout_check()). A widget
+ * type whose module has since been disabled is not that: the placement stays,
+ * unavailable, and the page is built without it.
  *
  * A **selector rule** is a `core.layout-rule`: a path pattern, the layout it
  * chooses, and optionally the type of the entity the page must be and whether
@@ -168,8 +170,9 @@ GDEFCORE_API GDEFCORE_Result gdefcore_layout_declare(GDEFCORE_Catalog * catalog)
 /**
  * @brief Whether the layout @p name can be applied to a page: it exists and is
  * published, its page template exists, and every placement is well formed,
- * names a region that template declares and a widget type the tenant has.
- * ::GDEFCORE_OK, or ::GDEFCORE_ERR_INVALID.
+ * names a region that template declares. A widget type the tenant no longer has
+ * (its module is disabled) does not stop the layout being applied: the page is
+ * built without that placement. ::GDEFCORE_OK, or ::GDEFCORE_ERR_INVALID.
  */
 GDEFCORE_API GDEFCORE_Result gdefcore_layout_check(GDEFCORE_Catalog * catalog,
     const char * name, size_t name_len);

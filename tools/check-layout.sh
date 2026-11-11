@@ -16,6 +16,7 @@
 #   unknown-region-accepted                  Layouts.AnUnknownRegionIsRefusedAndNothingIsWritten
 #   vet-not-called                           Layouts.AnUnknownRegionIsRefusedAndNothingIsWritten
 #   template-change-breaks-layout            Layouts.ChangingAPageTemplateCannotLeaveALayoutBroken
+#   layout-with-gone-widget-never-applied    Layouts.AModuleWidgetAndSelectorChangeAPageWithNoKernelChange
 #   disabled-module-widget-still-drawn       Layouts.AModuleWidgetAndSelectorChangeAPageWithNoKernelChange
 #   module-widget-needs-a-kernel-change      Layouts.TheCatalogHasEightTypesAndAModuleAddsMore, Layouts.AModuleWidgetAndSelectorChangeAPageWithNoKernelChange
 #   overlap-resolved-by-registration-order   Layouts.OverlappingContributorsResolveTheSameWayWhateverTheRegistrationOrder
@@ -93,6 +94,14 @@ plant disabled-module-widget-still-drawn src/render/render.c testLayout \
         rc = GDEFCORE_ERR_INVALID;
         goto done;
       }'
+
+# Plant 4a: a stored layout with a placement of a gone widget is never applied.
+plant layout-with-gone-widget-never-applied $LAYOUT testLayout \
+  'Layouts.AModuleWidgetAndSelectorChangeAPageWithNoKernelChange' \
+  '    rc = check_panes(catalog, NULL, body, body_len, panes, lens, count, panes,
+        lens, count, NULL, 0);' \
+  '    rc = check_panes(catalog, NULL, body, body_len, panes, lens, count, NULL,
+        NULL, 0, NULL, 0);'
 
 # Plant 4b: disabling a module is refused again while a layout places its widget.
 plant module-disable-refused-by-layout $LAYOUT testLayout \

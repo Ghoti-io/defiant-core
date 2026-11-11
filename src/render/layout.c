@@ -517,7 +517,10 @@ GDEFCORE_Result gdefcore_layout_check(GDEFCORE_Catalog * catalog, const char * n
     rc = GDEFCORE_OK;
   }
   if (rc == GDEFCORE_OK) {
-    rc = check_panes(catalog, NULL, body, body_len, panes, lens, count, NULL, NULL, 0, NULL, 0);
+    /* The layout is the stored one, so every placement in it is one it already
+     * holds: a widget whose module is disabled is unavailable, not a defect. */
+    rc = check_panes(catalog, NULL, body, body_len, panes, lens, count, panes,
+        lens, count, NULL, 0);
     gdefcore_values_free(catalog, panes, lens, count);
   }
   gdefcore_text_free(catalog, body);
