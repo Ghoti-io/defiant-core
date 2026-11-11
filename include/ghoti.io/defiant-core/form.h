@@ -848,6 +848,15 @@ GDEFCORE_API GDEFCORE_Result gdefcore_offers_at(const GDEFCORE_Offers * offers,
     size_t index, const char ** out_value, size_t * out_value_len,
     const char ** out_source, size_t * out_source_len);
 
+/**
+ * @brief How offer @p index ranked: its @p out_rank (larger is more specific,
+ * the number the order is made from), its @p out_weight (lowest first among equal
+ * ranks) and whether it is the @p out_site's own. Any may be NULL.
+ * ::GDEFCORE_ERR_INVALID past the end.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_offers_detail_at(const GDEFCORE_Offers * offers,
+    size_t index, int64_t * out_rank, int * out_weight, int * out_site);
+
 /** @brief Free a gathering. NULL is ignored. */
 GDEFCORE_API void gdefcore_offers_free(GDEFCORE_Offers * offers);
 

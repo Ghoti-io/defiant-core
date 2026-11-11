@@ -1318,6 +1318,7 @@ const Listed kListed[] = {
     {"gdefcore_render_widget", "Widgets.AFragmentIsKeyedByThePermissionSetAndTheMatchedValues: the menu, tabs and breadcrumbs, drawn from the entries above"},
     {"gdefcore_routes_offers", "Layouts.TheMoreSpecificRuleWinsAndTheOffersAreInOneOrder: an offer is a layout name, which is configuration and never an entity field; a rule of a type is offered only for a page of that type"},
     {"gdefcore_layout_select", "Layouts.AHiddenWidgetRendersNothingAndRevealsNothing: the name of a layout, from the offers above and the alter hook; no entity value"},
+    {"gdefcore_layout_why", "Layouts.TheCheckerAgreesWithTheRendererForEveryPathAndViewer: layout names, the rules that offered them and their ranks, which are configuration and never entity fields; no entity value"},
     {"gdefcore_layout_may_edit", "decision: yes or no"},
     {"gdefcore_siteasset_may_edit", "decision: yes or no"},
     {"gdefcore_region_may_edit", "decision: yes or no"},

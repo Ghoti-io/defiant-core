@@ -975,6 +975,158 @@ TEST_F(Layouts, TheMainContentIsTheSameWithAndWithoutAContributor) {
 
 /* ---- the alter hook ---------------------------------------------------------- */
 
+/* ---- which layout a path gets, and why ----------------------------------------------- */
+
+namespace {
+struct Why {
+  std::vector<std::string> offers;   /* "layout@source:why" in the engine's order */
+  std::string ordered;
+  std::string final;
+  bool refined = false;
+};
+}  // namespace
+
+TEST_F(Layouts, TheCheckerNamesTheWinnerAndWhyEachOtherOfferLost) {
+  GDEFCORE_Routes * routes = Table();
+  for (const char * name : {"a", "b", "c", "d"}) {
+    ASSERT_EQ(GDEFCORE_OK, PutLayout(name, "layout", {"main content"}));
+  }
+  ASSERT_EQ(GDEFCORE_OK, PutRule("site.deep", "/page/x/*", "a"));
+  ASSERT_EQ(GDEFCORE_OK, PutRule("site.mid", "/page/*", "b"));
+  ASSERT_EQ(GDEFCORE_OK, PutRule("site.light", "/page", "c", NULL, 0, 1));
+  ASSERT_EQ(GDEFCORE_OK, PutRule("site.heavy", "/page", "d", NULL, 0, 5));
+  const auto why = [&](const std::string & path) {
+    GDEFCORE_Layout_Why w;
+    memset(&w, 0, sizeof w);
+    w.size = sizeof w;
+    EXPECT_EQ(GDEFCORE_OK, gdefcore_layout_why(catalog_, routes, Req(), path.data(), path.size(), &w));
+    Why out;
+    for (size_t i = 0; i < w.noffers; i++) {
+      out.offers.push_back(std::string(w.offers[i].layout) + "@" + w.offers[i].source + ":" +
+          std::to_string(w.offers[i].why));
+    }
+    out.ordered = w.ordered;
+    out.final = w.final;
+    out.refined = w.refined != 0;
+    gdefcore_layout_why_free(&w);
+    return out;
+  };
+  const std::string chosen = std::to_string(GDEFCORE_WHY_CHOSEN);
+  const std::string less = std::to_string(GDEFCORE_WHY_LESS_SPECIFIC);
+  const std::string heavier = std::to_string(GDEFCORE_WHY_HEAVIER);
+  Why deep = why("/page/x/y");
+  ASSERT_EQ(4u, deep.offers.size()) << "the deep, the mid and the two of /page";
+  EXPECT_EQ("a@site.deep:" + chosen, deep.offers[0]);
+  EXPECT_EQ("b@site.mid:" + less, deep.offers[1]);
+  EXPECT_EQ("a", deep.final);
+  EXPECT_EQ("a", deep.ordered);
+  EXPECT_FALSE(deep.refined);
+  /* Equal rank: the lighter weight wins, the heavier says so. */
+  Why shallow = why("/page");
+  ASSERT_EQ(2u, shallow.offers.size());
+  EXPECT_EQ("c@site.light:" + chosen, shallow.offers[0]);
+  EXPECT_EQ("d@site.heavy:" + heavier, shallow.offers[1]);
+  EXPECT_EQ("c", shallow.final);
+  /* Equal rank and weight: the order of the engine, and the reason is "later". */
+  ASSERT_EQ(GDEFCORE_OK, PutRule("site.tie", "/page", "b", NULL, 0, 1));
+  Why tie = why("/page");
+  bool saw_later = false;
+  for (const std::string & o : tie.offers) {
+    saw_later = saw_later || o.find(":" + std::to_string(GDEFCORE_WHY_LATER)) != std::string::npos;
+  }
+  EXPECT_TRUE(saw_later) << "a tie is broken by the engine's order and the checker says so";
+  /* An offer whose layout cannot be applied is said to be unusable and never chosen. */
+  ASSERT_EQ(GDEFCORE_OK, PutRule("site.ghost", "/page/x/*", "no-such-layout"));
+  Why ghost = why("/page/x/y");
+  bool unusable = false;
+  for (const std::string & o : ghost.offers) {
+    if (o.find("no-such-layout@") == 0) {
+      unusable = o.find(":" + std::to_string(GDEFCORE_WHY_UNUSABLE)) != std::string::npos;
+    }
+  }
+  EXPECT_TRUE(unusable);
+  EXPECT_EQ("a", ghost.final);
+  /* A path nothing reaches has no winner and says so without an error. */
+  GDEFCORE_Layout_Why none;
+  memset(&none, 0, sizeof none);
+  none.size = sizeof none;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_layout_why(catalog_, routes, Req(), "/nowhere", 8, &none));
+  EXPECT_EQ(0u, none.noffers);
+  EXPECT_STREQ("", none.final);
+  gdefcore_layout_why_free(&none);
+  /* Arguments that are not. */
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, gdefcore_layout_why(catalog_, routes, Req(), "/", 1, NULL));
+  none.size = 1;
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, gdefcore_layout_why(catalog_, routes, Req(), "/", 1, &none));
+  none.size = sizeof none;
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, gdefcore_layout_why(catalog_, routes, Req(), "", 0, &none));
+}
+
+TEST_F(Layouts, TheCheckerAgreesWithTheRendererForEveryPathAndViewer) {
+  ASSERT_EQ(GDEFCORE_OK, PutLayout("vip", "layout", {"main content", "side sitename"}));
+  ASSERT_EQ(GDEFCORE_OK, PutLayout("deep", "layout", {"main content"}));
+  ASSERT_EQ(GDEFCORE_OK, PutRule("site.deep", "/page/*/x", "deep"));
+  ASSERT_EQ(GDEFCORE_OK, PutRule("site.pages", "/page", "post"));
+  Refine r1;
+  r1.who = vip_;
+  r1.to = "vip";
+  ModDef * m = NewMod("hookone");
+  m->Sub(GDEFCORE_HOOK_LAYOUT, GDEFCORE_HOOK_ALTER, RefineFn, &r1);
+  ASSERT_EQ(GDEFCORE_OK, Install(m));
+  ASSERT_EQ(GDEFCORE_OK, Enable("hookone", {})) << last_error_;
+  GDEFCORE_Routes * routes = Table();
+  const std::vector<std::string> paths = {"/", "/page/" + alpha_, "/page/" + beta_,
+      "/news/" + alpha_, "/page/" + alpha_ + "/x", "/page", "/nowhere", "/page/none", "page",
+      "/page/" + alpha_ + "/y/z"};
+  const std::vector<std::string> viewers = {"", reader_, vip_, layouter_};
+  size_t refined = 0;
+  size_t compared = 0;
+  for (const std::string & path : paths) {
+    for (const std::string & who : viewers) {
+      /* One request for each, with the resolution the renderer would set. */
+      GDEFCORE_Request * why_req = Req(who);
+      GDEFCORE_Request * pick_req = Req(who);
+      char * resolved = NULL;
+      size_t resolved_len = 0;
+      if (path != "/" && gdefcore_form_resolve(routes, catalog_, pick_req, path.data(), path.size(),
+              &resolved, &resolved_len) == GDEFCORE_OK) {
+        gdefcore_request_set_resolution(pick_req, resolved, resolved_len);
+        gdefcore_request_set_resolution(why_req, resolved, resolved_len);
+        gdefcore_text_free(catalog_, resolved);
+      }
+      char * name = NULL;
+      size_t name_len = 0;
+      GDEFCORE_Result picked = gdefcore_layout_select(catalog_, routes, pick_req, path.data(),
+          path.size(), &name, &name_len);
+      GDEFCORE_Layout_Why w;
+      memset(&w, 0, sizeof w);
+      w.size = sizeof w;
+      ASSERT_EQ(GDEFCORE_OK, gdefcore_layout_why(catalog_, routes, why_req, path.data(), path.size(), &w))
+          << path;
+      const std::string seen = picked == GDEFCORE_OK ? std::string(name, name_len) : std::string();
+      EXPECT_EQ(seen, std::string(w.final)) << "for " << path << " as '" << who << "'";
+      if (picked == GDEFCORE_OK) {
+        /* The first that can be applied is what the offers chose, before the hook. */
+        bool found = false;
+        for (size_t i = 0; i < w.noffers && !found; i++) {
+          if (w.offers[i].usable) {
+            EXPECT_STREQ(w.offers[i].layout, w.ordered);
+            EXPECT_EQ(GDEFCORE_WHY_CHOSEN, w.offers[i].why);
+            found = true;
+          }
+        }
+        EXPECT_TRUE(found);
+      }
+      refined += w.refined ? 1 : 0;
+      compared += 1;
+      gdefcore_layout_why_free(&w);
+      gdefcore_text_free(catalog_, name);
+    }
+  }
+  EXPECT_EQ(paths.size() * viewers.size(), compared);
+  EXPECT_GT(refined, 0u) << "CONTROL: the hook changed some answer, so a checker that left it out would differ";
+}
+
 TEST_F(Layouts, AnAlterHookRefinesTheLayoutForARoleAndCannotDenyAPage) {
   ASSERT_EQ(GDEFCORE_OK, PutLayout("vip", "layout", {"main content", "side sitename"}));
   ASSERT_EQ(GDEFCORE_OK, PutLayout("vip2", "layout", {"main content", "side title"}));

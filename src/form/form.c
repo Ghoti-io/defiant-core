@@ -4641,6 +4641,23 @@ GDEFCORE_Result gdefcore_offers_at(const GDEFCORE_Offers * offers, size_t index,
   return GDEFCORE_OK;
 }
 
+GDEFCORE_Result gdefcore_offers_detail_at(const GDEFCORE_Offers * offers, size_t index,
+    int64_t * out_rank, int * out_weight, int * out_site) {
+  if (offers == NULL || index >= offers->n) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  if (out_rank != NULL) {
+    *out_rank = offers->recs[index].rank;
+  }
+  if (out_weight != NULL) {
+    *out_weight = offers->recs[index].weight;
+  }
+  if (out_site != NULL) {
+    *out_site = offers->recs[index].site;
+  }
+  return GDEFCORE_OK;
+}
+
 GDEFCORE_Result gdefcore_routes_offers(GDEFCORE_Routes * routes,
     GDEFCORE_Catalog * catalog, GDEFCORE_Request * request, const char * kind,
     size_t kind_len, const char * path, size_t path_len,

@@ -303,4 +303,24 @@ plant role-dependence-not-marked $PLACE testLayout "$T_DEPENDS" \
   '  gdefcore_request_mark_principal_dependent(request);' \
   '  (void)request;'
 
+# ---- which layout a path gets, and why --------------------------------------------
+
+T_WHY='Layouts.TheCheckerNamesTheWinnerAndWhyEachOtherOfferLost'
+T_AGREE='Layouts.TheCheckerAgreesWithTheRendererForEveryPathAndViewer'
+
+# Plant 27: a heavier offer at the same rank is not said to be heavier.
+plant why-weight-reason-lost src/render/layout.c testLayout "$T_WHY" \
+  '      } else if (o->weight > win_weight) {' \
+  '      } else if (0 && o->weight > win_weight) {'
+
+# Plant 28: an offer whose layout cannot be applied is said to be usable.
+plant why-unusable-offer-usable src/render/layout.c testLayout "$T_WHY" \
+  '      o->usable = usable;' \
+  '      o->usable = 1;'
+
+# Plant 29: a refinement by a module's hook is not said to be one.
+plant why-refinement-not-reported src/render/layout.c testLayout "$T_AGREE" \
+  '    why->refined = strcmp(why->final, why->ordered) != 0;' \
+  '    why->refined = 0;'
+
 plant_finish

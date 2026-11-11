@@ -36,6 +36,7 @@
 #include <ghoti.io/defiant-core/entity.h>
 #include <ghoti.io/defiant-core/form.h>
 #include <ghoti.io/defiant-core/layout.h>
+#include <ghoti.io/defiant-core/layoutwhy.h>
 #include <ghoti.io/defiant-core/module.h>
 #include <ghoti.io/defiant-core/render.h>
 #include <ghoti.io/defiant-core/request.h>
@@ -1214,9 +1215,9 @@ void gdefcore_layout_site_contributor(const GDEFCORE_Contributor_Call * call) {
 
 /* ---- choosing a layout ---------------------------------------------------------- */
 
-GDEFCORE_Result gdefcore_layout_select(GDEFCORE_Catalog * catalog,
-    GDEFCORE_Routes * routes, GDEFCORE_Request * request, const char * path,
-    size_t path_len, char ** out_name, size_t * out_len) {
+static GDEFCORE_Result decide(GDEFCORE_Catalog * catalog, GDEFCORE_Routes * routes,
+    GDEFCORE_Request * request, const char * path, size_t path_len, char ** out_name,
+    size_t * out_len, GDEFCORE_Layout_Why * why) {
   GDEFCORE_Routes * own = NULL;
   GDEFCORE_Offers * offers = NULL;
   char * slashed = NULL;
@@ -1262,12 +1263,37 @@ GDEFCORE_Result gdefcore_layout_select(GDEFCORE_Catalog * catalog,
     return rc;
   }
   n = gdefcore_offers_count(offers);
-  for (i = 0; i < n && chosen == NULL; i++) {
+  if (why != NULL && n > 0) {
+    why->offers = (GDEFCORE_Layout_Why_Offer *)calloc(n, sizeof *why->offers);
+    if (why->offers == NULL) {
+      gdefcore_offers_free(offers);
+      gdefcore_routes_destroy(own);
+      free(slashed);
+      return GDEFCORE_ERR_OOM;
+    }
+    why->noffers = n;
+  }
+  for (i = 0; i < n && (chosen == NULL || why != NULL); i++) {
     const char * value = NULL;
     size_t value_len = 0;
-    if (gdefcore_offers_at(offers, i, &value, &value_len, NULL, NULL) !=
-            GDEFCORE_OK ||
-        gdefcore_layout_check(catalog, value, value_len) != GDEFCORE_OK) {
+    const char * source = NULL;
+    size_t source_len = 0;
+    int usable;
+    if (gdefcore_offers_at(offers, i, &value, &value_len, &source, &source_len) !=
+        GDEFCORE_OK) {
+      continue;
+    }
+    usable = gdefcore_layout_check(catalog, value, value_len) == GDEFCORE_OK;
+    if (why != NULL) {
+      GDEFCORE_Layout_Why_Offer * o = &why->offers[i];
+      o->size = sizeof *o;
+      memcpy(o->layout, value, value_len < GDEFCORE_LAYOUT_NAME_MAX ? value_len : GDEFCORE_LAYOUT_NAME_MAX);
+      memcpy(o->source, source == NULL ? "" : source,
+          source_len < GDEFCORE_LAYOUT_NAME_MAX ? source_len : GDEFCORE_LAYOUT_NAME_MAX);
+      (void)gdefcore_offers_detail_at(offers, i, &o->rank, &o->weight, &o->site);
+      o->usable = usable;
+    }
+    if (!usable || chosen != NULL) {
       continue;
     }
     rc = gdefcore_text_dup(catalog, value, value_len, &chosen);
@@ -1275,6 +1301,36 @@ GDEFCORE_Result gdefcore_layout_select(GDEFCORE_Catalog * catalog,
       break;
     }
     chosen_len = value_len;
+  }
+  if (why != NULL && rc == GDEFCORE_OK && chosen != NULL) {
+    /* Why each one is where it is, against the one chosen. */
+    size_t k;
+    int64_t win_rank = 0;
+    int win_weight = 0;
+    int found = 0;
+    memcpy(why->ordered, chosen, chosen_len < GDEFCORE_LAYOUT_NAME_MAX ? chosen_len : GDEFCORE_LAYOUT_NAME_MAX);
+    for (k = 0; k < why->noffers; k++) {
+      GDEFCORE_Layout_Why_Offer * o = &why->offers[k];
+      if (!o->usable) {
+        o->why = GDEFCORE_WHY_UNUSABLE;
+      } else if (!found) {
+        found = 1;
+        win_rank = o->rank;
+        win_weight = o->weight;
+        o->why = GDEFCORE_WHY_CHOSEN;
+      } else if (o->rank < win_rank) {
+        o->why = GDEFCORE_WHY_LESS_SPECIFIC;
+      } else if (o->weight > win_weight) {
+        o->why = GDEFCORE_WHY_HEAVIER;
+      } else {
+        o->why = GDEFCORE_WHY_LATER;
+      }
+    }
+  } else if (why != NULL) {
+    size_t k;
+    for (k = 0; k < why->noffers; k++) {
+      why->offers[k].why = GDEFCORE_WHY_UNUSABLE;
+    }
   }
   gdefcore_offers_free(offers);
   gdefcore_routes_destroy(own);
@@ -1326,7 +1382,48 @@ GDEFCORE_Result gdefcore_layout_select(GDEFCORE_Catalog * catalog,
     gdefcore_text_free(catalog, ptype);
   }
   free(slashed);
+  if (why != NULL) {
+    memcpy(why->final, chosen, chosen_len < GDEFCORE_LAYOUT_NAME_MAX ? chosen_len : GDEFCORE_LAYOUT_NAME_MAX);
+    why->refined = strcmp(why->final, why->ordered) != 0;
+  }
   *out_name = chosen;
   *out_len = chosen_len;
   return GDEFCORE_OK;
+}
+
+GDEFCORE_Result gdefcore_layout_select(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Routes * routes, GDEFCORE_Request * request, const char * path,
+    size_t path_len, char ** out_name, size_t * out_len) {
+  return decide(catalog, routes, request, path, path_len, out_name, out_len, NULL);
+}
+
+GDEFCORE_Result gdefcore_layout_why(GDEFCORE_Catalog * catalog, GDEFCORE_Routes * routes,
+    GDEFCORE_Request * request, const char * path, size_t path_len,
+    GDEFCORE_Layout_Why * out) {
+  char * name = NULL;
+  size_t name_len = 0;
+  GDEFCORE_Result rc;
+  if (out == NULL || out->size != sizeof *out || catalog == NULL || request == NULL ||
+      path == NULL || path_len == 0) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  memset((char *)out + sizeof out->size, 0, sizeof *out - sizeof out->size);
+  rc = decide(catalog, routes, request, path, path_len, &name, &name_len, out);
+  gdefcore_text_free(catalog, name);
+  if (rc == GDEFCORE_ERR_INVALID && name == NULL) {
+    /* No offer could be applied: the answer is that there is none. */
+    rc = GDEFCORE_OK;
+  }
+  if (rc != GDEFCORE_OK) {
+    gdefcore_layout_why_free(out);
+  }
+  return rc;
+}
+
+void gdefcore_layout_why_free(GDEFCORE_Layout_Why * why) {
+  if (why != NULL) {
+    free(why->offers);
+    why->offers = NULL;
+    why->noffers = 0;
+  }
 }

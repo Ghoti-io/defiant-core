@@ -1058,6 +1058,15 @@ inline std::string MenuLine(World & w, const std::string & who,
         path.size(), &name, &name_len);
     out += " layout=" + Rc(rc) + ":" + (name == NULL ? "" : std::string(name, name_len));
     gdefcore_text_free(w.site.catalog, name);
+    {
+      GDEFCORE_Layout_Why why;
+      memset(&why, 0, sizeof why);
+      why.size = sizeof why;
+      Note("gdefcore_layout_why");
+      rc = gdefcore_layout_why(w.site.catalog, w.routes, req, path.data(), path.size(), &why);
+      out += " layout-why=" + Rc(rc) + ":" + std::to_string(why.noffers) + ":" + why.final;
+      gdefcore_layout_why_free(&why);
+    }
     Note("gdefcore_layout_may_edit");
     out += " layout-may-edit=" +
            std::to_string(gdefcore_layout_may_edit(w.site.catalog, req));
