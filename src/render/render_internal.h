@@ -135,6 +135,24 @@ GDEFCORE_Result gdefcore_render_field_text(GDEFCORE_Catalog * catalog,
     const GDEFCORE_Changeset * cs, int view, const char * id, const char * field,
     char ** out, size_t * out_len);
 
+/** The page template that generated the site file @p name, as @p projection would
+ * leave it, in @p tag; 1 when the file exists (the tag is empty for one the site
+ * wrote), 0 when there is none. */
+int gdefcore_siteasset_generated_by(GDEFCORE_Catalog * catalog,
+    const GDEFCORE_Changeset * projection, const char * name, size_t name_len,
+    char tag[128 + 1]);
+
+/** Stage a stylesheet that a page template's structure generates. With @p text
+ * NULL only the tag changes: @p tag NULL takes it away (the file is the site's
+ * then). A file the site wrote is taken only when @p adopt. */
+GDEFCORE_Result gdefcore_siteasset_stage_generated(GDEFCORE_Changeset * changeset,
+    const char * name, size_t name_len, const char * text, size_t text_len,
+    const char * tag, size_t tag_len, int adopt);
+
+/** Stage the removal of a generated stylesheet. */
+GDEFCORE_Result gdefcore_siteasset_stage_forget_generated(
+    GDEFCORE_Changeset * changeset, const char * name, size_t name_len);
+
 /** Write the default shared region descriptors a new site starts with
  * (region.h), leaving any a site has made. */
 GDEFCORE_Result gdefcore_render_region_seed(GDEFCORE_Catalog * catalog);

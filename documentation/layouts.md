@@ -174,3 +174,55 @@ A shared descriptor is configuration written by changeset under
 not imply and the administrator role is granted at seed. A template's own are
 written with the template (`gdefcore_region_stage_template()`), so they ask the
 template permission. Each is checked when it is saved (`gdefcore_region_vet()`).
+
+## Page structure
+
+A page template can be **structured** (structure.h): it keeps a document of rows
+and cells, and its source and a stylesheet are generated from it. A cell is one
+region; a row has up to 12 columns shared among its cells. The document is text:
+
+```
+row stack medium
+cell main 8 1
+cell side 4 2
+row wrap
+cell card
+cell card2
+row fixed
+cell footer 12
+```
+
+`row stack <narrow|medium|wide>` folds to one column below that width, the cells
+in their stacked order (so a side area can come after the main content on a
+phone); `row wrap` flows its cells into as many columns as fit, none narrower
+than a minimum width, with no widths and no breakpoint; `row fixed` never folds.
+A cell is `cell <region> <width> [<stacked>]` (a wrap row's is just `cell
+<region>`); the width is 1 to 12 and a row's come to at most 12; a stacked
+position is 1 to the cells in the row, none twice, and is the cell's place in the
+row when left out. A region name is used once in the whole document. There are at
+most 32 rows, 12 cells in a row and 64 cells in all, in at most 4096 bytes.
+
+`gdefcore_structure_stage()` writes the template (made when there is none, as a
+`core.page`), its `structure` and the stylesheet `site/layout-<template>.css`
+(a `core.css-asset` that says which template generated it) in one changeset. The
+same structure and name give the same bytes every time, so the same address. The
+regions a layout finds by reading the generated source are exactly the cells.
+
+The generated pair is read only. The apply refuses a structured template whose
+source is not what its structure makes, a generated stylesheet that is not
+either, and any attempt to change or remove the stylesheet as a site file
+(`gdefcore_structure_vet()`). A person who wants to write the source by hand marks
+the template **custom** (`gdefcore_structure_stage_custom()`, its structure is
+the word `custom`): its source is theirs, its stylesheet becomes a file the site
+may change, and the template is found by reading it like any other. A custom
+template is replaced only by a structure staged with the caller saying so. A
+structured template's name is a-z first, then a-z, 0-9 and `-`, so it can name a
+class.
+
+The stylesheet is plain CSS Grid. A row folds by a **container query** on the
+width of its own container (the row's box), so the same structure behaves when it
+sits in a narrow region; the named widths are 480, 720 and 960 CSS pixels.
+Container queries have shipped in the current evergreen browsers since 2023; a
+browser without them shows every row at full width and unfolded, which is a
+usable page. The page's policy allows the site's own stylesheet (the web layer's
+documentation), and the template names no inline style.

@@ -217,6 +217,21 @@ static GDEFCORE_Result locate(GDEFCORE_Catalog * catalog,
   return GDEFCORE_ERR_INVALID;
 }
 
+/* Whether the file @p id says a page template generated it. */
+static int is_generated(GDEFCORE_Catalog * catalog, const GDEFCORE_Changeset * cs,
+    const char * id) {
+  char * tag = NULL;
+  size_t tag_len = 0;
+  int yes;
+  if (gdefcore_render_field_text(catalog, cs, GDEFCORE_VIEW_CURRENT, id, "generated",
+          &tag, &tag_len) != GDEFCORE_OK) {
+    return 1;   /* what cannot be read is not edited */
+  }
+  yes = tag_len > 0;
+  free(tag);
+  return yes;
+}
+
 GDEFCORE_Result gdefcore_siteasset_lookup(GDEFCORE_Catalog * catalog,
     const GDEFCORE_Changeset * projection, const char * name, size_t name_len,
     GDEFCORE_Asset * out) {
@@ -297,7 +312,7 @@ int gdefcore_siteasset_name_ok(const char * name, size_t name_len) {
 }
 
 GDEFCORE_Result gdefcore_siteasset_declare(GDEFCORE_Catalog * catalog) {
-  GDEFCORE_Field fields[2];
+  GDEFCORE_Field fields[3];
   size_t t;
   GDEFCORE_Result rc = GDEFCORE_OK;
   if (catalog == NULL) {
@@ -305,12 +320,19 @@ GDEFCORE_Result gdefcore_siteasset_declare(GDEFCORE_Catalog * catalog) {
   }
   field_set(&fields[0], "name");
   field_set(&fields[1], "text");
+  /* A stylesheet may say which page template generated it (structure.h); it is
+   * then read only here. */
+  memset(&fields[2], 0, sizeof fields[2]);
+  fields[2].size = sizeof fields[2];
+  fields[2].name = "generated";
+  fields[2].name_len = 9;
+  fields[2].many = 1;
   for (t = 0; t < 2 && rc == GDEFCORE_OK; t++) {
     const char * type = t == 0 ? kCssType : kJsType;
     int kind = 0;
     if (gdefcore_type_kind(catalog, type, strlen(type), &kind) != GDEFCORE_OK) {
       rc = gdefcore_type_define(catalog, type, strlen(type), GDEFCORE_TYPE_CONFIG,
-          fields, 2);
+          fields, t == 0 ? 3 : 2);
     }
   }
   if (rc == GDEFCORE_OK) {
@@ -380,6 +402,9 @@ GDEFCORE_Result gdefcore_siteasset_stage(GDEFCORE_Changeset * changeset,
   if (rc == GDEFCORE_OK && have_kind != kind) {
     return GDEFCORE_ERR_INVALID;   /* the name is the other kind's already */
   }
+  if (rc == GDEFCORE_OK && is_generated(catalog, changeset, id)) {
+    return GDEFCORE_ERR_INVALID;   /* a page template's structure makes it */
+  }
   if (rc == GDEFCORE_ERR_INVALID) {
     rc = gdefcore_entity_create(catalog, type, strlen(type), id, NULL);
   }
@@ -398,7 +423,8 @@ GDEFCORE_Result gdefcore_siteasset_stage_forget(GDEFCORE_Changeset * changeset,
   int kind = 0;
   if (changeset == NULL || !gdefcore_asset_name_ok(name, name_len) ||
       locate(gdefcore_changeset_catalog(changeset), changeset, name, name_len,
-          NULL, id, &kind) != GDEFCORE_OK) {
+          NULL, id, &kind) != GDEFCORE_OK ||
+      is_generated(gdefcore_changeset_catalog(changeset), changeset, id)) {
     return GDEFCORE_ERR_INVALID;
   }
   return gdefcore_entity_clear(changeset, id, GDEFCORE_PUBLIC_ID_LEN);
@@ -586,4 +612,154 @@ GDEFCORE_Result gdefcore_siteasset_authorize(GDEFCORE_Changeset * changeset,
     }
   }
   return GDEFCORE_OK;
+}
+
+/* ---- what a structure generates (structure.h) --------------------------------------- */
+
+int gdefcore_siteasset_generated_by(GDEFCORE_Catalog * catalog,
+    const GDEFCORE_Changeset * projection, const char * name, size_t name_len,
+    char tag[GDEFCORE_ASSET_NAME_MAX + 1]) {
+  char id[GDEFCORE_PUBLIC_ID_LEN + 1];
+  int kind = 0;
+  char * got = NULL;
+  size_t got_len = 0;
+  const GDEFCORE_Changeset * through;
+  int view;
+  int found = 0;
+  tag[0] = '\0';
+  if (locate(catalog, projection, name, name_len, NULL, id, &kind) != GDEFCORE_OK) {
+    return 0;
+  }
+  read_where(projection, &through, &view);
+  if (gdefcore_render_field_text(catalog, through, view, id, "generated", &got,
+          &got_len) == GDEFCORE_OK) {
+    if (got_len <= GDEFCORE_ASSET_NAME_MAX) {
+      memcpy(tag, got, got_len);
+      tag[got_len] = '\0';
+    }
+    found = 1;
+    free(got);
+  }
+  return found;
+}
+
+GDEFCORE_Result gdefcore_siteasset_stage_generated(GDEFCORE_Changeset * changeset,
+    const char * name, size_t name_len, const char * text, size_t text_len,
+    const char * tag, size_t tag_len, int adopt) {
+  char id[GDEFCORE_PUBLIC_ID_LEN + 1];
+  GDEFCORE_Catalog * catalog;
+  GDEFCORE_Value values[3];
+  const char * slots[3];
+  size_t lens[3];
+  size_t nvalues = 2;
+  int kind = 0;
+  GDEFCORE_Result rc;
+  if (changeset == NULL || !gdefcore_asset_name_ok(name, name_len) ||
+      (text != NULL && !file_text_ok(text, text_len)) ||
+      (tag != NULL && (tag_len == 0 || tag_len > GDEFCORE_ASSET_NAME_MAX))) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  catalog = gdefcore_changeset_catalog(changeset);
+  rc = locate(catalog, changeset, name, name_len, NULL, id, &kind);
+  if (rc == GDEFCORE_OK) {
+    char * had = NULL;
+    size_t had_len = 0;
+    if (kind != GDEFCORE_ASSET_CSS) {
+      return GDEFCORE_ERR_INVALID;
+    }
+    rc = gdefcore_render_field_text(catalog, changeset, GDEFCORE_VIEW_CURRENT, id,
+        "generated", &had, &had_len);
+    if (rc != GDEFCORE_OK) {
+      return rc;
+    }
+    /* A file that is another template's, or the site's own when the caller has
+     * not said to take it, is not overwritten. */
+    if ((had_len > 0 && tag != NULL &&
+            (had_len != tag_len || memcmp(had, tag, tag_len) != 0)) ||
+        (had_len == 0 && !adopt && tag != NULL)) {
+      free(had);
+      return GDEFCORE_ERR_INVALID;
+    }
+    free(had);
+  } else if (rc == GDEFCORE_ERR_INVALID && text != NULL) {
+    rc = gdefcore_entity_create(catalog, kCssType, strlen(kCssType), id, NULL);
+  }
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  value_set(&values[0], "name", &slots[0], &lens[0], name, name_len);
+  if (text != NULL) {
+    value_set(&values[1], "text", &slots[1], &lens[1], text, text_len);
+  } else {
+    /* The text is kept: only the tag changes. */
+    char * keep = NULL;
+    size_t keep_len = 0;
+    rc = gdefcore_render_field_text(catalog, changeset, GDEFCORE_VIEW_CURRENT, id,
+        "text", &keep, &keep_len);
+    if (rc != GDEFCORE_OK) {
+      return rc;
+    }
+    value_set(&values[1], "text", &slots[1], &lens[1], keep, keep_len);
+    rc = GDEFCORE_OK;
+    /* The slot is copied by the save before the call returns. */
+    {
+      GDEFCORE_Result saved;
+      if (tag != NULL) {
+        value_set(&values[2], "generated", &slots[2], &lens[2], tag, tag_len);
+        nvalues = 3;
+      } else {
+        memset(&values[2], 0, sizeof values[2]);
+        values[2].size = sizeof values[2];
+        values[2].field = "generated";
+        values[2].field_len = 9;
+        values[2].texts = &slots[2];
+        values[2].text_lens = &lens[2];
+        slots[2] = "";
+        lens[2] = 0;
+        values[2].count = 0;
+        nvalues = 3;
+      }
+      saved = gdefcore_entity_save(changeset, id, GDEFCORE_PUBLIC_ID_LEN, kLang,
+          sizeof kLang - 1, values, nvalues);
+      free(keep);
+      return saved;
+    }
+  }
+  if (tag != NULL) {
+    value_set(&values[2], "generated", &slots[2], &lens[2], tag, tag_len);
+  } else {
+    memset(&values[2], 0, sizeof values[2]);
+    values[2].size = sizeof values[2];
+    values[2].field = "generated";
+    values[2].field_len = 9;
+    values[2].texts = &slots[2];
+    values[2].text_lens = &lens[2];
+    slots[2] = "";
+    lens[2] = 0;
+    values[2].count = 0;
+  }
+  nvalues = 3;
+  return gdefcore_entity_save(changeset, id, GDEFCORE_PUBLIC_ID_LEN, kLang,
+      sizeof kLang - 1, values, nvalues);
+}
+
+GDEFCORE_Result gdefcore_siteasset_stage_forget_generated(
+    GDEFCORE_Changeset * changeset, const char * name, size_t name_len) {
+  char id[GDEFCORE_PUBLIC_ID_LEN + 1];
+  int kind = 0;
+  if (changeset == NULL || !gdefcore_asset_name_ok(name, name_len) ||
+      locate(gdefcore_changeset_catalog(changeset), changeset, name, name_len, NULL,
+          id, &kind) != GDEFCORE_OK) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  return gdefcore_entity_clear(changeset, id, GDEFCORE_PUBLIC_ID_LEN);
+}
+
+int gdefcore_siteasset_generator(GDEFCORE_Catalog * catalog, const char * name,
+    size_t name_len, char template_name[GDEFCORE_ASSET_NAME_MAX + 1]) {
+  if (catalog == NULL || template_name == NULL || !gdefcore_asset_name_ok(name, name_len)) {
+    return 0;
+  }
+  return gdefcore_siteasset_generated_by(catalog, NULL, name, name_len, template_name) &&
+         template_name[0] != '\0';
 }

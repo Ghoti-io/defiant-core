@@ -38,6 +38,7 @@
 #include <ghoti.io/defiant-core/layout.h>
 #include <ghoti.io/defiant-core/siteasset.h>
 #include <ghoti.io/defiant-core/region.h>
+#include <ghoti.io/defiant-core/structure.h>
 #include <ghoti.io/defiant-core/settings.h>
 #include <ghoti.io/defiant-core/template.h>
 
@@ -4830,6 +4831,12 @@ GDEFCORE_Result gdefcore_changeset_apply(GDEFCORE_Changeset * changeset,
   }
   /* A region descriptor that is not one is refused here (region.h). */
   rc = gdefcore_region_vet(changeset);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  /* A structured template is what its structure makes, and so is its
+   * stylesheet (structure.h). */
+  rc = gdefcore_structure_vet(changeset);
   if (rc != GDEFCORE_OK) {
     return rc;
   }

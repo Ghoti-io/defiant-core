@@ -3630,7 +3630,7 @@ GDEFCORE_Result gdefcore_render_kit(GDEFCORE_Catalog * catalog, uint8_t ** out_b
     size_t * out_len) {
   GDEFCORE_Changeset * cs = NULL;
   GDEFCORE_Field post[3];
-  GDEFCORE_Field tmpl[6];
+  GDEFCORE_Field tmpl[7];
   GDEFCORE_Field kinds[5];
   GDEFCORE_Field view[5];
   GDEFCORE_Field display[4];
@@ -3654,6 +3654,7 @@ GDEFCORE_Result gdefcore_render_kit(GDEFCORE_Catalog * catalog, uint8_t ** out_b
   set_field(&tmpl[3], "attached", 0, 0);
   set_field(&tmpl[4], "classification", 0, 0);
   set_field(&tmpl[5], "regions", 0, 1);
+  set_field(&tmpl[6], "structure", 0, 0);
   set_field(&kinds[0], "name", 1, 0);
   set_field(&kinds[1], "label", 1, 0);
   set_field(&kinds[2], "version", 1, 0);
@@ -3678,7 +3679,7 @@ GDEFCORE_Result gdefcore_render_kit(GDEFCORE_Catalog * catalog, uint8_t ** out_b
       3);
   if (rc == GDEFCORE_OK) {
     rc = gdefcore_changeset_define(cs, "core.template", 13, GDEFCORE_TYPE_CONFIG,
-        tmpl, 6);
+        tmpl, 7);
   }
   if (rc == GDEFCORE_OK) {
     rc = gdefcore_changeset_define(cs, GDEFCORE_TEMPLATE_KIND_TYPE,

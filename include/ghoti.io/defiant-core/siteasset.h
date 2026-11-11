@@ -84,6 +84,17 @@ extern "C" {
 GDEFCORE_API int gdefcore_siteasset_name_ok(const char * name, size_t name_len);
 
 /**
+ * @brief The page template whose structure generated the site file @p name
+ * (structure.h), written to @p template_name (::GDEFCORE_ASSET_NAME_MAX + 1
+ * bytes). A generated file is read only.
+ *
+ * @return 1 when the file is generated, 0 when it is the site's own or there is
+ *   none.
+ */
+GDEFCORE_API int gdefcore_siteasset_generator(GDEFCORE_Catalog * catalog,
+    const char * name, size_t name_len, char template_name[GDEFCORE_ASSET_NAME_MAX + 1]);
+
+/**
  * @brief Define the two types and declare the two permissions, granted to
  * nobody. Idempotent.
  */
