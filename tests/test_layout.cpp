@@ -623,6 +623,7 @@ TEST_F(Layouts, AModuleWidgetAndSelectorChangeAPageWithNoKernelChange) {
   EXPECT_NE(std::string::npos, news_page.find("<aside class=\"ticker\">Ticker:</aside>"))
       << news_page;
   EXPECT_EQ(std::string::npos, plain.find("ticker")) << "CONTROL: the other page";
+  EXPECT_EQ(std::string::npos, plain.find("site-name")) << "CONTROL: the default layout has none";
   EXPECT_EQ(1, ticker.calls);
   /* The main content is the same bytes on both: the contributor and the widget
    * add around it. */
@@ -636,30 +637,36 @@ TEST_F(Layouts, AModuleWidgetAndSelectorChangeAPageWithNoKernelChange) {
       Show("", "/news/" + alpha_, routes).find("Ticker:headlines")) << "the target is the provider's";
   EXPECT_EQ("headlines", ticker.target);
   /* The module off is never refused for a layout that places its widget: the
-   * disable may be a security decision. The page is built without the widget
-   * and the placement stays, unavailable. */
+   * disable may be a security decision. The page is built without the widget,
+   * the rest of the layout still draws, and the placement stays, unavailable. */
+  ASSERT_EQ(GDEFCORE_OK,
+      PutLayout("post", "layout", {"main content", "side news.ticker headlines", "side sitename"}))
+      << refusal_;
+  const int calls_before = ticker.calls;
+  ASSERT_NE(std::string::npos, Show("", "/page/" + alpha_, Table()).find("Ticker:headlines"));
+  EXPECT_EQ(calls_before + 1, ticker.calls);
   ASSERT_EQ(GDEFCORE_OK, Disable("news")) << last_error_;
   GDEFCORE_Routes * after = Table();
   EXPECT_EQ("post", Chosen("", "/news/" + alpha_, after)) << "no contributor, no skin";
-  const std::string gone = Show("", "/news/" + alpha_, after);
+  const std::string gone = Show("", "/page/" + alpha_, after);
   EXPECT_EQ(std::string::npos, gone.find("ticker")) << gone;
+  EXPECT_NE(std::string::npos, gone.find("<span class=\"site-name\">")) << "the rest of the layout draws: " << gone;
   EXPECT_NE(std::string::npos, gone.find("<article class=\"post\"><h1>Alpha</h1>")) << gone;
-  const int calls_before = ticker.calls;
-  Show("", "/news/" + alpha_, after);
-  EXPECT_EQ(calls_before, ticker.calls) << "a disabled module's widget never runs";
-  EXPECT_EQ("main content\nside news.ticker headlines\n", PanesOf("news"))
+  EXPECT_EQ(calls_before + 1, ticker.calls) << "a disabled module's widget never runs";
+  EXPECT_EQ("main content\nside news.ticker headlines\nside sitename\n", PanesOf("post"))
       << "the placement is kept";
   /* The layout can still be edited around the kept placement... */
   EXPECT_EQ(GDEFCORE_OK,
-      PutLayout("news", "layout", {"main content", "side news.ticker headlines", "side recent"}))
+      PutLayout("post", "layout",
+          {"main content", "side news.ticker headlines", "side sitename", "side recent"}))
       << refusal_;
   /* ...but a new placement of the gone widget is refused (CONTROL). */
   EXPECT_EQ(GDEFCORE_ERR_INVALID,
-      PutLayout("news", "layout", {"main content", "side news.other"}));
+      PutLayout("post", "layout", {"main content", "side news.other"}));
   /* The module on again: the widget draws as before. */
   ASSERT_EQ(GDEFCORE_OK, Enable("news", {})) << last_error_;
   EXPECT_NE(std::string::npos,
-      Show("", "/news/" + alpha_, Table()).find("Ticker:headlines"));
+      Show("", "/page/" + alpha_, Table()).find("Ticker:headlines"));
 }
 
 TEST_F(Layouts, MessagesAndTheSiteNameAndTitleAreWidgets) {

@@ -109,7 +109,11 @@ plant module-disable-refused-by-layout $LAYOUT testLayout \
   '    uses = tmpl_len > 0 && template_touched(changeset, catalog, tmpl, tmpl_len);' \
   '    uses = tmpl_len > 0 &&
            (gdefcore_changeset_module_count(changeset) > 0 ||
-               template_touched(changeset, catalog, tmpl, tmpl_len));'
+               template_touched(changeset, catalog, tmpl, tmpl_len));' \
+  '        span_eq(w, wl, widget, widget_len)) {
+      return 1;' \
+  '        (0 && span_eq(w, wl, widget, widget_len))) {
+      return 1;'
 
 # Plant 4c: a layout with a kept placement of a gone widget cannot be edited.
 plant kept-placement-of-gone-widget-refused $LAYOUT testLayout \
