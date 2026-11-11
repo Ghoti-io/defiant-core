@@ -635,13 +635,31 @@ TEST_F(Layouts, AModuleWidgetAndSelectorChangeAPageWithNoKernelChange) {
   EXPECT_NE(std::string::npos,
       Show("", "/news/" + alpha_, routes).find("Ticker:headlines")) << "the target is the provider's";
   EXPECT_EQ("headlines", ticker.target);
-  /* The module off: the layout it needs is refused, so it cannot be left in a
-   * state a page would find broken. */
-  EXPECT_EQ(GDEFCORE_ERR_INVALID, Disable("news"));
-  ASSERT_EQ(GDEFCORE_OK, PutLayout("news", "layout", {"main content"}));
-  EXPECT_EQ(GDEFCORE_OK, Disable("news")) << "CONTROL: nothing places its widget";
+  /* The module off is never refused for a layout that places its widget: the
+   * disable may be a security decision. The page is built without the widget
+   * and the placement stays, unavailable. */
+  ASSERT_EQ(GDEFCORE_OK, Disable("news")) << last_error_;
   GDEFCORE_Routes * after = Table();
   EXPECT_EQ("post", Chosen("", "/news/" + alpha_, after)) << "no contributor, no skin";
+  const std::string gone = Show("", "/news/" + alpha_, after);
+  EXPECT_EQ(std::string::npos, gone.find("ticker")) << gone;
+  EXPECT_NE(std::string::npos, gone.find("<article class=\"post\"><h1>Alpha</h1>")) << gone;
+  const int calls_before = ticker.calls;
+  Show("", "/news/" + alpha_, after);
+  EXPECT_EQ(calls_before, ticker.calls) << "a disabled module's widget never runs";
+  EXPECT_EQ("main content\nside news.ticker headlines\n", PanesOf("news"))
+      << "the placement is kept";
+  /* The layout can still be edited around the kept placement... */
+  EXPECT_EQ(GDEFCORE_OK,
+      PutLayout("news", "layout", {"main content", "side news.ticker headlines", "side recent"}))
+      << refusal_;
+  /* ...but a new placement of the gone widget is refused (CONTROL). */
+  EXPECT_EQ(GDEFCORE_ERR_INVALID,
+      PutLayout("news", "layout", {"main content", "side news.other"}));
+  /* The module on again: the widget draws as before. */
+  ASSERT_EQ(GDEFCORE_OK, Enable("news", {})) << last_error_;
+  EXPECT_NE(std::string::npos,
+      Show("", "/news/" + alpha_, Table()).find("Ticker:headlines"));
 }
 
 TEST_F(Layouts, MessagesAndTheSiteNameAndTitleAreWidgets) {

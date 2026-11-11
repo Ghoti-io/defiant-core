@@ -330,12 +330,36 @@ static int printable_name(const char * s, size_t n) {
 /*
  * Whether placements @p panes fit the page template whose source is @p body:
  * each is `region widget [target]`, names a region the template declares and a
- * widget type the tenant has (as @p projection would leave them). ::GDEFCORE_OK
- * or ::GDEFCORE_ERR_INVALID with @p why saying which.
+ * widget type the tenant has (as @p projection would leave them). A widget type
+ * the tenant no longer has (its module was disabled) is accepted when the
+ * layout as it is stored already places it (@p kept): the placement stays,
+ * unavailable, and the layout can still be edited around it; a new placement
+ * of such a type is refused. ::GDEFCORE_OK or ::GDEFCORE_ERR_INVALID with
+ * @p why saying which.
  */
+static int widget_kept(char ** kept, const size_t * kept_lens, size_t kept_count,
+    const char * widget, size_t widget_len) {
+  size_t i;
+  for (i = 0; i < kept_count; i++) {
+    const char * r;
+    const char * w;
+    const char * t;
+    size_t rl = 0;
+    size_t wl = 0;
+    size_t tl = 0;
+    if (gdefcore_render_split_pane(kept[i], kept_lens[i], &r, &rl, &w, &wl, &t,
+            &tl) &&
+        span_eq(w, wl, widget, widget_len)) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
 static GDEFCORE_Result check_panes(GDEFCORE_Catalog * catalog,
     const GDEFCORE_Changeset * projection, const char * body, size_t body_len,
-    char ** panes, const size_t * lens, size_t count, char * why, size_t cap) {
+    char ** panes, const size_t * lens, size_t count, char ** kept,
+    const size_t * kept_lens, size_t kept_count, char * why, size_t cap) {
   char ** regions = NULL;
   size_t nregions = 0;
   size_t i;
@@ -388,7 +412,8 @@ static GDEFCORE_Result check_panes(GDEFCORE_Catalog * catalog,
       break;
     }
     if (widget_find_in(catalog, projection, widget, widget_len, &w) !=
-        GDEFCORE_OK) {
+            GDEFCORE_OK &&
+        !widget_kept(kept, kept_lens, kept_count, widget, widget_len)) {
       say(why, cap, "No enabled module or built-in type offers the widget ",
           widget, widget_len, ".");
       rc = GDEFCORE_ERR_INVALID;
@@ -492,7 +517,7 @@ GDEFCORE_Result gdefcore_layout_check(GDEFCORE_Catalog * catalog, const char * n
     rc = GDEFCORE_OK;
   }
   if (rc == GDEFCORE_OK) {
-    rc = check_panes(catalog, NULL, body, body_len, panes, lens, count, NULL, 0);
+    rc = check_panes(catalog, NULL, body, body_len, panes, lens, count, NULL, NULL, 0, NULL, 0);
     gdefcore_values_free(catalog, panes, lens, count);
   }
   gdefcore_text_free(catalog, body);
@@ -811,8 +836,25 @@ static GDEFCORE_Result vet_display(GDEFCORE_Changeset * changeset,
     out = rc;
     goto done;
   }
-  rc = check_panes(catalog, changeset, body, body_len, panes, lens, count, why,
-      sizeof why);
+  {
+    /* The layout as it is stored: a placement it already holds stays valid
+     * when its widget's module has been disabled. */
+    char ** kept = NULL;
+    size_t * kept_lens = NULL;
+    size_t kept_count = 0;
+    if (gdefcore_entity_values(catalog, NULL, GDEFCORE_VIEW_PUBLISHED, id,
+            GDEFCORE_PUBLIC_ID_LEN, kLang, sizeof kLang - 1, "panes", 5, &kept,
+            &kept_lens, &kept_count) != GDEFCORE_OK) {
+      kept = NULL;
+      kept_lens = NULL;
+      kept_count = 0;
+    }
+    rc = check_panes(catalog, changeset, body, body_len, panes, lens, count,
+        kept, kept_lens, kept_count, why, sizeof why);
+    if (kept != NULL) {
+      gdefcore_values_free(catalog, kept, kept_lens, kept_count);
+    }
+  }
   gdefcore_values_free(catalog, panes, lens, count);
   if (rc == GDEFCORE_OK) {
     /* What the layout keeps unplaced is only checked for its shape. */
@@ -944,9 +986,6 @@ static GDEFCORE_Result vet_template_users(GDEFCORE_Changeset * changeset,
               &type_len, NULL) == GDEFCORE_OK &&
           type != NULL && span_eq(type, type_len, "core.template", 13);
   }
-  /* So does a module the write enables or disables: it takes its widget types
-   * with it. */
-  any = any || gdefcore_changeset_module_count(changeset) > 0;
   if (!any) {
     return GDEFCORE_OK;
   }
@@ -967,9 +1006,7 @@ static GDEFCORE_Result vet_template_users(GDEFCORE_Changeset * changeset,
             &tmpl, &tmpl_len) != GDEFCORE_OK) {
       continue;
     }
-    uses = tmpl_len > 0 &&
-           (gdefcore_changeset_module_count(changeset) > 0 ||
-               template_touched(changeset, catalog, tmpl, tmpl_len));
+    uses = tmpl_len > 0 && template_touched(changeset, catalog, tmpl, tmpl_len);
     free(tmpl);
     if (uses) {
       rc = vet_display(changeset, catalog, ids[i], GDEFCORE_TOUCH_SAVE);

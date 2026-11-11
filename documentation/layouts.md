@@ -26,8 +26,10 @@ template (its own name unless the module names one), the permission its source
 needs, and a provider. The provider binds the text variables the kind declares
 (`gdefcore_widget_bind_text()`) and is called only for a viewer who holds the
 permission. Nothing in the kernel changes. A type is the module's while the
-module is enabled; a layout cannot place it before, and disabling the module is
-refused while a layout places it (the refusal names the layout).
+module is enabled; a layout cannot place it before. Disabling the module is
+never refused because a layout places its widget: a disable can be a security
+decision, and it must not wait on anyone editing layouts. The placement stays
+stored and draws nothing (see below).
 
 `gdefcore_layout_widget_count()`, `_at()` and `_find()` list what the tenant has.
 
@@ -91,8 +93,8 @@ whole changeset is refused with nothing written when
   more than 32.
 
 The same check runs the other way: a changeset that changes, renames or clears a
-page template, or enables or disables a module, is refused if it would leave a
-layout that uses it unable to be applied. A layout that cannot be applied is
+page template is refused if it would leave a layout that uses it unable to be
+applied. Enabling or disabling a module is not checked this way (see below). A layout that cannot be applied is
 never applied to a page (`gdefcore_layout_check()`).
 
 ## Selector rules
@@ -322,6 +324,11 @@ placement is returned for the editor to say so. No placement is lost, and none i
 left naming a region the template lacks. An edit of a structure does the same and
 also carries a rename (see *Editing a page structure*).
 
-Disabling a module whose widget a layout places is refused, so a placed widget is
-never orphaned by a disable; a Not placed entry of a disabled module's widget is
-kept and cannot be placed until the module is enabled.
+Disabling a module is never refused because of a layout. A placement of its
+widget stays stored, in its region, and is **unavailable**: the page is built
+without it (no widget code runs, and no title is drawn), the rest of the layout
+is unaffected, and the placement can still be moved, configured, set aside or
+removed; the layout can be saved with it in place. A *new* placement of that
+widget is refused ("That widget is not available.") until the module is
+enabled, and when it is, the placement draws again as it was. A Not placed
+entry of the widget is kept the same way.

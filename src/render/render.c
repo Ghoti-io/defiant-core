@@ -2407,6 +2407,21 @@ static GDEFCORE_Result render_display(GDEFCORE_Catalog * catalog,
             &extras)) {
       continue;
     }
+    {
+      /* A placement whose widget type is gone (its module is disabled) draws
+       * nothing, title included, and the page is built without it. */
+      GDEFCORE_Layout_Widget known;
+      memset(&known, 0, sizeof known);
+      known.size = sizeof known;
+      rc = gdefcore_layout_widget_find(catalog, widget, widget_len, &known);
+      if (rc == GDEFCORE_ERR_INVALID) {
+        rc = GDEFCORE_OK;
+        continue;
+      }
+      if (rc != GDEFCORE_OK) {
+        goto done;
+      }
+    }
     rc = render_widget_at(catalog, request, nav, widget, widget_len, target,
         target_len, fuel, &html, &html_len);
     if (rc != GDEFCORE_OK) {

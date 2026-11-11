@@ -16,7 +16,7 @@
 #   unknown-region-accepted                  Layouts.AnUnknownRegionIsRefusedAndNothingIsWritten
 #   vet-not-called                           Layouts.AnUnknownRegionIsRefusedAndNothingIsWritten
 #   template-change-breaks-layout            Layouts.ChangingAPageTemplateCannotLeaveALayoutBroken
-#   module-disable-leaves-layout-broken      Layouts.AModuleWidgetAndSelectorChangeAPageWithNoKernelChange
+#   disabled-module-widget-still-drawn       Layouts.AModuleWidgetAndSelectorChangeAPageWithNoKernelChange
 #   module-widget-needs-a-kernel-change      Layouts.TheCatalogHasEightTypesAndAModuleAddsMore, Layouts.AModuleWidgetAndSelectorChangeAPageWithNoKernelChange
 #   overlap-resolved-by-registration-order   Layouts.OverlappingContributorsResolveTheSameWayWhateverTheRegistrationOrder
 #   site-rule-not-before-a-module            Layouts.ModulesEnabledInAnyOrderGiveTheSameOffersAndTheSiteBeatsAModule
@@ -81,14 +81,43 @@ plant template-change-breaks-layout $LAYOUT testLayout \
   '  return vet_template_users(changeset, catalog);' \
   '  return GDEFCORE_OK;'
 
-# Plant 4: disabling a module leaves a layout that places its widget.
-plant module-disable-leaves-layout-broken $LAYOUT testLayout \
+# Plant 4: a page that places a widget of a disabled module is built with the
+# widget in it (the module is asked, or the page fails) instead of without it.
+plant disabled-module-widget-still-drawn src/render/render.c testLayout \
   'Layouts.AModuleWidgetAndSelectorChangeAPageWithNoKernelChange' \
-  '  any = any || gdefcore_changeset_module_count(changeset) > 0;' \
-  '  any = any || 0;' \
-  '           (gdefcore_changeset_module_count(changeset) > 0 ||
-               template_touched(changeset, catalog, tmpl, tmpl_len));' \
-  '           (0 || template_touched(changeset, catalog, tmpl, tmpl_len));'
+  '      if (rc == GDEFCORE_ERR_INVALID) {
+        rc = GDEFCORE_OK;
+        continue;
+      }' \
+  '      if (rc == GDEFCORE_ERR_INVALID) {
+        rc = GDEFCORE_ERR_INVALID;
+        goto done;
+      }'
+
+# Plant 4b: disabling a module is refused again while a layout places its widget.
+plant module-disable-refused-by-layout $LAYOUT testLayout \
+  'Layouts.AModuleWidgetAndSelectorChangeAPageWithNoKernelChange' \
+  '  if (!any) {
+    return GDEFCORE_OK;
+  }
+  rc = gdefcore_entity_ids(catalog, kDisplayType' \
+  '  any = any || gdefcore_changeset_module_count(changeset) > 0;
+  if (!any) {
+    return GDEFCORE_OK;
+  }
+  rc = gdefcore_entity_ids(catalog, kDisplayType' \
+  '    uses = tmpl_len > 0 && template_touched(changeset, catalog, tmpl, tmpl_len);' \
+  '    uses = tmpl_len > 0 &&
+           (gdefcore_changeset_module_count(changeset) > 0 ||
+               template_touched(changeset, catalog, tmpl, tmpl_len));'
+
+# Plant 4c: a layout with a kept placement of a gone widget cannot be edited.
+plant kept-placement-of-gone-widget-refused $LAYOUT testLayout \
+  'Layouts.AModuleWidgetAndSelectorChangeAPageWithNoKernelChange' \
+  '        span_eq(w, wl, widget, widget_len)) {
+      return 1;' \
+  '        (0 && span_eq(w, wl, widget, widget_len))) {
+      return 1;'
 
 # Plant 5: the catalog is the built-in list: a module's type is not in it.
 plant module-widget-needs-a-kernel-change $LAYOUT testLayout \
