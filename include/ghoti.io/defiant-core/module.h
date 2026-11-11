@@ -1366,6 +1366,18 @@ GDEFCORE_API GDEFCORE_Result gdefcore_alter_text(const GDEFCORE_Alter * alter,
     const char ** out_text, size_t * out_len);
 
 /**
+ * @brief The module whose subscriber last changed the alter value.
+ *
+ * A subscriber that changes the text (and does not fail: a failing subscriber's
+ * change is rolled back) is remembered by the name of its module, or by its own
+ * name when it is not a module's; a later subscriber that changes it again takes
+ * its place. ::GDEFCORE_ERR_INVALID when no subscriber changed it. The name is the
+ * alter value's own and lives as long as it does.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_alter_changed_by(const GDEFCORE_Alter * alter,
+    const char ** out_name, size_t * out_len);
+
+/**
  * @brief Replace the shared text. The bytes are copied.
  *
  * @param alter The value.

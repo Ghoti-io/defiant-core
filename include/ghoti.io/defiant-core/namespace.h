@@ -206,6 +206,7 @@
 #define gdefcore_alter_destroy GHOTIIO_DEFCORE(gdefcore_alter_destroy)
 #define gdefcore_alter_set GHOTIIO_DEFCORE(gdefcore_alter_set)
 #define gdefcore_alter_text GHOTIIO_DEFCORE(gdefcore_alter_text)
+#define gdefcore_alter_changed_by GHOTIIO_DEFCORE(gdefcore_alter_changed_by)
 #define gdefcore_catalog_bind_host GHOTIIO_DEFCORE(gdefcore_catalog_bind_host)
 #define gdefcore_catalog_bind_subjects                                         \
   GHOTIIO_DEFCORE(gdefcore_catalog_bind_subjects)

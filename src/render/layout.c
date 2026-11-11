@@ -1414,9 +1414,15 @@ static GDEFCORE_Result decide(GDEFCORE_Catalog * catalog, GDEFCORE_Routes * rout
           char * refined = NULL;
           if (gdefcore_text_dup(catalog, text, text_len, &refined) ==
               GDEFCORE_OK) {
+            const char * by = NULL;
+            size_t by_len = 0;
             gdefcore_text_free(catalog, chosen);
             chosen = refined;
             chosen_len = text_len;
+            if (why != NULL && gdefcore_alter_changed_by(alter, &by, &by_len) == GDEFCORE_OK) {
+              memcpy(why->refined_by, by,
+                  by_len < GDEFCORE_LAYOUT_NAME_MAX ? by_len : GDEFCORE_LAYOUT_NAME_MAX);
+            }
           }
         }
       }

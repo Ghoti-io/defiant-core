@@ -80,6 +80,7 @@ typedef struct GDEFCORE_Layout_Why {
   char ordered[GDEFCORE_LAYOUT_NAME_MAX + 1];   ///< The layout the offers chose, or "".
   char final[GDEFCORE_LAYOUT_NAME_MAX + 1];     ///< The layout after the alter hook, or "".
   int refined;                                  ///< Non-zero when the hook changed it.
+  char refined_by[GDEFCORE_LAYOUT_NAME_MAX + 1]; ///< The module whose subscriber made that change, or "" when `refined` is 0.
 } GDEFCORE_Layout_Why;
 
 /**

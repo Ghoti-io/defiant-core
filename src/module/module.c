@@ -226,6 +226,8 @@ struct GDEFCORE_Alter {
   const GDEFCORE_Allocator * alloc;
   char * text;
   size_t len;
+  char by[kNameMax + 1];   /* the module whose subscriber last changed the text */
+  size_t by_len;
 };
 
 static const GDEFCORE_Allocator * use_alloc(const GDEFCORE_Allocator * alloc) {
@@ -3500,6 +3502,19 @@ static GDEFCORE_Result call_subscriber(GDEFCORE_Host * host, ChainNode * node,
         return restore;
       }
     } else {
+      if (alter != NULL && saved != NULL &&
+          (alter->len != saved_len ||
+              (saved_len > 0 && memcmp(alter->text, saved, saved_len) != 0))) {
+        /* Say who changed it: a module, or the subscriber when it is the kernel's. */
+        const char * who = mod != NULL ? mod->name : node->name;
+        size_t who_len = mod != NULL ? mod->name_len : node->name_len;
+        if (who_len > kNameMax) {
+          who_len = kNameMax;
+        }
+        memcpy(alter->by, who, who_len);
+        alter->by[who_len] = '\0';
+        alter->by_len = who_len;
+      }
       gcu_allocator_free(host->alloc, saved);
     }
   }
@@ -3672,6 +3687,8 @@ GDEFCORE_Result gdefcore_alter_create(GDEFCORE_Host * host, const char * text,
   }
   alter->text[len] = '\0';
   alter->len = len;
+  alter->by[0] = '\0';
+  alter->by_len = 0;
   *out_alter = alter;
   return GDEFCORE_OK;
 }
@@ -3695,6 +3712,16 @@ GDEFCORE_Result gdefcore_alter_text(const GDEFCORE_Alter * alter,
   }
   *out_text = alter->text;
   *out_len = alter->len;
+  return GDEFCORE_OK;
+}
+
+GDEFCORE_Result gdefcore_alter_changed_by(const GDEFCORE_Alter * alter, const char ** out_name,
+    size_t * out_len) {
+  if (alter == NULL || out_name == NULL || out_len == NULL || alter->by_len == 0) {
+    return GDEFCORE_ERR_INVALID;   /* no value, or nobody changed it */
+  }
+  *out_name = alter->by;
+  *out_len = alter->by_len;
   return GDEFCORE_OK;
 }
 

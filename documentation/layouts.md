@@ -127,7 +127,11 @@ classification: subscribers compose in the host's one order, each seeing what
 the one before named. It changes the layout and nothing else. The decision a
 subscriber reports is not read, a subscriber that fails is skipped by the host,
 and if the final name cannot be applied, the choice made before the hook
-stands. No refinement can deny a page.
+stands. No refinement can deny a page. The module whose subscriber last changed
+the name (`gdefcore_alter_changed_by()`) is what `gdefcore_layout_why()` reports as
+`refined_by` when the refinement is the one that applied, so an editor asking why
+a page got a layout is told which module sent it there; a subscriber whose change
+was rolled back because it failed is not named.
 
 ## Who sees what
 

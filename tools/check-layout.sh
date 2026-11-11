@@ -371,4 +371,20 @@ plant why-refinement-not-reported src/render/layout.c testLayout "$T_AGREE" \
   '    why->refined = strcmp(why->final, why->ordered) != 0;' \
   '    why->refined = 0;'
 
+# ---- which module refined a choice (the checker names it) ---------------------------------
+
+# The checker is not told who changed the choice.
+plant refinement-not-attributed $LAYOUT testLayout \
+  'Layouts.AnAlterHookRefinesTheLayoutForARoleAndCannotDenyAPage' \
+  '            if (why != NULL && gdefcore_alter_changed_by(alter, &by, &by_len) == GDEFCORE_OK) {' \
+  '            if (0 && why != NULL && gdefcore_alter_changed_by(alter, &by, &by_len) == GDEFCORE_OK) {'
+
+# The first module to change it is named, though a later one made the change that stands.
+plant refinement-attributed-to-the-first src/module/module.c testLayout \
+  'Layouts.AnAlterHookRefinesTheLayoutForARoleAndCannotDenyAPage' \
+  '      if (alter != NULL && saved != NULL &&
+          (alter->len != saved_len ||' \
+  '      if (alter != NULL && saved != NULL && alter->by_len == 0 &&
+          (alter->len != saved_len ||'
+
 plant_finish

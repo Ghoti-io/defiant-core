@@ -1204,6 +1204,35 @@ TEST_F(Layouts, AnAlterHookRefinesTheLayoutForARoleAndCannotDenyAPage) {
   ASSERT_EQ(GDEFCORE_OK, Enable("hooktwo", {})) << last_error_;
   EXPECT_EQ("vip2", Chosen(vip_, page, routes)) << "hookone, then hooktwo";
   EXPECT_EQ("post", Chosen(reader_, page, routes));
+  /* The checker names the module whose subscriber made the last change, and nobody when none did. */
+  {
+    GDEFCORE_Request * asked = Req(vip_);
+    char * resolved = NULL;
+    size_t resolved_len = 0;
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_form_resolve(routes, catalog_, asked, page.data(), page.size(),
+                               &resolved, &resolved_len));
+    gdefcore_request_set_resolution(asked, resolved, resolved_len);
+    gdefcore_text_free(catalog_, resolved);
+    GDEFCORE_Layout_Why w;
+    memset(&w, 0, sizeof w);
+    w.size = sizeof w;
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_layout_why(catalog_, routes, asked, page.data(), page.size(), &w));
+    EXPECT_EQ(1, w.refined);
+    EXPECT_STREQ("vip2", w.final);
+    EXPECT_STREQ("hooktwo", w.refined_by) << "the last module to change it, not the first";
+    gdefcore_layout_why_free(&w);
+    GDEFCORE_Request * other = Req(reader_);
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_form_resolve(routes, catalog_, other, page.data(), page.size(),
+                               &resolved, &resolved_len));
+    gdefcore_request_set_resolution(other, resolved, resolved_len);
+    gdefcore_text_free(catalog_, resolved);
+    memset(&w, 0, sizeof w);
+    w.size = sizeof w;
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_layout_why(catalog_, routes, other, page.data(), page.size(), &w));
+    EXPECT_EQ(0, w.refined);
+    EXPECT_STREQ("", w.refined_by) << "CONTROL: nobody refined it for this viewer";
+    gdefcore_layout_why_free(&w);
+  }
   /* Every wrong thing a hook can do: report a denial, fail, name a layout that
    * cannot be applied, name nothing. The page is drawn, as chosen. */
   r2.deny = 1;

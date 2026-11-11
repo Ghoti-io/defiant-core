@@ -371,6 +371,7 @@ static const Surface kSurface[] = {
     {"gdefcore_alter_create", "P"},
     {"gdefcore_alter_destroy", "P"},
     {"gdefcore_alter_text", "P"},
+    {"gdefcore_alter_changed_by", "P"},
     {"gdefcore_alter_set", "P"},
     {"gdefcore_module_contribute", "W"},
     {"gdefcore_module_contributions", "RA"},
