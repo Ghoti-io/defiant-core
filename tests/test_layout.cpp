@@ -1798,6 +1798,17 @@ TEST_F(Layouts, TheStructsHereAreAcceptedAtOnlyTheirOwnSize) {
     gdefcore_text_free(catalog_, name);
     return r.seen_size == size;
   };
+  /* The which-layout answer is taken at its own size only. */
+  probes["GDEFCORE_Layout_Why"] = [&, this](size_t size) {
+    GDEFCORE_Layout_Why w;
+    memset(&w, 0, sizeof w);
+    w.size = size;
+    GDEFCORE_Result rc = gdefcore_layout_why(catalog_, NULL, Req(), "/", 1, &w);
+    if (rc == GDEFCORE_OK) {
+      gdefcore_layout_why_free(&w);
+    }
+    return rc == GDEFCORE_OK;
+  };
   size_structs::Run("tests/test_layout.cpp", probes);
 }
 

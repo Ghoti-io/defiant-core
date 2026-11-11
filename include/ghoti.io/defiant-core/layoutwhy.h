@@ -59,9 +59,10 @@ enum {
   GDEFCORE_WHY_UNUSABLE           ///< Its layout cannot be applied (it is missing or invalid).
 };
 
-/** @brief One offer of the selection. Begins with @ref size. */
+/** @brief One offer of the selection. An element of GDEFCORE_Layout_Why::offers:
+ *  the engine fills it and the caller only reads it, so the size that guards the
+ *  array is the one in GDEFCORE_Layout_Why. */
 typedef struct GDEFCORE_Layout_Why_Offer {
-  size_t size;                                  ///< \`sizeof\`.
   char layout[GDEFCORE_LAYOUT_NAME_MAX + 1];    ///< The layout offered.
   char source[GDEFCORE_LAYOUT_NAME_MAX + 1];    ///< Who offered it: a rule of the site, or a module's contributor.
   int64_t rank;                                 ///< The engine's rank: larger is more specific.

@@ -1286,7 +1286,6 @@ static GDEFCORE_Result decide(GDEFCORE_Catalog * catalog, GDEFCORE_Routes * rout
     usable = gdefcore_layout_check(catalog, value, value_len) == GDEFCORE_OK;
     if (why != NULL) {
       GDEFCORE_Layout_Why_Offer * o = &why->offers[i];
-      o->size = sizeof *o;
       memcpy(o->layout, value, value_len < GDEFCORE_LAYOUT_NAME_MAX ? value_len : GDEFCORE_LAYOUT_NAME_MAX);
       memcpy(o->source, source == NULL ? "" : source,
           source_len < GDEFCORE_LAYOUT_NAME_MAX ? source_len : GDEFCORE_LAYOUT_NAME_MAX);
