@@ -1417,6 +1417,67 @@ TEST_F(Layouts, TheStructsHereAreAcceptedAtOnlyTheirOwnSize) {
 
 }  // namespace
 
+/* ---- files a module ships, named by a template (site admin story 18) ----- */
+
+TEST_F(Layouts, AFileAModuleShipsHasAnAddressWithItsHashAndAPageUsesIt) {
+  const std::string body =
+      "<% use region; use asset; %><link rel=\"stylesheet\" href=\"<%= "
+      "asset(\"skin/site.css\") %>\"><%= region(\"main\") %>";
+  ModDef * skin = NewMod("skin");
+  skin->Asset("site.css", GDEFCORE_ASSET_CSS, "abc");
+  ASSERT_EQ(GDEFCORE_OK, Install(skin));
+  /* Installed is not enabled: the file is not the tenant's yet, so a template
+   * that names it is refused when it is saved, and the refusal names it. */
+  EXPECT_NE(GDEFCORE_OK, PutTemplate("skinpage", "core.page", body));
+  EXPECT_NE(std::string::npos, refusal_.find("skin/site.css")) << refusal_;
+  ASSERT_EQ(GDEFCORE_OK, Enable("skin", {})) << last_error_;
+  ASSERT_EQ(GDEFCORE_OK, PutTemplate("skinpage", "core.page", body)) << refusal_;
+  ASSERT_EQ(GDEFCORE_OK, PutLayout("post", "skinpage", {"main content"})) << refusal_;
+  GDEFCORE_Routes * routes = Table();
+  std::string page = Show("", "/page/" + alpha_, routes);
+  EXPECT_NE(std::string::npos,
+      page.find("href=\"/assets/skin/site.css?v=ba7816bf8f01cfea414140de5dae2223\""))
+      << page;
+  /* The same page with the module off draws no address: a link that goes
+   * nowhere is empty, not a guess. */
+  ASSERT_EQ(GDEFCORE_OK, Disable("skin"));
+  page = Show("", "/page/" + alpha_, routes);
+  EXPECT_NE(std::string::npos, page.find("href=\"\"")) << page;
+  EXPECT_EQ(std::string::npos, page.find("/assets/")) << page;
+}
+
+TEST_F(Layouts, AnAssetNameIsCheckedWhenATemplateIsSavedAndMustBeWrittenOut) {
+  ModDef * skin = NewMod("skin");
+  skin->Asset("site.css", GDEFCORE_ASSET_CSS, "abc");
+  ASSERT_EQ(GDEFCORE_OK, Install(skin));
+  ASSERT_EQ(GDEFCORE_OK, Enable("skin", {})) << last_error_;
+  auto issues = [&](const std::string & call) {
+    std::string body = "<% use region; use asset; %><%= " + call + " %>";
+    GDEFCORE_Template_Report * rep = NULL;
+    EXPECT_EQ(GDEFCORE_OK, gdefcore_template_validate(catalog_, NULL, "core.page", 9,
+                               body.data(), body.size(), &rep));
+    size_t n = 0;
+    const char * t = gdefcore_template_report_text(rep, &n);
+    std::string text = t == NULL ? "" : std::string(t, n);
+    gdefcore_template_report_free(rep);
+    return text;
+  };
+  EXPECT_EQ("", issues("asset(\"skin/site.css\")")) << "CONTROL: a file the module ships";
+  EXPECT_NE(std::string::npos,
+      issues("asset(\"skin/missing.css\")").find("no enabled module ships"));
+  EXPECT_NE(std::string::npos,
+      issues("asset(\"other/site.css\")").find("no enabled module ships"))
+      << "the owner is part of the name";
+  EXPECT_NE(std::string::npos, issues("asset(\"site.css\")").find("no enabled module ships"))
+      << "no owner";
+  EXPECT_NE(std::string::npos, issues("asset(\"skin/\")").find("no enabled module ships"));
+  EXPECT_NE(std::string::npos,
+      issues("asset(\"skin/site.css/x\")").find("no enabled module ships"));
+  EXPECT_NE(std::string::npos, issues("asset(region(\"main\"))").find("plain text"))
+      << "a name that is computed cannot be checked";
+  EXPECT_NE(std::string::npos, issues("asset()").find("takes 1 argument"));
+}
+
 int main(int argc, char ** argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();

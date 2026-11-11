@@ -32,6 +32,7 @@
 #include "render_internal.h"
 
 #include <ghoti.io/defiant-core/access.h>
+#include <ghoti.io/defiant-core/asset.h>
 #include <ghoti.io/defiant-core/layout.h>
 #include <ghoti.io/defiant-core/menu.h>
 #include <ghoti.io/defiant-core/message.h>
@@ -131,7 +132,7 @@ static const char kMessagesBody[] =
  * renderer has.
  */
 static const char * const kPageVars[] = {NULL};
-static const char * const kPageFns[] = {"region 1", "url 1"};
+static const char * const kPageFns[] = {"region 1", "url 1", "asset 1"};
 static const char * const kPaneVars[] = {
     "title text The title of the post being shown.",
     "body text The body of the post being shown. It is text: printing it "
@@ -626,6 +627,35 @@ static bool native_url(GLTANG_NativeCall * call, void * user) {
   return true;
 }
 
+/*
+ * asset("owner/name"): the address of a file a module ships, with the hash of
+ * its bytes in the query, or nothing when the tenant has no such file. The
+ * user pointer is the catalog; the answer is an attribute-safe string, so a
+ * name is never trusted to be well formed.
+ */
+static bool native_asset(GLTANG_NativeCall * call, void * user) {
+  GDEFCORE_Catalog * catalog = (GDEFCORE_Catalog *)user;
+  size_t n = 0;
+  const char * text;
+  char * url = NULL;
+  size_t url_len = 0;
+  text = gltang_call_count(call) == 1 &&
+          gltang_call_kind(call, 0) == GLTANG_KIND_STRING
+      ? gltang_call_text(call, 0, &n)
+      : NULL;
+  if (text == NULL ||
+      gdefcore_asset_url(catalog, NULL, text, n, &url, &url_len) !=
+          GDEFCORE_OK) {
+    gltang_call_return_string(call, "", 0,
+        GLTANG_UNICODE_STRING_TYPE_HTML_ATTRIBUTE);
+    return true;
+  }
+  gltang_call_return_string(call, url, url_len,
+      GLTANG_UNICODE_STRING_TYPE_HTML_ATTRIBUTE);
+  gdefcore_text_free(catalog, url);
+  return true;
+}
+
 static GDEFCORE_Result region_add(RegionSet * set, const char * name,
     size_t nlen, const char * html, size_t hlen) {
   size_t i;
@@ -851,6 +881,11 @@ static GDEFCORE_Result build_library(TangJob * job, GLTANG_Library ** out_lib,
     }
     if (f.name_len == 3 && memcmp(f.name, "url", 3) == 0) {
       if (gltang_library_add_native(lib, "url", native_url, NULL) != GLTANG_OK) {
+        goto fail;
+      }
+    } else if (f.name_len == 5 && memcmp(f.name, "asset", 5) == 0) {
+      if (gltang_library_add_native(lib, "asset", native_asset, job->catalog) !=
+          GLTANG_OK) {
         goto fail;
       }
     } else if (job->native != NULL && job->native_name != NULL &&
@@ -3349,7 +3384,7 @@ static GDEFCORE_Result write_kit(GDEFCORE_Catalog * catalog) {
   char id[GDEFCORE_PUBLIC_ID_LEN + 1];
   GDEFCORE_Result rc;
   /* The kinds first: a template is validated against its kind as it is saved. */
-  rc = ensure_kind(catalog, "core.page", "Page layout", kPageVars, 0, kPageFns, 2);
+  rc = ensure_kind(catalog, "core.page", "Page layout", kPageVars, 0, kPageFns, 3);
   if (rc == GDEFCORE_OK) {
     rc = ensure_kind(catalog, "core.pane", "Pane", kPaneVars, 3, kPaneFns, 1);
   }

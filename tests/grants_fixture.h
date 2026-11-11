@@ -109,6 +109,7 @@ struct ModDef {
   std::list<GDEFCORE_Module_Contributor_Handler> contributor_handlers;
   std::vector<GDEFCORE_Module_Widget> widgets;
   std::list<GDEFCORE_Module_Widget_Provider> widget_providers;
+  std::vector<GDEFCORE_Module_Asset> assets;
   GDEFCORE_Module_Manifest man;
 
   static void NoRoute(const GDEFCORE_Route_Call * call) { (void)call; }
@@ -290,6 +291,25 @@ struct ModDef {
     w.provider_len = svc.name_len;
     widgets.push_back(w);
     return widgets.back();
+  }
+
+  /** A shipped file (site admin story 18). @p media is for an image or font. */
+  GDEFCORE_Module_Asset & Asset(const std::string & file_name, int kind,
+      const std::string & bytes, const std::string & media = std::string()) {
+    GDEFCORE_Module_Asset a;
+    memset(&a, 0, sizeof a);
+    a.size = sizeof a;
+    a.name = S(file_name);
+    a.name_len = file_name.size();
+    a.kind = kind;
+    if (!media.empty()) {
+      a.media_type = S(media);
+      a.media_type_len = media.size();
+    }
+    a.bytes = reinterpret_cast<const uint8_t *>(S(bytes));
+    a.bytes_len = bytes.size();
+    assets.push_back(a);
+    return assets.back();
   }
 
   /** A subscription to a hook. */
@@ -514,6 +534,8 @@ struct ModDef {
     man.ncontributors = contributors.size();
     man.widgets = widgets.empty() ? NULL : &widgets[0];
     man.nwidgets = widgets.size();
+    man.assets = assets.empty() ? NULL : &assets[0];
+    man.nassets = assets.size();
   }
 };
 

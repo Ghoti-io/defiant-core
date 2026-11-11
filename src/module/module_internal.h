@@ -116,6 +116,12 @@ typedef struct DeclWidget {
   size_t index;
 } DeclWidget;
 
+typedef struct DeclAsset {
+  GDEFCORE_Module_Declared_Asset pub;
+  size_t given_media_len; /* what the manifest named, before kind decides */
+  size_t index;
+} DeclAsset;
+
 typedef struct DeclRelation {
   GDEFCORE_Module_Declared_Relation pub;
   GDEFCORE_Module_Relation_Column cols[GDEFCORE_RELATION_COLUMNS_MAX];
@@ -150,6 +156,8 @@ struct Decl {
   size_t ncontributors;
   DeclWidget * widgets;
   size_t nwidgets;
+  DeclAsset * assets;
+  size_t nassets;
 };
 
 /** The declarations of the modules in force, already in module order. */
@@ -210,6 +218,10 @@ GDEFCORE_Result gdefcore_decl_contributors(const GDEFCORE_Allocator * alloc,
 GDEFCORE_Result gdefcore_decl_widgets(const GDEFCORE_Allocator * alloc,
     const DeclRef * refs, size_t n,
     const GDEFCORE_Module_Declared_Widget *** out, size_t * count);
+
+GDEFCORE_Result gdefcore_decl_assets(const GDEFCORE_Allocator * alloc,
+    const DeclRef * refs, size_t n,
+    const GDEFCORE_Module_Declared_Asset *** out, size_t * count);
 
 /**
  * Add the contributors of @p refs to @p routes. On a refusal @p out_error (when

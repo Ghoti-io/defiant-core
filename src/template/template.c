@@ -36,10 +36,12 @@
 #include <ghoti.io/defiant-core/macros.h>
 #include <ghoti.io/defiant-core/template.h>
 #include <ghoti.io/defiant-core/access.h>
+#include <ghoti.io/defiant-core/asset.h>
 
 #include "template_internal.h"
 
 #include <ghoti.io/cutil/fiber.h>
+#include <ghoti.io/cutil/memory.h>
 #include <ghoti.io/lang-tang/parse.h>
 #include <ghoti.io/lang-tang/ast/astNodeAll.h>
 
@@ -837,6 +839,9 @@ typedef struct Ctx {
   const char * tname;
   size_t tname_len;
   Scope * top;
+  /* Where an asset a template names is looked up; NULL checks no asset. */
+  GDEFCORE_Catalog * catalog;
+  const GDEFCORE_Changeset * projection;
   GDEFCORE_Result rc;
 } Ctx;
 
@@ -1286,6 +1291,42 @@ static void check_use(Ctx * ctx, GLTANG_Ast_Node * n) {
   }
 }
 
+/*
+ * asset("owner/name"): the name must be a plain text written in the template,
+ * so the file it names can be known when the template is saved, and the file
+ * must be one the tenant has. A name that is computed cannot be checked, and an
+ * unchecked asset is a link that quietly goes nowhere, so it is not allowed.
+ */
+static void check_asset_call(Ctx * ctx, GLTANG_Ast_Node * n,
+    GLTANG_Ast_Node_Function_Call * call) {
+  GLTANG_Ast_Node * arg = (GLTANG_Ast_Node *)GLTANG_TYPEX_P(call->arguments->data[0]);
+  GLTANG_Unicode_Rendered_String text;
+  GDEFCORE_Asset found;
+  if (ctx->catalog == NULL) {
+    return;
+  }
+  if (arg == NULL || !IS(arg, STRING)) {
+    note(ctx, GDEFCORE_ISSUE_CALL, n, "asset", 5,
+        "`asset()` needs its file name written in the template as plain text, "
+        "such as asset(\"base/site.css\"), so the file can be checked.");
+    return;
+  }
+  text = gltang_unicode_string_render(AS(GLTANG_Ast_Node_String, arg)->string);
+  if (text.buffer == NULL) {
+    ctx->rc = GDEFCORE_ERR_OOM;
+    return;
+  }
+  memset(&found, 0, sizeof found);
+  found.size = sizeof found;
+  if (gdefcore_asset_find(ctx->catalog, ctx->projection, text.buffer,
+          text.length, &found) != GDEFCORE_OK) {
+    note(ctx, GDEFCORE_ISSUE_CALL, n, "asset", 5,
+        "`asset(\"%s\")` names a file that no enabled module ships.",
+        text.buffer);
+  }
+  gcu_free(text.buffer);
+}
+
 static void check_call(Ctx * ctx, Scope * sc, GLTANG_Ast_Node * n) {
   GLTANG_Ast_Node_Function_Call * call = AS(GLTANG_Ast_Node_Function_Call, n);
   GLTANG_Ast_Node * lhs = call->lhs;
@@ -1315,6 +1356,8 @@ static void check_call(Ctx * ctx, Scope * sc, GLTANG_Ast_Node * n) {
         note(ctx, GDEFCORE_ISSUE_CALL, n, id, idn,
             "`%s()` takes %d argument%s and is called with %zu.", id, f->arity,
             f->arity == 1 ? "" : "s", nargs);
+      } else if (d->path_len == 5 && memcmp(d->path, "asset", 5) == 0) {
+        check_asset_call(ctx, n, call);
       }
     }
   } else {
@@ -1440,6 +1483,8 @@ typedef struct Job {
   const char * tname;
   size_t tname_len;
   GDEFCORE_Template_Report * rep;
+  GDEFCORE_Catalog * catalog;
+  const GDEFCORE_Changeset * projection;
   GDEFCORE_Result rc;
 } Job;
 
@@ -1474,6 +1519,8 @@ static void validate_run(Job * job) {
     ctx.tname = job->tname;
     ctx.tname_len = job->tname_len;
     ctx.top = &top;
+    ctx.catalog = job->catalog;
+    ctx.projection = job->projection;
     ctx.rc = GDEFCORE_OK;
     walk_run(&ctx, &top, gltang_tree_root(tree));
     scope_free(&top);
@@ -1539,6 +1586,8 @@ static GDEFCORE_Result validate_into(GDEFCORE_Catalog * catalog,
   job.tname = tname;
   job.tname_len = tname_len;
   job.rep = rep;
+  job.catalog = catalog;
+  job.projection = projection;
   rc = validate_on_side_stack(&job);
   gdefcore_template_contract_close(contract);
   return rc;

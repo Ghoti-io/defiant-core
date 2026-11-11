@@ -547,6 +547,23 @@ typedef GDEFCORE_Result (*GDEFCORE_Contribution_Fn)(GDEFCORE_Request * request,
 #define GDEFCORE_MODULE_CONTRIBUTORS_MAX 32
 /** Most widget types one manifest declares. */
 #define GDEFCORE_MODULE_WIDGETS_MAX 32
+/** Most assets one manifest declares. */
+#define GDEFCORE_MODULE_ASSETS_MAX 64
+/** Most bytes in one asset. */
+#define GDEFCORE_ASSET_BYTES_MAX (4u * 1024u * 1024u)
+/** Longest asset name, in bytes. */
+#define GDEFCORE_ASSET_NAME_MAX 128
+/** Length of an asset's content hash, in hexadecimal digits. */
+#define GDEFCORE_ASSET_HASH_LEN 32
+
+/** An asset that is a stylesheet. Its media type is `text/css`. */
+#define GDEFCORE_ASSET_CSS 1
+/** An asset that is a script. Its media type is `text/javascript`. */
+#define GDEFCORE_ASSET_JS 2
+/** An asset that is an image. The module names one of the allowed types. */
+#define GDEFCORE_ASSET_IMAGE 3
+/** An asset that is a font. The module names one of the allowed types. */
+#define GDEFCORE_ASSET_FONT 4
 /** Most columns one relation has. */
 #define GDEFCORE_RELATION_COLUMNS_MAX 4
 /** Longest name of a relation column, in bytes. */
@@ -708,6 +725,33 @@ typedef struct GDEFCORE_Module_Widget {
   const char * provider;      ///< Name of the module's widget provider service.
   size_t provider_len;        ///< Length of @ref provider.
 } GDEFCORE_Module_Widget;
+
+/**
+ * @brief A file a module ships: a stylesheet, a script, an image or a font.
+ * Begins with @ref size.
+ *
+ * The bytes are compiled into the module and copied by the host when the
+ * manifest is read, so they need not outlive the call. An asset is public
+ * under `<module>/<name>` and is served only to a tenant that has the module
+ * enabled. @ref name is a file name: 1 to ::GDEFCORE_ASSET_NAME_MAX bytes of
+ * a-z, 0-9, '.', '_' and '-', starting with a letter or digit, with no `..`.
+ * The media type of a stylesheet or a script comes from @ref kind and
+ * @ref media_type must be empty; an image names one of `image/png`,
+ * `image/jpeg`, `image/gif`, `image/webp`, `image/avif` or `image/svg+xml`,
+ * and a font `font/woff2` or `font/woff`. A stylesheet or script is UTF-8
+ * text. An asset has at most ::GDEFCORE_ASSET_BYTES_MAX bytes and is never
+ * empty.
+ */
+typedef struct GDEFCORE_Module_Asset {
+  size_t size;                ///< `sizeof(GDEFCORE_Module_Asset)`.
+  const char * name;          ///< File name, `logo.svg`.
+  size_t name_len;            ///< Length of @ref name.
+  int kind;                   ///< ::GDEFCORE_ASSET_CSS, _JS, _IMAGE or _FONT.
+  const char * media_type;    ///< Image or font only; NULL for the others.
+  size_t media_type_len;      ///< Length of @ref media_type.
+  const uint8_t * bytes;      ///< The file. Required.
+  size_t bytes_len;           ///< Length of @ref bytes.
+} GDEFCORE_Module_Asset;
 
 /**
  * @brief A route a module declares. Begins with @ref size.
@@ -971,6 +1015,8 @@ typedef struct GDEFCORE_Module_Manifest {
   size_t ncontributors;                     ///< How many contributors.
   const GDEFCORE_Module_Widget * widgets;   ///< Widget types. May be NULL.
   size_t nwidgets;                          ///< How many widget types.
+  const GDEFCORE_Module_Asset * assets;     ///< Shipped files. May be NULL.
+  size_t nassets;                           ///< How many assets.
 } GDEFCORE_Module_Manifest;
 
 /**
@@ -1615,6 +1661,24 @@ typedef struct GDEFCORE_Module_Declared_Widget {
   void * user;                ///< Its user pointer.
 } GDEFCORE_Module_Declared_Widget;
 
+/** @brief An asset as the enumeration reports it. Borrowed from the host. */
+typedef struct GDEFCORE_Module_Declared_Asset {
+  size_t size;                ///< `sizeof(GDEFCORE_Module_Declared_Asset)`.
+  const char * module;        ///< The shipping module: the asset's owner.
+  size_t module_len;          ///< Length of @ref module.
+  const char * name;          ///< File name.
+  size_t name_len;            ///< Length of @ref name.
+  int kind;                   ///< ::GDEFCORE_ASSET_CSS, _JS, _IMAGE or _FONT.
+  const char * media_type;    ///< Full `Content-Type` value; never NULL. A
+                              ///< stylesheet or script carries `; charset=utf-8`.
+  size_t media_type_len;      ///< Length of @ref media_type.
+  const uint8_t * bytes;      ///< The file.
+  size_t bytes_len;           ///< Length of @ref bytes.
+  char hash[GDEFCORE_ASSET_HASH_LEN + 1]; ///< Content hash: the first 128 bits
+                              ///< of the SHA-256 of the bytes, lowercase hex,
+                              ///< NUL-terminated. Equal bytes give an equal hash.
+} GDEFCORE_Module_Declared_Asset;
+
 /**
  * @brief The routes the modules enabled for @p tenant declare.
  *
@@ -1736,9 +1800,19 @@ GDEFCORE_API GDEFCORE_Result gdefcore_module_widgets(GDEFCORE_Host * host,
     const GDEFCORE_Module_Declared_Widget *** out_items, size_t * out_count);
 
 /**
+ * @brief The assets of the enabled modules, in module order and then by name.
+ * An asset exists for a tenant only while its module is enabled, so a
+ * disabled module's files are not listed and are listed again on enable.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_module_assets(GDEFCORE_Host * host,
+    const uint8_t * tenant, size_t tenant_len,
+    const GDEFCORE_Changeset * projection,
+    const GDEFCORE_Module_Declared_Asset *** out_items, size_t * out_count);
+
+/**
  * @brief Free an array from gdefcore_module_routes(), _links(), _settings(),
- * _variables(), _grants(), _relations(), _callbacks(), _contributors() or
- * _widgets(). NULL is ignored.
+ * _variables(), _grants(), _relations(), _callbacks(), _contributors(),
+ * _widgets() or _assets(). NULL is ignored.
  */
 GDEFCORE_API void gdefcore_module_declared_free(GDEFCORE_Host * host,
     const void * items);

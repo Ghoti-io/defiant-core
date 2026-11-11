@@ -117,6 +117,9 @@
   X(GDEFCORE_Module_Widget_Provider, "tests/test_layout.cpp") \
   X(GDEFCORE_Module_Declared_Contributor, "tests/test_layout.cpp") \
   X(GDEFCORE_Module_Declared_Widget, "tests/test_layout.cpp") \
+  X(GDEFCORE_Module_Asset, "tests/test_assets.cpp") \
+  X(GDEFCORE_Asset, "tests/test_assets.cpp") \
+  X(GDEFCORE_Module_Declared_Asset, "tests/test_assets.cpp") \
   X(GDEFCORE_Layout_Widget, "tests/test_layout.cpp") \
   X(GDEFCORE_Layout_Rule, "tests/test_layout.cpp") \
   X(GDEFCORE_Layout_Hook, "tests/test_layout.cpp") \

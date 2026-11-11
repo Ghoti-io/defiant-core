@@ -37,6 +37,7 @@
 #include <ghoti.io/defiant-core/settings.h>
 
 #include <ghoti.io/cutil/allocator.h>
+#include <ghoti.io/security/sha256.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -119,6 +120,29 @@ static int take_exact(Build * b, void * dst, size_t n, const void * src,
 #define TAKE_EXACT(b, type, dst, src, index) \
   take_exact((b), &(dst), sizeof(type), (src), #type, (index))
 
+/* Allocate @p n bytes owned by the Decl and freed with it. */
+static void * keep_alloc(Build * b, size_t n, const char * what, size_t index) {
+  void * block;
+  if (b->d->nblocks == b->d->cap_blocks) {
+    size_t cap = b->d->cap_blocks == 0 ? 32 : b->d->cap_blocks * 2;
+    void ** next = (void **)gcu_allocator_realloc(b->d->alloc, b->d->blocks,
+        cap * sizeof *next);
+    if (next == NULL) {
+      build_fail(b, GDEFCORE_ERR_OOM, what, index);
+      return NULL;
+    }
+    b->d->blocks = next;
+    b->d->cap_blocks = cap;
+  }
+  block = gcu_allocator_malloc(b->d->alloc, n);
+  if (block == NULL) {
+    build_fail(b, GDEFCORE_ERR_OOM, what, index);
+    return NULL;
+  }
+  b->d->blocks[b->d->nblocks++] = block;
+  return block;
+}
+
 /* Copy a string into the Decl. A NULL pointer is fine for length 0 only. */
 static const char * dup_str(Build * b, const char * p, size_t n,
     const char * what, size_t index) {
@@ -137,25 +161,35 @@ static const char * dup_str(Build * b, const char * p, size_t n,
     build_fail(b, GDEFCORE_ERR_LIMIT, what, index);
     return kEmpty;
   }
-  if (b->d->nblocks == b->d->cap_blocks) {
-    size_t cap = b->d->cap_blocks == 0 ? 32 : b->d->cap_blocks * 2;
-    void ** next = (void **)gcu_allocator_realloc(b->d->alloc, b->d->blocks,
-        cap * sizeof *next);
-    if (next == NULL) {
-      build_fail(b, GDEFCORE_ERR_OOM, what, index);
-      return kEmpty;
-    }
-    b->d->blocks = next;
-    b->d->cap_blocks = cap;
-  }
-  copy = (char *)gcu_allocator_malloc(b->d->alloc, n + 1);
+  copy = (char *)keep_alloc(b, n + 1, what, index);
   if (copy == NULL) {
-    build_fail(b, GDEFCORE_ERR_OOM, what, index);
     return kEmpty;
   }
   memcpy(copy, p, n);
   copy[n] = '\0';
-  b->d->blocks[b->d->nblocks++] = copy;
+  return copy;
+}
+
+/* Copy @p n bytes of an asset into the Decl, up to the asset maximum. */
+static const uint8_t * dup_bytes(Build * b, const uint8_t * p, size_t n,
+    const char * what, size_t index) {
+  uint8_t * copy;
+  if (b->rc != GDEFCORE_OK) {
+    return NULL;
+  }
+  if (p == NULL || n == 0) {
+    build_fail(b, GDEFCORE_ERR_INVALID, what, index);
+    return NULL;
+  }
+  if (n > GDEFCORE_ASSET_BYTES_MAX) {
+    build_fail(b, GDEFCORE_ERR_LIMIT, what, index);
+    return NULL;
+  }
+  copy = (uint8_t *)keep_alloc(b, n, what, index);
+  if (copy == NULL) {
+    return NULL;
+  }
+  memcpy(copy, p, n);
   return copy;
 }
 
@@ -275,6 +309,7 @@ void gdefcore_decl_free(Decl * d) {
   gcu_allocator_free(d->alloc, d->callbacks);
   gcu_allocator_free(d->alloc, d->contributors);
   gcu_allocator_free(d->alloc, d->widgets);
+  gcu_allocator_free(d->alloc, d->assets);
   gcu_allocator_free(d->alloc, d);
 }
 
@@ -621,6 +656,75 @@ static void build_widgets(Build * b, const GDEFCORE_Module_Manifest * m,
   }
 }
 
+static int cmp_asset(const void * a, const void * b) {
+  const DeclAsset * x = (const DeclAsset *)a;
+  const DeclAsset * y = (const DeclAsset *)b;
+  int c = span_cmp(x->pub.name, x->pub.name_len, y->pub.name, y->pub.name_len);
+  return c != 0 ? c : (x->index < y->index ? -1 : (x->index > y->index));
+}
+
+static void build_assets(Build * b, const GDEFCORE_Module_Manifest * m) {
+  Decl * d = b->d;
+  size_t i;
+  d->assets = (DeclAsset *)gcu_allocator_calloc(d->alloc, m->nassets,
+      sizeof *d->assets);
+  if (d->assets == NULL) {
+    build_fail(b, GDEFCORE_ERR_OOM, "asset", 0);
+    return;
+  }
+  for (i = 0; i < m->nassets && b->rc == GDEFCORE_OK; i++) {
+    GDEFCORE_Module_Asset a;
+    DeclAsset * da = &d->assets[i];
+    GSEC_Sha256 ctx;
+    uint8_t dig[GSEC_SHA256_DIGEST_LEN];
+    static const char kHex[] = "0123456789abcdef";
+    size_t k;
+    if (!TAKE_EXACT(b, GDEFCORE_Module_Asset, a, &m->assets[i], i)) {
+      break;
+    }
+    da->index = i;
+    da->pub.size = sizeof da->pub;
+    da->pub.module = d->module;
+    da->pub.module_len = d->module_len;
+    da->pub.name = dup_str(b, a.name, a.name_len, "asset", i);
+    da->pub.name_len = a.name_len;
+    da->pub.kind = a.kind;
+    /* A stylesheet or script takes its type from its kind; an image or font
+     * keeps the one the module named. Whether that is allowed is decided in
+     * validation, where the error can name the asset. */
+    da->given_media_len = a.media_type_len;
+    da->pub.media_type = dup_str(b, a.media_type, a.media_type_len, "asset", i);
+    da->pub.media_type_len = a.media_type_len;
+    if (a.media_type_len == 0 &&
+        (a.kind == GDEFCORE_ASSET_CSS || a.kind == GDEFCORE_ASSET_JS)) {
+      da->pub.media_type = a.kind == GDEFCORE_ASSET_CSS
+                               ? "text/css; charset=utf-8"
+                               : "text/javascript; charset=utf-8";
+      da->pub.media_type_len = strlen(da->pub.media_type);
+    }
+    da->pub.bytes = dup_bytes(b, a.bytes, a.bytes_len, "asset", i);
+    da->pub.bytes_len = a.bytes_len;
+    if (b->rc != GDEFCORE_OK) {
+      break;
+    }
+    if (gsec_sha256_init(&ctx) != GSEC_OK ||
+        gsec_sha256_update(&ctx, da->pub.bytes, da->pub.bytes_len) != GSEC_OK ||
+        gsec_sha256_final(&ctx, dig) != GSEC_OK) {
+      build_fail(b, GDEFCORE_ERR_INTERNAL, "asset", i);
+      break;
+    }
+    for (k = 0; k < GDEFCORE_ASSET_HASH_LEN / 2; k++) {
+      da->pub.hash[k * 2] = kHex[dig[k] >> 4];
+      da->pub.hash[k * 2 + 1] = kHex[dig[k] & 0x0fu];
+    }
+    da->pub.hash[GDEFCORE_ASSET_HASH_LEN] = '\0';
+    d->nassets = i + 1;
+  }
+  if (b->rc == GDEFCORE_OK && d->nassets > 1) {
+    qsort(d->assets, d->nassets, sizeof *d->assets, cmp_asset);
+  }
+}
+
 static void build_grants(Build * b, const GDEFCORE_Module_Manifest * m) {
   Decl * d = b->d;
   size_t i;
@@ -907,7 +1011,8 @@ GDEFCORE_Result gdefcore_decl_build(const GDEFCORE_Allocator * alloc,
   *out = NULL;
   if (man->nroutes == 0 && man->nlinks == 0 && man->nsettings == 0 &&
       man->nvariables == 0 && man->ngrants == 0 && man->nrelations == 0 &&
-      man->ncallbacks == 0 && man->ncontributors == 0 && man->nwidgets == 0) {
+      man->ncallbacks == 0 && man->ncontributors == 0 && man->nwidgets == 0 &&
+      man->nassets == 0) {
     return GDEFCORE_OK;
   }
   if (module_len > 64) {
@@ -933,18 +1038,19 @@ GDEFCORE_Result gdefcore_decl_build(const GDEFCORE_Allocator * alloc,
       man->nrelations > GDEFCORE_MODULE_RELATIONS_MAX ||
       man->ncallbacks > GDEFCORE_MODULE_CALLBACKS_MAX ||
       man->ncontributors > GDEFCORE_MODULE_CONTRIBUTORS_MAX ||
-      man->nwidgets > GDEFCORE_MODULE_WIDGETS_MAX) {
+      man->nwidgets > GDEFCORE_MODULE_WIDGETS_MAX ||
+      man->nassets > GDEFCORE_MODULE_ASSETS_MAX) {
     b.rc = GDEFCORE_ERR_LIMIT;
     if (err != NULL && cap > 0) {
       snprintf(err, cap,
           "Module %s declares more than %d routes, %d links, %d settings, "
           "%d variables, %d grants, %d relations, %d access callbacks, "
-          "%d contributors or %d widget types.",
+          "%d contributors, %d widget types or %d assets.",
           d->module, GDEFCORE_MODULE_ROUTES_MAX, GDEFCORE_MODULE_LINKS_MAX,
           GDEFCORE_MODULE_SETTINGS_MAX, GDEFCORE_MODULE_VARIABLES_MAX,
           GDEFCORE_MODULE_GRANTS_MAX, GDEFCORE_MODULE_RELATIONS_MAX,
           GDEFCORE_MODULE_CALLBACKS_MAX, GDEFCORE_MODULE_CONTRIBUTORS_MAX,
-          GDEFCORE_MODULE_WIDGETS_MAX);
+          GDEFCORE_MODULE_WIDGETS_MAX, GDEFCORE_MODULE_ASSETS_MAX);
     }
   } else if ((man->nroutes > 0 && man->routes == NULL) ||
              (man->nlinks > 0 && man->links == NULL) ||
@@ -954,7 +1060,8 @@ GDEFCORE_Result gdefcore_decl_build(const GDEFCORE_Allocator * alloc,
              (man->nrelations > 0 && man->relations == NULL) ||
              (man->ncallbacks > 0 && man->callbacks == NULL) ||
              (man->ncontributors > 0 && man->contributors == NULL) ||
-             (man->nwidgets > 0 && man->widgets == NULL)) {
+             (man->nwidgets > 0 && man->widgets == NULL) ||
+             (man->nassets > 0 && man->assets == NULL)) {
     b.rc = GDEFCORE_ERR_INVALID;
     if (err != NULL && cap > 0) {
       snprintf(err, cap, "Module %s: a declared table has a count and no data.",
@@ -987,6 +1094,9 @@ GDEFCORE_Result gdefcore_decl_build(const GDEFCORE_Allocator * alloc,
   }
   if (b.rc == GDEFCORE_OK && man->nwidgets > 0) {
     build_widgets(&b, man, svcs, nsvcs);
+  }
+  if (b.rc == GDEFCORE_OK && man->nassets > 0) {
+    build_assets(&b, man);
   }
   if (b.rc != GDEFCORE_OK) {
     gdefcore_decl_free(d);
@@ -1810,6 +1920,108 @@ static int check_widgets(const DeclRef * refs, size_t n, Say * say) {
   return 0;
 }
 
+static int asset_name_ok(const char * s, size_t n) {
+  size_t i;
+  if (n == 0 || n > GDEFCORE_ASSET_NAME_MAX) {
+    return 0;
+  }
+  if (!((s[0] >= 'a' && s[0] <= 'z') || (s[0] >= '0' && s[0] <= '9'))) {
+    return 0;
+  }
+  for (i = 0; i < n; i++) {
+    if (!machine_char(s[i])) {
+      return 0;
+    }
+    if (s[i] == '.' && i + 1 < n && s[i + 1] == '.') {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static const char * const kImageTypes[] = {"image/png", "image/jpeg",
+    "image/gif", "image/webp", "image/avif", "image/svg+xml", NULL};
+static const char * const kFontTypes[] = {"font/woff2", "font/woff", NULL};
+
+static int type_listed(const char * const * list, const char * t, size_t n) {
+  size_t i;
+  for (i = 0; list[i] != NULL; i++) {
+    if (strlen(list[i]) == n && memcmp(list[i], t, n) == 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static int check_assets(const DeclRef * refs, size_t n, Say * say) {
+  size_t m;
+  size_t i;
+  size_t j;
+  for (m = 0; m < n; m++) {
+    const Decl * d = refs[m].decl;
+    for (i = 0; i < d->nassets; i++) {
+      const GDEFCORE_Module_Declared_Asset * p = &d->assets[i].pub;
+      char a[kShow + 8];
+      if (!asset_name_ok(p->name, p->name_len)) {
+        SAY(say,
+            "Module %s: asset '%s' has a name that is not 1 to %d bytes of "
+            "a-z, 0-9, '.', '_' and '-', starting with a letter or digit, with "
+            "no '..'.",
+            d->module, show(a, p->name, p->name_len), GDEFCORE_ASSET_NAME_MAX);
+        return 1;
+      }
+      switch (p->kind) {
+      case GDEFCORE_ASSET_CSS:
+      case GDEFCORE_ASSET_JS:
+        if (d->assets[i].given_media_len != 0) {
+          SAY(say, "Module %s: asset '%s' names a media type, which a "
+                   "stylesheet or script takes from its kind.",
+              d->module, show(a, p->name, p->name_len));
+          return 1;
+        }
+        if (!text_ok((const char *)p->bytes, p->bytes_len, 1)) {
+          SAY(say, "Module %s: asset '%s' is a stylesheet or script and is not "
+                   "UTF-8 text.",
+              d->module, show(a, p->name, p->name_len));
+          return 1;
+        }
+        break;
+      case GDEFCORE_ASSET_IMAGE:
+        if (!type_listed(kImageTypes, p->media_type, p->media_type_len)) {
+          SAY(say, "Module %s: asset '%s' is an image and names a media type "
+                   "outside image/png, image/jpeg, image/gif, image/webp, "
+                   "image/avif and image/svg+xml.",
+              d->module, show(a, p->name, p->name_len));
+          return 1;
+        }
+        break;
+      case GDEFCORE_ASSET_FONT:
+        if (!type_listed(kFontTypes, p->media_type, p->media_type_len)) {
+          SAY(say, "Module %s: asset '%s' is a font and names a media type "
+                   "outside font/woff2 and font/woff.",
+              d->module, show(a, p->name, p->name_len));
+          return 1;
+        }
+        break;
+      default:
+        SAY(say, "Module %s: asset '%s' has a kind that is not a stylesheet, "
+                 "a script, an image or a font.",
+            d->module, show(a, p->name, p->name_len));
+        return 1;
+      }
+      for (j = i + 1; j < d->nassets; j++) {
+        if (span_is(p->name, p->name_len, d->assets[j].pub.name,
+                d->assets[j].pub.name_len)) {
+          SAY(say, "Module %s: asset '%s' is declared twice.", d->module,
+              show(a, p->name, p->name_len));
+          return 1;
+        }
+      }
+    }
+  }
+  return 0;
+}
+
 static size_t table_count(const Decl * d, int table) {
   switch (table) {
   case 0:
@@ -1930,7 +2142,7 @@ int gdefcore_decl_validate(const DeclRef * refs, size_t n, int local,
         check_links(refs, n, routes, nroutes, links, nlinks, local, &say) ||
         check_settings(refs, n, &say) || check_vars(refs, n, &say) ||
         check_relations(refs, n, &say) || check_contributors(refs, n, &say) ||
-        check_widgets(refs, n, &say) ||
+        check_widgets(refs, n, &say) || check_assets(refs, n, &say) ||
         duplicates(routes, nroutes, refs, "route", &say) ||
         duplicates(links, nlinks, refs, "menu link", &say) ||
         duplicates(settings, nsettings, refs, "setting", &say) ||
@@ -2267,6 +2479,37 @@ GDEFCORE_Result gdefcore_decl_widgets(const GDEFCORE_Allocator * alloc,
   for (m = 0; m < n; m++) {
     for (i = 0; i < refs[m].decl->nwidgets; i++) {
       items[at++] = &refs[m].decl->widgets[i].pub;
+    }
+  }
+  *out = items;
+  *count = total;
+  return GDEFCORE_OK;
+}
+
+GDEFCORE_Result gdefcore_decl_assets(const GDEFCORE_Allocator * alloc,
+    const DeclRef * refs, size_t n,
+    const GDEFCORE_Module_Declared_Asset *** out, size_t * count) {
+  size_t m;
+  size_t i;
+  size_t total = 0;
+  size_t at = 0;
+  const GDEFCORE_Module_Declared_Asset ** items;
+  *out = NULL;
+  *count = 0;
+  for (m = 0; m < n; m++) {
+    total += refs[m].decl->nassets;
+  }
+  if (total == 0) {
+    return GDEFCORE_OK;
+  }
+  items = (const GDEFCORE_Module_Declared_Asset **)gcu_allocator_calloc(alloc,
+      total, sizeof *items);
+  if (items == NULL) {
+    return GDEFCORE_ERR_OOM;
+  }
+  for (m = 0; m < n; m++) {
+    for (i = 0; i < refs[m].decl->nassets; i++) {
+      items[at++] = &refs[m].decl->assets[i].pub;
     }
   }
   *out = items;

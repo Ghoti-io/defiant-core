@@ -34,7 +34,7 @@ The starter kit stores these kinds and sets each built-in template's kind:
 
 | Kind | Variables | Functions | Templates |
 |---|---|---|---|
-| `core.page` | none | `region/1`, `url/1` | `layout` |
+| `core.page` | none | `region/1`, `url/1`, `asset/1` | `layout` |
 | `core.pane` | `title`, `body`, `summary` (all `text`) | `url/1` | `entity`, `recent` |
 | `core.menu` | `menu` (`text`), `items` (`list`) | `url/1` | `menu` |
 | `core.tabs` | `items` (`list`) | `url/1` | `tabs` |
@@ -109,7 +109,7 @@ nothing else:
 
 - the values the host bound that the contract declares as base variables
   (a bound name the contract does not declare is not in the library);
-- the functions it declares (`url`, `region`);
+- the functions it declares (`url`, `region`, `asset`);
 - the contributed variables, each registered as a lazy Tang factory;
 - null for `math` and `random`, the engine's own libraries, which a library
   shadows;
@@ -314,3 +314,14 @@ compiled for no request.
 | `gdefcore_access_can` | The one decision: may the principal do this to this entity. What authorize asks. |
 | `gdefcore_render_sample`, `gdefcore_render_shareable_count` | The editor's preview, and the shared-cache count. |
 | `gdefcore_render_compile_count`, `gdefcore_render_run_count` | How many template bodies the process has compiled to render, and how many it has run. |
+
+## Naming a file a module ships
+
+A page template links a stylesheet, a script or an image with
+`asset("owner/name")`, which gives `/assets/owner/name?v=<hash>`. The owner is the
+module that ships the file (assets.md). The name must be written in the template
+as plain text, so the file it names can be known when the template is saved: a
+template that names a file no enabled module ships, or that computes the name,
+is refused with the line, and a template saved while the module is disabled is
+refused the same way. A file that goes away later (the module is disabled)
+renders as an empty address, not a guess.

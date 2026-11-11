@@ -37,6 +37,7 @@
 #include <ghoti.io/defiant-core/form.h>
 #include <ghoti.io/defiant-core/inst.h>
 #include <ghoti.io/defiant-core/macros.h>
+#include <ghoti.io/defiant-core/asset.h>
 #include <ghoti.io/defiant-core/layout.h>
 #include <ghoti.io/defiant-core/menu.h>
 #include <ghoti.io/defiant-core/message.h>
