@@ -106,8 +106,8 @@ plant duplicate-name-allowed $DECL testAssets "$T_LIMITS" \
 
 # Plant 11: a manifest may declare any number of assets.
 plant count-unbounded $DECL testAssets "$T_LIMITS" \
-  '      man->nassets > GDEFCORE_MODULE_ASSETS_MAX) {' \
-  '      man->nassets > 0xFFFFFu) {'
+  '      man->nassets > GDEFCORE_MODULE_ASSETS_MAX ||' \
+  '      man->nassets > 0xFFFFFu ||'
 
 # The asset() function and the check made when a template is saved are tested
 # in the layout suite, where a page is rendered.
