@@ -292,6 +292,10 @@ static GDEFCORE_Result declare_edit(GDEFCORE_Catalog * catalog,
   return gdefcore_access_declare(catalog, &perm);
 }
 
+int gdefcore_siteasset_name_ok(const char * name, size_t name_len) {
+  return gdefcore_asset_name_ok(name, name_len);
+}
+
 GDEFCORE_Result gdefcore_siteasset_declare(GDEFCORE_Catalog * catalog) {
   GDEFCORE_Field fields[2];
   size_t t;

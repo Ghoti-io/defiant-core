@@ -292,6 +292,18 @@ TEST_F(SiteAssets, AFileThatBreaksARuleIsRefusedAtStageAndAtApply) {
   EXPECT_EQ("", Found("site/x.js"));
 }
 
+TEST_F(SiteAssets, TheNameRuleIsTheOneAModulesFileHas) {
+  EXPECT_TRUE(gdefcore_siteasset_name_ok("site.css", 8));
+  EXPECT_TRUE(gdefcore_siteasset_name_ok("0-a_b.c", 7));
+  EXPECT_FALSE(gdefcore_siteasset_name_ok("", 0));
+  EXPECT_FALSE(gdefcore_siteasset_name_ok(NULL, 3));
+  EXPECT_FALSE(gdefcore_siteasset_name_ok("A.css", 5));
+  EXPECT_FALSE(gdefcore_siteasset_name_ok("a/b", 3));
+  EXPECT_FALSE(gdefcore_siteasset_name_ok("a..b", 4));
+  EXPECT_FALSE(gdefcore_siteasset_name_ok("-a", 2));
+  EXPECT_FALSE(gdefcore_siteasset_name_ok("a\0b", 3));
+}
+
 TEST_F(SiteAssets, ANameIsUsedOnceAcrossBothKindsAndEverywhereAnEntityCanComeFrom) {
   ASSERT_EQ(GDEFCORE_OK, Put("one.txt", GDEFCORE_ASSET_CSS, "a{}"));
   /* The staging call refuses the other kind; so does the vet when the entity is

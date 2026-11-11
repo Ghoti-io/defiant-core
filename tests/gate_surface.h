@@ -418,6 +418,7 @@ static const Surface kSurface[] = {
     {"gdefcore_asset_find", "RA"},
     {"gdefcore_asset_url", "RA"},
     {"gdefcore_asset_release", "P"},
+    {"gdefcore_siteasset_name_ok", "P"},
     {"gdefcore_siteasset_declare", "W"},
     {"gdefcore_siteasset_stage", "W"},
     {"gdefcore_siteasset_stage_forget", "W"},
