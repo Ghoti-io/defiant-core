@@ -209,6 +209,9 @@ typedef struct GdefPane {
 int gdefcore_render_pane_extras(const char * s, size_t n, GdefPane * out, char * why,
     size_t cap);
 
+/** Whether the path pattern @p pat (`:name`, `*` one segment, a last `**` the rest) matches @p path. */
+int gdefcore_render_path_matches(const char * pat, size_t pn, const char * path, size_t n);
+
 /** Whether the placement shows for this request on the page at @p path. */
 int gdefcore_render_pane_visible(GDEFCORE_Catalog * catalog,
     GDEFCORE_Request * request, const char * path, size_t path_len,

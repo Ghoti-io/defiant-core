@@ -283,7 +283,9 @@ int gdefcore_render_pane_extras(const char * s, size_t n, GdefPane * out, char *
 
 /* Whether the page's path matches the pattern: segment for segment, `:name` and
  * `*` taking any one, and a last `**` the rest, none included. */
-static int path_matches(const char * pat, size_t pn, const char * path, size_t n) {
+int gdefcore_render_path_matches(const char * pat, size_t pn, const char * path, size_t n);
+#define path_matches gdefcore_render_path_matches
+int gdefcore_render_path_matches(const char * pat, size_t pn, const char * path, size_t n) {
   size_t pi = 0;
   size_t qi = 0;
   if (pn == 1 && pat[0] == '/') {

@@ -184,6 +184,55 @@ typedef struct GDEFCORE_Layout_Edit {
 GDEFCORE_API GDEFCORE_Result gdefcore_layout_stage_edit(
     GDEFCORE_Changeset * changeset, const GDEFCORE_Layout_Edit * edit);
 
+/* ---- previewing a layout ---------------------------------------------------------- */
+
+/**
+ * @brief Who a preview shows the layout to. Begins with @ref size.
+ *
+ * A preview is the layout as one kind of visitor would see it, without a
+ * request: an empty @ref role is a visitor who is not signed in, `authenticated`
+ * is anyone signed in who holds no role the placements name, and any other name is
+ * a signed-in person who holds that role (and so also matches a placement for
+ * `authenticated`). @ref path and @ref type say which page it is: a placement
+ * that names a path or an entity type shows only when they match.
+ */
+typedef struct GDEFCORE_Preview_Viewer {
+  size_t size;                ///< `sizeof(GDEFCORE_Preview_Viewer)`.
+  const char * role;          ///< "" (not signed in), "authenticated" or a role's name.
+  size_t role_len;            ///< Its length.
+  const char * path;          ///< The page's path, e.g. "/blog/hello"; "" for none.
+  size_t path_len;            ///< Its length.
+  const char * type;          ///< The entity type the page shows, or "".
+  size_t type_len;            ///< Its length.
+} GDEFCORE_Preview_Viewer;
+
+/**
+ * @brief A layout as one visitor would see it. Free with gdefcore_layout_preview_free().
+ */
+typedef struct GDEFCORE_Layout_Preview {
+  size_t size;                ///< `sizeof(GDEFCORE_Layout_Preview)`.
+  GDEFCORE_Layout_View view;  ///< The layout as an editor draws it.
+  unsigned char * shown;      ///< For each of `view.placed`, 1 when the visitor sees it.
+  size_t nshown;              ///< How many of them.
+  size_t nhidden;             ///< How many the visitor does not see.
+} GDEFCORE_Layout_Preview;
+
+/**
+ * @brief Read layout @p name and decide, for @p viewer, which of its placements show.
+ *
+ * It reads the published layout and nothing else: nothing is written, cached
+ * or kept, and a placement the visitor does not see is counted and never named
+ * (read `shown`, not `view.placed`, to draw). The decision is the one the
+ * renderer makes for a placement's path, type and roles. A layout that does not
+ * exist is ::GDEFCORE_ERR_INVALID.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_layout_preview(GDEFCORE_Catalog * catalog,
+    const char * name, size_t name_len, const GDEFCORE_Preview_Viewer * viewer,
+    GDEFCORE_Layout_Preview * out);
+
+/** @brief Free what gdefcore_layout_preview() allocated. NULL is ignored. */
+GDEFCORE_API void gdefcore_layout_preview_free(GDEFCORE_Layout_Preview * preview);
+
 #ifdef __cplusplus
 }
 #endif

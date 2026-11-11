@@ -125,6 +125,8 @@
   X(GDEFCORE_Layout_View, "tests/test_layoutedit.cpp") \
   X(GDEFCORE_Layout_Edit, "tests/test_layoutedit.cpp") \
   X(GDEFCORE_Structure_View, "tests/test_layoutedit.cpp") \
+  X(GDEFCORE_Preview_Viewer, "tests/test_layoutedit.cpp") \
+  X(GDEFCORE_Layout_Preview, "tests/test_layoutedit.cpp") \
   X(GDEFCORE_Structure_Edit, "tests/test_layoutedit.cpp") \
   X(GDEFCORE_Layout_Why, "tests/test_layout.cpp") \
   X(GDEFCORE_Layout_Widget, "tests/test_layout.cpp") \

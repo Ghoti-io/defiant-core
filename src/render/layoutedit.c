@@ -828,3 +828,80 @@ GDEFCORE_Result gdefcore_layout_stage_carry_all(GDEFCORE_Changeset * changeset,
   gdefcore_ids_free(catalog, ids, count);
   return rc;
 }
+
+/* ---- previewing ------------------------------------------------------------------- */
+
+static int preview_role_hit(const GDEFCORE_Placement * p, const char * role, size_t role_len) {
+  size_t k;
+  int anonymous = role_len == 0 || (role_len == 9 && memcmp(role, "anonymous", 9) == 0);
+  for (k = 0; k < p->nroles; k++) {
+    const char * want = p->roles[k];
+    if (anonymous) {
+      if (strcmp(want, "anonymous") == 0) {
+        return 1;
+      }
+      continue;
+    }
+    if (strcmp(want, "authenticated") == 0 ||
+        (strlen(want) == role_len && memcmp(want, role, role_len) == 0)) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static int preview_shows(const GDEFCORE_Placement * p, const GDEFCORE_Preview_Viewer * v) {
+  if (p->path[0] != '\0' &&
+      (v->path_len == 0 || !gdefcore_render_path_matches(p->path, strlen(p->path), v->path, v->path_len))) {
+    return 0;
+  }
+  if (p->type[0] != '\0' &&
+      !(strlen(p->type) == v->type_len && memcmp(p->type, v->type, v->type_len) == 0)) {
+    return 0;
+  }
+  if (p->nroles > 0 && !preview_role_hit(p, v->role == NULL ? "" : v->role, v->role_len)) {
+    return 0;
+  }
+  return 1;
+}
+
+void gdefcore_layout_preview_free(GDEFCORE_Layout_Preview * preview) {
+  if (preview == NULL) {
+    return;
+  }
+  gdefcore_layout_view_free(&preview->view);
+  free(preview->shown);
+  preview->shown = NULL;
+  preview->nshown = 0;
+  preview->nhidden = 0;
+}
+
+GDEFCORE_Result gdefcore_layout_preview(GDEFCORE_Catalog * catalog, const char * name,
+    size_t name_len, const GDEFCORE_Preview_Viewer * viewer, GDEFCORE_Layout_Preview * out) {
+  GDEFCORE_Result rc;
+  size_t i;
+  if (catalog == NULL || name == NULL || viewer == NULL || viewer->size != sizeof *viewer ||
+      out == NULL || out->size != sizeof *out) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  memset((char *)out + sizeof out->size, 0, sizeof *out - sizeof out->size);
+  out->view.size = sizeof out->view;
+  rc = gdefcore_layout_view(catalog, name, name_len, &out->view);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  out->shown = (unsigned char *)calloc(out->view.nplaced == 0 ? 1 : out->view.nplaced, 1);
+  if (out->shown == NULL) {
+    gdefcore_layout_view_free(&out->view);
+    return GDEFCORE_ERR_OOM;
+  }
+  for (i = 0; i < out->view.nplaced; i++) {
+    out->shown[i] = (unsigned char)preview_shows(&out->view.placed[i], viewer);
+    if (out->shown[i]) {
+      out->nshown++;
+    } else {
+      out->nhidden++;
+    }
+  }
+  return GDEFCORE_OK;
+}

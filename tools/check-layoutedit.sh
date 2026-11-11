@@ -177,4 +177,35 @@ plant stacked-set-without-the-swap $SEDIT testLayoutedit "$T_CELLS" \
   '        if (j != k && row->cells[j].stacked == e->stacked) {' \
   '        if (0 && j != k && row->cells[j].stacked == e->stacked) {'
 
+# ---- previewing a layout (site admin story 28) ----------------------------------------
+
+T_PREVIEW='LayoutEdit.APreviewShowsWhatAVisitorWouldSeeAndNeverNamesWhatItHides'
+
+# A role does not decide what a preview shows.
+plant preview-ignores-roles $CARRY testLayoutedit "$T_PREVIEW" \
+  '  if (p->nroles > 0 && !preview_role_hit(p, v->role == NULL ? "" : v->role, v->role_len)) {' \
+  '  if (0 && p->nroles > 0 && !preview_role_hit(p, v->role == NULL ? "" : v->role, v->role_len)) {'
+
+# A page's path does not decide it.
+plant preview-ignores-the-path $CARRY testLayoutedit "$T_PREVIEW" \
+  "  if (p->path[0] != '\\0' &&
+      (v->path_len == 0 ||" \
+  "  if (0 && p->path[0] != '\\0' &&
+      (v->path_len == 0 ||"
+
+# A visitor who is not signed in is shown what is for the signed in.
+plant anonymous-previewed-as-signed-in $CARRY testLayoutedit "$T_PREVIEW" \
+  '    if (anonymous) {' \
+  '    if (0 && anonymous) {'
+
+# Any role is taken for the one asked about.
+plant any-role-matches $CARRY testLayoutedit "$T_PREVIEW" \
+  '        (strlen(want) == role_len && memcmp(want, role, role_len) == 0)) {' \
+  '        (strlen(want) == role_len && memcmp(want, role, role_len) == 0) || 1) {'
+
+# What is hidden is shown anyway.
+plant hidden-placement-shown $CARRY testLayoutedit "$T_PREVIEW" \
+  '    out->shown[i] = (unsigned char)preview_shows(&out->view.placed[i], viewer);' \
+  '    out->shown[i] = (unsigned char)(preview_shows(&out->view.placed[i], viewer) || 1);'
+
 plant_finish

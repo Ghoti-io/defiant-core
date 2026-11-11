@@ -30,6 +30,7 @@
 #include <ghoti.io/defiant-core/defiant-core.h>
 #include <gtest/gtest.h>
 
+#include <chrono>
 #include <map>
 #include <set>
 #include <string>
@@ -931,6 +932,98 @@ TEST_F(LayoutEdit, AStaleStructureFormAHandWrittenTemplateAndAMissingPermissionW
   EXPECT_EQ("<none>", Document("no-such-template"));
 }
 
+
+TEST_F(LayoutEdit, APreviewShowsWhatAVisitorWouldSeeAndNeverNamesWhatItHides) {
+  GDEFCORE_Placement editors = Placement("recent");
+  editors.nroles = 1;
+  snprintf(editors.roles[0], sizeof editors.roles[0], "editors");
+  ASSERT_EQ(GDEFCORE_OK, Place("post", "recent", "side", 0, &editors)) << refusal_;
+  GDEFCORE_Placement signed_in = Placement("menu");
+  signed_in.nroles = 1;
+  snprintf(signed_in.roles[0], sizeof signed_in.roles[0], "authenticated");
+  ASSERT_EQ(GDEFCORE_OK, Place("post", "menu", "side", 1, &signed_in)) << refusal_;
+  GDEFCORE_Placement blog = Placement("menu");
+  snprintf(blog.path, sizeof blog.path, "/blog/**");
+  ASSERT_EQ(GDEFCORE_OK, Place("post", "menu", "main", 1, &blog)) << refusal_;
+  const size_t revisions = Revisions("post");
+  auto look = [this](const char * role, const char * path) {
+    GDEFCORE_Preview_Viewer viewer;
+    GDEFCORE_Layout_Preview pv;
+    memset(&viewer, 0, sizeof viewer);
+    viewer.size = sizeof viewer;
+    viewer.role = role;
+    viewer.role_len = strlen(role);
+    viewer.path = path;
+    viewer.path_len = strlen(path);
+    memset(&pv, 0, sizeof pv);
+    pv.size = sizeof pv;
+    EXPECT_EQ(GDEFCORE_OK, gdefcore_layout_preview(catalog_, "post", 4, &viewer, &pv));
+    std::string out;
+    for (size_t i = 0; i < pv.view.nplaced; i++) {
+      if (pv.shown[i]) {
+        out += std::string(pv.view.placed[i].region) + ":" + pv.view.placed[i].widget + " ";
+      }
+    }
+    out += "hidden=" + std::to_string(pv.nhidden);
+    gdefcore_layout_preview_free(&pv);
+    return out;
+  };
+  /* Anyone: the page's own content only. */
+  EXPECT_EQ("main:content hidden=3 ", look("", "/other") + " ");
+  EXPECT_EQ("main:content main:menu hidden=2 ", look("", "/blog/x") + " ");
+  /* Signed in with no named role: the placement for everyone signed in. */
+  EXPECT_EQ("main:content side:menu hidden=2 ", look("authenticated", "/other") + " ");
+  /* A holder of the role sees both of the role's. */
+  EXPECT_EQ("main:content side:recent side:menu hidden=1 ", look("editors", "/other") + " ");
+  EXPECT_EQ("main:content main:menu side:recent side:menu hidden=0 ", look("editors", "/blog/y") + " ");
+  /* A role nobody's placement names is no more than signed in. */
+  EXPECT_EQ(look("authenticated", "/other"), look("somebody-else", "/other"));
+  /* Previewing writes nothing and changes nothing. */
+  EXPECT_EQ(revisions, Revisions("post"));
+  /* A layout that is not there. */
+  GDEFCORE_Preview_Viewer viewer;
+  GDEFCORE_Layout_Preview pv;
+  memset(&viewer, 0, sizeof viewer);
+  viewer.size = sizeof viewer;
+  memset(&pv, 0, sizeof pv);
+  pv.size = sizeof pv;
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, gdefcore_layout_preview(catalog_, "no-such", 7, &viewer, &pv));
+}
+
+TEST_F(LayoutEdit, ThePreviewOfALayoutOfThirtyPlacementsIsMeasuredForEveryRole) {
+  /* The cost of previewing as a role: a full layout, asked 2000 times. */
+  for (int i = 0; i < 30; i++) {
+    GDEFCORE_Placement p = Placement(i % 2 ? "menu" : "recent");
+    p.nroles = 1;
+    snprintf(p.roles[0], sizeof p.roles[0], "role%d", i % 5);
+    ASSERT_EQ(GDEFCORE_OK, Place("post", i % 2 ? "menu" : "recent", i % 3 ? "main" : "side", 0, &p)) << i << refusal_;
+  }
+  GDEFCORE_Preview_Viewer viewer;
+  memset(&viewer, 0, sizeof viewer);
+  viewer.size = sizeof viewer;
+  viewer.role = "role2";
+  viewer.role_len = 5;
+  viewer.path = "/x";
+  viewer.path_len = 2;
+  size_t shown = 0;
+  const auto start = std::chrono::steady_clock::now();
+  const int rounds = 2000;
+  for (int r = 0; r < rounds; r++) {
+    GDEFCORE_Layout_Preview pv;
+    memset(&pv, 0, sizeof pv);
+    pv.size = sizeof pv;
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_layout_preview(catalog_, "post", 4, &viewer, &pv));
+    shown = pv.nshown;
+    EXPECT_EQ(pv.view.nplaced, pv.nshown + pv.nhidden);
+    gdefcore_layout_preview_free(&pv);
+  }
+  const double micros = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - start).count() / rounds;
+  /* content + the six placements of role2 (30 placements, five roles). */
+  EXPECT_EQ(7u, shown);
+  fprintf(stderr, "preview-as-role: 31 placements, %.1f microseconds a preview\n", micros);
+  EXPECT_LT(micros, 20000.0) << "a preview is a read of one layout and a loop";
+}
+
 TEST_F(LayoutEdit, TheStructsHereAreAcceptedAtOnlyTheirOwnSize) {
   auto placement = [](size_t size) {
     GDEFCORE_Placement p;
@@ -983,8 +1076,35 @@ TEST_F(LayoutEdit, TheStructsHereAreAcceptedAtOnlyTheirOwnSize) {
     gdefcore_changeset_destroy(cs);
     return ok;
   };
+  auto pviewer = [this](size_t size) {
+    GDEFCORE_Preview_Viewer viewer;
+    GDEFCORE_Layout_Preview pv;
+    memset(&viewer, 0, sizeof viewer);
+    viewer.size = size;
+    memset(&pv, 0, sizeof pv);
+    pv.size = sizeof pv;
+    GDEFCORE_Result rc = gdefcore_layout_preview(catalog_, "post", 4, &viewer, &pv);
+    if (rc == GDEFCORE_OK) {
+      gdefcore_layout_preview_free(&pv);
+    }
+    return rc == GDEFCORE_OK;
+  };
+  auto ppreview = [this](size_t size) {
+    GDEFCORE_Preview_Viewer viewer;
+    GDEFCORE_Layout_Preview pv;
+    memset(&viewer, 0, sizeof viewer);
+    viewer.size = sizeof viewer;
+    memset(&pv, 0, sizeof pv);
+    pv.size = size;
+    GDEFCORE_Result rc = gdefcore_layout_preview(catalog_, "post", 4, &viewer, &pv);
+    if (rc == GDEFCORE_OK) {
+      gdefcore_layout_preview_free(&pv);
+    }
+    return rc == GDEFCORE_OK;
+  };
   size_structs::Run("tests/test_layoutedit.cpp",
-      {{"GDEFCORE_Placement", placement}, {"GDEFCORE_Layout_View", view},
+      {{"GDEFCORE_Preview_Viewer", pviewer}, {"GDEFCORE_Layout_Preview", ppreview},
+          {"GDEFCORE_Placement", placement}, {"GDEFCORE_Layout_View", view},
           {"GDEFCORE_Layout_Edit", edit}, {"GDEFCORE_Structure_View", sview},
           {"GDEFCORE_Structure_Edit", sedit}});
 }
