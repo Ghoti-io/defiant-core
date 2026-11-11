@@ -706,6 +706,7 @@
 #define gdefcore_asset_find GHOTIIO_DEFCORE(gdefcore_asset_find)
 #define gdefcore_asset_url GHOTIIO_DEFCORE(gdefcore_asset_url)
 #define gdefcore_asset_release GHOTIIO_DEFCORE(gdefcore_asset_release)
+#define gdefcore_siteasset_name_ok GHOTIIO_DEFCORE(gdefcore_siteasset_name_ok)
 #define gdefcore_siteasset_declare GHOTIIO_DEFCORE(gdefcore_siteasset_declare)
 #define gdefcore_siteasset_stage GHOTIIO_DEFCORE(gdefcore_siteasset_stage)
 #define gdefcore_siteasset_stage_forget GHOTIIO_DEFCORE(gdefcore_siteasset_stage_forget)

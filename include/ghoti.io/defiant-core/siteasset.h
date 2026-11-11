@@ -19,7 +19,9 @@
  */
 
 /**
- * @file
+ * @file siteasset.h
+ * @brief The site's own stylesheets and scripts, written by changeset.
+ * @stability free
  *
  * The site's own stylesheets and scripts.
  *
@@ -73,6 +75,13 @@ extern "C" {
 #define GDEFCORE_ASSET_CSS_EDIT_LABEL "Edit site stylesheets"
 /** @brief The label the script permission is granted under. */
 #define GDEFCORE_ASSET_JS_EDIT_LABEL "Edit site scripts"
+
+/**
+ * @brief Whether @p name is a file name: 1 to ::GDEFCORE_ASSET_NAME_MAX bytes of
+ * a-z, 0-9, '.', '_' and '-', starting with a letter or digit, with no "..".
+ * It is the rule of a module's file name too.
+ */
+GDEFCORE_API int gdefcore_siteasset_name_ok(const char * name, size_t name_len);
 
 /**
  * @brief Define the two types and declare the two permissions, granted to
