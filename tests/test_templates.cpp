@@ -47,6 +47,7 @@
 #endif
 
 #include <functional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -1146,7 +1147,13 @@ TEST_F(Templates, BuiltInsAndContracts) {
   gdefcore_template_contract_close(c);
   ASSERT_EQ(GDEFCORE_OK, gdefcore_template_contract_open(catalog_, NULL, "core.page", 9, &c, NULL));
   EXPECT_EQ(0u, gdefcore_template_contract_var_count(c));
-  EXPECT_EQ(2u, gdefcore_template_contract_fn_count(c));
+  /* The page names the regions, links and files of a page: nothing more. */
+  std::set<std::string> page_fns;
+  for (size_t i = 0; i < gdefcore_template_contract_fn_count(c); i++) {
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_template_contract_fn_at(c, i, &f));
+    page_fns.insert(std::string(f.name, f.name_len) + "/" + std::to_string(f.arity));
+  }
+  EXPECT_EQ((std::set<std::string>{"asset/1", "region/1", "url/1"}), page_fns);
   gdefcore_template_contract_close(c);
 }
 
