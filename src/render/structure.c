@@ -1435,7 +1435,9 @@ GDEFCORE_Result gdefcore_structure_stage_edit(GDEFCORE_Changeset * changeset, co
     return rc;
   }
   version_text(text == NULL ? "" : text, n, version);
-  if (edit->version == NULL || !span_eq(edit->version, edit->version_len, version, strlen(version))) {
+  /* A template that is not there has no structure to have changed since it was drawn. */
+  if (exists && (edit->version == NULL ||
+                    !span_eq(edit->version, edit->version_len, version, strlen(version)))) {
     (void)gdefcore_changeset_set_refusal(changeset, GDEFCORE_STRUCTURE_REFUSED_STALE,
         sizeof GDEFCORE_STRUCTURE_REFUSED_STALE - 1);
     free(text);

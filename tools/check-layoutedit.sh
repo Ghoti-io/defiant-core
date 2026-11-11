@@ -142,8 +142,10 @@ plant orphans-not-reported $SEDIT testLayoutedit "$T_CARRY" \
 
 # A form drawn before another change is applied over it.
 plant stale-structure-accepted $SEDIT testLayoutedit "$T_SSTALE" \
-  '  if (edit->version == NULL || !span_eq(edit->version, edit->version_len, version, strlen(version))) {' \
-  '  if (edit->version == NULL || (0 && !span_eq(edit->version, edit->version_len, version, strlen(version)))) {'
+  '  if (exists && (edit->version == NULL ||
+                    !span_eq(edit->version, edit->version_len, version, strlen(version)))) {' \
+  '  if (exists && (edit->version == NULL ||
+                    (0 && !span_eq(edit->version, edit->version_len, version, strlen(version))))) {'
 
 # A template written by hand is changed by an edit of rows and cells.
 plant custom-edited-without-a-new-start $SEDIT testLayoutedit "$T_SSTALE" \
