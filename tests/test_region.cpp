@@ -393,6 +393,20 @@ TEST_F(Regions, ALayoutsNotPlacedListIsOnlyDataAndIsCheckedForItsShape) {
   EXPECT_EQ(GDEFCORE_OK, PutLines(post, "unplaced", ok, kDisplay)) << "CONTROL: 32";
 }
 
+TEST_F(Regions, TheStructsHereAreAcceptedAtOnlyTheirOwnSize) {
+  auto described = [this](size_t size) {
+    GDEFCORE_Region_Info info;
+    memset(&info, 0, sizeof info);
+    info.size = size;
+    GDEFCORE_Result rc = gdefcore_region_describe(catalog_, NULL, 0, "main", 4, &info);
+    if (rc == GDEFCORE_OK) {
+      gdefcore_region_info_free(catalog_, &info);
+    }
+    return rc == GDEFCORE_OK;
+  };
+  size_structs::Run("tests/test_region.cpp", {{"GDEFCORE_Region_Info", described}});
+}
+
 int main(int argc, char ** argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();

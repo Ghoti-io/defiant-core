@@ -540,7 +540,7 @@ TEST_COMPILE_FLAGS := `PKG_CONFIG_PATH=$(PKG_CONFIG_LOOKUP_PATH) pkg-config --cf
 # coverage target does, because --coverage links the gcov runtime, whose
 # mangle_path check-symbols is right to reject in a shipping library and
 # wrong to reject in an instrumented one. Spelled as text's TEST_GATES is.
-TEST_GATES ?= check-symbols check-aliasing check-seams check-prefix check-labels check-noveto check-access check-account check-inst check-subject check-keystore check-keystores check-form check-render check-erasure check-oracle check-readpaths check-routes check-tenant check-renderkey check-wait check-contexts check-bus check-defects check-safeout check-templates check-tpermission check-menu check-menuedit check-layout check-assets check-region check-structure check-settings check-message check-manifest check-conditions check-grants check-admin check-can check-revisions check-paths check-listplan check-relations check-groups check-personal check-callbacks check-suspend check-sweep check-restore check-migration check-scale check-model check-sizes
+TEST_GATES ?= check-symbols check-aliasing check-seams check-prefix check-labels check-noveto check-access check-account check-inst check-subject check-keystore check-keystores check-form check-render check-erasure check-oracle check-readpaths check-routes check-tenant check-renderkey check-wait check-contexts check-bus check-defects check-safeout check-templates check-tpermission check-menu check-menuedit check-layout check-assets check-region check-structure check-layoutedit check-settings check-message check-manifest check-conditions check-grants check-admin check-can check-revisions check-paths check-listplan check-relations check-groups check-personal check-callbacks check-suspend check-sweep check-restore check-migration check-scale check-model check-sizes
 
 # Valgrind flags (exclude "still reachable" as it's not a leak)
 # --suppressions: see tests/valgrind.supp. It holds allocations that are
@@ -1690,7 +1690,7 @@ $(FUZZ_FLAGS_STAMP): force-flags
 	@printf '%s\n' '$(FUZZ_CC) $(FUZZ_CXX) $(FUZZ_SAN) $(FUZZ_LIB_FLAGS) $(FUZZ_BIN_FLAGS) $(INCLUDE) $(STOR_LIBS) $(CUTIL_LIBS) $(SEC_LIBS) $(TEXT_LIBS) $(REGEX_LIBS) $(LTANG_LIBS) $(ARC_LIBS) $(MEM_LIBS) $(SQL_LIBS)' > $@.new
 	@cmp -s $@.new $@ 2>/dev/null && rm -f $@.new || mv -f $@.new $@
 
-.PHONY: check-seams check-prefix check-labels check-noveto check-access check-account check-inst check-subject check-keystore check-keystores check-form check-render check-erasure check-oracle check-readpaths check-routes check-tenant check-renderkey check-wait check-contexts check-bus check-defects check-safeout check-templates check-tpermission check-menu check-menuedit check-layout check-assets check-region check-structure check-settings check-message check-manifest check-conditions check-grants check-admin check-can check-revisions check-paths check-listplan check-relations check-groups check-personal check-callbacks check-suspend check-sweep check-restore check-migration check-scale check-model check-sizes
+.PHONY: check-seams check-prefix check-labels check-noveto check-access check-account check-inst check-subject check-keystore check-keystores check-form check-render check-erasure check-oracle check-readpaths check-routes check-tenant check-renderkey check-wait check-contexts check-bus check-defects check-safeout check-templates check-tpermission check-menu check-menuedit check-layout check-assets check-region check-structure check-layoutedit check-settings check-message check-manifest check-conditions check-grants check-admin check-can check-revisions check-paths check-listplan check-relations check-groups check-personal check-callbacks check-suspend check-sweep check-restore check-migration check-scale check-model check-sizes
 check-seams: ## Fail if a subsystem includes another's private header
 	@tools/check-seams.sh .
 check-prefix: ## Fail if a derived Defiant prefix collides or a dependency is out of order
@@ -1737,6 +1737,8 @@ check-region: $(APP_DIR)/testRegion$(EXE_EXTENSION) ## Region descriptors and a 
 	@GHOTI_PLANT_LIB=$(PLANT_LIB) tools/check-region.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX)) $(PLANT_PATHS)
 check-structure: $(APP_DIR)/testStructure$(EXE_EXTENSION) ## A page template's structure: the document's rules, deterministic output, one changeset, custom templates; real-source plants
 	@GHOTI_PLANT_LIB=$(PLANT_LIB) tools/check-structure.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX)) $(PLANT_PATHS)
+check-layoutedit: $(APP_DIR)/testLayoutedit$(EXE_EXTENSION) ## Editing a layout one placement at a time: each action, the stale refusal, the sentences; real-source plants
+	@GHOTI_PLANT_LIB=$(PLANT_LIB) tools/check-layoutedit.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX)) $(PLANT_PATHS)
 
 check-layout: $(APP_DIR)/testLayout$(EXE_EXTENSION) ## Widget types and layouts chosen through the route trie: unknown regions refused, one order, hooks deny nothing; real-source plants
 	@GHOTI_PLANT_LIB=$(PLANT_LIB) tools/check-layout.sh "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX)) $(PLANT_PATHS)

@@ -226,3 +226,35 @@ Container queries have shipped in the current evergreen browsers since 2023; a
 browser without them shows every row at full width and unfolded, which is a
 usable page. The page's policy allows the site's own stylesheet (the web layer's
 documentation), and the template names no inline style.
+
+## Editing a layout one placement at a time
+
+An editor reads a layout with `gdefcore_layout_view()`: the page template it
+draws with, that template's regions in its order, the placements (each a
+`GDEFCORE_Placement`: region, widget, target, title, path, type, roles), the Not
+placed list, and a **version**. It changes the layout with
+`gdefcore_layout_stage_edit()`, one action at a time:
+
+- *place* a widget in a region at a position, with its settings;
+- *place* an entry of the Not placed list in a region at a position;
+- *move* a placement to a region and a position;
+- *configure* a placement: its target, title and conditions are replaced whole
+  (what is not given is taken away), its region and widget kept;
+- *remove* a placement, from either list, which deletes it;
+- *unplace* a placement, which sets it aside in the Not placed list with its
+  settings.
+
+A position counts among the placements of that region, 0 first, and a position
+past the last is the last. Each edit is one changeset on the one layout, so it is
+one revision, and reverting the layout undoes it whole (reverting again is the
+redo). Every edit carries the version the editor drew, and an edit of a layout
+that has changed since is refused with "This layout changed. Showing the current
+layout." and writes nothing. The other refusals each have a sentence and write
+nothing: a region the template does not name ("That region is not in this
+template."), a widget the tenant does not have ("That widget is not available.",
+which is also why a Not placed entry whose module is disabled cannot be placed
+until it is enabled, though it can be configured and removed), a setting that is
+not one, a layout that would hold more than 32 placements, and a placement that is
+not there. An edit that changes nothing is success and stages nothing. The apply
+still asks the layout permission for the layout and checks the layout as it is
+left.

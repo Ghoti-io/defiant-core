@@ -157,6 +157,10 @@ GDEFCORE_Result gdefcore_siteasset_stage_forget_generated(
  * (region.h), leaving any a site has made. */
 GDEFCORE_Result gdefcore_render_region_seed(GDEFCORE_Catalog * catalog);
 
+/** Percent-encode @p n bytes into @p out (three bytes of room for each), so that the
+ * text holds no space, no `%` and no `~`; the length written. */
+size_t gdefcore_render_escape(const char * s, size_t n, char * out);
+
 /** Decode the percent-escapes of @p n bytes into @p out (@p cap with the NUL).
  * The length, or -1 for a bad escape or a value that does not fit. */
 long gdefcore_render_unescape(const char * s, size_t n, char * out, size_t cap);

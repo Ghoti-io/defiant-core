@@ -40,6 +40,7 @@
 #include <ghoti.io/defiant-core/asset.h>
 #include <ghoti.io/defiant-core/siteasset.h>
 #include <ghoti.io/defiant-core/region.h>
+#include <ghoti.io/defiant-core/layoutedit.h>
 #include <ghoti.io/defiant-core/structure.h>
 #include <ghoti.io/defiant-core/layout.h>
 #include <ghoti.io/defiant-core/menu.h>

@@ -120,6 +120,10 @@
   X(GDEFCORE_Module_Asset, "tests/test_assets.cpp") \
   X(GDEFCORE_Asset, "tests/test_assets.cpp") \
   X(GDEFCORE_Module_Declared_Asset, "tests/test_assets.cpp") \
+  X(GDEFCORE_Region_Info, "tests/test_region.cpp") \
+  X(GDEFCORE_Placement, "tests/test_layoutedit.cpp") \
+  X(GDEFCORE_Layout_View, "tests/test_layoutedit.cpp") \
+  X(GDEFCORE_Layout_Edit, "tests/test_layoutedit.cpp") \
   X(GDEFCORE_Layout_Widget, "tests/test_layout.cpp") \
   X(GDEFCORE_Layout_Rule, "tests/test_layout.cpp") \
   X(GDEFCORE_Layout_Hook, "tests/test_layout.cpp") \

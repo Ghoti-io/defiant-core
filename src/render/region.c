@@ -125,7 +125,7 @@ static int parse_line(const char * s, size_t n, char name[GDEFCORE_REGION_NAME_M
 }
 
 /* Percent-encode a text so that it holds no space and no `%`. */
-static size_t escape(const char * s, size_t n, char * out) {
+size_t gdefcore_render_escape(const char * s, size_t n, char * out) {
   static const char kHex[] = "0123456789ABCDEF";
   size_t i;
   size_t o = 0;
@@ -479,11 +479,11 @@ GDEFCORE_Result gdefcore_region_stage_template(GDEFCORE_Changeset * changeset,
       at = region_len;
       memcpy(line + at, " ~label=", 8);
       at += 8;
-      at += escape(label, label_len, line + at);
+      at += gdefcore_render_escape(label, label_len, line + at);
       if (description_len > 0) {
         memcpy(line + at, " ~description=", 14);
         at += 14;
-        at += escape(description, description_len, line + at);
+        at += gdefcore_render_escape(description, description_len, line + at);
       }
       lines[nlines] = line;
       line_lens[nlines] = at;
