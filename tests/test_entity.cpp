@@ -37,6 +37,7 @@
 #include <string.h>
 
 #include <map>
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -276,6 +277,40 @@ TEST_F(Entity, FieldNamedKind) {
   ASSERT_EQ(GDEFCORE_OK,
       gdefcore_type_field_count(catalog_, "site.kinded", 11, &nfields));
   EXPECT_EQ(2u, nfields);
+}
+
+/* The types a tenant has defined are listed by kind, in key order: what an editor offers as a choice. */
+TEST_F(Entity, TheTypesOfAKindAreListedInKeyOrderAndOfNoOtherKind) {
+  char ** names = NULL;
+  size_t * lens = NULL;
+  size_t n = 0;
+  DefineType(catalog_, "site.zebra", GDEFCORE_TYPE_CONTENT);
+  DefineType(catalog_, "site.apple", GDEFCORE_TYPE_CONTENT);
+  DefineType(catalog_, "site.rule", GDEFCORE_TYPE_CONFIG);
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_type_names(catalog_, GDEFCORE_TYPE_CONTENT, &names, &lens, &n));
+  std::vector<std::string> content;
+  for (size_t i = 0; i < n; i++) {
+    content.push_back(std::string(names[i], lens[i]));
+  }
+  gdefcore_values_free(catalog_, names, lens, n);
+  const auto at = [&](const std::vector<std::string> & v, const char * name) {
+    return std::find(v.begin(), v.end(), name) - v.begin();
+  };
+  ASSERT_LT(at(content, "site.apple"), (long)content.size());
+  ASSERT_LT(at(content, "site.zebra"), (long)content.size());
+  EXPECT_LT(at(content, "site.apple"), at(content, "site.zebra")) << "key order";
+  EXPECT_EQ((long)content.size(), at(content, "site.rule")) << "a config type is not a content type";
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_type_names(catalog_, GDEFCORE_TYPE_CONFIG, &names, &lens, &n));
+  std::vector<std::string> config;
+  for (size_t i = 0; i < n; i++) {
+    config.push_back(std::string(names[i], lens[i]));
+  }
+  gdefcore_values_free(catalog_, names, lens, n);
+  EXPECT_LT(at(config, "site.rule"), (long)config.size());
+  EXPECT_EQ((long)config.size(), at(config, "site.apple")) << "a content type is not a config type";
+  /* A kind that is neither, and no destination, are refused and write nothing. */
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, gdefcore_type_names(catalog_, 99, &names, &lens, &n));
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, gdefcore_type_names(catalog_, GDEFCORE_TYPE_CONTENT, NULL, &lens, &n));
 }
 
 /* A hyphen is allowed in the local part of a type name, and nowhere else. */

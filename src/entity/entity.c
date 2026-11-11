@@ -1700,6 +1700,98 @@ GDEFCORE_Result gdefcore_type_kind(GDEFCORE_Catalog * catalog, const char * name
       NULL);
 }
 
+GDEFCORE_Result gdefcore_type_names(GDEFCORE_Catalog * catalog, int kind, char *** out_names,
+    size_t ** out_lens, size_t * out_count) {
+  char ** names = NULL;
+  size_t * lens = NULL;
+  size_t n = 0;
+  size_t cap = 0;
+  uint64_t offset = 0;
+  GDEFCORE_Result rc = GDEFCORE_OK;
+  if (catalog == NULL || out_names == NULL || out_lens == NULL || out_count == NULL ||
+      (kind != GDEFCORE_TYPE_CONTENT && kind != GDEFCORE_TYPE_CONFIG)) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  *out_names = NULL;
+  *out_lens = NULL;
+  *out_count = 0;
+  for (;;) {
+    GDEFSTOR_RecordList * list = NULL;
+    size_t count;
+    size_t i;
+    rc = gdefcore_ent_map(gdefstor_record_list(catalog->store, (const char *)catalog->tenant,
+        catalog->tenant_len, GDEFCORE_ENT_TYPE_NS, sizeof GDEFCORE_ENT_TYPE_NS - 1, "", 0, offset,
+        GDEFSTOR_RECORD_MAX_PAGE, &list));
+    if (rc != GDEFCORE_OK) {
+      break;
+    }
+    count = gdefstor_record_list_count(list);
+    for (i = 0; rc == GDEFCORE_OK && i < count; i++) {
+      const char * key = NULL;
+      size_t key_len = 0;
+      const uint8_t * bytes = NULL;
+      size_t blen = 0;
+      GDEFCORE_EntType t;
+      char * copy;
+      rc = gdefcore_ent_map(gdefstor_record_list_item(list, i, &key, &key_len, &bytes, &blen, NULL, NULL));
+      if (rc != GDEFCORE_OK) {
+        break;
+      }
+      rc = gdefcore_ent_type_load(catalog, key, key_len, &t);
+      if (rc == GDEFCORE_ERR_INVALID) {
+        rc = GDEFCORE_OK;   /* a record that is not a type of this tenant's */
+        continue;
+      }
+      if (rc != GDEFCORE_OK) {
+        break;
+      }
+      if (t.kind != kind) {
+        gdefcore_ent_type_free(catalog->alloc, &t);
+        continue;
+      }
+      gdefcore_ent_type_free(catalog->alloc, &t);
+      if (n == cap) {
+        size_t next = cap == 0 ? 16 : cap * 2;
+        char ** nn = (char **)gcu_allocator_realloc(catalog->alloc, names, next * sizeof *nn);
+        size_t * nl;
+        if (nn == NULL) {
+          rc = GDEFCORE_ERR_OOM;
+          break;
+        }
+        names = nn;
+        nl = (size_t *)gcu_allocator_realloc(catalog->alloc, lens, next * sizeof *nl);
+        if (nl == NULL) {
+          rc = GDEFCORE_ERR_OOM;
+          break;
+        }
+        lens = nl;
+        cap = next;
+      }
+      copy = dup_span(catalog->alloc, key, key_len);
+      if (copy == NULL) {
+        rc = GDEFCORE_ERR_OOM;
+        break;
+      }
+      names[n] = copy;
+      lens[n] = key_len;
+      n += 1;
+    }
+    gdefstor_record_list_free(list);
+    if (rc != GDEFCORE_OK || count < GDEFSTOR_RECORD_MAX_PAGE) {
+      break;
+    }
+    offset += count;
+  }
+  if (rc != GDEFCORE_OK) {
+    gdefcore_values_free(catalog, names, lens, n);
+    return rc;
+  }
+  *out_names = names;
+  *out_lens = lens;
+  *out_count = n;
+  return GDEFCORE_OK;
+}
+
 GDEFCORE_Result gdefcore_type_subjects(GDEFCORE_Catalog * catalog,
     const char * name, size_t name_len, int * out_subjects) {
   int subjects = 0;

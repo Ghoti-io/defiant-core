@@ -362,6 +362,17 @@ GDEFCORE_API GDEFCORE_Result gdefcore_type_kind(GDEFCORE_Catalog * catalog,
     const char * name, size_t name_len, int * out_kind);
 
 /**
+ * @brief The names of the types of @p kind this tenant has defined, in key order.
+ *
+ * @p kind is ::GDEFCORE_TYPE_CONTENT or ::GDEFCORE_TYPE_CONFIG. The built-in
+ * types are not listed. The names are what an editor offers as a choice (the type
+ * a layout rule or a placement is for); a type that a disabled module defined is
+ * listed while its definition is stored. Free with gdefcore_values_free().
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_type_names(GDEFCORE_Catalog * catalog, int kind,
+    char *** out_names, size_t ** out_lens, size_t * out_count);
+
+/**
  * @brief Whether the type's entities are subjects (::GDEFCORE_TYPE_SUBJECTS).
  *
  * @p out_subjects receives 1 or 0. A type that is not there is

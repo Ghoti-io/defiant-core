@@ -573,6 +573,7 @@
 #define gdefcore_subject_open_value GHOTIIO_DEFCORE(gdefcore_subject_open_value)
 #define gdefcore_tree_value_subject GHOTIIO_DEFCORE(gdefcore_tree_value_subject)
 #define gdefcore_type_subjects GHOTIIO_DEFCORE(gdefcore_type_subjects)
+#define gdefcore_type_names GHOTIIO_DEFCORE(gdefcore_type_names)
 #define gdefcore_subject_keyset GHOTIIO_DEFCORE(gdefcore_subject_keyset)
 #define gdefcore_subject_mac GHOTIIO_DEFCORE(gdefcore_subject_mac)
 #define gdefcore_subject_mac_sealed GHOTIIO_DEFCORE(gdefcore_subject_mac_sealed)

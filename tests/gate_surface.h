@@ -170,6 +170,7 @@ static const Surface kSurface[] = {
     {"gdefcore_type_define", "W"},
     {"gdefcore_type_kind", "RA"},
     {"gdefcore_type_subjects", "RA"},
+    {"gdefcore_type_names", "RA"},
     {"gdefcore_entity_subject", "RA"},
     {"gdefcore_catalog_subjects", "P"},
     {"gdefcore_tree_value_subject", "P"},
