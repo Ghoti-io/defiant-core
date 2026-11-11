@@ -72,6 +72,13 @@ value that is not escaped properly or is out of range: a title is 1 to 128
 bytes of text, a path is a pattern as above of at most 128 bytes, a type is
 `module.name`, a role is a name of a-z, 0-9, `.`, `_` and `-`.
 
+A layout also keeps a **Not placed** list, `unplaced`, one entry per line in the
+form of a placement without its region: `widget [target] [~key=value ...]`. It is
+only data. A widget there draws nothing, and its type need not exist, so a
+module that is disabled keeps its placements and they come back when it is
+enabled. A layout is refused when an entry is not that shape or when it holds
+more than 32 (the most values the port keeps of one field).
+
 A layout is checked when it is saved, as the write leaves it
 (`gdefcore_layout_vet()`, run by apply with or without a request), and the
 whole changeset is refused with nothing written when
@@ -142,3 +149,28 @@ writes, about the entity as stored and as the write leaves it
 `layout` (conditions.md). A layout change is a changeset and moves the config
 epoch, so every key that holds the epoch (the render key, a widget's fragment)
 moves with it.
+
+## Region descriptors
+
+A template names a region with `region("side")` and says no more. What an editor
+is shown for one (region.h) is a **descriptor**, a label and an optional
+description, found in this order, the first match winning:
+
+1. the template's own, kept in its `regions` field, one
+   `name ~label=<text> ~description=<text>` line each (the values
+   percent-encoded as a placement's are), at most 32;
+2. a shared one, a `core.region-descriptor` entity of a name, a label and a
+   description. A new site starts with `main`, `side`, `header`, `navigation` and
+   `footer`, and the site adds its own; the seed leaves one the site changed;
+3. the name in readable form: `footer_links` is "Footer links".
+
+A descriptor changes what an editor and a preview show and nothing else: how a
+page renders does not depend on one, and removing a shared one touches labels
+only, never a placement. A name is a-z first, then a-z, 0-9, `_` and `-`, at most
+63 bytes; a label is 1 to 64 bytes of text and a description at most 256.
+
+A shared descriptor is configuration written by changeset under
+`core.region.edit` ("Edit region descriptors"), which the layout permission does
+not imply and the administrator role is granted at seed. A template's own are
+written with the template (`gdefcore_region_stage_template()`), so they ask the
+template permission. Each is checked when it is saved (`gdefcore_region_vet()`).

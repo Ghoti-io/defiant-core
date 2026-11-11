@@ -63,7 +63,7 @@ static int hex_val(char c) {
 
 /* Decode @p n bytes of a value into @p out (@p cap bytes with the NUL). Returns
  * the length, or -1 for a bad escape or a value that does not fit. */
-static long unescape(const char * s, size_t n, char * out, size_t cap) {
+long gdefcore_render_unescape(const char * s, size_t n, char * out, size_t cap) {
   size_t i;
   size_t o = 0;
   for (i = 0; i < n; i++) {
@@ -229,7 +229,7 @@ int gdefcore_render_pane_extras(const char * s, size_t n, GdefPane * out, char *
       }
       value = key + key_len + 1;
       value_len = e - (b + 1 + key_len + 1);
-      dn = unescape(value, value_len, decoded, sizeof decoded);
+      dn = gdefcore_render_unescape(value, value_len, decoded, sizeof decoded);
       if (dn < 0 || memchr(decoded, '\0', (size_t)dn) != NULL) {
         say(why, cap, "A placement part has a value that is not escaped properly.");
         return 0;

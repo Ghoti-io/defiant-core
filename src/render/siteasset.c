@@ -68,7 +68,7 @@ static int kind_of(const char * type, size_t n) {
 }
 
 /* One value of @p field as a NUL-terminated copy, empty when there is none. */
-static GDEFCORE_Result field_text(GDEFCORE_Catalog * catalog,
+GDEFCORE_Result gdefcore_render_field_text(GDEFCORE_Catalog * catalog,
     const GDEFCORE_Changeset * cs, int view, const char * id, const char * field,
     char ** out, size_t * out_len) {
   char ** texts = NULL;
@@ -162,7 +162,7 @@ static GDEFCORE_Result locate(GDEFCORE_Catalog * catalog,
       if (op == GDEFCORE_TOUCH_CLEAR || op == GDEFCORE_TOUCH_UNPUBLISH) {
         continue;
       }
-      if (field_text(catalog, through, view, ids[i], "name", &stored,
+      if (gdefcore_render_field_text(catalog, through, view, ids[i], "name", &stored,
               &stored_len) != GDEFCORE_OK) {
         gdefcore_ids_free(catalog, ids, count);
         return GDEFCORE_ERR_OOM;
@@ -201,7 +201,7 @@ static GDEFCORE_Result locate(GDEFCORE_Catalog * catalog,
         (skip != NULL && memcmp(canon, skip, GDEFCORE_PUBLIC_ID_LEN) == 0)) {
       continue;
     }
-    if (field_text(catalog, through, view, canon, "name", &stored, &stored_len) !=
+    if (gdefcore_render_field_text(catalog, through, view, canon, "name", &stored, &stored_len) !=
         GDEFCORE_OK) {
       return GDEFCORE_ERR_OOM;
     }
@@ -232,7 +232,7 @@ GDEFCORE_Result gdefcore_siteasset_lookup(GDEFCORE_Catalog * catalog,
     return rc;
   }
   read_where(projection, &through, &view);
-  rc = field_text(catalog, through, view, id, "text", &text, &text_len);
+  rc = gdefcore_render_field_text(catalog, through, view, id, "text", &text, &text_len);
   if (rc != GDEFCORE_OK) {
     return rc;
   }
@@ -464,9 +464,9 @@ GDEFCORE_Result gdefcore_siteasset_vet(GDEFCORE_Changeset * changeset) {
           op == GDEFCORE_TOUCH_PUBLISH ? NULL : changeset;
       int view = op == GDEFCORE_TOUCH_PUBLISH ? GDEFCORE_VIEW_DRAFT
                                                : GDEFCORE_VIEW_CURRENT;
-      rc = field_text(catalog, through, view, canon, "name", &name, &name_len);
+      rc = gdefcore_render_field_text(catalog, through, view, canon, "name", &name, &name_len);
       if (rc == GDEFCORE_OK) {
-        rc = field_text(catalog, through, view, canon, "text", &text, &text_len);
+        rc = gdefcore_render_field_text(catalog, through, view, canon, "text", &text, &text_len);
       }
     }
     if (rc != GDEFCORE_OK) {
@@ -514,7 +514,7 @@ static GDEFCORE_Result decide_edit(GDEFCORE_Catalog * catalog,
   int ok = 0;
   GDEFCORE_Result rc;
   *allowed = 0;
-  rc = field_text(catalog, through, view, id, "name", &name, &name_len);
+  rc = gdefcore_render_field_text(catalog, through, view, id, "name", &name, &name_len);
   if (rc == GDEFCORE_OK && name_len > 0) {
     memset(&value, 0, sizeof value);
     value.size = sizeof value;

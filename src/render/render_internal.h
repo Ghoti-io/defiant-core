@@ -129,6 +129,20 @@ int gdefcore_render_split_pane(const char * s, size_t n, const char ** region,
     size_t * region_len, const char ** widget, size_t * widget_len,
     const char ** target, size_t * target_len);
 
+/** One value of @p field as a NUL-terminated copy made with malloc, empty when
+ * there is none; read as @p cs would leave it (view @p view). */
+GDEFCORE_Result gdefcore_render_field_text(GDEFCORE_Catalog * catalog,
+    const GDEFCORE_Changeset * cs, int view, const char * id, const char * field,
+    char ** out, size_t * out_len);
+
+/** Write the default shared region descriptors a new site starts with
+ * (region.h), leaving any a site has made. */
+GDEFCORE_Result gdefcore_render_region_seed(GDEFCORE_Catalog * catalog);
+
+/** Decode the percent-escapes of @p n bytes into @p out (@p cap with the NUL).
+ * The length, or -1 for a bad escape or a value that does not fit. */
+long gdefcore_render_unescape(const char * s, size_t n, char * out, size_t cap);
+
 /** Limits on what a placement says beyond region, widget and target. */
 #define GDEFCORE_PANE_TITLE_MAX 128
 #define GDEFCORE_PANE_PATH_MAX 128

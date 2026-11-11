@@ -37,6 +37,7 @@
 #include <ghoti.io/defiant-core/menu.h>
 #include <ghoti.io/defiant-core/layout.h>
 #include <ghoti.io/defiant-core/siteasset.h>
+#include <ghoti.io/defiant-core/region.h>
 #include <ghoti.io/defiant-core/settings.h>
 #include <ghoti.io/defiant-core/template.h>
 
@@ -4770,6 +4771,11 @@ GDEFCORE_Result gdefcore_changeset_apply(GDEFCORE_Changeset * changeset,
     if (rc != GDEFCORE_OK) {
       return rc;
     }
+    /* And who may write a shared region descriptor. */
+    rc = gdefcore_region_authorize(changeset, changeset->request);
+    if (rc != GDEFCORE_OK) {
+      return rc;
+    }
   }
   rc = gdefcore_changeset_rate(changeset, &risk);
   if (rc != GDEFCORE_OK) {
@@ -4819,6 +4825,11 @@ GDEFCORE_Result gdefcore_changeset_apply(GDEFCORE_Changeset * changeset,
   /* A site file with a name or text it may not have, or a name used twice, is
    * refused here with nothing written (siteasset.h). */
   rc = gdefcore_siteasset_vet(changeset);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  /* A region descriptor that is not one is refused here (region.h). */
+  rc = gdefcore_region_vet(changeset);
   if (rc != GDEFCORE_OK) {
     return rc;
   }

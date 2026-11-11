@@ -1061,6 +1061,8 @@ inline std::string MenuLine(World & w, const std::string & who,
     Note("gdefcore_layout_may_edit");
     out += " layout-may-edit=" +
            std::to_string(gdefcore_layout_may_edit(w.site.catalog, req));
+    Note("gdefcore_region_may_edit");
+    out += " region-may-edit=" + std::to_string(gdefcore_region_may_edit(w.site.catalog, req));
     Note("gdefcore_siteasset_may_edit");
     out += " siteasset-may-edit=" +
            std::to_string(gdefcore_siteasset_may_edit(w.site.catalog, req,

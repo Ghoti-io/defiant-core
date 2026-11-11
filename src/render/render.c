@@ -35,6 +35,7 @@
 #include <ghoti.io/defiant-core/asset.h>
 #include <ghoti.io/defiant-core/layout.h>
 #include <ghoti.io/defiant-core/siteasset.h>
+#include <ghoti.io/defiant-core/region.h>
 #include <ghoti.io/defiant-core/menu.h>
 #include <ghoti.io/defiant-core/message.h>
 #include <ghoti.io/defiant-core/module.h>
@@ -3530,6 +3531,14 @@ static GDEFCORE_Result write_kit(GDEFCORE_Catalog * catalog) {
     rc = gdefcore_siteasset_declare(catalog);
   }
   if (rc == GDEFCORE_OK) {
+    /* The shared region descriptors, the permission to write them, and the
+     * defaults a new site starts with. */
+    rc = gdefcore_region_declare(catalog);
+  }
+  if (rc == GDEFCORE_OK) {
+    rc = gdefcore_render_region_seed(catalog);
+  }
+  if (rc == GDEFCORE_OK) {
     /* The settings: the site's changed values and who may change them. */
     rc = gdefcore_settings_declare(catalog);
   }
@@ -3621,10 +3630,10 @@ GDEFCORE_Result gdefcore_render_kit(GDEFCORE_Catalog * catalog, uint8_t ** out_b
     size_t * out_len) {
   GDEFCORE_Changeset * cs = NULL;
   GDEFCORE_Field post[3];
-  GDEFCORE_Field tmpl[5];
+  GDEFCORE_Field tmpl[6];
   GDEFCORE_Field kinds[5];
   GDEFCORE_Field view[5];
-  GDEFCORE_Field display[3];
+  GDEFCORE_Field display[4];
   GDEFCORE_Patch * files = NULL;
   size_t count = 0;
   uint8_t * blob = NULL;
@@ -3644,6 +3653,7 @@ GDEFCORE_Result gdefcore_render_kit(GDEFCORE_Catalog * catalog, uint8_t ** out_b
   set_field(&tmpl[2], "kind", 1, 0);
   set_field(&tmpl[3], "attached", 0, 0);
   set_field(&tmpl[4], "classification", 0, 0);
+  set_field(&tmpl[5], "regions", 0, 1);
   set_field(&kinds[0], "name", 1, 0);
   set_field(&kinds[1], "label", 1, 0);
   set_field(&kinds[2], "version", 1, 0);
@@ -3658,6 +3668,7 @@ GDEFCORE_Result gdefcore_render_kit(GDEFCORE_Catalog * catalog, uint8_t ** out_b
   set_field(&display[0], "name", 1, 0);
   set_field(&display[1], "layout", 1, 0);
   set_field(&display[2], "panes", 0, 1);
+  set_field(&display[3], "unplaced", 0, 1);
   /* range is optional and declared with sort's slot reused below. */
   rc = gdefcore_changeset_prepare(catalog, NULL, 0, &cs);
   if (rc != GDEFCORE_OK) {
@@ -3667,7 +3678,7 @@ GDEFCORE_Result gdefcore_render_kit(GDEFCORE_Catalog * catalog, uint8_t ** out_b
       3);
   if (rc == GDEFCORE_OK) {
     rc = gdefcore_changeset_define(cs, "core.template", 13, GDEFCORE_TYPE_CONFIG,
-        tmpl, 5);
+        tmpl, 6);
   }
   if (rc == GDEFCORE_OK) {
     rc = gdefcore_changeset_define(cs, GDEFCORE_TEMPLATE_KIND_TYPE,
@@ -3686,7 +3697,7 @@ GDEFCORE_Result gdefcore_render_kit(GDEFCORE_Catalog * catalog, uint8_t ** out_b
   }
   if (rc == GDEFCORE_OK) {
     rc = gdefcore_changeset_define(cs, "core.display", 12, GDEFCORE_TYPE_CONFIG,
-        display, 3);
+        display, 4);
   }
   if (rc == GDEFCORE_OK) {
     rc = gdefcore_changeset_serialize(cs, &files, &count);

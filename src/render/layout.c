@@ -716,6 +716,48 @@ static GDEFCORE_Result refuse(GDEFCORE_Changeset * changeset, const char * what,
   return GDEFCORE_ERR_INVALID;
 }
 
+/*
+ * The Not placed list: placements that have no region, `widget [target] [~parts]`.
+ * A widget type that is not there is allowed (a module that is disabled keeps its
+ * placements here, unavailable), so only the shape and the parts are checked.
+ */
+static GDEFCORE_Result check_unplaced(char ** lines, const size_t * lens, size_t count,
+    char * why, size_t cap) {
+  size_t i;
+  if (count > GDEFCORE_LAYOUT_PANES_MAX) {
+    say(why, cap, "The Not placed list holds at most 32 placements.", NULL, 0, "");
+    return GDEFCORE_ERR_INVALID;
+  }
+  for (i = 0; i < count; i++) {
+    /* Given a region, it is a placement like any other. */
+    char * with = (char *)malloc(lens[i] + 3);
+    const char * region;
+    const char * widget;
+    const char * target;
+    size_t region_len = 0;
+    size_t widget_len = 0;
+    size_t target_len = 0;
+    GdefPane extras;
+    char reason[160];
+    int ok;
+    if (with == NULL) {
+      return GDEFCORE_ERR_OOM;
+    }
+    memcpy(with, "x ", 2);
+    memcpy(with + 2, lines[i], lens[i]);
+    ok = gdefcore_render_split_pane(with, lens[i] + 2, &region, &region_len, &widget,
+             &widget_len, &target, &target_len) &&
+         gdefcore_render_pane_extras(with, lens[i] + 2, &extras, reason, sizeof reason);
+    free(with);
+    if (!ok) {
+      say(why, cap, "A Not placed entry is not `widget [target] [~key=value ...]`: ",
+          lines[i], lens[i], ".");
+      return GDEFCORE_ERR_INVALID;
+    }
+  }
+  return GDEFCORE_OK;
+}
+
 static GDEFCORE_Result vet_display(GDEFCORE_Changeset * changeset,
     GDEFCORE_Catalog * catalog, const char * id, int op) {
   const GDEFCORE_Changeset * through = op == GDEFCORE_TOUCH_PUBLISH ? NULL : changeset;
@@ -771,6 +813,21 @@ static GDEFCORE_Result vet_display(GDEFCORE_Changeset * changeset,
   rc = check_panes(catalog, changeset, body, body_len, panes, lens, count, why,
       sizeof why);
   gdefcore_values_free(catalog, panes, lens, count);
+  if (rc == GDEFCORE_OK) {
+    /* What the layout keeps unplaced is only checked for its shape. */
+    char ** unplaced = NULL;
+    size_t * unplaced_lens = NULL;
+    size_t unplaced_count = 0;
+    rc = gdefcore_entity_values(catalog, through, view, id, GDEFCORE_PUBLIC_ID_LEN,
+        kLang, sizeof kLang - 1, "unplaced", 8, &unplaced, &unplaced_lens,
+        &unplaced_count);
+    if (rc == GDEFCORE_ERR_INVALID) {
+      rc = GDEFCORE_OK;
+    } else if (rc == GDEFCORE_OK) {
+      rc = check_unplaced(unplaced, unplaced_lens, unplaced_count, why, sizeof why);
+      gdefcore_values_free(catalog, unplaced, unplaced_lens, unplaced_count);
+    }
+  }
   if (rc == GDEFCORE_ERR_INVALID) {
     out = refuse(changeset, "Layout", name, name_len,
         why[0] != '\0' ? why : "it does not fit its page template.");

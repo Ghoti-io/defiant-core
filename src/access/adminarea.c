@@ -30,6 +30,7 @@
 #include <ghoti.io/defiant-core/adminarea.h>
 #include <ghoti.io/defiant-core/layout.h>
 #include <ghoti.io/defiant-core/siteasset.h>
+#include <ghoti.io/defiant-core/region.h>
 #include <ghoti.io/defiant-core/menu.h>
 #include <ghoti.io/defiant-core/settings.h>
 #include <ghoti.io/defiant-core/template.h>
@@ -105,6 +106,7 @@ GDEFCORE_Result gdefcore_admin_seed(GDEFCORE_Catalog * catalog) {
       GDEFCORE_MENU_EDIT_OVERRIDE_LABEL,
       GDEFCORE_LAYOUT_EDIT_DISPLAY_LABEL,
       GDEFCORE_LAYOUT_EDIT_RULE_LABEL,
+      GDEFCORE_REGION_EDIT_LABEL,
       GDEFCORE_ASSET_CSS_EDIT_LABEL,
       GDEFCORE_ASSET_JS_EDIT_LABEL,
       GDEFCORE_SETTINGS_EDIT_LABEL,
@@ -134,6 +136,9 @@ GDEFCORE_Result gdefcore_admin_seed(GDEFCORE_Catalog * catalog) {
   }
   if (rc == GDEFCORE_OK) {
     rc = gdefcore_siteasset_declare(catalog);
+  }
+  if (rc == GDEFCORE_OK) {
+    rc = gdefcore_region_declare(catalog);
   }
   if (rc == GDEFCORE_OK) {
     rc = gdefcore_settings_declare(catalog);
