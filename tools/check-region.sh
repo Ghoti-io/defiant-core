@@ -48,13 +48,15 @@ plant_stale stale-object $REGION testRegion "$T_ORDER" \
   '  if (from_template(catalog, template_name, template_len, region, region_len, info,
           &rc) ||
       rc != GDEFCORE_OK) {' \
-  '  if (0) {'
+  '  if (0 && from_template(catalog, template_name, template_len, region, region_len, info,
+          &rc)) {'
 
 plant template-descriptor-ignored $REGION testRegion "$T_ORDER" \
   '  if (from_template(catalog, template_name, template_len, region, region_len, info,
           &rc) ||
       rc != GDEFCORE_OK) {' \
-  '  if (0) {'
+  '  if (0 && from_template(catalog, template_name, template_len, region, region_len, info,
+          &rc)) {'
 
 plant shared-descriptor-ignored $REGION testRegion "$T_SEED" \
   '  if (from_shared(catalog, region, region_len, info, &rc) || rc != GDEFCORE_OK) {' \
