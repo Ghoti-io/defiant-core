@@ -29,6 +29,13 @@
 #   tenant-layout-leak                       Layouts.TwoTenantsLayoutsNeverMix
 #   authorize-not-called                     Layouts.EditingLayoutsIsOnePermissionCheckedAtApplyForAChangesetWithARequest
 #
+# and, for what a placement says beyond region, widget and target (a title and
+# when it shows): placement-visibility-ignored, placement-role-not-asked,
+# anonymous-holds-every-role, path-matches-by-prefix, placement-type-ignored,
+# placement-title-not-escaped, untitled-placement-wrapped,
+# placement-parts-unchecked, placement-path-needs-no-slash,
+# placement-title-unbounded and role-dependence-not-marked.
+#
 # Every test has a control (the viewer who holds the permission DOES see the
 # widget, the module enabled in the other order DOES give the same offers, the
 # role that holds the grant DOES write), so a plant turning one red is a test
@@ -226,5 +233,74 @@ plant authorize-not-called src/entity/entity.c testLayout \
   'Layouts.EditingLayoutsIsOnePermissionCheckedAtApplyForAChangesetWithARequest' \
   '    rc = gdefcore_layout_authorize(changeset, changeset->request);' \
   '    rc = GDEFCORE_OK;'
+
+# ---- what a placement says beyond region, widget and target -----------------------
+
+T_ROLE='Layouts.APlacementIsDrawnOnlyForTheRolesItNamesAndIsNotAskedToDrawForOthers'
+T_PATH='Layouts.APlacementCanBeLimitedToAPathOrToTheTypeOfThePage'
+T_TITLE='Layouts.APlacementsTitleIsDrawnEscapedAboveItAndAPlacementWithoutOneIsBare'
+T_BAD='Layouts.APlacementPartThatIsNotOneIsRefusedWhenALayoutIsSaved'
+T_DEPENDS='Layouts.ARenderThatDependsOnRoleIsMarkedAsDependingOnThePrincipal'
+PLACE=src/render/placement.c
+
+# Plant 16: every placement is drawn, whoever asks.
+plant placement-visibility-ignored src/render/render.c testLayout "$T_ROLE" \
+  '    if (!gdefcore_render_pane_visible(catalog, request,
+            nav != NULL ? nav->path : NULL, nav != NULL ? nav->path_len : 0,
+            &extras)) {' \
+  '    if (0) {'
+
+# Plant 17: a role is never asked.
+plant placement-role-not-asked $PLACE testLayout "$T_ROLE" \
+  '  if (p->nroles > 0 && !holds_role(catalog, request, p)) {' \
+  '  if (p->nroles > 0 && 0 && !holds_role(catalog, request, p)) {'
+
+# Plant 18: the anonymous visitor holds every built-in role.
+plant anonymous-holds-every-role $PLACE testLayout "$T_ROLE" \
+  '      hit = strcmp(want, "anonymous") == 0;' \
+  '      hit = 1;'
+
+# Plant 19: a path matches by prefix, so a pattern of two segments takes one.
+plant path-matches-by-prefix $PLACE testLayout "$T_PATH" \
+  '  return qi >= n || (qi + 1 == n && path[qi] == '"'"'/'"'"');' \
+  '  return 1;'
+
+# Plant 20: the type of the page is not asked.
+plant placement-type-ignored $PLACE testLayout "$T_PATH" \
+  '  if (p->type_len > 0) {' \
+  '  if (0) {'
+
+# Plant 21: a title is written into the page as it is.
+plant placement-title-not-escaped src/render/render.c testLayout "$T_TITLE" \
+  '      rep = "&lt;";' \
+  '      rep = "<";'
+
+# Plant 22: every placement is wrapped, titled or not.
+plant untitled-placement-wrapped src/render/render.c testLayout "$T_TITLE" \
+  '    if (extras.title_len > 0) {' \
+  '    if (1) {'
+
+# Plant 23: a placement part is not read when a layout is saved.
+plant placement-parts-unchecked src/render/layout.c testLayout "$T_BAD" \
+  '      if (!gdefcore_render_pane_extras(panes[i], lens[i], &extras, reason,
+              sizeof reason)) {' \
+  '      (void)extras;
+      (void)reason;
+      if (0) {'
+
+# Plant 24: a path pattern need not start with a slash.
+plant placement-path-needs-no-slash $PLACE testLayout "$T_BAD" \
+  '  if (n == 0 || n > GDEFCORE_PANE_PATH_MAX || s[0] != '"'"'/'"'"') {' \
+  '  if (n == 0 || n > GDEFCORE_PANE_PATH_MAX) {'
+
+# Plant 25: a title may be any length.
+plant placement-title-unbounded $PLACE testLayout "$T_BAD" \
+  '        if (out->title_len > 0 || dn == 0 || dn > GDEFCORE_PANE_TITLE_MAX ||' \
+  '        if (out->title_len > 0 || dn == 0 || dn > 128 + 1 ||'
+
+# Plant 26: a render that depends on role is not said to depend on the principal.
+plant role-dependence-not-marked $PLACE testLayout "$T_DEPENDS" \
+  '  gdefcore_request_mark_principal_dependent(request);' \
+  '  (void)request;'
 
 plant_finish

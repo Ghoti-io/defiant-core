@@ -218,7 +218,7 @@ int gdefcore_render_split_pane(const char * s, size_t n, const char ** region,
     const char ** target, size_t * target_len) {
   size_t i = 0;
   size_t b;
-  size_t k;
+  size_t t;
   while (i < n && s[i] != ' ') {
     i += 1;
   }
@@ -237,20 +237,30 @@ int gdefcore_render_split_pane(const char * s, size_t n, const char ** region,
   }
   *widget = s + b;
   *widget_len = i - b;
-  if (i == n) {
-    *target = s + n;
-    *target_len = 0;
-  } else {
-    for (k = i + 1; k < n; k++) {
-      if (s[k] == ' ') {
-        return 0;
-      }
+  *target = s + n;
+  *target_len = 0;
+  t = 0;
+  /* What follows is an optional target, then parts that start with `~`. */
+  while (i < n) {
+    size_t e;
+    i += 1;   /* the space */
+    b = i;
+    while (i < n && s[i] != ' ') {
+      i += 1;
     }
-    if (i + 1 == n) {
+    e = i;
+    if (e == b) {
       return 0;
     }
-    *target = s + i + 1;
-    *target_len = n - (i + 1);
+    if (s[b] == '~') {
+      t = 2;
+    } else if (t == 0) {
+      *target = s + b;
+      *target_len = e - b;
+      t = 1;
+    } else {
+      return 0;   /* a second plain word, or one after a `~` part */
+    }
   }
   return *region_len < 64 && *widget_len <= GDEFCORE_LAYOUT_NAME_MAX;
 }
@@ -354,6 +364,16 @@ static GDEFCORE_Result check_panes(GDEFCORE_Catalog * catalog,
           lens[i], ".");
       rc = GDEFCORE_ERR_INVALID;
       break;
+    }
+    {
+      GdefPane extras;
+      char reason[160];
+      if (!gdefcore_render_pane_extras(panes[i], lens[i], &extras, reason,
+              sizeof reason)) {
+        say(why, cap, reason, NULL, 0, "");
+        rc = GDEFCORE_ERR_INVALID;
+        break;
+      }
     }
     for (k = 0; k < nregions; k++) {
       if (span_eq(regions[k], strlen(regions[k]), region, region_len)) {

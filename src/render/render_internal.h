@@ -121,12 +121,44 @@ void gdefcore_render_scan_regions(const char * body, size_t n, char *** out_name
     size_t * out_count, GDEFCORE_Catalog * catalog, GDEFCORE_Result * rc);
 
 /**
- * Split a placement, `region widget [target]`. Single spaces only; the target
- * is the rest and holds none. Returns 0 for anything else.
+ * Split a placement, `region widget [target] [~key=value ...]`. Single spaces
+ * only; the target holds none and does not start with `~`; the `~` parts are
+ * read by gdefcore_render_pane_extras(). Returns 0 for anything else.
  */
 int gdefcore_render_split_pane(const char * s, size_t n, const char ** region,
     size_t * region_len, const char ** widget, size_t * widget_len,
     const char ** target, size_t * target_len);
+
+/** Limits on what a placement says beyond region, widget and target. */
+#define GDEFCORE_PANE_TITLE_MAX 128
+#define GDEFCORE_PANE_PATH_MAX 128
+#define GDEFCORE_PANE_TYPE_MAX 96
+#define GDEFCORE_PANE_ROLE_MAX 64
+#define GDEFCORE_PANE_ROLES_MAX 8
+
+/** A placement's title and visibility, decoded (placement.c). */
+typedef struct GdefPane {
+  char title[GDEFCORE_PANE_TITLE_MAX + 1];
+  size_t title_len;
+  char path[GDEFCORE_PANE_PATH_MAX + 1];
+  size_t path_len;
+  char type[GDEFCORE_PANE_TYPE_MAX + 1];
+  size_t type_len;
+  char roles[GDEFCORE_PANE_ROLES_MAX][GDEFCORE_PANE_ROLE_MAX + 1];
+  size_t nroles;
+} GdefPane;
+
+/**
+ * Read the \`~key=value\` parts of a placement line. 1 when every one is well
+ * formed; 0 otherwise, with a sentence in @p why.
+ */
+int gdefcore_render_pane_extras(const char * s, size_t n, GdefPane * out, char * why,
+    size_t cap);
+
+/** Whether the placement shows for this request on the page at @p path. */
+int gdefcore_render_pane_visible(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Request * request, const char * path, size_t path_len,
+    const GdefPane * p);
 
 #ifdef __cplusplus
 }

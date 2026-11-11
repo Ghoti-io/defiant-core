@@ -2289,6 +2289,62 @@ static GDEFCORE_Result render_widget_at(GDEFCORE_Catalog * catalog,
   }
 }
 
+/* A placement's html under its title: the title escaped, in a heading. */
+static GDEFCORE_Result pane_with_title(const char * title, size_t title_len,
+    const char * html, size_t html_len, char ** out, size_t * out_len) {
+  static const char kHead[] = "<section class=\"pane\"><h2 class=\"pane-title\">";
+  static const char kMid[] = "</h2>";
+  static const char kTail[] = "</section>";
+  size_t cap = sizeof kHead + title_len * 6 + sizeof kMid + html_len + sizeof kTail + 1;
+  char * buf = (char *)malloc(cap);
+  size_t at = 0;
+  size_t i;
+  if (buf == NULL) {
+    return GDEFCORE_ERR_OOM;
+  }
+  memcpy(buf, kHead, sizeof kHead - 1);
+  at = sizeof kHead - 1;
+  for (i = 0; i < title_len; i++) {
+    const char * rep = NULL;
+    switch (title[i]) {
+    case '&':
+      rep = "&amp;";
+      break;
+    case '<':
+      rep = "&lt;";
+      break;
+    case '>':
+      rep = "&gt;";
+      break;
+    case '"':
+      rep = "&quot;";
+      break;
+    case '\'':
+      rep = "&#39;";
+      break;
+    default:
+      break;
+    }
+    if (rep != NULL) {
+      size_t rl = strlen(rep);
+      memcpy(buf + at, rep, rl);
+      at += rl;
+    } else {
+      buf[at++] = title[i];
+    }
+  }
+  memcpy(buf + at, kMid, sizeof kMid - 1);
+  at += sizeof kMid - 1;
+  memcpy(buf + at, html, html_len);
+  at += html_len;
+  memcpy(buf + at, kTail, sizeof kTail - 1);
+  at += sizeof kTail - 1;
+  buf[at] = '\0';
+  *out = buf;
+  *out_len = at;
+  return GDEFCORE_OK;
+}
+
 static GDEFCORE_Result render_display(GDEFCORE_Catalog * catalog,
     GDEFCORE_Request * request, const NavCtx * nav, const char * name,
     size_t name_len, uint64_t fuel, char ** out, size_t * out_len) {
@@ -2334,10 +2390,21 @@ static GDEFCORE_Result render_display(GDEFCORE_Catalog * catalog,
     size_t target_len = 0;
     char * html = NULL;
     size_t html_len = 0;
+    GdefPane extras;
+    char * titled = NULL;
+    size_t titled_len = 0;
     if (!gdefcore_render_split_pane(panes[i], lens[i], &region, &region_len,
-            &widget, &widget_len, &target, &target_len)) {
+            &widget, &widget_len, &target, &target_len) ||
+        !gdefcore_render_pane_extras(panes[i], lens[i], &extras, NULL, 0)) {
       rc = GDEFCORE_ERR_INVALID;
       goto done;
+    }
+    /* A placement that is not for this viewer is not asked to draw: nothing of
+     * it is read, rendered or left behind. */
+    if (!gdefcore_render_pane_visible(catalog, request,
+            nav != NULL ? nav->path : NULL, nav != NULL ? nav->path_len : 0,
+            &extras)) {
+      continue;
     }
     rc = render_widget_at(catalog, request, nav, widget, widget_len, target,
         target_len, fuel, &html, &html_len);
@@ -2345,8 +2412,19 @@ static GDEFCORE_Result render_display(GDEFCORE_Catalog * catalog,
       gdefcore_text_free(catalog, html);
       goto done;
     }
-    rc = region_add(&regions, region, region_len, html == NULL ? "" : html,
-        html_len);
+    if (extras.title_len > 0) {
+      rc = pane_with_title(extras.title, extras.title_len,
+          html == NULL ? "" : html, html_len, &titled, &titled_len);
+      if (rc != GDEFCORE_OK) {
+        gdefcore_text_free(catalog, html);
+        goto done;
+      }
+    }
+    rc = titled != NULL
+             ? region_add(&regions, region, region_len, titled, titled_len)
+             : region_add(&regions, region, region_len, html == NULL ? "" : html,
+                   html_len);
+    free(titled);
     gdefcore_text_free(catalog, html);
     if (rc != GDEFCORE_OK) {
       goto done;

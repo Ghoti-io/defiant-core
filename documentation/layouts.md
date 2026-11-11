@@ -39,6 +39,39 @@ means is the widget's: a template to draw with for a built-in type (a menu's is
 `<menu>[/<template>]`), the view for `recent`, and whatever the provider reads
 for a module's.
 
+A placement may carry parts after its target, each `~key=value` with the value
+percent-encoded so that it holds no space:
+
+```
+side menu primary ~title=Site%20menu ~role=editor ~path=/admin/ **
+```
+
+(the path is written with no space before the two stars). `title` is drawn above
+the widget, escaped, in `<section class="pane"><h2 class="pane-title">`; a
+placement with no title is bare, as it always was. The others say when the
+placement shows, and it shows only when every one given holds:
+
+- `path` is the page's path. A segment of `:name` or `*` takes any one segment,
+  and a last segment of `**` takes the rest (none included), so `/` is the front
+  page alone and `/news/**` is everything under it. A path is not a prefix.
+- `role` is a role the principal holds. It may be given up to eight times and
+  any one will do. The built-in `anonymous` (nobody signed in) and
+  `authenticated` (anyone signed in) count.
+- `type` is the type of the entity the page resolved to; a page that resolved to
+  none has no type to match.
+
+A part is data in a fixed shape, never code. A placement that is not for the
+viewer is not asked to draw: its widget is not called and nothing of it is read
+or left behind. A part only narrows. A role condition grants nothing, and the
+widget's own permission still decides what it shows. A render that reads a role
+marks its request as depending on the principal, so a host that keeps a page
+(the render key, access.md) keeps one for each principal, and a path or a type,
+which a host keys by the page already, does not. A layout is refused when it is
+saved if a part is not one of the four, is given twice (a role excepted), has a
+value that is not escaped properly or is out of range: a title is 1 to 128
+bytes of text, a path is a pattern as above of at most 128 bytes, a type is
+`module.name`, a role is a name of a-z, 0-9, `.`, `_` and `-`.
+
 A layout is checked when it is saved, as the write leaves it
 (`gdefcore_layout_vet()`, run by apply with or without a request), and the
 whole changeset is refused with nothing written when
@@ -47,7 +80,8 @@ whole changeset is refused with nothing written when
 - a placement names a region the page template does not declare;
 - a placement names a widget type the tenant does not have, as the changeset
   would leave the enabled modules;
-- a placement is not `region widget [target]`, or there are more than 32.
+- a placement is not `region widget [target] [~key=value ...]`, or there are
+  more than 32.
 
 The same check runs the other way: a changeset that changes, renames or clears a
 page template, or enables or disables a module, is refused if it would leave a

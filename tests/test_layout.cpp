@@ -1080,6 +1080,222 @@ TEST_F(Layouts, AHiddenWidgetRendersNothingAndRevealsNothing) {
   EXPECT_NE(std::string::npos, Show("", page, routes).find("Alpha"));
 }
 
+/* ---- what a placement says beyond its region, widget and target ------------------- */
+
+TEST_F(Layouts, APlacementIsDrawnOnlyForTheRolesItNamesAndIsNotAskedToDrawForOthers) {
+  Ticker ticker;
+  ModDef * news = NewMod("news");
+  news->Widget("ticker", "core.pane", TickerFn, &ticker);
+  ASSERT_EQ(GDEFCORE_OK, Install(news));
+  ASSERT_EQ(GDEFCORE_OK, Enable("news", {})) << last_error_;
+  ASSERT_EQ(GDEFCORE_OK, PutTemplate("news.ticker", "core.pane",
+      "<% use title; %><aside class=\"ticker\"><%= title %></aside>"));
+  GDEFCORE_Routes * routes = Table();
+  const std::string page = "/page/" + alpha_;
+  const auto shown = [&](const std::string & who) {
+    ticker.calls = 0;
+    std::string out = Show(who, page, routes);
+    return out.find("class=\"ticker\"") != std::string::npos;
+  };
+  ASSERT_EQ(GDEFCORE_OK,
+      PutLayout("post", "layout", {"main content", "side news.ticker ~role=newsreaders"}))
+      << refusal_;
+  EXPECT_TRUE(shown(vip_)) << "CONTROL: the role is held";
+  EXPECT_EQ(1, ticker.calls);
+  EXPECT_FALSE(shown(reader_));
+  EXPECT_EQ(0, ticker.calls) << "the widget is not even asked";
+  EXPECT_FALSE(shown(""));
+  EXPECT_EQ(0, ticker.calls);
+  /* The built-in roles are anybody signed in, and nobody. */
+  ASSERT_EQ(GDEFCORE_OK,
+      PutLayout("post", "layout", {"main content", "side news.ticker ~role=authenticated"}));
+  EXPECT_TRUE(shown(reader_));
+  EXPECT_TRUE(shown(vip_));
+  EXPECT_FALSE(shown(""));
+  ASSERT_EQ(GDEFCORE_OK,
+      PutLayout("post", "layout", {"main content", "side news.ticker ~role=anonymous"}));
+  EXPECT_TRUE(shown(""));
+  EXPECT_FALSE(shown(reader_));
+  EXPECT_FALSE(shown(vip_));
+  /* Any one of several roles. */
+  ASSERT_EQ(GDEFCORE_OK,
+      PutLayout("post", "layout",
+          {"main content", "side news.ticker ~role=layouters ~role=newsreaders"}));
+  EXPECT_TRUE(shown(vip_));
+  EXPECT_TRUE(shown(layouter_));
+  EXPECT_FALSE(shown(reader_));
+}
+
+TEST_F(Layouts, ARoleConditionGrantsNothingTheWidgetsOwnCheckStillDecides) {
+  Ticker ticker;
+  ModDef * news = NewMod("news");
+  news->Widget("ticker", "core.pane", TickerFn, &ticker, "news.read");
+  ASSERT_EQ(GDEFCORE_OK, Install(news));
+  ASSERT_EQ(GDEFCORE_OK, Enable("news", {})) << last_error_;
+  ASSERT_EQ(GDEFCORE_OK, PutTemplate("news.ticker", "core.pane",
+      "<% use title; %><aside class=\"ticker\"><%= title %></aside>"));
+  ASSERT_EQ(GDEFCORE_OK,
+      PutLayout("post", "layout", {"main content", "side news.ticker ~role=layouters"}));
+  GDEFCORE_Routes * routes = Table();
+  const std::string page = "/page/" + alpha_;
+  /* The layouter holds the role the placement names and not the permission the
+   * widget needs. */
+  std::string out = Show(layouter_, page, routes);
+  EXPECT_EQ(std::string::npos, out.find("ticker")) << out;
+  EXPECT_EQ(0, ticker.calls);
+  /* CONTROL: someone who holds both is shown it. */
+  Role("both");
+  Grant("both", "Read news");
+  Grant("both", GDEFCORE_LAYOUT_EDIT_DISPLAY_LABEL);
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_access_principal_add_role(catalog_, layouter_.c_str(),
+                             layouter_.size(), "both", 4));
+  EXPECT_NE(std::string::npos, Show(layouter_, page, routes).find("class=\"ticker\""));
+}
+
+TEST_F(Layouts, APlacementCanBeLimitedToAPathOrToTheTypeOfThePage) {
+  Ticker ticker;
+  ModDef * news = NewMod("news");
+  news->Widget("ticker", "core.pane", TickerFn, &ticker);
+  ASSERT_EQ(GDEFCORE_OK, Install(news));
+  ASSERT_EQ(GDEFCORE_OK, Enable("news", {})) << last_error_;
+  ASSERT_EQ(GDEFCORE_OK, PutTemplate("news.ticker", "core.pane",
+      "<% use title; %><aside class=\"ticker\"><%= title %></aside>"));
+  GDEFCORE_Routes * routes = Table();
+  const auto shown_on = [&](const std::string & panes, const std::string & path) {
+    EXPECT_EQ(GDEFCORE_OK, PutLayout("post", "layout", {"main content", panes}))
+        << panes << " " << refusal_;
+    EXPECT_EQ(GDEFCORE_OK, PutLayout("front", "layout", {"main content", panes}));
+    return Show("", path, routes).find("class=\"ticker\"") != std::string::npos;
+  };
+  const std::string page = "/page/" + alpha_;
+  const std::string other = "/news/" + alpha_;
+  EXPECT_TRUE(shown_on("side news.ticker ~path=/page/:id", page));
+  EXPECT_FALSE(shown_on("side news.ticker ~path=/page/:id", other));
+  EXPECT_TRUE(shown_on("side news.ticker ~path=/page/**", page));
+  EXPECT_FALSE(shown_on("side news.ticker ~path=/page/**", other));
+  EXPECT_TRUE(shown_on("side news.ticker ~path=/**", other));
+  EXPECT_TRUE(shown_on("side news.ticker ~path=/*/*", page));
+  EXPECT_FALSE(shown_on("side news.ticker ~path=/*", page)) << "one segment is not two";
+  EXPECT_FALSE(shown_on("side news.ticker ~path=/page", page)) << "no prefix match";
+  EXPECT_FALSE(shown_on("side news.ticker ~path=/", page));
+  EXPECT_TRUE(shown_on("side news.ticker ~path=/", "/"));
+  EXPECT_TRUE(shown_on("side news.ticker ~type=site.post", page));
+  EXPECT_FALSE(shown_on("side news.ticker ~type=site.other", page));
+  /* Every given part must hold. */
+  EXPECT_TRUE(shown_on("side news.ticker ~type=site.post ~path=/page/:id", page));
+  EXPECT_FALSE(shown_on("side news.ticker ~type=site.post ~path=/news/:id", page));
+  EXPECT_FALSE(shown_on("side news.ticker ~type=site.other ~path=/page/:id", page));
+  /* A page that resolves to no entity has no type to match. */
+  EXPECT_FALSE(shown_on("side news.ticker ~type=site.post", "/"));
+}
+
+TEST_F(Layouts, APlacementsTitleIsDrawnEscapedAboveItAndAPlacementWithoutOneIsBare) {
+  Ticker ticker;
+  ModDef * news = NewMod("news");
+  news->Widget("ticker", "core.pane", TickerFn, &ticker);
+  ASSERT_EQ(GDEFCORE_OK, Install(news));
+  ASSERT_EQ(GDEFCORE_OK, Enable("news", {})) << last_error_;
+  ASSERT_EQ(GDEFCORE_OK, PutTemplate("news.ticker", "core.pane",
+      "<% use title; %><aside class=\"ticker\"><%= title %></aside>"));
+  GDEFCORE_Routes * routes = Table();
+  const std::string page = "/page/" + alpha_;
+  ASSERT_EQ(GDEFCORE_OK,
+      PutLayout("post", "layout", {"main content", "side news.ticker"}));
+  std::string bare = Show("", page, routes);
+  EXPECT_NE(std::string::npos, bare.find("<aside class=\"ticker\">"));
+  EXPECT_EQ(std::string::npos, bare.find("pane-title")) << "CONTROL: no title, no wrapper";
+  ASSERT_EQ(GDEFCORE_OK,
+      PutLayout("post", "layout",
+          {"main content", "side news.ticker ~title=A%20%3Cb%3E%26%22q%22%20%27s%27%20caf%C3%A9"}))
+      << refusal_;
+  std::string titled = Show("", page, routes);
+  EXPECT_NE(std::string::npos,
+      titled.find("<section class=\"pane\"><h2 class=\"pane-title\">A &lt;b&gt;&amp;&quot;q&quot; "
+                  "&#39;s&#39; caf\xC3\xA9</h2><aside class=\"ticker\">"))
+      << titled;
+  EXPECT_EQ(std::string::npos, titled.find("<b>"));
+  /* A title and a target together. */
+  ASSERT_EQ(GDEFCORE_OK,
+      PutLayout("post", "layout", {"main content", "side news.ticker mine ~title=T"}));
+  Show("", page, routes);
+  EXPECT_EQ("mine", ticker.target);
+}
+
+TEST_F(Layouts, APlacementPartThatIsNotOneIsRefusedWhenALayoutIsSaved) {
+  Ticker ticker;
+  ModDef * news = NewMod("news");
+  news->Widget("ticker", "core.pane", TickerFn, &ticker);
+  ASSERT_EQ(GDEFCORE_OK, Install(news));
+  ASSERT_EQ(GDEFCORE_OK, Enable("news", {})) << last_error_;
+  const std::string big(GDEFCORE_LAYOUT_NAME_MAX + 200, 'a');
+  const char * bad[] = {
+      "side news.ticker ~foo=1", "side news.ticker ~title", "side news.ticker ~title=",
+      "side news.ticker ~title=a ~title=b", "side news.ticker ~path=admin",
+      "side news.ticker ~path=/a//b", "side news.ticker ~path=/**/a",
+      "side news.ticker ~path=/a?b", "side news.ticker ~type=post",
+      "side news.ticker ~type=a.b.c", "side news.ticker ~role=Bad",
+      "side news.ticker ~role=a ~role=a", "side news.ticker ~title=%zz",
+      "side news.ticker ~title=%2", "side news.ticker ~title=%00x",
+      "side news.ticker ~title=%07x", "side news.ticker ~title=%FF",
+      "side news.ticker ~ ", "side news.ticker  ~title=a", "side news.ticker ~title=a ",
+      "side news.ticker ~title=a target", "side news.ticker one two ~title=a",
+      "side news.ticker ~~title=a"};
+  for (const char * line : bad) {
+    EXPECT_EQ(GDEFCORE_ERR_INVALID, PutLayout("post", "layout", {"main content", line}))
+        << line;
+  }
+  std::string many = "side news.ticker";
+  for (int i = 0; i < 9; i++) {
+    many += " ~role=r" + std::to_string(i);
+  }
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, PutLayout("post", "layout", {"main content", many}));
+  std::string long_title = "side news.ticker ~title=" + std::string(129, 'a');
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, PutLayout("post", "layout", {"main content", long_title}));
+  std::string ok_title = "side news.ticker ~title=" + std::string(128, 'a');
+  EXPECT_EQ(GDEFCORE_OK, PutLayout("post", "layout", {"main content", ok_title}))
+      << "CONTROL: the longest title";
+  EXPECT_EQ(GDEFCORE_OK, PutLayout("post", "layout",
+                             {"main content", "side news.ticker ~role=a ~title=t ~path=/ "
+                                              "~type=site.post"}))
+      << refusal_;
+}
+
+TEST_F(Layouts, ARenderThatDependsOnRoleIsMarkedAsDependingOnThePrincipal) {
+  Ticker ticker;
+  ModDef * news = NewMod("news");
+  news->Widget("ticker", "core.pane", TickerFn, &ticker);
+  ASSERT_EQ(GDEFCORE_OK, Install(news));
+  ASSERT_EQ(GDEFCORE_OK, Enable("news", {})) << last_error_;
+  ASSERT_EQ(GDEFCORE_OK, PutTemplate("news.ticker", "core.pane",
+      "<% use title; %><aside class=\"ticker\"><%= title %></aside>"));
+  GDEFCORE_Routes * routes = Table();
+  const std::string page = "/";
+  /* Whether a host must keep a page for each principal is observed while
+   * rendering (the render key then names the principal), so a placement that
+   * depends on role has to say so, whoever happens to see it. */
+  const auto depends = [&](const std::string & who) {
+    GDEFCORE_Request * req = Req(who);
+    char * out = NULL;
+    size_t out_n = 0;
+    EXPECT_EQ(GDEFCORE_OK, gdefcore_render_page(catalog_, routes, req, page.data(),
+                               page.size(), GDEFCORE_RENDER_PAGE_FUEL, &out, &out_n));
+    gdefcore_text_free(catalog_, out);
+    return gdefcore_request_principal_dependent(req) != 0;
+  };
+  ASSERT_EQ(GDEFCORE_OK, PutLayout("front", "layout", {"main content", "side news.ticker"}));
+  EXPECT_FALSE(depends(reader_)) << "CONTROL: nothing in the layout depends on who asks";
+  EXPECT_FALSE(depends(""));
+  ASSERT_EQ(GDEFCORE_OK,
+      PutLayout("front", "layout", {"main content", "side news.ticker ~role=newsreaders"}));
+  EXPECT_TRUE(depends(reader_)) << "who is not shown it";
+  EXPECT_TRUE(depends(vip_)) << "and who is";
+  EXPECT_TRUE(depends(""));
+  /* A path or a type depends on the page, which a host keys by already. */
+  ASSERT_EQ(GDEFCORE_OK,
+      PutLayout("front", "layout", {"main content", "side news.ticker ~path=/page/:id"}));
+  EXPECT_FALSE(depends(reader_));
+}
+
 TEST_F(Layouts, TwoTenantsLayoutsNeverMix) {
   GDEFCORE_Catalog * tenants[2] = {NULL, NULL};
   const char * names[2] = {"ta", "tb"};
