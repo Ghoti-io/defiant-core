@@ -184,6 +184,24 @@ typedef struct GDEFCORE_Layout_Edit {
 GDEFCORE_API GDEFCORE_Result gdefcore_layout_stage_edit(
     GDEFCORE_Changeset * changeset, const GDEFCORE_Layout_Edit * edit);
 
+/**
+ * @brief Stage, beside an edit of page template @p template_name's body to
+ * @p body, what every layout that draws with it becomes.
+ *
+ * A placement in a region the new body does not call is set aside in its layout's
+ * Not placed list, so a template edit never leaves a layout naming a region the
+ * template does not have and never loses a placement. The caller stages the
+ * template's own change in the same @p changeset. Nothing is staged for a layout
+ * whose regions all remain.
+ *
+ * @param moved Where to put one line, `layout widget region`, for each placement
+ *   set aside (free with free()), or NULL.
+ * @param moved_len Its length.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_layout_stage_template_carry(
+    GDEFCORE_Changeset * changeset, const char * template_name, size_t template_len,
+    const char * body, size_t body_len, char ** moved, size_t * moved_len);
+
 /* ---- previewing a layout ---------------------------------------------------------- */
 
 /**

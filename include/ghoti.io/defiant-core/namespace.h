@@ -739,6 +739,7 @@
 #define gdefcore_structure_vet GHOTIIO_DEFCORE(gdefcore_structure_vet)
 #define gdefcore_structure_view GHOTIIO_DEFCORE(gdefcore_structure_view)
 #define gdefcore_layout_preview GHOTIIO_DEFCORE(gdefcore_layout_preview)
+#define gdefcore_layout_stage_template_carry GHOTIIO_DEFCORE(gdefcore_layout_stage_template_carry)
 #define gdefcore_layout_preview_free GHOTIIO_DEFCORE(gdefcore_layout_preview_free)
 #define GDEFCORE_Preview_Viewer GHOTIIO_DEFCORE(GDEFCORE_Preview_Viewer)
 #define GDEFCORE_Layout_Preview GHOTIIO_DEFCORE(GDEFCORE_Layout_Preview)

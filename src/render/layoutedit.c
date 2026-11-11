@@ -905,3 +905,31 @@ GDEFCORE_Result gdefcore_layout_preview(GDEFCORE_Catalog * catalog, const char *
   }
   return GDEFCORE_OK;
 }
+
+GDEFCORE_Result gdefcore_layout_stage_template_carry(GDEFCORE_Changeset * changeset,
+    const char * template_name, size_t template_len, const char * body, size_t body_len,
+    char ** moved, size_t * moved_len) {
+  GDEFCORE_Catalog * catalog;
+  char ** names = NULL;
+  size_t count = 0;
+  GDEFCORE_Result rc;
+  if (moved != NULL) {
+    *moved = NULL;
+  }
+  if (moved_len != NULL) {
+    *moved_len = 0;
+  }
+  if (changeset == NULL || template_name == NULL || body == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  catalog = gdefcore_changeset_catalog(changeset);
+  rc = GDEFCORE_OK;
+  gdefcore_render_scan_regions(body, body_len, &names, &count, catalog, &rc);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  rc = gdefcore_layout_stage_carry_all(changeset, template_name, template_len,
+      (const char * const *)names, count, NULL, NULL, 0, moved, moved_len);
+  gdefcore_render_names_free(catalog, names, count);
+  return rc;
+}

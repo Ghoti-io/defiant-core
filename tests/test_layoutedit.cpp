@@ -1024,6 +1024,80 @@ TEST_F(LayoutEdit, ThePreviewOfALayoutOfThirtyPlacementsIsMeasuredForEveryRole) 
   EXPECT_LT(micros, 20000.0) << "a preview is a read of one layout and a loop";
 }
 
+
+TEST_F(LayoutEdit, ATemplateEditThatDropsARegionSetsItsPlacementsAsideAndLosesNone) {
+  ASSERT_EQ(GDEFCORE_OK, Place("post", "recent", "side", 0)) << refusal_;
+  EXPECT_EQ("main content\nside recent\n", Lines("post"));
+  /* The template "layout" is edited to call only the main region. */
+  char ** ids = NULL;
+  size_t n = 0;
+  std::string tid;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_entity_ids(catalog_, "core.template", 13, &ids, &n));
+  for (size_t i = 0; i < n && tid.empty(); i++) {
+    char ** t = NULL;
+    size_t * l = NULL;
+    size_t c = 0;
+    if (gdefcore_entity_values(catalog_, NULL, GDEFCORE_VIEW_PUBLISHED, ids[i], strlen(ids[i]), "en", 2,
+            "name", 4, &t, &l, &c) == GDEFCORE_OK && c > 0 && std::string(t[0], l[0]) == "layout") {
+      tid = ids[i];
+    }
+    if (c > 0) {
+      gdefcore_values_free(catalog_, t, l, c);
+    }
+  }
+  gdefcore_ids_free(catalog_, ids, n);
+  ASSERT_FALSE(tid.empty());
+  const std::string body = "<% use region; %><div><%= region(\"main\") %></div>";
+  const char * slot = body.c_str();
+  size_t len = body.size();
+  GDEFCORE_Value value;
+  memset(&value, 0, sizeof value);
+  value.size = sizeof value;
+  value.field = "body";
+  value.field_len = 4;
+  value.texts = &slot;
+  value.text_lens = &len;
+  value.count = 1;
+  GDEFCORE_Changeset * cs = NULL;
+  char * moved = NULL;
+  size_t moved_len = 0;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_entity_save(cs, tid.data(), tid.size(), "en", 2, &value, 1));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_layout_stage_template_carry(cs, "layout", 6, body.data(), body.size(),
+                             &moved, &moved_len));
+  EXPECT_EQ("post recent side\n", std::string(moved, moved_len));
+  free(moved);
+  std::set<std::string> types;
+  for (size_t i = 0; i < gdefcore_changeset_touched_count(cs); i++) {
+    const char * id;
+    size_t id_len;
+    const char * type;
+    size_t type_len;
+    int op;
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_touched_at(cs, i, &id, &id_len, &type, &type_len, &op));
+    types.insert(std::string(type, type_len));
+  }
+  std::string confirm;
+  for (const std::string & t : types) {
+    confirm += (confirm.empty() ? "" : "\n") + t;
+  }
+  EXPECT_EQ("core.display\ncore.template", confirm);
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, confirm.data(), confirm.size())) << [&] {
+    size_t rn = 0;
+    const char * r = gdefcore_changeset_refusal(cs, &rn);
+    return r == NULL ? std::string() : std::string(r, rn);
+  }();
+  gdefcore_changeset_destroy(cs);
+  EXPECT_EQ("main content\n", Lines("post"));
+  EXPECT_EQ("recent\n", Lines("post", true)) << "nothing is lost";
+  /* A body that keeps every region stages nothing for the layout. */
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_layout_stage_template_carry(cs, "layout", 6, body.data(), body.size(),
+                             NULL, NULL));
+  EXPECT_EQ(0u, gdefcore_changeset_touched_count(cs));
+  gdefcore_changeset_destroy(cs);
+}
+
 TEST_F(LayoutEdit, TheStructsHereAreAcceptedAtOnlyTheirOwnSize) {
   auto placement = [](size_t size) {
     GDEFCORE_Placement p;

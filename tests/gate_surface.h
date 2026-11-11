@@ -454,6 +454,7 @@ static const Surface kSurface[] = {
     {"gdefcore_structure_vet", "W"},
     {"gdefcore_structure_view", "RA"},
     {"gdefcore_layout_preview", "RA"},
+    {"gdefcore_layout_stage_template_carry", "W"},
     {"gdefcore_layout_preview_free", "P"},
     {"gdefcore_structure_view_free", "P"},
     {"gdefcore_structure_stage_edit", "W"},

@@ -208,4 +208,25 @@ plant hidden-placement-shown $CARRY testLayoutedit "$T_PREVIEW" \
   '    out->shown[i] = (unsigned char)preview_shows(&out->view.placed[i], viewer);' \
   '    out->shown[i] = (unsigned char)(preview_shows(&out->view.placed[i], viewer) || 1);'
 
+# ---- a template edit that drops a region (site admin story 29) -------------------------
+
+T_TEMPLATE='LayoutEdit.ATemplateEditThatDropsARegionSetsItsPlacementsAsideAndLosesNone'
+
+# The placements of a region a template edit drops are deleted, not set aside.
+plant template-edit-deletes-orphans $CARRY testLayoutedit "$T_TEMPLATE" \
+  "    p.region[0] = '\\0';
+    unplaced[un++] = p;" \
+  "    p.region[0] = '\\0';
+    (void)p;"
+
+# The regions of the new body are not read, so every placement is an orphan.
+plant template-carry-reads-no-regions $CARRY testLayoutedit "$T_TEMPLATE" \
+  '      (const char * const *)names, count, NULL, NULL, 0, moved, moved_len);' \
+  '      (const char * const *)names, 0 * count, NULL, NULL, 0, moved, moved_len);'
+
+# What was set aside is not reported.
+plant template-carry-reports-nothing $CARRY testLayoutedit "$T_TEMPLATE" \
+  '      (const char * const *)names, count, NULL, NULL, 0, moved, moved_len);' \
+  '      (const char * const *)names, count, NULL, NULL, 0, NULL, NULL);'
+
 plant_finish
