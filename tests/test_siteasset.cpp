@@ -308,6 +308,12 @@ TEST_F(SiteAssets, ANameIsUsedOnceAcrossBothKindsAndEverywhereAnEntityCanComeFro
   ASSERT_EQ(GDEFCORE_OK, Put("one.txt", GDEFCORE_ASSET_CSS, "a{}"));
   /* The staging call refuses the other kind; so does the vet when the entity is
    * handed to the port by another road. */
+  GDEFCORE_Changeset * cs = NULL;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
+  EXPECT_EQ(GDEFCORE_ERR_INVALID,
+      gdefcore_siteasset_stage(cs, "one.txt", 7, GDEFCORE_ASSET_JS, "x", 1))
+      << "the stage refuses a name that is the other kind's";
+  gdefcore_changeset_destroy(cs);
   EXPECT_EQ(GDEFCORE_ERR_INVALID, Put("one.txt", GDEFCORE_ASSET_JS, "x"));
   EXPECT_EQ(GDEFCORE_ERR_INVALID, PutRaw(kJs, "one.txt", "x"));
   EXPECT_NE(std::string::npos, refusal_.find("already has a file")) << refusal_;

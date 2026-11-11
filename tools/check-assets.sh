@@ -168,7 +168,7 @@ plant site-hash-of-the-name $SA testSiteasset "$T_FOUND $T_EDIT" \
 # A script is served as a stylesheet.
 plant site-script-typed-as-css $SA testSiteasset "$T_FOUND" \
   '  out->media_type = kind == GDEFCORE_ASSET_CSS ? kCssMedia : kJsMedia;' \
-  '  out->media_type = kCssMedia;'
+  '  out->media_type = kCssMedia; (void)kJsMedia;'
 
 # A staged file is not seen through its changeset.
 plant site-projection-ignored $SA testSiteasset "$T_STAGED" \
