@@ -388,6 +388,102 @@ TEST_F(Regions, ALayoutsNotPlacedListIsOnlyDataAndIsCheckedForItsShape) {
   EXPECT_EQ(GDEFCORE_OK, PutLines(post, "unplaced", ok, kDisplay)) << "CONTROL: 32";
 }
 
+TEST_F(Regions, AModuleShipsRegionDescriptorsAndTheyLastWhileItIsEnabled) {
+  EXPECT_EQ("Banner||3", Describe(NULL, "banner"));
+  ModDef * a = NewMod("kita");
+  a->Region("banner", "Top banner", "Above the header.");
+  a->Region("rail_left", "Left rail");
+  ASSERT_EQ(GDEFCORE_OK, Install(a)) << last_error_;
+  EXPECT_EQ("Banner||3", Describe(NULL, "banner")) << "installed, not enabled";
+  ASSERT_EQ(GDEFCORE_OK, Enable("kita", {})) << last_error_;
+  EXPECT_EQ("Top banner|Above the header.|4", Describe(NULL, "banner"));
+  EXPECT_EQ("Left rail||4", Describe(NULL, "rail_left"));
+  EXPECT_EQ("Rail right||3", Describe(NULL, "rail_right")) << "CONTROL: a region it does not name";
+  /* The kernel's shared descriptors beat a module's: a module cannot take over `side`. */
+  ModDef * c = NewMod("kitc");
+  c->Region("side", "Hijacked side");
+  ASSERT_EQ(GDEFCORE_OK, Install(c)) << last_error_;
+  ASSERT_EQ(GDEFCORE_OK, Enable("kitc", {})) << last_error_;
+  EXPECT_EQ("Side area|Shown beside the main content.|2", Describe(NULL, "side"));
+  ASSERT_EQ(GDEFCORE_OK, Disable("kitc"));
+  /* A shared descriptor the site writes beats the module's; the template's own beats both. */
+  ASSERT_EQ(GDEFCORE_OK, Shared("banner", "Site banner", "")) << refusal_;
+  EXPECT_EQ("Site banner||2", Describe(NULL, "banner"));
+  ASSERT_EQ(GDEFCORE_OK, Own("layout", "banner", "Mine", "")) << refusal_;
+  EXPECT_EQ("Mine||1", Describe("layout", "banner"));
+  ASSERT_EQ(GDEFCORE_OK, Own("layout", "banner", "", "")) << refusal_;
+  ASSERT_EQ(GDEFCORE_OK, Forget("banner")) << refusal_;
+  EXPECT_EQ("Top banner|Above the header.|4", Describe(NULL, "banner"))
+      << "forgotten, the module's is what is left";
+  /* Two modules naming one region: the first in module order. */
+  ModDef * b = NewMod("kitb");
+  b->Region("banner", "Other banner");
+  ASSERT_EQ(GDEFCORE_OK, Install(b)) << last_error_;
+  ASSERT_EQ(GDEFCORE_OK, Enable("kitb", {})) << last_error_;
+  EXPECT_EQ("Top banner|Above the header.|4", Describe(NULL, "banner")) << "kita before kitb";
+  ASSERT_EQ(GDEFCORE_OK, Disable("kita"));
+  EXPECT_EQ("Other banner||4", Describe(NULL, "banner")) << "the other, once the first is off";
+  ASSERT_EQ(GDEFCORE_OK, Disable("kitb"));
+  EXPECT_EQ("Banner||3", Describe(NULL, "banner")) << "disabled, the name again";
+  EXPECT_EQ("Rail left||3", Describe(NULL, "rail_left"));
+  ASSERT_EQ(GDEFCORE_OK, Enable("kita", {})) << last_error_;
+  EXPECT_EQ("Left rail||4", Describe(NULL, "rail_left")) << "and back on enable";
+}
+
+TEST_F(Regions, ARegionDescriptorThatIsNotOneRefusesTheModuleAndSaysWhich) {
+  struct Case {
+    const char * name;
+    std::string region;
+    std::string label;
+    std::string description;
+    const char * says;
+  };
+  const std::vector<Case> bad = {
+      {"b1", "Bad Name", "x", "", "not a region name"},
+      {"b2", "side", "", "", "label"},
+      {"b3", "side", std::string(65, 'a'), "", "label"},
+      {"b4", "side", "line\nbreak", "", "label"},
+      {"b5", "side", "ok", std::string(257, 'a'), "description"},
+      {"b6", "side", "ok", "tab\there", "description"},
+      {"b7", "side", "bad \xC3(", "", "label"},
+  };
+  auto fresh = [this]() {
+    Close();
+    Defs().clear();
+    Open();
+  };
+  for (const Case & c : bad) {
+    fresh();
+    ModDef * m = NewMod(c.name);
+    m->Region(c.region, c.label, c.description);
+    ASSERT_EQ(GDEFCORE_OK, Install(m)) << c.name;
+    EXPECT_NE(GDEFCORE_OK, Enable(c.name, {})) << c.name << ": enabled";
+    EXPECT_NE(std::string::npos, last_error_.find(c.says)) << c.name << ": " << last_error_;
+  }
+  /* Twice in one module. */
+  fresh();
+  ModDef * twice = NewMod("btwice");
+  twice->Region("side", "One");
+  twice->Region("side", "Two");
+  ASSERT_EQ(GDEFCORE_OK, Install(twice));
+  EXPECT_NE(GDEFCORE_OK, Enable("btwice", {}));
+  EXPECT_NE(std::string::npos, last_error_.find("twice")) << last_error_;
+  /* More than the most. */
+  fresh();
+  ModDef * many = NewMod("bmany");
+  for (size_t i = 0; i < GDEFCORE_MODULE_REGIONS_MAX + 1; i++) {
+    many->Region("r" + std::to_string(i), "Region");
+  }
+  EXPECT_NE(GDEFCORE_OK, Install(many) == GDEFCORE_OK ? Enable("bmany", {}) : GDEFCORE_ERR_LIMIT);
+  /* CONTROL: the longest that is allowed, and non-ASCII text, is enabled. */
+  fresh();
+  ModDef * ok = NewMod("bok");
+  ok->Region(std::string(63, 'a'), std::string(64, 'b'), std::string(256, 'c'));
+  ok->Region("caf", "Caf\xC3\xA9");
+  ASSERT_EQ(GDEFCORE_OK, Install(ok)) << last_error_;
+  EXPECT_EQ(GDEFCORE_OK, Enable("bok", {})) << last_error_;
+}
+
 TEST_F(Regions, TheStructsHereAreAcceptedAtOnlyTheirOwnSize) {
   auto described = [this](size_t size) {
     GDEFCORE_Region_Info info;
@@ -399,7 +495,35 @@ TEST_F(Regions, TheStructsHereAreAcceptedAtOnlyTheirOwnSize) {
     }
     return rc == GDEFCORE_OK;
   };
-  size_structs::Run("tests/test_region.cpp", {{"GDEFCORE_Region_Info", described}});
+  auto fresh = [this]() {
+    Close();
+    Defs().clear();
+    Open();
+  };
+  auto entry = [this, fresh](size_t size) {
+    fresh();
+    ModDef * m = NewMod("szr");
+    m->Region("banner", "Banner");
+    m->Finish();
+    m->regions[0].size = size;
+    return gdefcore_module_install_guest(host_, kEntries[Defs().size() - 1]) == GDEFCORE_OK;
+  };
+  auto declared = [this, fresh](size_t size) {
+    fresh();
+    ModDef * m = NewMod("szq");
+    m->Region("banner", "Banner");
+    EXPECT_EQ(GDEFCORE_OK, Install(m));
+    EXPECT_EQ(GDEFCORE_OK, Enable("szq", {}));
+    const GDEFCORE_Module_Declared_Region ** items = NULL;
+    size_t n = 0;
+    EXPECT_EQ(GDEFCORE_OK, gdefcore_module_regions(host_, (const uint8_t *)kTenant, 1, NULL, &items, &n));
+    bool filled = n == 1 && items[0]->size == size;
+    gdefcore_module_declared_free(host_, items);
+    return filled;
+  };
+  size_structs::Run("tests/test_region.cpp",
+      {{"GDEFCORE_Region_Info", described}, {"GDEFCORE_Module_Region", entry},
+          {"GDEFCORE_Module_Declared_Region", declared}});
 }
 
 int main(int argc, char ** argv) {

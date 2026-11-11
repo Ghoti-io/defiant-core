@@ -2405,6 +2405,27 @@ GDEFCORE_Result gdefcore_module_widgets(GDEFCORE_Host * host,
   return rc;
 }
 
+GDEFCORE_Result gdefcore_module_regions(GDEFCORE_Host * host,
+    const uint8_t * tenant, size_t tenant_len,
+    const GDEFCORE_Changeset * projection,
+    const GDEFCORE_Module_Declared_Region *** out_items, size_t * out_count) {
+  DeclRef * refs;
+  size_t n;
+  GDEFCORE_Result rc;
+  if (out_items == NULL || out_count == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  *out_items = NULL;
+  *out_count = 0;
+  rc = enumerate_refs(host, tenant, tenant_len, projection, &refs, &n);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  rc = gdefcore_decl_regions(host->alloc, refs, n, out_items, out_count);
+  gcu_allocator_free(host->alloc, refs);
+  return rc;
+}
+
 GDEFCORE_Result gdefcore_module_assets(GDEFCORE_Host * host,
     const uint8_t * tenant, size_t tenant_len,
     const GDEFCORE_Changeset * projection,

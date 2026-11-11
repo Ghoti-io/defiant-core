@@ -706,6 +706,7 @@
 #define gdefcore_widget_bind_text GHOTIIO_DEFCORE(gdefcore_widget_bind_text)
 #define gdefcore_module_contributors GHOTIIO_DEFCORE(gdefcore_module_contributors)
 #define gdefcore_module_widgets GHOTIIO_DEFCORE(gdefcore_module_widgets)
+#define gdefcore_module_regions GHOTIIO_DEFCORE(gdefcore_module_regions)
 #define gdefcore_module_assets GHOTIIO_DEFCORE(gdefcore_module_assets)
 #define gdefcore_asset_find GHOTIIO_DEFCORE(gdefcore_asset_find)
 #define gdefcore_asset_url GHOTIIO_DEFCORE(gdefcore_asset_url)

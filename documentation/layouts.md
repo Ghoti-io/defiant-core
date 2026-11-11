@@ -168,7 +168,17 @@ description, found in this order, the first match winning:
 2. a shared one, a `core.region-descriptor` entity of a name, a label and a
    description. A new site starts with `main`, `side`, `header`, `navigation` and
    `footer`, and the site adds its own; the seed leaves one the site changed;
-3. the name in readable form: `footer_links` is "Footer links".
+3. one a module ships (`GDEFCORE_Module_Region`, the manifest's `regions`, at most 32
+   a module): the first enabled module in module order that names the region. A
+   module that ships widgets or page templates for regions it names ships their
+   labels with them; they are there while it is enabled and gone when it is not,
+   and the site's own shared descriptor of that name wins over them (so a module
+   cannot take over `side`, and the site can always rename what a module calls a
+   region). A module whose region has a name that is not a region name, a label
+   that is empty, over 64 bytes or not UTF-8 text with no control character, a
+   description over 256 bytes or not such text, or two entries for one name is
+   refused when it is enabled, with the entry named;
+4. the name in readable form: `footer_links` is "Footer links".
 
 A descriptor changes what an editor and a preview show and nothing else: how a
 page renders does not depend on one, and removing a shared one touches labels

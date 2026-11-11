@@ -110,6 +110,7 @@ struct ModDef {
   std::vector<GDEFCORE_Module_Widget> widgets;
   std::list<GDEFCORE_Module_Widget_Provider> widget_providers;
   std::vector<GDEFCORE_Module_Asset> assets;
+  std::vector<GDEFCORE_Module_Region> regions;
   GDEFCORE_Module_Manifest man;
 
   static void NoRoute(const GDEFCORE_Route_Call * call) { (void)call; }
@@ -310,6 +311,22 @@ struct ModDef {
     a.bytes_len = bytes.size();
     assets.push_back(a);
     return assets.back();
+  }
+
+  /** A region descriptor (region.h), shipped with the module. */
+  GDEFCORE_Module_Region & Region(const std::string & region_name, const std::string & label,
+      const std::string & description = std::string()) {
+    GDEFCORE_Module_Region r;
+    memset(&r, 0, sizeof r);
+    r.size = sizeof r;
+    r.name = S(region_name);
+    r.name_len = region_name.size();
+    r.label = S(label);
+    r.label_len = label.size();
+    r.description = S(description);
+    r.description_len = description.size();
+    regions.push_back(r);
+    return regions.back();
   }
 
   /** A subscription to a hook. */
@@ -536,6 +553,8 @@ struct ModDef {
     man.nwidgets = widgets.size();
     man.assets = assets.empty() ? NULL : &assets[0];
     man.nassets = assets.size();
+    man.regions = regions.empty() ? NULL : &regions[0];
+    man.nregions = regions.size();
   }
 };
 

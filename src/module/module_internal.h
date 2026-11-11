@@ -116,6 +116,11 @@ typedef struct DeclWidget {
   size_t index;
 } DeclWidget;
 
+typedef struct DeclRegion {
+  GDEFCORE_Module_Declared_Region pub;
+  size_t index;
+} DeclRegion;
+
 typedef struct DeclAsset {
   GDEFCORE_Module_Declared_Asset pub;
   size_t given_media_len; /* what the manifest named, before kind decides */
@@ -158,6 +163,8 @@ struct Decl {
   size_t nwidgets;
   DeclAsset * assets;
   size_t nassets;
+  DeclRegion * regions;
+  size_t nregions;
 };
 
 /** The declarations of the modules in force, already in module order. */
@@ -215,6 +222,9 @@ GDEFCORE_Result gdefcore_decl_contributors(const GDEFCORE_Allocator * alloc,
     const DeclRef * refs, size_t n,
     const GDEFCORE_Module_Declared_Contributor *** out, size_t * count);
 
+GDEFCORE_Result gdefcore_decl_regions(const GDEFCORE_Allocator * alloc,
+    const DeclRef * refs, size_t n,
+    const GDEFCORE_Module_Declared_Region *** out, size_t * count);
 GDEFCORE_Result gdefcore_decl_widgets(const GDEFCORE_Allocator * alloc,
     const DeclRef * refs, size_t n,
     const GDEFCORE_Module_Declared_Widget *** out, size_t * count);

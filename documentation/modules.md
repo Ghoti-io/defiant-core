@@ -30,8 +30,8 @@ ends it. templates.md has the rest.
 
 ## Declared tables
 
-A manifest can declare seven tables (and grants, below) besides its hooks, services and permissions:
-**routes**, **menu links**, **settings**, **template variables**, **contributors**, **widget types** and **assets**. They are
+A manifest can declare eight tables (and grants, below) besides its hooks, services and permissions:
+**routes**, **menu links**, **settings**, **template variables**, **contributors**, **widget types**, **assets** and **region descriptors**. They are
 members of `GDEFCORE_Module_Manifest`; a table a module does not use is NULL
 with a count of 0. The manifest and every entry have a `size` member that must
 be `sizeof` of its struct: any other size refuses the install, and the error
@@ -46,6 +46,7 @@ names the struct and both sizes.
 | contributors | `GDEFCORE_Module_Contributor` | machine name, what it contributes (a kind such as `layout`), path pattern, exact flag, weight, handler |
 | widget types | `GDEFCORE_Module_Widget` | machine name, template kind, default template, the permission its source needs, description, provider |
 | assets | `GDEFCORE_Module_Asset` | file name, kind (stylesheet, script, image, font), media type (images and fonts), the bytes. assets.md |
+| region descriptors | `GDEFCORE_Module_Region` | region name, label, description: what an editor calls a region the module's widgets or templates use (layouts.md, *Region descriptors*) |
 
 This is declaration only: what a setting is worth, and how it is stored and
 edited, is settings.md; the menu is menus.md.

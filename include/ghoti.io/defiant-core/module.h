@@ -549,6 +549,8 @@ typedef GDEFCORE_Result (*GDEFCORE_Contribution_Fn)(GDEFCORE_Request * request,
 #define GDEFCORE_MODULE_WIDGETS_MAX 32
 /** Most assets one manifest declares. */
 #define GDEFCORE_MODULE_ASSETS_MAX 64
+/** The most region descriptors one module may ship. */
+#define GDEFCORE_MODULE_REGIONS_MAX 32
 /** Most bytes in one asset. */
 #define GDEFCORE_ASSET_BYTES_MAX (4u * 1024u * 1024u)
 /** Longest asset name, in bytes. */
@@ -725,6 +727,29 @@ typedef struct GDEFCORE_Module_Widget {
   const char * provider;      ///< Name of the module's widget provider service.
   size_t provider_len;        ///< Length of @ref provider.
 } GDEFCORE_Module_Widget;
+
+/**
+ * @brief What an editor calls a region, shipped by a module. Begins with @ref size.
+ *
+ * A page template names a region and nothing else about it; what an editor is
+ * shown is a descriptor (region.h). A module that ships page templates, or
+ * widgets for regions it names, ships the labels with them: while the module is
+ * enabled, a region with no descriptor of the page template's own and no shared
+ * one of the site's is described by the first enabled module (in module order)
+ * that names it. The texts are the module's and are escaped by whoever shows
+ * them. @ref name is a region name (region.h), @ref label is 1 to
+ * GDEFCORE_REGION_LABEL_MAX bytes and @ref description 0 to
+ * GDEFCORE_REGION_DESCRIPTION_MAX; none holds a control character.
+ */
+typedef struct GDEFCORE_Module_Region {
+  size_t size;                ///< `sizeof(GDEFCORE_Module_Region)`.
+  const char * name;          ///< The region's name: `side`, `footer_links`.
+  size_t name_len;            ///< Length of @ref name.
+  const char * label;         ///< What an editor calls it.
+  size_t label_len;           ///< Length of @ref label.
+  const char * description;   ///< Plain words for the editor. May be NULL.
+  size_t description_len;     ///< Length of @ref description.
+} GDEFCORE_Module_Region;
 
 /**
  * @brief A file a module ships: a stylesheet, a script, an image or a font.
@@ -1017,6 +1042,8 @@ typedef struct GDEFCORE_Module_Manifest {
   size_t nwidgets;                          ///< How many widget types.
   const GDEFCORE_Module_Asset * assets;     ///< Shipped files. May be NULL.
   size_t nassets;                           ///< How many assets.
+  const GDEFCORE_Module_Region * regions;   ///< Region descriptors. May be NULL.
+  size_t nregions;                          ///< How many region descriptors.
 } GDEFCORE_Module_Manifest;
 
 /**
@@ -1673,6 +1700,19 @@ typedef struct GDEFCORE_Module_Declared_Widget {
   void * user;                ///< Its user pointer.
 } GDEFCORE_Module_Declared_Widget;
 
+/** @brief A region descriptor as the enumeration reports it. Borrowed from the host. */
+typedef struct GDEFCORE_Module_Declared_Region {
+  size_t size;                ///< `sizeof(GDEFCORE_Module_Declared_Region)`.
+  const char * module;        ///< The declaring module.
+  size_t module_len;          ///< Length of @ref module.
+  const char * name;          ///< The region's name.
+  size_t name_len;            ///< Length of @ref name.
+  const char * label;         ///< Its label; never empty.
+  size_t label_len;           ///< Length of @ref label.
+  const char * description;   ///< Never NULL; may be empty.
+  size_t description_len;     ///< Length of @ref description.
+} GDEFCORE_Module_Declared_Region;
+
 /** @brief An asset as the enumeration reports it. Borrowed from the host. */
 typedef struct GDEFCORE_Module_Declared_Asset {
   size_t size;                ///< `sizeof(GDEFCORE_Module_Declared_Asset)`.
@@ -1812,6 +1852,15 @@ GDEFCORE_API GDEFCORE_Result gdefcore_module_widgets(GDEFCORE_Host * host,
     const GDEFCORE_Module_Declared_Widget *** out_items, size_t * out_count);
 
 /**
+ * @brief The region descriptors of the enabled modules, in module order and then
+ * by name. A descriptor exists for a tenant only while its module is enabled.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_module_regions(GDEFCORE_Host * host,
+    const uint8_t * tenant, size_t tenant_len,
+    const GDEFCORE_Changeset * projection,
+    const GDEFCORE_Module_Declared_Region *** out_items, size_t * out_count);
+
+/**
  * @brief The assets of the enabled modules, in module order and then by name.
  * An asset exists for a tenant only while its module is enabled, so a
  * disabled module's files are not listed and are listed again on enable.
@@ -1824,7 +1873,7 @@ GDEFCORE_API GDEFCORE_Result gdefcore_module_assets(GDEFCORE_Host * host,
 /**
  * @brief Free an array from gdefcore_module_routes(), _links(), _settings(),
  * _variables(), _grants(), _relations(), _callbacks(), _contributors(),
- * _widgets() or _assets(). NULL is ignored.
+ * _widgets(), _regions() or _assets(). NULL is ignored.
  */
 GDEFCORE_API void gdefcore_module_declared_free(GDEFCORE_Host * host,
     const void * items);

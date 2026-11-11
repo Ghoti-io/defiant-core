@@ -34,6 +34,7 @@
 #include "../core/size.h"
 #include "module_internal.h"
 
+#include <ghoti.io/defiant-core/region.h>
 #include <ghoti.io/defiant-core/settings.h>
 
 #include <ghoti.io/cutil/allocator.h>
@@ -310,6 +311,7 @@ void gdefcore_decl_free(Decl * d) {
   gcu_allocator_free(d->alloc, d->contributors);
   gcu_allocator_free(d->alloc, d->widgets);
   gcu_allocator_free(d->alloc, d->assets);
+  gcu_allocator_free(d->alloc, d->regions);
   gcu_allocator_free(d->alloc, d);
 }
 
@@ -653,6 +655,51 @@ static void build_widgets(Build * b, const GDEFCORE_Module_Manifest * m,
   }
   if (b->rc == GDEFCORE_OK && d->nwidgets > 1) {
     qsort(d->widgets, d->nwidgets, sizeof *d->widgets, cmp_widget);
+  }
+}
+
+static int cmp_region(const void * a, const void * b) {
+  const DeclRegion * x = (const DeclRegion *)a;
+  const DeclRegion * y = (const DeclRegion *)b;
+  size_t n = x->pub.name_len < y->pub.name_len ? x->pub.name_len : y->pub.name_len;
+  int c = memcmp(x->pub.name, y->pub.name, n);
+  if (c != 0) {
+    return c;
+  }
+  return x->pub.name_len < y->pub.name_len ? -1 : x->pub.name_len > y->pub.name_len;
+}
+
+static void build_regions(Build * b, const GDEFCORE_Module_Manifest * m) {
+  Decl * d = b->d;
+  size_t i;
+  d->regions = (DeclRegion *)gcu_allocator_calloc(d->alloc, m->nregions, sizeof *d->regions);
+  if (d->regions == NULL) {
+    build_fail(b, GDEFCORE_ERR_OOM, "region", 0);
+    return;
+  }
+  for (i = 0; i < m->nregions && b->rc == GDEFCORE_OK; i++) {
+    GDEFCORE_Module_Region r;
+    DeclRegion * dr = &d->regions[i];
+    if (!TAKE_EXACT(b, GDEFCORE_Module_Region, r, &m->regions[i], i)) {
+      break;
+    }
+    dr->index = i;
+    dr->pub.size = sizeof dr->pub;
+    dr->pub.module = d->module;
+    dr->pub.module_len = d->module_len;
+    dr->pub.name = dup_str(b, r.name, r.name_len, "region", i);
+    dr->pub.name_len = r.name_len;
+    dr->pub.label = dup_str(b, r.label, r.label_len, "region", i);
+    dr->pub.label_len = r.label_len;
+    dr->pub.description = dup_str(b, r.description, r.description_len, "region", i);
+    dr->pub.description_len = r.description_len;
+    if (b->rc != GDEFCORE_OK) {
+      break;
+    }
+    d->nregions = i + 1;
+  }
+  if (b->rc == GDEFCORE_OK && d->nregions > 1) {
+    qsort(d->regions, d->nregions, sizeof *d->regions, cmp_region);
   }
 }
 
@@ -1002,7 +1049,7 @@ GDEFCORE_Result gdefcore_decl_build(const GDEFCORE_Allocator * alloc,
   if (man->nroutes == 0 && man->nlinks == 0 && man->nsettings == 0 &&
       man->nvariables == 0 && man->ngrants == 0 && man->nrelations == 0 &&
       man->ncallbacks == 0 && man->ncontributors == 0 && man->nwidgets == 0 &&
-      man->nassets == 0) {
+      man->nassets == 0 && man->nregions == 0) {
     return GDEFCORE_OK;
   }
   if (module_len > 64) {
@@ -1029,18 +1076,20 @@ GDEFCORE_Result gdefcore_decl_build(const GDEFCORE_Allocator * alloc,
       man->ncallbacks > GDEFCORE_MODULE_CALLBACKS_MAX ||
       man->ncontributors > GDEFCORE_MODULE_CONTRIBUTORS_MAX ||
       man->nwidgets > GDEFCORE_MODULE_WIDGETS_MAX ||
-      man->nassets > GDEFCORE_MODULE_ASSETS_MAX) {
+      man->nassets > GDEFCORE_MODULE_ASSETS_MAX ||
+      man->nregions > GDEFCORE_MODULE_REGIONS_MAX) {
     b.rc = GDEFCORE_ERR_LIMIT;
     if (err != NULL && cap > 0) {
       snprintf(err, cap,
           "Module %s declares more than %d routes, %d links, %d settings, "
           "%d variables, %d grants, %d relations, %d access callbacks, "
-          "%d contributors, %d widget types or %d assets.",
+          "%d contributors, %d widget types, %d assets or %d region descriptors.",
           d->module, GDEFCORE_MODULE_ROUTES_MAX, GDEFCORE_MODULE_LINKS_MAX,
           GDEFCORE_MODULE_SETTINGS_MAX, GDEFCORE_MODULE_VARIABLES_MAX,
           GDEFCORE_MODULE_GRANTS_MAX, GDEFCORE_MODULE_RELATIONS_MAX,
           GDEFCORE_MODULE_CALLBACKS_MAX, GDEFCORE_MODULE_CONTRIBUTORS_MAX,
-          GDEFCORE_MODULE_WIDGETS_MAX, GDEFCORE_MODULE_ASSETS_MAX);
+          GDEFCORE_MODULE_WIDGETS_MAX, GDEFCORE_MODULE_ASSETS_MAX,
+          GDEFCORE_MODULE_REGIONS_MAX);
     }
   } else if ((man->nroutes > 0 && man->routes == NULL) ||
              (man->nlinks > 0 && man->links == NULL) ||
@@ -1051,7 +1100,8 @@ GDEFCORE_Result gdefcore_decl_build(const GDEFCORE_Allocator * alloc,
              (man->ncallbacks > 0 && man->callbacks == NULL) ||
              (man->ncontributors > 0 && man->contributors == NULL) ||
              (man->nwidgets > 0 && man->widgets == NULL) ||
-             (man->nassets > 0 && man->assets == NULL)) {
+             (man->nassets > 0 && man->assets == NULL) ||
+             (man->nregions > 0 && man->regions == NULL)) {
     b.rc = GDEFCORE_ERR_INVALID;
     if (err != NULL && cap > 0) {
       snprintf(err, cap, "Module %s: a declared table has a count and no data.",
@@ -1087,6 +1137,9 @@ GDEFCORE_Result gdefcore_decl_build(const GDEFCORE_Allocator * alloc,
   }
   if (b.rc == GDEFCORE_OK && man->nassets > 0) {
     build_assets(&b, man);
+  }
+  if (b.rc == GDEFCORE_OK && man->nregions > 0) {
+    build_regions(&b, man);
   }
   if (b.rc != GDEFCORE_OK) {
     gdefcore_decl_free(d);
@@ -1874,6 +1927,48 @@ static int type_listed(const char * const * list, const char * t, size_t n) {
   return 0;
 }
 
+static int check_regions(const DeclRef * refs, size_t n, Say * say) {
+  size_t m;
+  size_t i;
+  size_t j;
+  for (m = 0; m < n; m++) {
+    const Decl * d = refs[m].decl;
+    for (i = 0; i < d->nregions; i++) {
+      const GDEFCORE_Module_Declared_Region * p = &d->regions[i].pub;
+      char a[kShow + 8];
+      if (!gdefcore_region_name_ok(p->name, p->name_len)) {
+        SAY(say, "Module %s: region '%s' has a name that is not a region name (a-z first, then a-z, "
+                 "0-9, '_' and '-', at most %d bytes).",
+            d->module, show(a, p->name, p->name_len), GDEFCORE_REGION_NAME_MAX);
+        return 1;
+      }
+      if (p->label_len == 0 || p->label_len > GDEFCORE_REGION_LABEL_MAX ||
+          !text_ok(p->label, p->label_len, 0)) {
+        SAY(say, "Module %s: region '%s' has a label that is not 1 to %d bytes of UTF-8 text with no "
+                 "control character.",
+            d->module, show(a, p->name, p->name_len), GDEFCORE_REGION_LABEL_MAX);
+        return 1;
+      }
+      if (p->description_len > GDEFCORE_REGION_DESCRIPTION_MAX ||
+          !text_ok(p->description, p->description_len, 0)) {
+        SAY(say, "Module %s: region '%s' has a description that is not up to %d bytes of UTF-8 text "
+                 "with no control character.",
+            d->module, show(a, p->name, p->name_len), GDEFCORE_REGION_DESCRIPTION_MAX);
+        return 1;
+      }
+      for (j = i + 1; j < d->nregions; j++) {
+        const GDEFCORE_Module_Declared_Region * q = &d->regions[j].pub;
+        if (q->name_len == p->name_len && memcmp(q->name, p->name, p->name_len) == 0) {
+          SAY(say, "Module %s: region '%s' is described twice.", d->module,
+              show(a, p->name, p->name_len));
+          return 1;
+        }
+      }
+    }
+  }
+  return 0;
+}
+
 static int check_assets(const DeclRef * refs, size_t n, Say * say) {
   size_t m;
   size_t i;
@@ -2069,6 +2164,7 @@ int gdefcore_decl_validate(const DeclRef * refs, size_t n, int local,
         check_settings(refs, n, &say) || check_vars(refs, n, &say) ||
         check_relations(refs, n, &say) || check_contributors(refs, n, &say) ||
         check_widgets(refs, n, &say) || check_assets(refs, n, &say) ||
+        check_regions(refs, n, &say) ||
         duplicates(routes, nroutes, refs, "route", &say) ||
         duplicates(links, nlinks, refs, "menu link", &say) ||
         duplicates(settings, nsettings, refs, "setting", &say) ||
@@ -2374,6 +2470,36 @@ GDEFCORE_Result gdefcore_decl_contributors(const GDEFCORE_Allocator * alloc,
   for (m = 0; m < n; m++) {
     for (i = 0; i < refs[m].decl->ncontributors; i++) {
       items[at++] = &refs[m].decl->contributors[i].pub;
+    }
+  }
+  *out = items;
+  *count = total;
+  return GDEFCORE_OK;
+}
+
+GDEFCORE_Result gdefcore_decl_regions(const GDEFCORE_Allocator * alloc,
+    const DeclRef * refs, size_t n,
+    const GDEFCORE_Module_Declared_Region *** out, size_t * count) {
+  size_t m;
+  size_t i;
+  size_t total = 0;
+  size_t at = 0;
+  const GDEFCORE_Module_Declared_Region ** items;
+  *out = NULL;
+  *count = 0;
+  for (m = 0; m < n; m++) {
+    total += refs[m].decl->nregions;
+  }
+  if (total == 0) {
+    return GDEFCORE_OK;
+  }
+  items = (const GDEFCORE_Module_Declared_Region **)gcu_allocator_calloc(alloc, total, sizeof *items);
+  if (items == NULL) {
+    return GDEFCORE_ERR_OOM;
+  }
+  for (m = 0; m < n; m++) {
+    for (i = 0; i < refs[m].decl->nregions; i++) {
+      items[at++] = &refs[m].decl->regions[i].pub;
     }
   }
   *out = items;

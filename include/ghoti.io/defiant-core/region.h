@@ -34,7 +34,11 @@
  *  2. a shared one with that region name, a `core.region-descriptor` entity,
  *     seeded with main, side, header, navigation and footer and extended by the
  *     site;
- *  3. the name itself in readable form, `footer_links` as "Footer links".
+ *  3. an enabled module's (its manifest's `regions`, GDEFCORE_Module_Region), the
+ *     first in module order that names the region: a module that ships page
+ *     templates or widgets for regions it names ships their labels with them, and
+ *     they are there while it is enabled and gone when it is not;
+ *  4. the name itself in readable form, `footer_links` as "Footer links".
  *
  * A descriptor changes what the editor and the preview show and nothing else: it
  * never changes how a page renders, and removing a shared one touches labels
@@ -76,7 +80,8 @@ extern "C" {
 enum {
   GDEFCORE_REGION_SOURCE_TEMPLATE = 1,  ///< The page template's own.
   GDEFCORE_REGION_SOURCE_SHARED = 2,    ///< The shared catalog.
-  GDEFCORE_REGION_SOURCE_NAME = 3       ///< The name, made readable.
+  GDEFCORE_REGION_SOURCE_NAME = 3,      ///< The name, made readable.
+  GDEFCORE_REGION_SOURCE_MODULE = 4     ///< An enabled module's (GDEFCORE_Module_Region).
 };
 
 /**

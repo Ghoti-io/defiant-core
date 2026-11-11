@@ -418,6 +418,7 @@ static const Surface kSurface[] = {
     {"gdefcore_widget_bind_text", "P"},
     {"gdefcore_module_contributors", "RA"},
     {"gdefcore_module_widgets", "RA"},
+    {"gdefcore_module_regions", "RA"},
     {"gdefcore_module_assets", "RA"},
     {"gdefcore_asset_find", "RA"},
     {"gdefcore_asset_url", "RA"},

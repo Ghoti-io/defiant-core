@@ -43,6 +43,8 @@ T_SHARED='Regions.ASharedDescriptorIsMadeChangedAndRemovedByChangeset'
 T_BAD='Regions.ADescriptorThatIsNotOneIsRefusedAtStageAndAtApply'
 T_PERM='Regions.SharedDescriptorsAreWrittenOnTheirOwnPermissionAndTemplatesOnTheTemplates'
 T_UNPLACED='Regions.ALayoutsNotPlacedListIsOnlyDataAndIsCheckedForItsShape'
+T_MODULE='Regions.AModuleShipsRegionDescriptorsAndTheyLastWhileItIsEnabled'
+T_MODBAD='Regions.ARegionDescriptorThatIsNotOneRefusesTheModuleAndSaysWhich'
 
 plant_stale stale-object $REGION testRegion "$T_ORDER" \
   '  if (from_template(catalog, template_name, template_len, region, region_len, info,
@@ -106,5 +108,48 @@ plant vet-not-asked src/entity/entity.c testRegion "$T_BAD" \
 plant unplaced-unchecked src/render/layout.c testRegion "$T_UNPLACED" \
   '      rc = check_unplaced(unplaced, unplaced_lens, unplaced_count, why, sizeof why);' \
   '      rc = GDEFCORE_OK;'
+
+# ---- descriptors a module ships (GDEFCORE_Module_Region) ----------------------------------
+
+# An enabled module's descriptors are never asked for.
+plant module-descriptor-ignored $REGION testRegion "$T_MODULE" \
+  '  if (from_module(catalog, region, region_len, info, &rc) || rc != GDEFCORE_OK) {' \
+  '  if ((0 && from_module(catalog, region, region_len, info, &rc)) || rc != GDEFCORE_OK) {'
+
+# The site's shared descriptor is passed over for a module's.
+plant module-beats-the-shared-descriptor $REGION testRegion "$T_MODULE" \
+  '  if (from_shared(catalog, region, region_len, info, &rc) || rc != GDEFCORE_OK) {' \
+  '  if ((0 && from_shared(catalog, region, region_len, info, &rc)) || rc != GDEFCORE_OK) {'
+
+# The last module to name a region wins, not the first.
+plant last-module-wins $REGION testRegion "$T_MODULE" \
+  '  for (i = 0; i < count && !found; i++) {
+    if (span_eq(items[i]->name, items[i]->name_len, region, region_len)) {' \
+  '  for (i = count; i-- > 0 && !found;) {
+    if (span_eq(items[i]->name, items[i]->name_len, region, region_len)) {'
+
+# A module's region name is not checked.
+plant module-region-name-unchecked src/module/decl.c testRegion "$T_MODBAD" \
+  '      if (!gdefcore_region_name_ok(p->name, p->name_len)) {' \
+  '      if (0 && !gdefcore_region_name_ok(p->name, p->name_len)) {'
+
+# A module's label may be empty or too long or hold a control character.
+plant module-label-unchecked src/module/decl.c testRegion "$T_MODBAD" \
+  '      if (p->label_len == 0 || p->label_len > GDEFCORE_REGION_LABEL_MAX ||
+          !text_ok(p->label, p->label_len, 0)) {' \
+  '      if (0 && (p->label_len == 0 || p->label_len > GDEFCORE_REGION_LABEL_MAX ||
+          !text_ok(p->label, p->label_len, 0))) {'
+
+# A module's description may hold a control character or be too long.
+plant module-description-unchecked src/module/decl.c testRegion "$T_MODBAD" \
+  '      if (p->description_len > GDEFCORE_REGION_DESCRIPTION_MAX ||
+          !text_ok(p->description, p->description_len, 0)) {' \
+  '      if (0 && (p->description_len > GDEFCORE_REGION_DESCRIPTION_MAX ||
+          !text_ok(p->description, p->description_len, 0))) {'
+
+# A module may describe one region twice.
+plant module-region-twice-allowed src/module/decl.c testRegion "$T_MODBAD" \
+  '        if (q->name_len == p->name_len && memcmp(q->name, p->name, p->name_len) == 0) {' \
+  '        if (0 && q->name_len == p->name_len && memcmp(q->name, p->name, p->name_len) == 0) {'
 
 plant_finish

@@ -26,6 +26,7 @@
 #include <ghoti.io/defiant-core/macros.h>
 #include <ghoti.io/defiant-core/access.h>
 #include <ghoti.io/defiant-core/entity.h>
+#include <ghoti.io/defiant-core/module.h>
 #include <ghoti.io/defiant-core/region.h>
 
 #include "../core/asset_util.h"
@@ -227,6 +228,39 @@ static int from_shared(GDEFCORE_Catalog * catalog, const char * region,
   return 0;
 }
 
+/* The first enabled module (in module order) that describes @p region, 1 when there is one. */
+static int from_module(GDEFCORE_Catalog * catalog, const char * region, size_t region_len,
+    GDEFCORE_Region_Info * info, GDEFCORE_Result * rc) {
+  GDEFCORE_Host * host = gdefcore_catalog_host(catalog);
+  const GDEFCORE_Module_Declared_Region ** items = NULL;
+  size_t count = 0;
+  size_t tenant_len = 0;
+  const uint8_t * tenant;
+  size_t i;
+  int found = 0;
+  if (host == NULL) {
+    return 0;
+  }
+  tenant = gdefcore_catalog_tenant(catalog, &tenant_len);
+  if (tenant == NULL ||
+      gdefcore_module_regions(host, tenant, tenant_len, NULL, &items, &count) != GDEFCORE_OK) {
+    return 0;
+  }
+  for (i = 0; i < count && !found; i++) {
+    if (span_eq(items[i]->name, items[i]->name_len, region, region_len)) {
+      *rc = copy_text(items[i]->label, items[i]->label_len, &info->label, &info->label_len);
+      if (*rc == GDEFCORE_OK) {
+        *rc = copy_text(items[i]->description, items[i]->description_len, &info->description,
+            &info->description_len);
+      }
+      info->source = GDEFCORE_REGION_SOURCE_MODULE;
+      found = 1;
+    }
+  }
+  gdefcore_module_declared_free(host, items);
+  return found;
+}
+
 GDEFCORE_Result gdefcore_region_describe(GDEFCORE_Catalog * catalog,
     const char * template_name, size_t template_len, const char * region,
     size_t region_len, GDEFCORE_Region_Info * info) {
@@ -250,6 +284,12 @@ GDEFCORE_Result gdefcore_region_describe(GDEFCORE_Catalog * catalog,
     return rc;
   }
   if (from_shared(catalog, region, region_len, info, &rc) || rc != GDEFCORE_OK) {
+    if (rc != GDEFCORE_OK) {
+      gdefcore_region_info_free(catalog, info);
+    }
+    return rc;
+  }
+  if (from_module(catalog, region, region_len, info, &rc) || rc != GDEFCORE_OK) {
     if (rc != GDEFCORE_OK) {
       gdefcore_region_info_free(catalog, info);
     }
