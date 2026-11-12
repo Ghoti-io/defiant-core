@@ -43,6 +43,7 @@
 #include <ghoti.io/defiant-core/layoutedit.h>
 #include <ghoti.io/defiant-core/layoutwhy.h>
 #include <ghoti.io/defiant-core/structure.h>
+#include <ghoti.io/defiant-core/view.h>
 #include <ghoti.io/defiant-core/layout.h>
 #include <ghoti.io/defiant-core/menu.h>
 #include <ghoti.io/defiant-core/message.h>

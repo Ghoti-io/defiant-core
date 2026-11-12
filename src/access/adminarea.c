@@ -34,6 +34,7 @@
 #include <ghoti.io/defiant-core/menu.h>
 #include <ghoti.io/defiant-core/settings.h>
 #include <ghoti.io/defiant-core/template.h>
+#include <ghoti.io/defiant-core/view.h>
 
 #include <string.h>
 
@@ -136,6 +137,10 @@ GDEFCORE_Result gdefcore_admin_seed(GDEFCORE_Catalog * catalog) {
   }
   if (rc == GDEFCORE_OK) {
     rc = gdefcore_siteasset_declare(catalog);
+  }
+  if (rc == GDEFCORE_OK) {
+    /* The type a stored view is kept as. */
+    rc = gdefcore_view_declare(catalog);
   }
   if (rc == GDEFCORE_OK) {
     rc = gdefcore_region_declare(catalog);

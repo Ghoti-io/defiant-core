@@ -410,6 +410,36 @@ struct World {
   }
 };
 
+/** A stored view of the notes (title, sorted by title), as the sweep and the
+ * oracle run it for a principal who may see nothing: both worlds hold it. */
+inline void SaveNotesView(Site & s) {
+  GDEFCORE_View_Column col;
+  GDEFCORE_View_Def def;
+  GDEFCORE_Changeset * cs = NULL;
+  memset(&col, 0, sizeof col);
+  col.size = sizeof col;
+  col.field = "title";
+  col.field_len = 5;
+  memset(&def, 0, sizeof def);
+  def.size = sizeof def;
+  def.name = "oracle-notes";
+  def.name_len = 12;
+  def.type = "site.note";
+  def.type_len = 9;
+  def.sort = "title";
+  def.sort_len = 5;
+  def.columns = &col;
+  def.column_count = 1;
+  def.format = GDEFCORE_VIEW_FORMAT_JSON;
+  def.limit = 50;
+  EXPECT_EQ(GDEFCORE_OK, gdefcore_view_declare(s.catalog));
+  EXPECT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(s.catalog, NULL, 0, &cs));
+  EXPECT_EQ(GDEFCORE_OK, gdefcore_view_stage(cs, &def));
+  EXPECT_EQ(GDEFCORE_OK,
+      gdefcore_changeset_apply(cs, GDEFCORE_VIEW_TYPE, strlen(GDEFCORE_VIEW_TYPE)));
+  gdefcore_changeset_destroy(cs);
+}
+
 /**
  * World "S": a principal who may see nothing. Entities that exist but that
  * principal may not read: two notes (no role holds a grant on them), a
@@ -427,6 +457,7 @@ inline void BuildS(World * w, bool with_hidden) {
   s.Role("readers");
   s.Grant("readers", "Read notes");
   s.InstallKit();
+  SaveNotesView(s);
   w->posts = true;
   s.Login();
   w->principal["none"] = s.Principal();
@@ -804,6 +835,33 @@ inline std::string RevisionLine(World & w, const std::string & who,
     gdefcore_values_free(w.site.catalog, texts, lens, count);
   }
   return out + Diag(w, req);
+}
+
+/** What the stored notes view gives @p who: the rows, the total, the text. */
+inline std::string ViewLine(World & w, const std::string & who) {
+  Fresh fresh(w, who);
+  GDEFCORE_View_Result * res = (GDEFCORE_View_Result *)0x1;
+  std::string out;
+  GDEFCORE_Result rc;
+  Note("gdefcore_view_run");
+  rc = gdefcore_view_run(w.site.catalog, fresh.req, "oracle-notes", 12, NULL, 0, 0,
+      &res);
+  out = "rc=" + Rc(rc);
+  if (rc != GDEFCORE_OK) {
+    return out + (res == NULL ? " null" : " set") + Diag(w, fresh.req);
+  }
+  out += " rows=" + std::to_string(gdefcore_view_result_rows(res)) +
+         " total=" + std::to_string(gdefcore_view_result_total(res));
+  {
+    char * text = NULL;
+    size_t n = 0;
+    if (gdefcore_view_result_text(w.site.catalog, res, &text, &n) == GDEFCORE_OK) {
+      out += " text=" + std::string(text, n);
+      gdefcore_text_free(w.site.catalog, text);
+    }
+  }
+  gdefcore_view_result_free(res);
+  return out + Diag(w, fresh.req);
 }
 
 inline std::string ListLine(World & w, const std::string & who, const char * type,
@@ -1332,6 +1390,7 @@ inline Obs Observe(World & w, const std::string & who, const Ask & ask) {
   {
     std::string notes = "site.note";
     o.kv["g:list.notes"] = ListLine(w, who, "site.note", NULL, "", NULL);
+    o.kv["g:view.notes"] = ViewLine(w, who);
     o.kv["g:list.notes.fr"] = ListLine(w, who, "site.note", NULL, "", NULL, "fr");
     for (i = 0; i < w.titles.size(); i++) {
       o.kv["g:list.notes.title=" + w.titles[i]] =

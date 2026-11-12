@@ -42,6 +42,7 @@
 #include <ghoti.io/defiant-core/request.h>
 #include <ghoti.io/defiant-core/settings.h>
 #include <ghoti.io/defiant-core/template.h>
+#include <ghoti.io/defiant-core/view.h>
 #include <ghoti.io/cutil/allocator.h>
 #include <ghoti.io/cutil/fiber.h>
 #include <ghoti.io/archive/reader.h>
@@ -3544,6 +3545,10 @@ static GDEFCORE_Result write_kit(GDEFCORE_Catalog * catalog) {
   if (rc == GDEFCORE_OK) {
     /* The site's own stylesheets and scripts, and the two permissions. */
     rc = gdefcore_siteasset_declare(catalog);
+  }
+  if (rc == GDEFCORE_OK) {
+    /* The type a stored view is kept as. */
+    rc = gdefcore_view_declare(catalog);
   }
   if (rc == GDEFCORE_OK) {
     /* The shared region descriptors, the permission to write them, and the
