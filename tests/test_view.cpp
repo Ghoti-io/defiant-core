@@ -38,6 +38,7 @@
 
 #include <string.h>
 
+#include <map>
 #include <string>
 #include <vector>
 
@@ -882,6 +883,228 @@ TEST_F(Views, TheStructsOfAViewAreAcceptedAtOnlyTheirOwnSize) {
              return rc == GDEFCORE_OK;
            }},
       });
+}
+
+/* ---- groups and many-valued fields as columns (story 4) -------------------------- */
+
+namespace {
+
+const char kOrder[] = "site.order";
+
+/* An order with lines, each line with taxes: the shape a view reads in one read. */
+class ViewGroups : public Views {
+ protected:
+  struct Line {
+    std::string sku;
+    std::string qty;
+    std::vector<std::string> rates;
+    std::vector<std::string> notes;
+    Line(std::string s, std::string q, std::vector<std::string> r = {},
+        std::vector<std::string> n = {})
+        : sku(std::move(s)), qty(std::move(q)), rates(std::move(r)), notes(std::move(n)) {}
+  };
+
+  void DefineOrder() {
+    GDEFCORE_Field taxes[1] = {Field("rate")};
+    GDEFCORE_Field line[6] = {Field("sku"), Field("qty"), Field("who"), Field("ssn", 1),
+        Field("taxes"), Field("notes")};
+    line[5].many = 1;
+    line[1].type = GDEFSTOR_FIELD_INTEGER;
+    line[2].type = GDEFSTOR_FIELD_REFERENCE;
+    line[3].subject = "who";
+    line[3].subject_len = 3;
+    line[4].type = GDEFSTOR_FIELD_GROUP;
+    line[4].many = 1;
+    line[4].children = taxes;
+    line[4].child_count = 1;
+    GDEFCORE_Field f[2] = {Field("title"), Field("lines")};
+    f[1].type = GDEFSTOR_FIELD_GROUP;
+    f[1].many = 1;
+    f[1].children = line;
+    f[1].child_count = 6;
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_type_define(catalog_, kOrder, strlen(kOrder),
+        GDEFCORE_TYPE_CONTENT, f, 2));
+    Declare(Perm("Read orders", "read", GDEFCORE_ACCESS_ANY, kOrder));
+    Declare(Perm("Read order line skus", "read", GDEFCORE_ACCESS_ANY, kOrder, "lines.sku"));
+    Declare(Perm("Read order lines", "read", GDEFCORE_ACCESS_ANY, kOrder, "lines"));
+    admin_ = Admin();
+  }
+
+  std::string Order(const char * title, const std::vector<Line> & lines) {
+    char id[GDEFCORE_PUBLIC_ID_LEN + 1];
+    GDEFCORE_Tree * t = NULL;
+    GDEFCORE_Changeset * cs = NULL;
+    EXPECT_EQ(GDEFCORE_OK, gdefcore_entity_create(catalog_, kOrder, strlen(kOrder), id, NULL));
+    EXPECT_EQ(GDEFCORE_OK, gdefcore_tree_create(catalog_, &t));
+    EXPECT_EQ(GDEFCORE_OK, gdefcore_tree_set(t, 0, "title", 5, title, strlen(title)));
+    for (const Line & l : lines) {
+      size_t li = 0;
+      EXPECT_EQ(GDEFCORE_OK, gdefcore_tree_add(t, 0, "lines", 5, 0, &li));
+      EXPECT_EQ(GDEFCORE_OK, gdefcore_tree_set(t, li, "sku", 3, l.sku.data(), l.sku.size()));
+      EXPECT_EQ(GDEFCORE_OK, gdefcore_tree_set(t, li, "qty", 3, l.qty.data(), l.qty.size()));
+      for (const std::string & n : l.notes) {
+        size_t ni = 0;
+        EXPECT_EQ(GDEFCORE_OK, gdefcore_tree_add(t, li, "notes", 5, 0, &ni));
+        EXPECT_EQ(GDEFCORE_OK, gdefcore_tree_set(t, ni, "", 0, n.data(), n.size()));
+      }
+      for (const std::string & r : l.rates) {
+        size_t ti = 0;
+        EXPECT_EQ(GDEFCORE_OK, gdefcore_tree_add(t, li, "taxes", 5, 0, &ti));
+        EXPECT_EQ(GDEFCORE_OK, gdefcore_tree_set(t, ti, "rate", 4, r.data(), r.size()));
+      }
+    }
+    EXPECT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, admin_.data(), admin_.size(), &cs));
+    EXPECT_EQ(GDEFCORE_OK, gdefcore_tree_save(cs, id, strlen(id), "en", 2, t));
+    EXPECT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, NULL, 0));
+    gdefcore_changeset_destroy(cs);
+    gdefcore_tree_free(t);
+    return std::string(id);
+  }
+
+  std::string OrderReader() {
+    Role("orderer");
+    Grant("orderer", "Read orders");
+    Grant("orderer", "Read order line skus");
+    Grant("orderer", "Read order lines");
+    return Principal("orderer");
+  }
+
+  Spec OrderSpec(std::vector<Spec::Col> cols) {
+    Spec s;
+    s.name = "orders";
+    s.type = kOrder;
+    s.columns = std::move(cols);
+    return s;
+  }
+};
+
+}  // namespace
+
+TEST_F(ViewGroups, AGroupAndAFieldInsideOneAreColumnsReadAcrossEveryItem) {
+  DefineOrder();
+  std::string who = OrderReader();
+  Order("first", {{"A-1", "2", {"5", "7"}, {"n1", "n2"}}, {"B-2", "3", {}, {}},
+      {"C-3", "9", {"1"}, {"n3"}}});
+  Order("second", {});
+  Spec s = OrderSpec({{"title", "", "Title"}, {"lines", "count", "Lines"},
+      {"lines.sku", "join", "Skus"}, {"lines.qty", "join", "Qtys"},
+      {"lines.taxes", "count", "Taxes"}, {"lines.taxes.rate", "join", "Rates"},
+      {"lines.sku", "count", "Sku count"}, {"lines.notes", "join", "Notes"},
+      {"lines.notes", "count", "Note count"}});
+  Save(s);
+  Out o = Run(who, "orders");
+  ASSERT_EQ(GDEFCORE_OK, o.rc);
+  ASSERT_EQ(2u, o.cells.size());
+  std::map<std::string, std::vector<std::string>> by;
+  for (const auto & row : o.cells) {
+    by[row[0]] = row;
+  }
+  EXPECT_EQ(std::vector<std::string>({"first", "3", "A-1, B-2, C-3", "2, 3, 9", "3", "5, 7, 1", "3", "n1, n2, n3", "3"}),
+      by["first"]);
+  EXPECT_EQ(std::vector<std::string>({"second", "0", "", "", "0", "", "0", "", "0"}), by["second"])
+      << "an order with no lines shows empty cells and zero counts";
+}
+
+TEST_F(ViewGroups, AColumnNamesOnlyWhatTheTypeHasAndOnlyAFormatterThatSuitsIt) {
+  DefineOrder();
+  size_t n = 0;
+  const char * const * g = gdefcore_view_formatters(GDEFSTOR_FIELD_GROUP, 1, &n);
+  ASSERT_EQ(1u, n);
+  EXPECT_STREQ("count", g[0]);
+  struct Bad {
+    const char * field;
+    const char * formatter;
+    const char * why;
+  };
+  const Bad bad[] = {
+      {"lines", "join", "a group has only a count"},
+      {"lines", "", "a group needs its formatter named"},
+      {"lines.nope", "join", "a field the group lacks"},
+      {"nope.sku", "join", "a group the type lacks"},
+      {"lines.sku", "upper", "a field in a group is read as many values"},
+      {"lines.ssn", "join", "a personal field in a group is not shown"},
+      {"lines..sku", "join", "an empty part"},
+      {".lines", "count", "a leading dot"},
+      {"lines.", "count", "a trailing dot"},
+      {"lines.taxes.rate.x", "join", "a path past a field"},
+  };
+  for (const Bad & b : bad) {
+    Spec s = OrderSpec({{b.field, b.formatter, ""}});
+    std::string why;
+    EXPECT_EQ(GDEFCORE_ERR_INVALID, Build(s, &why, false)) << b.field << ": " << b.why;
+    EXPECT_FALSE(why.empty()) << b.field << " is refused with a reason";
+  }
+  for (const char * f : {"lines.sku", "lines.qty", "lines.taxes.rate"}) {
+    for (const char * fm : {"join", "count"}) {
+      Spec s = OrderSpec({{f, fm, ""}});
+      std::string why;
+      EXPECT_EQ(GDEFCORE_OK, Build(s, &why, false)) << f << " " << fm << ": " << why;
+    }
+  }
+  /* Neither a group nor a field in one can be a sort key. */
+  Spec k = OrderSpec({{"title", "", ""}});
+  k.sort = "lines.sku";
+  std::string why;
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, Build(k, &why, false));
+  k.sort = "lines";
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, Build(k, &why, false));
+}
+
+TEST_F(ViewGroups, ARowCostsOneReadOfTheEntityHoweverManyColumnsItShows) {
+  DefineOrder();
+  std::string who = OrderReader();
+  for (int i = 0; i < 6; i++) {
+    Order(("order" + std::to_string(i)).c_str(),
+        {{"A", "1", {"5", "6"}}, {"B", "2", {"7"}}, {"C", "3", {}}});
+  }
+  Spec one = OrderSpec({{"title", "", ""}});
+  Save(one);
+  auto reads = [&](const char * name, size_t * rows) {
+    size_t before = gdefcore_catalog_doc_reads(catalog_);
+    Out o = Run(who, name);
+    EXPECT_EQ(GDEFCORE_OK, o.rc);
+    *rows = o.cells.size();
+    return gdefcore_catalog_doc_reads(catalog_) - before;
+  };
+  size_t rows1 = 0;
+  size_t d1 = reads("orders", &rows1);
+  ASSERT_EQ(6u, rows1);
+  Spec many = OrderSpec({{"title", "", "T"}, {"lines", "count", "L"}, {"lines.sku", "join", "S"},
+      {"lines.qty", "join", "Q"}, {"lines.taxes", "count", "X"}, {"lines.taxes.rate", "join", "R"},
+      {"lines.sku", "count", "N"}});
+  Save(many);
+  size_t rows7 = 0;
+  size_t d7 = reads("orders", &rows7);
+  ASSERT_EQ(6u, rows7);
+  EXPECT_EQ(d1, d7) << "seven columns, three of them in groups, read no more than one";
+  /* And the reads of a page grow with its rows, not with its columns. */
+  many.limit = 3;
+  Save(many);
+  size_t rows3 = 0;
+  size_t d3 = reads("orders", &rows3);
+  ASSERT_EQ(3u, rows3);
+  EXPECT_EQ(3u, d1 - d3) << "each row of the page is one read";
+}
+
+TEST_F(ViewGroups, TheFieldsAReaderMayNotSeeAreEmptyInEveryItem) {
+  DefineOrder();
+  Role("narrow");
+  Grant("narrow", "Read orders");
+  std::string narrow = Principal("narrow");
+  std::string full = OrderReader();
+  Order("o", {{"A-1", "2", {"5"}}, {"B-2", "3", {}}});
+  Spec s = OrderSpec({{"title", "", ""}, {"lines.sku", "join", ""}, {"lines", "count", "L"},
+      {"lines.qty", "join", "Q"}});
+  Save(s);
+  Out n = Run(narrow, "orders");
+  ASSERT_EQ(1u, n.cells.size());
+  EXPECT_EQ("o", n.cells[0][0]);
+  EXPECT_EQ("", n.cells[0][1]) << "the sku is governed by a permission this reader lacks";
+  Out f = Run(full, "orders");
+  ASSERT_EQ(1u, f.cells.size());
+  EXPECT_EQ("A-1, B-2", f.cells[0][1]);
+  EXPECT_EQ("2", f.cells[0][2]);
+  EXPECT_EQ("2, 3", f.cells[0][3]);
 }
 
 int main(int argc, char ** argv) {

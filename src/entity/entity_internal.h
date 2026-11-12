@@ -37,6 +37,7 @@
 #include <ghoti.io/defiant-core/module.h>
 #include <ghoti.io/defiant-storage/model.h>
 
+#include <ghoti.io/cutil/atomic.h>
 #include <ghoti.io/cutil/mutex.h>
 
 enum {
@@ -210,6 +211,8 @@ struct GDEFCORE_Catalog {
   GDEFCORE_Limits limits;
   GDEFCORE_Host * host;
   struct GDEFCORE_Subjects * subjects; /* the keys that index its values */
+  /* Whole-entity reads from the store (gdefcore_catalog_doc_reads()). */
+  GCU_Atomic_Size doc_reads;
   /* What parts of the library keep per catalog (gdefcore_catalog_cache()). */
   GCU_MUTEX_T cache_lock;
   int cache_lock_made;

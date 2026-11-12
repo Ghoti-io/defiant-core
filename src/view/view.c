@@ -54,6 +54,7 @@ static const char * const kFmtBool[] = {"raw", "yesno", NULL};
 static const char * const kFmtDate[] = {"raw", "date", NULL};
 static const char * const kFmtRaw[] = {"raw", NULL};
 static const char * const kFmtMany[] = {"join", "count", NULL};
+static const char * const kFmtCount[] = {"count", NULL};
 static const char * const kFmtNone[] = {NULL};
 
 static size_t table_count(const char * const * t) {
@@ -93,8 +94,10 @@ const char * const * gdefcore_view_operators(int field_type, size_t * out_count)
 const char * const * gdefcore_view_formatters(int field_type, int many,
     size_t * out_count) {
   const char * const * t = kFmtNone;
-  if (many) {
-    t = field_type == GDEFSTOR_FIELD_GROUP ? kFmtNone : kFmtMany;
+  if (field_type == GDEFSTOR_FIELD_GROUP) {
+    t = kFmtCount;
+  } else if (many) {
+    t = kFmtMany;
   } else {
     switch (field_type) {
     case GDEFSTOR_FIELD_TEXT:
@@ -231,6 +234,177 @@ static int root_field(GDEFCORE_Catalog * catalog, const char * type, size_t type
     }
   }
   return 0;
+}
+
+/* A column's field: a root field, a group (its items are counted), or a field
+ * inside a group (the values it holds in every item of that group, in order).
+ * A field in a group is read as one that holds many values, because a group
+ * may hold many items. @p item_path is the path of the items the values sit
+ * on ("" for the root item) and @p leaf the field's own name there. */
+typedef struct ColShape {
+  FieldShape f;
+  int group;
+  char item_path[GDEFCORE_FIELD_PATH_MAX + 1];
+  size_t item_path_len;
+  char leaf[GDEFCORE_FIELD_PATH_MAX + 1];
+  size_t leaf_len;
+} ColShape;
+
+static int path_ok(const char * s, size_t n) {
+  size_t i;
+  size_t seg = 0;
+  if (s == NULL || n == 0 || n > GDEFCORE_FIELD_PATH_MAX) {
+    return 0;
+  }
+  for (i = 0; i < n; i++) {
+    char c = s[i];
+    if (c == '.') {
+      if (seg == 0 || seg > 64) {
+        return 0;
+      }
+      seg = 0;
+      continue;
+    }
+    if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+            (c >= '0' && c <= '9') || c == '_')) {
+      return 0;
+    }
+    seg += 1;
+  }
+  return seg > 0 && seg <= 64;
+}
+
+static int column_field(GDEFCORE_Catalog * catalog, const char * type, size_t type_len,
+    const char * name, size_t name_len, ColShape * out) {
+  size_t count = 0;
+  size_t i;
+  if (!path_ok(name, name_len) ||
+      gdefcore_type_tree_field_count(catalog, type, type_len, &count) != GDEFCORE_OK) {
+    return 0;
+  }
+  for (i = 0; i < count; i++) {
+    GDEFCORE_FieldInfo info;
+    memset(&info, 0, sizeof info);
+    info.size = sizeof info;
+    if (gdefcore_type_tree_field(catalog, type, type_len, i, &info) != GDEFCORE_OK) {
+      return 0;
+    }
+    if (info.path_len != name_len || memcmp(info.path, name, name_len) != 0) {
+      continue;
+    }
+    memset(out, 0, sizeof *out);
+    out->f.type = info.type;
+    out->f.personal = info.personal;
+    if (info.type == GDEFSTOR_FIELD_GROUP) {
+      out->group = 1;
+      out->f.many = 1;
+      memcpy(out->item_path, info.path, info.path_len);
+      out->item_path_len = info.path_len;
+    } else if (info.many) {
+      /* A field of many values keeps each in an item of its own under the
+       * field, holding the value as its own (an empty field name). */
+      out->f.many = 1;
+      memcpy(out->item_path, info.path, info.path_len);
+      out->item_path_len = info.path_len;
+    } else if (info.depth == 0) {
+      out->f.many = 0;
+      memcpy(out->leaf, info.path, info.path_len);
+      out->leaf_len = info.path_len;
+    } else {
+      out->f.many = 1;
+      if (info.name_at == 0 || info.name_at > info.path_len) {
+        return 0;
+      }
+      memcpy(out->item_path, info.path, info.name_at - 1);
+      out->item_path_len = info.name_at - 1;
+      memcpy(out->leaf, info.path + info.name_at, info.path_len - info.name_at);
+      out->leaf_len = info.path_len - info.name_at;
+    }
+    return 1;
+  }
+  return 0;
+}
+
+/* The values of a column in one row's tree, borrowed from it: for a group the
+ * number of items and no values. Free the arrays, not what they point to. */
+static GDEFCORE_Result column_values(const GDEFCORE_Tree * tree, const ColShape * cs,
+    const char *** out_texts, size_t ** out_lens, size_t * out_count) {
+  size_t items = gdefcore_tree_item_count(tree);
+  size_t i;
+  size_t k;
+  size_t n = 0;
+  size_t cap = 0;
+  const char ** texts = NULL;
+  size_t * lens = NULL;
+  *out_texts = NULL;
+  *out_lens = NULL;
+  *out_count = 0;
+  for (i = 0; i < items; i++) {
+    GDEFCORE_TreeItem it;
+    memset(&it, 0, sizeof it);
+    it.size = sizeof it;
+    if (gdefcore_tree_item(tree, i, &it) != GDEFCORE_OK) {
+      return GDEFCORE_ERR_CORRUPT;
+    }
+    if (it.path_len != cs->item_path_len ||
+        (it.path_len > 0 && memcmp(it.path, cs->item_path, it.path_len) != 0)) {
+      continue;
+    }
+    if (cs->group) {
+      n += 1;
+      continue;
+    }
+    cap += it.value_count;
+  }
+  if (cs->group) {
+    *out_count = n;
+    return GDEFCORE_OK;
+  }
+  if (cap == 0) {
+    return GDEFCORE_OK;
+  }
+  texts = (const char **)calloc(cap, sizeof *texts);
+  lens = (size_t *)calloc(cap, sizeof *lens);
+  if (texts == NULL || lens == NULL) {
+    free(texts);
+    free(lens);
+    return GDEFCORE_ERR_OOM;
+  }
+  for (i = 0; i < items; i++) {
+    GDEFCORE_TreeItem it;
+    memset(&it, 0, sizeof it);
+    it.size = sizeof it;
+    if (gdefcore_tree_item(tree, i, &it) != GDEFCORE_OK) {
+      free(texts);
+      free(lens);
+      return GDEFCORE_ERR_CORRUPT;
+    }
+    if (it.path_len != cs->item_path_len ||
+        (it.path_len > 0 && memcmp(it.path, cs->item_path, it.path_len) != 0)) {
+      continue;
+    }
+    for (k = 0; k < it.value_count && n < cap; k++) {
+      const char * field = NULL;
+      size_t field_len = 0;
+      const char * text = NULL;
+      size_t len = 0;
+      if (gdefcore_tree_value(tree, i, k, &field, &field_len, &text, &len) !=
+          GDEFCORE_OK) {
+        free(texts);
+        free(lens);
+        return GDEFCORE_ERR_CORRUPT;
+      }
+      if (field_len == cs->leaf_len && memcmp(field, cs->leaf, field_len) == 0) {
+        texts[n] = text;
+        lens[n] = len;
+        n += 1;
+      }
+    }
+  }
+  *out_texts = texts;
+  *out_lens = lens;
+  *out_count = n;
+  return GDEFCORE_OK;
 }
 
 /* ---- arguments in a condition ------------------------------------------ */
@@ -371,6 +545,7 @@ static int use_piece(void * vctx, const char * text, size_t len, int is_arg) {
 GDEFCORE_Result gdefcore_view_validate(GDEFCORE_Catalog * catalog,
     const GDEFCORE_View_Def * def, char * why, size_t why_cap) {
   FieldShape shape;
+  ColShape col;
   int kind = 0;
   size_t i;
   size_t j;
@@ -429,11 +604,11 @@ GDEFCORE_Result gdefcore_view_validate(GDEFCORE_Catalog * catalog,
     if (c->size != sizeof *c) {
       return GDEFCORE_ERR_INVALID;
     }
-    if (!field_name_ok(c->field, c->field_len) ||
-        !root_field(catalog, def->type, def->type_len, c->field, c->field_len,
-            &shape)) {
-      REFUSE("%.*s is not a field the type holds a value in", c->field, c->field_len);
+    if (!column_field(catalog, def->type, def->type_len, c->field, c->field_len,
+            &col)) {
+      REFUSE("%.*s is not a field or group the type has", c->field, c->field_len);
     }
+    shape = col.f;
     if (shape.personal) {
       REFUSE("%.*s is a personal field, which a view does not show", c->field,
           c->field_len);
@@ -1227,7 +1402,7 @@ const char * gdefcore_view_result_cell(const GDEFCORE_View_Result * r, size_t ro
 
 /* One value as a column shows it. */
 static GDEFCORE_Result format_cell(const char * formatter, size_t flen,
-    const FieldShape * shape, char ** texts, size_t * lens, size_t count, char ** out,
+    const FieldShape * shape, const char * const * texts, const size_t * lens, size_t count, char ** out,
     size_t * out_len) {
   size_t trunc = 0;
   Buf b;
@@ -1391,6 +1566,7 @@ GDEFCORE_Result gdefcore_view_run(GDEFCORE_Catalog * catalog, GDEFCORE_Request *
   RunCtx ctx;
   GDEFCORE_Access_List q;
   char ** ids = NULL;
+  ColShape * shapes = NULL;
   size_t count = 0;
   uint64_t total = 0;
   size_t row;
@@ -1482,40 +1658,56 @@ GDEFCORE_Result gdefcore_view_run(GDEFCORE_Catalog * catalog, GDEFCORE_Request *
       rc = GDEFCORE_ERR_OOM;
     }
   }
+  /* Each column's field is resolved once, and each row is read once: a row
+   * costs one read of the entity however many columns, values or group items
+   * it shows. */
+  if (rc == GDEFCORE_OK && count > 0) {
+    shapes = (ColShape *)calloc(r->cols, sizeof *shapes);
+    if (shapes == NULL) {
+      rc = GDEFCORE_ERR_OOM;
+    }
+    for (col = 0; rc == GDEFCORE_OK && col < r->cols; col++) {
+      const GDEFCORE_View_Column * c = &def.columns[col];
+      if (!column_field(catalog, def.type, def.type_len, c->field, c->field_len,
+              &shapes[col])) {
+        rc = GDEFCORE_ERR_INVALID;
+      }
+    }
+  }
   for (row = 0; rc == GDEFCORE_OK && row < count; row++) {
     int visible = 1;
     size_t base = kept * r->cols;
+    GDEFCORE_Tree * tree = NULL;
+    GDEFCORE_Result rr = gdefcore_access_tree(catalog, request, ids[row], strlen(ids[row]),
+        kLang, 2, &tree);
+    if (rr == GDEFCORE_ERR_INVALID) {
+      /* An entity with no content to show answers as one with no values:
+       * empty cells. The rows themselves came from the filtered list, so a
+       * row the principal may not see is never here. */
+      tree = NULL;
+      rr = GDEFCORE_OK;
+    }
+    if (rr != GDEFCORE_OK) {
+      rc = rr;
+      break;
+    }
     for (col = 0; rc == GDEFCORE_OK && visible && col < r->cols; col++) {
       const GDEFCORE_View_Column * c = &def.columns[col];
-      FieldShape shape;
-      char ** texts = NULL;
+      const char ** texts = NULL;
       size_t * lens = NULL;
       size_t n = 0;
-      int locked = 0;
-      GDEFCORE_Result rr;
-      if (!root_field(catalog, def.type, def.type_len, c->field, c->field_len, &shape)) {
-        rc = GDEFCORE_ERR_INVALID;
+      if (tree != NULL) {
+        rc = column_values(tree, &shapes[col], &texts, &lens, &n);
+      }
+      if (rc != GDEFCORE_OK) {
         break;
       }
-      rr = gdefcore_access_read(catalog, request, ids[row], strlen(ids[row]), kLang, 2,
-          c->field, c->field_len, &texts, &lens, &n, &locked);
-      if (rr == GDEFCORE_ERR_INVALID) {
-        /* A field the entity has no value for answers as one it does not
-         * have: an empty cell. The rows themselves came from the filtered
-         * list, so a row the principal may not see is never here. */
-        n = 0;
-        texts = NULL;
-        lens = NULL;
-        rr = GDEFCORE_OK;
-      }
-      if (rr != GDEFCORE_OK) {
-        rc = rr;
-        break;
-      }
-      rc = format_cell(c->formatter, c->formatter_len, &shape, texts, lens, n,
+      rc = format_cell(c->formatter, c->formatter_len, &shapes[col].f, texts, lens, n,
           &r->cells[base + col], &r->cell_len[base + col]);
-      gdefcore_values_free(catalog, texts, lens, n);
+      free((void *)texts);
+      free(lens);
     }
+    gdefcore_tree_free(tree);
     if (rc == GDEFCORE_OK && visible) {
       memcpy(r->ids[kept], ids[row], GDEFCORE_PUBLIC_ID_LEN + 1);
       kept += 1;
@@ -1529,6 +1721,7 @@ GDEFCORE_Result gdefcore_view_run(GDEFCORE_Catalog * catalog, GDEFCORE_Request *
   }
   r->rows = kept;
   r->total = total;
+  free(shapes);
   gdefcore_ids_free(catalog, ids, count);
   free(ctx.out.p);
   gdefcore_view_def_free(catalog, owner);

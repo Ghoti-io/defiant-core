@@ -30,6 +30,13 @@
 #   principal-argument-from-caller    Views.TheCurrentPrincipalIsAnArgumentAndAnonymousIsNoRows
 #   operator-table-wrong              Views.TheOperatorAndFormatterTablesAreWhatTheSaveAccepts
 #   param-size-unchecked              Views.TheStructsOfAViewAreAcceptedAtOnlyTheirOwnSize
+#   row-read-per-column               ViewGroups.ARowCostsOneReadOfTheEntityHoweverManyColumnsItShows
+#   group-items-of-any-path-counted   ViewGroups.AGroupAndAFieldInsideOneAreColumnsReadAcrossEveryItem
+#   nested-leaf-not-matched           ViewGroups.AGroupAndAFieldInsideOneAreColumnsReadAcrossEveryItem
+#   group-formatter-allows-join       ViewGroups.AColumnNamesOnlyWhatTheTypeHasAndOnlyAFormatterThatSuitsIt
+#   nested-personal-field-shown       ViewGroups.AColumnNamesOnlyWhatTheTypeHasAndOnlyAFormatterThatSuitsIt
+#   sort-by-nested-field-allowed      ViewGroups.AColumnNamesOnlyWhatTheTypeHasAndOnlyAFormatterThatSuitsIt
+#   nested-cells-read-unfiltered      ViewGroups.TheFieldsAReaderMayNotSeeAreEmptyInEveryItem
 #
 # Every test has a control (a good view saves, a condition of every operator the
 # table lists, the administrator-like reader who sees all four rows, the default
@@ -44,6 +51,7 @@ set -u
 plant_setup "$@"
 
 plant_control testView 'Views.*'
+plant_control testView 'ViewGroups.*'
 
 V=src/view/view.c
 T_HID='Views.ARowThePrincipalMayNotSeeIsNotInTheRowsOrTheTotal'
@@ -56,6 +64,10 @@ T_OUT='Views.CsvAndJsonAreQuotedEscapedAndSafeToOpenInASpreadsheet'
 T_PRIN='Views.TheCurrentPrincipalIsAnArgumentAndAnonymousIsNoRows'
 T_TAB='Views.TheOperatorAndFormatterTablesAreWhatTheSaveAccepts'
 T_SIZE='Views.TheStructsOfAViewAreAcceptedAtOnlyTheirOwnSize'
+T_GCOLS='ViewGroups.AGroupAndAFieldInsideOneAreColumnsReadAcrossEveryItem'
+T_GBAD='ViewGroups.AColumnNamesOnlyWhatTheTypeHasAndOnlyAFormatterThatSuitsIt'
+T_GREADS='ViewGroups.ARowCostsOneReadOfTheEntityHoweverManyColumnsItShows'
+T_GHID='ViewGroups.TheFieldsAReaderMayNotSeeAreEmptyInEveryItem'
 
 # The list is the unfiltered index of the type, not the principal's page: a row
 # the principal may not see is in the rows and in the total.
@@ -64,13 +76,19 @@ plant list-unfiltered $V testView "$T_HID" \
   '    rc = gdefcore_entity_ids(catalog, def.type, def.type_len, &ids, &count);
     total = count;'
 
-# A cell is read as the system, not through the field filter.
+# A row is read as the system, not through the field filter.
 plant cells-read-unfiltered $V testView "$T_FIELD" \
-  '      rr = gdefcore_access_read(catalog, request, ids[row], strlen(ids[row]), kLang, 2,
-          c->field, c->field_len, &texts, &lens, &n, &locked);' \
-  '      (void)locked;
-      rr = gdefcore_entity_values(catalog, NULL, GDEFCORE_VIEW_PUBLISHED, ids[row],
-          strlen(ids[row]), kLang, 2, c->field, c->field_len, &texts, &lens, &n);'
+  '    GDEFCORE_Result rr = gdefcore_access_tree(catalog, request, ids[row], strlen(ids[row]),
+        kLang, 2, &tree);' \
+  '    GDEFCORE_Result rr = gdefcore_entity_tree(catalog, NULL, GDEFCORE_VIEW_PUBLISHED, ids[row],
+        strlen(ids[row]), kLang, 2, &tree);'
+
+# The same, seen in the fields of the items of a group.
+plant nested-cells-read-unfiltered $V testView "$T_GHID" \
+  '    GDEFCORE_Result rr = gdefcore_access_tree(catalog, request, ids[row], strlen(ids[row]),
+        kLang, 2, &tree);' \
+  '    GDEFCORE_Result rr = gdefcore_entity_tree(catalog, NULL, GDEFCORE_VIEW_PUBLISHED, ids[row],
+        strlen(ids[row]), kLang, 2, &tree);'
 
 # An argument value is put in as it came: a quote or backslash in it ends the
 # constant.
@@ -168,5 +186,53 @@ plant operator-table-wrong $V testView "$T_TAB" \
 plant param-size-unchecked $V testView "$T_SIZE" \
   '    if (params[row].size != sizeof params[row]) {' \
   '    if (params[row].size == 0) {'
+
+# A column reads the entity again for itself, so a page costs rows times columns.
+plant row-read-per-column $V testView "$T_GREADS" \
+  '      if (tree != NULL) {
+        rc = column_values(tree, &shapes[col], &texts, &lens, &n);
+      }' \
+  '      if (tree != NULL) {
+        char ** again = NULL;
+        size_t * again_lens = NULL;
+        size_t again_n = 0;
+        (void)gdefcore_entity_values(catalog, NULL, GDEFCORE_VIEW_PUBLISHED, ids[row],
+            strlen(ids[row]), kLang, 2, c->field, c->field_len, &again, &again_lens, &again_n);
+        gdefcore_values_free(catalog, again, again_lens, again_n);
+        rc = column_values(tree, &shapes[col], &texts, &lens, &n);
+      }'
+
+# Items of every group are counted for a group, not the items of that group.
+plant group-items-of-any-path-counted $V testView "$T_GCOLS" \
+  '    if (it.path_len != cs->item_path_len ||
+        (it.path_len > 0 && memcmp(it.path, cs->item_path, it.path_len) != 0)) {
+      continue;
+    }
+    if (cs->group) {' \
+  '    if (it.path_len == 0) {
+      continue;
+    }
+    if (cs->group) {'
+
+# Every value of the item is taken, not the values of the field asked for.
+plant nested-leaf-not-matched $V testView "$T_GCOLS" \
+  '      if (field_len == cs->leaf_len && memcmp(field, cs->leaf, field_len) == 0) {' \
+  '      if (memcmp(field, cs->leaf, 0) == 0) {'
+
+plant group-formatter-allows-join $V testView "$T_GBAD" \
+  'static const char * const kFmtCount[] = {"count", NULL};' \
+  'static const char * const kFmtCount[] = {"count", "join", NULL};'
+
+# A personal field inside a group is shown as any other.
+plant nested-personal-field-shown $V testView "$T_GBAD" \
+  '    out->f.type = info.type;
+    out->f.personal = info.personal;' \
+  '    out->f.type = info.type;
+    out->f.personal = 0;'
+
+# A field inside a group can be a sort key.
+plant sort-by-nested-field-allowed $V testView "$T_GBAD" \
+  '    if (info.depth == 0 && info.path_len == name_len &&' \
+  '    if (info.depth < 99 && info.path_len == name_len &&'
 
 plant_finish

@@ -1827,6 +1827,7 @@ GDEFCORE_Result gdefcore_ent_read_doc_look(GDEFCORE_Catalog * cat,
   GDEFCORE_Result rc;
   size_t i;
   memset(out, 0, sizeof *out);
+  gcu_atomic_size_fetch_add(&cat->doc_reads, 1);
   rc = load_port_type(cat, look.type, look.type_len, &type);
   if (rc != GDEFCORE_OK) {
     return rc;

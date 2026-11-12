@@ -265,6 +265,19 @@ GDEFCORE_API GDEFCORE_Result gdefcore_catalog_open(GDEFSTOR_Store * store,
 /** @brief Close a catalog. NULL is ignored. The store stays open. */
 GDEFCORE_API void gdefcore_catalog_destroy(GDEFCORE_Catalog * catalog);
 
+/**
+ * @brief How many whole entities this catalog has read from the store.
+ *
+ * A counter that only rises: each read of an entity's document (every value
+ * of every language, which is what gdefcore_entity_values(),
+ * gdefcore_entity_tree() and the access reads make) adds one. It does not
+ * start at zero in any useful sense, so a caller compares two readings; the
+ * difference is the reads made between them. Views use it to show that a page
+ * of rows costs one read per row however many columns it has. Safe to call
+ * from any thread. NULL reads as 0.
+ */
+GDEFCORE_API size_t gdefcore_catalog_doc_reads(const GDEFCORE_Catalog * catalog);
+
 /** @brief Makes the object a catalog keeps under a name; see
  * gdefcore_catalog_cache(). */
 typedef void * (*GDEFCORE_Catalog_Create_Fn)(void * ctx);

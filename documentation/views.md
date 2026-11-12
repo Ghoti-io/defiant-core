@@ -13,13 +13,18 @@ a running site with no deploy (`view.h`).
 | `type` | the entity type listed |
 | `condition` | optional, `defiant-condition/1` (conditions.md): the and/or/not tree, comparisons of `field.<name>` with constants, `in`, `principal`, `creator`, `now` |
 | `sort`, `sort2` | up to two root fields, each ascending or descending |
-| `columns` | one to sixteen: a root field, a formatter and a heading |
+| `columns` | one to sixteen: a field, a group or a field inside a group (`lines.price`), a formatter and a heading |
 | `args` | up to eight named arguments the condition may use, each with a source |
 | `format` | `table`, `list`, `csv` or `json` |
 | `limit` | rows in a page, 1 to 200 |
 
-A view reads the fields of the type's root that hold values. A group is not a
-column; a many-valued field is shown with `join` or `count`.
+A column names a field by its path. A root field shows its value; a
+many-valued field is shown with `join` or `count`. A **group** (`lines`) is
+shown with `count`, the number of its items. A field inside a group
+(`lines.price`, `lines.taxes.rate`) shows the values it holds in every item of
+that group, in order, so it is read as many-valued: `join` or `count`. A group's
+fields are not sort keys or condition operands (the condition language sees the
+root only), and a personal field inside a group is refused as a root one is.
 
 ## Arguments
 
@@ -66,16 +71,24 @@ offers, and a test checks them against what the save accepts.
 | boolean | `=` `!=` `in` | `raw` `yesno` |
 | integer, decimal, float | `=` `!=` `<` `<=` `>` `>=` `in` | `raw` |
 | date, date and time | the same | `raw` `date` |
-| many-valued | | `join` `count` |
+| many-valued, or inside a group | | `join` `count` |
+| group | | `count` |
 
 ## Running
 
 `gdefcore_view_run()` returns the page for the request's principal. Rows come
 from the access filter (`gdefcore_access_list_page()`), so a row the principal
 may not see is neither in the page nor in the total, and the condition only
-narrows, as a grant's does. Cells are read with `gdefcore_access_read()`: a
-field the principal may not read is an empty cell, the same as a field with no
-value. A stored view that no longer fits its type (a field was removed) is
+narrows, as a grant's does. Each row is read **once**, with `gdefcore_access_tree()`, and every column
+takes its values from that tree: a row costs one read of the entity however many
+columns, values or group items it shows (`gdefcore_catalog_doc_reads()` counts
+the reads, and a test holds the number to one per row). A field the principal
+may not read, or one inside a group they may not read, is an empty cell, the
+same as a field with no value. What a page of N rows still costs is N reads:
+the store port has no read of many entities at once, so the reads are not
+constant in the rows. A batched read of a page would be one more call of the
+port (a list of public ids in, the trees out) in each backend and its
+conformance suite. A stored view that no longer fits its type (a field was removed) is
 refused with `GDEFCORE_ERR_INVALID`, never run loosely. A caller draws a table
 or a list from the cells, escaped; a view makes no HTML.
 

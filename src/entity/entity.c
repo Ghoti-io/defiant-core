@@ -1372,8 +1372,13 @@ GDEFCORE_Result gdefcore_catalog_open(GDEFSTOR_Store * store,
     return GDEFCORE_ERR_OOM;
   }
   cat->cache_lock_made = 1;
+  gcu_atomic_size_init(&cat->doc_reads, 0);
   *out_catalog = cat;
   return GDEFCORE_OK;
+}
+
+size_t gdefcore_catalog_doc_reads(const GDEFCORE_Catalog * catalog) {
+  return catalog == NULL ? 0 : gcu_atomic_size_load(&catalog->doc_reads);
 }
 
 GDEFCORE_Result gdefcore_catalog_cache(GDEFCORE_Catalog * catalog,
