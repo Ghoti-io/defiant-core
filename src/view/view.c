@@ -177,21 +177,6 @@ static int name_ok(const char * s, size_t n) {
   return 1;
 }
 
-static int field_name_ok(const char * s, size_t n) {
-  size_t i;
-  if (s == NULL || n == 0 || n > 64) {
-    return 0;
-  }
-  for (i = 0; i < n; i++) {
-    char c = s[i];
-    if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-            (c >= '0' && c <= '9') || c == '_')) {
-      return 0;
-    }
-  }
-  return 1;
-}
-
 static void reason(char * why, size_t cap, const char * fmt, const char * a,
     size_t alen) {
   if (why != NULL && cap > 0) {
