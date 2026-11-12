@@ -35,8 +35,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-static const char kLang[] = "en";
 static const char kType[] = GDEFCORE_UPLOAD_TYPE;
+/* The language a file's own metadata is written in. A reference to a file is
+ * read in every language the referring entity has. */
+static const char kLang[] = "en";
 #define TYPE_LEN (sizeof kType - 1)
 #define ONE_DAY_MS (24ull * 60ull * 60ull * 1000ull)
 
@@ -385,12 +387,86 @@ static GDEFCORE_Result paths_of(GDEFCORE_Catalog * catalog, const char * type, s
   return GDEFCORE_OK;
 }
 
+/* Whether the pair (file, referrer) is already counted. */
+static int pair_seen(const struct Refs * r, const char * file, const char * referrer) {
+  size_t i;
+  for (i = 0; i < r->n; i++) {
+    if (memcmp(r->v[i].file, file, GDEFCORE_PUBLIC_ID_LEN) == 0 &&
+        memcmp(r->v[i].referrer, referrer, GDEFCORE_PUBLIC_ID_LEN) == 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+/* The file references one language's tree of an entity holds, added to @p out.
+ * With @p only_new, a pair (file, referrer) that is already there is not added
+ * again: a draft names what the published revision names, and the count is of
+ * references, not of the views that show them. */
+static GDEFCORE_Result collect(GDEFCORE_Tree * tree, const char * referrer,
+    const struct Paths * ps, int only_new, struct Refs * out) {
+  size_t items = gdefcore_tree_item_count(tree);
+  size_t it;
+  for (it = 0; it < items; it++) {
+    GDEFCORE_TreeItem item;
+    size_t v;
+    memset(&item, 0, sizeof item);
+    item.size = sizeof item;
+    if (gdefcore_tree_item(tree, it, &item) != GDEFCORE_OK) {
+      continue;
+    }
+    for (v = 0; v < item.value_count; v++) {
+      const char * field = NULL;
+      size_t field_len = 0;
+      const char * text = NULL;
+      size_t text_len = 0;
+      char path[GDEFCORE_FIELD_PATH_MAX + 2];
+      char file[GDEFCORE_PUBLIC_ID_LEN + 1];
+      size_t plen;
+      if (gdefcore_tree_value(tree, it, v, &field, &field_len, &text, &text_len) !=
+              GDEFCORE_OK ||
+          text_len != GDEFCORE_PUBLIC_ID_LEN) {
+        continue;
+      }
+      if (item.path_len + field_len + 1 > GDEFCORE_FIELD_PATH_MAX) {
+        continue;
+      }
+      plen = 0;
+      if (item.path_len > 0) {
+        memcpy(path, item.path, item.path_len);
+        plen = item.path_len;
+      }
+      if (field_len > 0) {
+        if (plen > 0) {
+          path[plen++] = '.';
+        }
+        memcpy(path + plen, field, field_len);
+        plen += field_len;
+      }
+      if (!path_wanted(ps, path, plen) ||
+          gdefcore_id_canonical(text, text_len, file) != GDEFCORE_OK) {
+        continue;
+      }
+      if (only_new && pair_seen(out, file, referrer)) {
+        continue;
+      }
+      if (refs_add(out, file, referrer) != 0) {
+        return GDEFCORE_ERR_OOM;
+      }
+    }
+  }
+  return GDEFCORE_OK;
+}
+
 /* Every file reference of the entities of every content and configuration
- * type: the pair (file, referrer). With a @p request, an entity is read through
- * the access filter and one the principal cannot see, or a field they cannot
- * read, is not there; without one, as the system. */
+ * type: the pair (file, referrer), in every language the entity has. With a
+ * @p request, an entity is read through the access filter and one the
+ * principal cannot see, or a field they cannot read, is not there; without
+ * one, as the system. With @p drafts (a system scan only), a draft that names
+ * a file holds it as the published revision does, so an editor's unpublished
+ * work is not swept from under them. */
 static GDEFCORE_Result scan(GDEFCORE_Catalog * catalog, GDEFCORE_Request * request,
-    struct Refs * out) {
+    int drafts, struct Refs * out) {
   int kinds[2] = {GDEFCORE_TYPE_CONTENT, GDEFCORE_TYPE_CONFIG};
   size_t k;
   for (k = 0; k < 2; k++) {
@@ -420,75 +496,50 @@ static GDEFCORE_Result scan(GDEFCORE_Catalog * catalog, GDEFCORE_Request * reque
         continue;
       }
       for (e = 0; e < nids; e++) {
-        GDEFCORE_Tree * tree = NULL;
-        size_t items;
-        size_t it;
-        GDEFCORE_Result rr;
-        if (strlen(ids[e]) != GDEFCORE_PUBLIC_ID_LEN) {
+        char ** langs = NULL;
+        size_t * llens = NULL;
+        size_t nlangs = 0;
+        size_t l;
+        GDEFCORE_Result rr = GDEFCORE_OK;
+        if (strlen(ids[e]) != GDEFCORE_PUBLIC_ID_LEN ||
+            gdefcore_entity_languages(catalog, ids[e], GDEFCORE_PUBLIC_ID_LEN, &langs,
+                &llens, &nlangs) != GDEFCORE_OK) {
           continue;
         }
-        rr = request != NULL
-                 ? gdefcore_access_tree(catalog, request, ids[e], GDEFCORE_PUBLIC_ID_LEN,
-                       kLang, sizeof kLang - 1, &tree)
-                 : gdefcore_entity_tree(catalog, NULL, GDEFCORE_VIEW_PUBLISHED, ids[e],
-                       GDEFCORE_PUBLIC_ID_LEN, kLang, sizeof kLang - 1, &tree);
-        if (rr != GDEFCORE_OK || tree == NULL) {
-          continue;
-        }
-        items = gdefcore_tree_item_count(tree);
-        for (it = 0; it < items; it++) {
-          GDEFCORE_TreeItem item;
-          size_t v;
-          memset(&item, 0, sizeof item);
-          item.size = sizeof item;
-          if (gdefcore_tree_item(tree, it, &item) != GDEFCORE_OK) {
-            continue;
-          }
-          for (v = 0; v < item.value_count; v++) {
-            const char * field = NULL;
-            size_t field_len = 0;
-            const char * text = NULL;
-            size_t text_len = 0;
-            char path[GDEFCORE_FIELD_PATH_MAX + 2];
-            size_t plen;
-            if (gdefcore_tree_value(tree, it, v, &field, &field_len, &text, &text_len) !=
-                GDEFCORE_OK || text_len != GDEFCORE_PUBLIC_ID_LEN) {
-              continue;
-            }
-            if (item.path_len + field_len + 1 > GDEFCORE_FIELD_PATH_MAX) {
-              continue;
-            }
-            plen = 0;
-            if (item.path_len > 0) {
-              memcpy(path, item.path, item.path_len);
-              plen = item.path_len;
-            }
-            if (field_len > 0) {
-              if (plen > 0) {
-                path[plen++] = '.';
+        for (l = 0; l < nlangs && rr == GDEFCORE_OK; l++) {
+          GDEFCORE_Tree * tree = NULL;
+          int pass;
+          for (pass = 0; pass < (drafts && request == NULL ? 2 : 1) && rr == GDEFCORE_OK;
+               pass++) {
+            if (pass == 1) {
+              if (gdefcore_entity_tree(catalog, NULL, GDEFCORE_VIEW_DRAFT, ids[e],
+                      GDEFCORE_PUBLIC_ID_LEN, langs[l], llens[l], &tree) != GDEFCORE_OK) {
+                tree = NULL;
               }
-              memcpy(path + plen, field, field_len);
-              plen += field_len;
-            }
-            if (!path_wanted(ps, path, plen)) {
-              continue;
-            }
-            {
-              char file[GDEFCORE_PUBLIC_ID_LEN + 1];
-              if (gdefcore_id_canonical(text, text_len, file) != GDEFCORE_OK) {
-                continue;
+            } else if (request != NULL) {
+              if (gdefcore_access_tree(catalog, request, ids[e], GDEFCORE_PUBLIC_ID_LEN,
+                      langs[l], llens[l], &tree) != GDEFCORE_OK) {
+                tree = NULL;
               }
-              if (refs_add(out, file, ids[e]) != 0) {
-                gdefcore_tree_free(tree);
-                gdefcore_ids_free(catalog, ids, nids);
-                free(ps);
-                gdefcore_values_free(catalog, names, nlens, ntypes);
-                return GDEFCORE_ERR_OOM;
-              }
+            } else if (gdefcore_entity_tree(catalog, NULL, GDEFCORE_VIEW_PUBLISHED, ids[e],
+                           GDEFCORE_PUBLIC_ID_LEN, langs[l], llens[l], &tree) !=
+                       GDEFCORE_OK) {
+              tree = NULL;
+            }
+            if (tree != NULL) {
+              rr = collect(tree, ids[e], ps, pass == 1, out);
+              gdefcore_tree_free(tree);
+              tree = NULL;
             }
           }
         }
-        gdefcore_tree_free(tree);
+        gdefcore_values_free(catalog, langs, llens, nlangs);
+        if (rr != GDEFCORE_OK) {
+          gdefcore_ids_free(catalog, ids, nids);
+          free(ps);
+          gdefcore_values_free(catalog, names, nlens, ntypes);
+          return rr;
+        }
       }
       gdefcore_ids_free(catalog, ids, nids);
       free(ps);
@@ -519,7 +570,7 @@ GDEFCORE_Result gdefcore_upload_references(GDEFCORE_Catalog * catalog, const cha
       gdefcore_id_canonical(id, id_len, canon) != GDEFCORE_OK) {
     return GDEFCORE_ERR_INVALID;
   }
-  rc = scan(catalog, NULL, &refs);
+  rc = scan(catalog, NULL, 1, &refs);
   if (rc == GDEFCORE_OK) {
     *out_count = count_of(&refs, canon);
   }
@@ -635,7 +686,7 @@ GDEFCORE_Result gdefcore_upload_sweep(GDEFCORE_Catalog * catalog,
     return rc;
   }
   tenant = gdefcore_catalog_tenant(catalog, &tenant_len);
-  rc = scan(catalog, NULL, &refs);
+  rc = scan(catalog, NULL, 1, &refs);
   if (rc != GDEFCORE_OK) {
     free(refs.v);
     return rc;
@@ -739,7 +790,7 @@ static int may_have(GDEFCORE_Catalog * catalog, GDEFCORE_Request * request, cons
     return 0;
   }
   memset(&refs, 0, sizeof refs);
-  if (scan(catalog, request, &refs) == GDEFCORE_OK) {
+  if (scan(catalog, request, 0, &refs) == GDEFCORE_OK) {
     ok = count_of(&refs, id) > 0;
   }
   free(refs.v);

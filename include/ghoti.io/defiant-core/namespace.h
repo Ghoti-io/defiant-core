@@ -302,6 +302,7 @@
 #define gdefcore_entity_unschedule GHOTIIO_DEFCORE(gdefcore_entity_unschedule)
 #define gdefcore_entity_save_draft GHOTIIO_DEFCORE(gdefcore_entity_save_draft)
 #define gdefcore_entity_type GHOTIIO_DEFCORE(gdefcore_entity_type)
+#define gdefcore_entity_languages GHOTIIO_DEFCORE(gdefcore_entity_languages)
 #define gdefcore_entity_values GHOTIIO_DEFCORE(gdefcore_entity_values)
 #define gdefcore_entity_values_many GHOTIIO_DEFCORE(gdefcore_entity_values_many)
 #define gdefcore_epoch GHOTIIO_DEFCORE(gdefcore_epoch)

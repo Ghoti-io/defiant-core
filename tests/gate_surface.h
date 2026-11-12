@@ -219,6 +219,7 @@ static const Surface kSurface[] = {
     {"gdefcore_entity_revision", "RA"},
     {"gdefcore_entity_revision_count", "RA"},
     {"gdefcore_entity_revision_at", "RA"},
+    {"gdefcore_entity_languages", "RA"},
     {"gdefcore_entity_values", "RA"},
     {"gdefcore_entity_values_many", "RA"},
     {"gdefcore_entity_revision_values", "RA"},

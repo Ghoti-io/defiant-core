@@ -40,9 +40,9 @@
  * field of type reference that names it. The reference count is **derived**:
  * gdefcore_upload_references() reads the current published revisions of the
  * entities of every content type and counts the reference fields, at any
- * depth, that name the file. There is no stored counter to drift. The
- * language read is `en`, which is what every form writes; a reference in
- * another language is not seen.
+ * depth and in every language the entity has, that name the file. A draft
+ * that names a file holds it as a published revision does (the pair is counted
+ * once). There is no stored counter to drift.
  *
  * gdefcore_upload_sweep() is the whole lifecycle, and is safe to run at any
  * time and as often as wanted: a staged file with a reference becomes `kept`

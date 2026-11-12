@@ -354,6 +354,70 @@ TEST_F(Uploads, TheCountIsDerivedFromTheCurrentRevisionsOfTheEntitiesThatNameThe
   EXPECT_EQ(7u, nfields);
 }
 
+TEST_F(Uploads, AReferenceInAnyLanguageOfAnEntityHoldsTheFile) {
+  std::string only_fr = Stage(editor_, "fr.png", "image/png", "frfrfr");
+  std::string stray = Stage(editor_, "stray.png", "image/png", "stray");
+  std::string g = Gallery("");
+  /* The English text names nothing; a French one names the file. */
+  EXPECT_EQ(0u, Refs(only_fr));
+  GDEFCORE_Changeset * cs = NULL;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, admin_.data(), admin_.size(), &cs));
+  const char * texts[2] = {"g (fr)", only_fr.c_str()};
+  size_t lens[2] = {6, only_fr.size()};
+  GDEFCORE_Value v[2];
+  memset(v, 0, sizeof v);
+  v[0].size = sizeof v[0];
+  v[0].field = "title";
+  v[0].field_len = 5;
+  v[0].texts = &texts[0];
+  v[0].text_lens = &lens[0];
+  v[0].count = 1;
+  v[1].size = sizeof v[1];
+  v[1].field = "photo";
+  v[1].field_len = 5;
+  v[1].texts = &texts[1];
+  v[1].text_lens = &lens[1];
+  v[1].count = 1;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_entity_save(cs, g.c_str(), g.size(), "fr", 2, v, 2));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, NULL, 0));
+  gdefcore_changeset_destroy(cs);
+  EXPECT_EQ(1u, Refs(only_fr)) << "a reference in French is a reference";
+  Swept s = Sweep(100000);
+  EXPECT_EQ(1u, s.promoted);
+  EXPECT_EQ(1u, s.removed) << "only the stray file went";
+  EXPECT_TRUE(Exists(only_fr));
+  EXPECT_FALSE(Exists(stray));
+}
+
+TEST_F(Uploads, ADraftThatNamesAFileHoldsItAsAPublishedRevisionDoes) {
+  std::string held = Stage(editor_, "draft.png", "image/png", "ddd");
+  std::string stray = Stage(editor_, "stray.png", "image/png", "sss");
+  std::string g = Gallery("");
+  GDEFCORE_Changeset * cs = NULL;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, admin_.data(), admin_.size(), &cs));
+  const char * text = held.c_str();
+  size_t len = held.size();
+  GDEFCORE_Value v;
+  memset(&v, 0, sizeof v);
+  v.size = sizeof v;
+  v.field = "photo";
+  v.field_len = 5;
+  v.texts = &text;
+  v.text_lens = &len;
+  v.count = 1;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_entity_save_draft(cs, g.c_str(), g.size(), "en", 2, &v, 1));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, NULL, 0));
+  gdefcore_changeset_destroy(cs);
+  /* The published revision names nothing; the draft names the file. */
+  EXPECT_EQ(1u, Refs(held));
+  EXPECT_EQ(0u, Refs(stray));
+  Swept s = Sweep(100000);
+  EXPECT_EQ(1u, s.promoted);
+  EXPECT_EQ(1u, s.removed);
+  EXPECT_TRUE(Exists(held)) << "the editor's unpublished work is not swept from under them";
+  EXPECT_FALSE(Exists(stray));
+}
+
 TEST_F(Uploads, AKeptFileNothingReferencesAnyMoreIsStagedAgainWithAFreshExpiry) {
   std::string id = Stage(editor_, "a.png", "image/png", "x", 1000);
   std::string g = Gallery(id);

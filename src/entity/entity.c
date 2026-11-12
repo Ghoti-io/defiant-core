@@ -3615,6 +3615,68 @@ void gdefcore_values_free(GDEFCORE_Catalog * catalog, char ** texts,
   gcu_allocator_free(catalog->alloc, lens);
 }
 
+GDEFCORE_Result gdefcore_entity_languages(GDEFCORE_Catalog * catalog, const char * id,
+    size_t id_len, char *** out_langs, size_t ** out_lens, size_t * out_count) {
+  char canon[GDEFCORE_PUBLIC_ID_LEN + 1];
+  GDEFSTOR_Languages * langs = NULL;
+  char ** names = NULL;
+  size_t * lens = NULL;
+  size_t n;
+  size_t i;
+  GDEFCORE_Result rc;
+  if (catalog == NULL || out_langs == NULL || out_lens == NULL || out_count == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  *out_langs = NULL;
+  *out_lens = NULL;
+  *out_count = 0;
+  if (gdefcore_id_canonical(id, id_len, canon) != GDEFCORE_OK) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  rc = map_stor(gdefstor_entity_languages(catalog->store, (const char *)catalog->tenant,
+      catalog->tenant_len, canon, GDEFCORE_PUBLIC_ID_LEN, 0, &langs));
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  n = gdefstor_languages_count(langs);
+  if (n > 0) {
+    names = (char **)gcu_allocator_realloc(catalog->alloc, NULL, n * sizeof *names);
+    lens = (size_t *)gcu_allocator_realloc(catalog->alloc, NULL, n * sizeof *lens);
+    if (names == NULL || lens == NULL) {
+      gcu_allocator_free(catalog->alloc, names);
+      gcu_allocator_free(catalog->alloc, lens);
+      gdefstor_languages_free(langs);
+      return GDEFCORE_ERR_OOM;
+    }
+    memset(names, 0, n * sizeof *names);
+  }
+  for (i = 0; i < n; i++) {
+    const char * lang = NULL;
+    size_t lang_len = 0;
+    if (gdefstor_languages_get(langs, i, &lang, &lang_len) != GDEFSTOR_OK) {
+      rc = GDEFCORE_ERR_CORRUPT;
+      break;
+    }
+    names[i] = (char *)gcu_allocator_realloc(catalog->alloc, NULL, lang_len + 1);
+    if (names[i] == NULL) {
+      rc = GDEFCORE_ERR_OOM;
+      break;
+    }
+    memcpy(names[i], lang, lang_len);
+    names[i][lang_len] = '\0';
+    lens[i] = lang_len;
+  }
+  gdefstor_languages_free(langs);
+  if (rc != GDEFCORE_OK) {
+    gdefcore_values_free(catalog, names, lens, n);
+    return rc;
+  }
+  *out_langs = names;
+  *out_lens = lens;
+  *out_count = n;
+  return GDEFCORE_OK;
+}
+
 GDEFCORE_Result gdefcore_entity_values(GDEFCORE_Catalog * catalog,
     const GDEFCORE_Changeset * changeset, int view, const char * id,
     size_t id_len, const char * lang, size_t lang_len, const char * field,

@@ -837,6 +837,18 @@ GDEFCORE_API GDEFCORE_Result gdefcore_entity_revision_at(
     uint64_t * out_seq, char ** out_actor, size_t * out_actor_len);
 
 /**
+ * @brief The languages an entity has content in, sorted by bytes.
+ *
+ * Read from the entity's current tables, as the other unfiltered reads of this
+ * header are (gdefcore_entity_values()); an entity with no revision has none.
+ * ::GDEFCORE_ERR_INVALID for an id that is not a known entity. Free the
+ * names with gdefcore_values_free().
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_entity_languages(GDEFCORE_Catalog * catalog,
+    const char * id, size_t id_len, char *** out_langs, size_t ** out_lens,
+    size_t * out_count);
+
+/**
  * @brief Read field values.
  *
  * When @p changeset touches the entity, the staged fields are returned and

@@ -29,6 +29,8 @@
 #   reference-read-as-system    Uploads.AKeptFileIsReadByWhoeverMaySeeTheEntityThatNamesIt
 #   digest-not-verified         Uploads.ABlobThatIsMissingOrIsNotTheDigestIsNeverServed
 #   personal-field-allowed      Uploads.AFileIsNeverAttachedThroughAPersonalFieldOrAFieldThatIsNotAReference
+#   only-the-first-language-read Uploads.AReferenceInAnyLanguageOfAnEntityHoldsTheFile
+#   drafts-not-counted          Uploads.ADraftThatNamesAFileHoldsItAsAPublishedRevisionDoes
 #   policy-struct-size-unchecked Uploads.TheStructsOfAnUploadAreAcceptedAtOnlyTheirOwnSize
 #   blob-store-size-unchecked   Uploads.TheStructsOfAnUploadAreAcceptedAtOnlyTheirOwnSize
 #
@@ -161,5 +163,18 @@ plant policy-struct-size-unchecked $U testUpload "$T_SIZE" \
 plant blob-store-size-unchecked $U testUpload "$T_SIZE" \
   '  return b != NULL && b->size == sizeof *b && b->put != NULL && b->get != NULL &&' \
   '  return b != NULL && b->put != NULL && b->get != NULL &&'
+
+# A reference in a language after the first (by bytes) is not seen, so a file named
+# only there is swept.
+plant only-the-first-language-read $U testUpload \
+  'Uploads.AReferenceInAnyLanguageOfAnEntityHoldsTheFile' \
+  '        for (l = 0; l < nlangs && rr == GDEFCORE_OK; l++) {' \
+  '        for (l = 0; l < (nlangs > 1 ? 1 : nlangs) && rr == GDEFCORE_OK; l++) {'
+
+# A draft that names a file does not hold it, so the editor's unpublished work is swept.
+plant drafts-not-counted $U testUpload \
+  'Uploads.ADraftThatNamesAFileHoldsItAsAPublishedRevisionDoes' \
+  '          for (pass = 0; pass < (drafts && request == NULL ? 2 : 1) && rr == GDEFCORE_OK;' \
+  '          for (pass = 0; pass < 1 && rr == GDEFCORE_OK;'
 
 plant_finish
