@@ -83,6 +83,12 @@ struct Def {
   int indexed = 0;
   int personal = 0;
   std::string subject;
+  size_t min_len = 0;
+  size_t max_len = 0;
+  bool has_range = false;
+  int64_t range_min = 0;
+  int64_t range_max = 0;
+  std::string pattern;
   std::vector<Def> kids;
 };
 
@@ -106,6 +112,25 @@ Def Required(Def d) {
 
 Def Indexed(Def d) {
   d.indexed = 1;
+  return d;
+}
+
+/* A field with the constraints the type declares for it. */
+Def Len(Def d, size_t min_len, size_t max_len) {
+  d.min_len = min_len;
+  d.max_len = max_len;
+  return d;
+}
+
+Def Range(Def d, int64_t lo, int64_t hi) {
+  d.has_range = true;
+  d.range_min = lo;
+  d.range_max = hi;
+  return d;
+}
+
+Def Pattern(Def d, const char * pattern) {
+  d.pattern = pattern;
   return d;
 }
 
@@ -137,6 +162,15 @@ struct Fields {
       f.type = defs[i].type;
       f.scale = defs[i].scale;
       f.indexed = defs[i].indexed;
+      f.min_len = defs[i].min_len;
+      f.max_len = defs[i].max_len;
+      f.has_range = defs[i].has_range ? 1 : 0;
+      f.range_min = defs[i].range_min;
+      f.range_max = defs[i].range_max;
+      if (!defs[i].pattern.empty()) {
+        f.pattern = defs[i].pattern.c_str();
+        f.pattern_len = defs[i].pattern.size();
+      }
       if (!defs[i].kids.empty()) {
         f.children = Make(defs[i].kids);
         f.child_count = defs[i].kids.size();
@@ -1244,6 +1278,141 @@ TEST(GroupsFlat, AFlatTypeIsDeclaredAndSavedAsBefore) {
 }
 
 /* ---- personal fields inside groups -------------------------------------- */
+
+/* ---- constraints at depth ------------------------------------------------ */
+
+/* The constraints a field declares hold inside a group, at any depth, as they
+ * hold on the root (the form layer checks only the root's, so the tree save is
+ * where a nested value is held to them). */
+std::vector<Def> Guarded() {
+  const int T = GDEFSTOR_FIELD_TEXT;
+  const int I = GDEFSTOR_FIELD_INTEGER;
+  return {
+      Required(Len(F("title", T), 0, 10)),
+      G("lines",
+          {Pattern(Len(F("sku", T), 2, 6), "[A-Z]+-[0-9]+"),
+              Range(F("qty", I), 1, 10), Many(Len(F("tags", T), 0, 3)),
+              G("taxes", {Len(F("code", T), 2, 3), Range(F("pct", I), 0, 100),
+                             Pattern(F("region", T), "[a-z]+")})}),
+  };
+}
+
+Node GoodGuarded() {
+  Node n;
+  n.Set("title", "ok");
+  Node & l = n.Add("lines");
+  l.Set("sku", "AB-1").Set("qty", "2");
+  l.AddValue("tags", "a");
+  l.Add("taxes").Set("code", "vat").Set("pct", "20").Set("region", "eu");
+  return n;
+}
+
+class GroupsConstraints : public ::testing::Test {
+ protected:
+  std::unique_ptr<Site> s;
+  std::string id;
+
+  void SetUp() override {
+    s.reset(new Site(kMemory));
+    ASSERT_EQ(GDEFCORE_OK, s->Define("site.guarded", Guarded()));
+    id = s->Create("site.guarded");
+  }
+
+  /* The refusal of saving @p n as the tree, and the words it gave. */
+  GDEFCORE_Result Try(const Node & n, std::string * why, bool draft = false) {
+    GDEFCORE_Changeset * cs = NULL;
+    GDEFCORE_Tree * t = Build(s->catalog, n);
+    GDEFCORE_Result rc = gdefcore_changeset_prepare(s->catalog, NULL, 0, &cs);
+    if (rc == GDEFCORE_OK) {
+      rc = (draft ? gdefcore_tree_save_draft : gdefcore_tree_save)(cs,
+          id.data(), id.size(), "en", 2, t);
+    }
+    EXPECT_EQ(rc == GDEFCORE_OK ? 1u : 0u, gdefcore_changeset_touched_count(cs));
+    size_t len = 0;
+    const char * r = gdefcore_changeset_refusal(cs, &len);
+    *why = r == NULL ? "" : std::string(r, len);
+    gdefcore_changeset_destroy(cs);
+    gdefcore_tree_free(t);
+    return rc;
+  }
+
+  void Refused(const Node & n, const char * path, const char * what) {
+    std::string why;
+    EXPECT_EQ(GDEFCORE_ERR_INVALID, Try(n, &why)) << path << ": " << what;
+    EXPECT_NE(std::string::npos, why.find(std::string(path) + ": "))
+        << "the refusal names the path " << path << ": " << why;
+    EXPECT_NE(std::string::npos, why.find(what)) << why;
+    /* A draft is held to the same constraints. */
+    EXPECT_EQ(GDEFCORE_ERR_INVALID, Try(n, &why, true)) << path;
+  }
+};
+
+TEST_F(GroupsConstraints, AValidTreeIsSavedAndTheSameBeyondTheRootIsHeldToItsFields) {
+  std::string why;
+  ASSERT_EQ(GDEFCORE_OK, Try(GoodGuarded(), &why)) << why;
+  EXPECT_EQ("", why);
+}
+
+TEST_F(GroupsConstraints, ALengthRangeOrPatternBrokenOneGroupDeepIsRefusedByPath) {
+  Node n = GoodGuarded();
+  n.At("lines", 0).Set("sku", "A");
+  Refused(n, "lines.sku", "shorter");
+  n = GoodGuarded();
+  n.At("lines", 0).Set("sku", "ABCDEFG-1");
+  Refused(n, "lines.sku", "longer");
+  n = GoodGuarded();
+  n.At("lines", 0).Set("sku", "ab-1");
+  Refused(n, "lines.sku", "pattern");
+  /* The pattern must match the whole value, not a part of it. */
+  n = GoodGuarded();
+  n.At("lines", 0).Set("sku", "AB-1x");
+  Refused(n, "lines.sku", "pattern");
+  n = GoodGuarded();
+  n.At("lines", 0).Set("qty", "11");
+  Refused(n, "lines.qty", "range");
+  n = GoodGuarded();
+  n.At("lines", 0).Set("qty", "0");
+  Refused(n, "lines.qty", "range");
+  /* An item of a multiple field in a group is held to its field too. */
+  n = GoodGuarded();
+  n.At("lines", 0).AddValue("tags", "toolong");
+  Refused(n, "lines.tags", "longer");
+}
+
+TEST_F(GroupsConstraints, ALengthRangeOrPatternBrokenTwoGroupsDeepIsRefusedByPath) {
+  Node n = GoodGuarded();
+  n.At("lines", 0).At("taxes", 0).Set("code", "x");
+  Refused(n, "lines.taxes.code", "shorter");
+  n = GoodGuarded();
+  n.At("lines", 0).At("taxes", 0).Set("code", "wxyz");
+  Refused(n, "lines.taxes.code", "longer");
+  n = GoodGuarded();
+  n.At("lines", 0).At("taxes", 0).Set("pct", "101");
+  Refused(n, "lines.taxes.pct", "range");
+  n = GoodGuarded();
+  n.At("lines", 0).At("taxes", 0).Set("region", "EU");
+  Refused(n, "lines.taxes.region", "pattern");
+  /* A second item of the group, not the first, is the one checked. */
+  n = GoodGuarded();
+  n.At("lines", 0).Add("taxes").Set("code", "gst").Set("pct", "-1");
+  Refused(n, "lines.taxes.pct", "range");
+}
+
+TEST_F(GroupsConstraints, TheRootsOwnConstraintsAreHeldToo) {
+  Node n = GoodGuarded();
+  n.Set("title", "far too long for it");
+  Refused(n, "title", "longer");
+}
+
+TEST_F(GroupsConstraints, AValueThatPassesEveryConstraintAtTheEdgeIsSaved) {
+  Node n = GoodGuarded();
+  n.At("lines", 0).Set("sku", "AB-123").Set("qty", "10");
+  n.At("lines", 0).At("taxes", 0).Set("code", "ab").Set("pct", "0");
+  std::string why;
+  ASSERT_EQ(GDEFCORE_OK, Try(n, &why)) << why;
+  n.At("lines", 0).At("taxes", 0).Set("pct", "100").Set("code", "abc");
+  ASSERT_EQ(GDEFCORE_OK, Try(n, &why)) << why;
+}
 
 class GroupsPersonal : public ::testing::Test {
  protected:

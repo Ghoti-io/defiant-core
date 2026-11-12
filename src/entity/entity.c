@@ -46,6 +46,7 @@
 #include <ghoti.io/defiant-storage/model.h>
 #include <ghoti.io/defiant-storage/query.h>
 #include <ghoti.io/regex/compile.h>
+#include <ghoti.io/regex/exec.h>
 #include <ghoti.io/security/random.h>
 
 #include <errno.h>
@@ -2572,6 +2573,142 @@ static GDEFCORE_Result canon_one(GDEFCORE_Catalog * cat, int accept_personal,
   return gdefcore_ent_value_check(cat->alloc, d, text, len, out);
 }
 
+/* A refusal's words, kept for the changeset: the path of the field and what
+ * it broke. */
+typedef struct Refuse {
+  char text[224];
+} Refuse;
+
+static void refuse_set(Refuse * why, const char * path, size_t path_len,
+    const char * what) {
+  int n;
+  if (why == NULL) {
+    return;
+  }
+  n = snprintf(why->text, sizeof why->text, "%.*s: %s", (int)path_len, path,
+      what);
+  if (n < 0) {
+    why->text[0] = '\0';
+  }
+}
+
+/* A whole base-10 integer, the form's reading of a range (form.c). */
+static int range_i64(const char * text, size_t len, int64_t * out) {
+  size_t i = 0;
+  int neg = 0;
+  uint64_t acc = 0;
+  const uint64_t limit = (uint64_t)INT64_MAX;
+  if (text == NULL || len == 0) {
+    return 0;
+  }
+  if (text[0] == '-') {
+    neg = 1;
+    i = 1;
+    if (len == 1) {
+      return 0;
+    }
+  }
+  for (; i < len; i++) {
+    unsigned d;
+    if (text[i] < '0' || text[i] > '9') {
+      return 0;
+    }
+    d = (unsigned)(text[i] - '0');
+    if (acc > (limit + (neg ? 1u : 0u) - d) / 10) {
+      return 0;
+    }
+    acc = acc * 10 + d;
+  }
+  *out = neg ? (int64_t)(0 - acc) : (int64_t)acc;
+  return 1;
+}
+
+/* The constraints the type declares for field @p d (a length, a range, a
+ * pattern that must match the whole value), checked on a value as it was
+ * handed over, with the same reading the form's check gives a root value. A
+ * personal value is sealed here and is checked where it was open. */
+static GDEFCORE_Result constraint_check(const GDEFCORE_Decl * d, const char * text,
+    size_t len, const char ** what) {
+  if (d->personal) {
+    return GDEFCORE_OK;
+  }
+  if (d->min_len != 0 && len < d->min_len) {
+    *what = "shorter than the field allows";
+    return GDEFCORE_ERR_INVALID;
+  }
+  if (d->max_len != 0 && len > d->max_len) {
+    *what = "longer than the field allows";
+    return GDEFCORE_ERR_INVALID;
+  }
+  if (d->has_range) {
+    int64_t number = 0;
+    if (!range_i64(text, len, &number) || number < d->range_min ||
+        number > d->range_max) {
+      *what = "outside the range the field allows";
+      return GDEFCORE_ERR_INVALID;
+    }
+  }
+  if (d->pattern.n > 0) {
+    GRX_Regex * re = NULL;
+    GRX_Match * match = NULL;
+    GRX_Capture span;
+    GRX_Result rr;
+    int matched = 0;
+    rr = grx_regex_compile_with_allocator(d->pattern.p, d->pattern.n,
+        GRX_SYNTAX_ECMASCRIPT, GRX_OPT_NONE, NULL, NULL, NULL, &re);
+    if (rr == GRX_OK) {
+      rr = grx_match_create(re, NULL, &match);
+    }
+    if (rr == GRX_OK) {
+      rr = grx_regex_match(re, text == NULL ? "" : text, len, 0,
+          GRX_ENGINE_AUTO, NULL, match, &matched);
+    }
+    if (rr == GRX_OK && matched &&
+        (grx_match_span(match, &span) != GRX_OK || span.start != 0 ||
+            span.end != len)) {
+      matched = 0;
+    }
+    if (match != NULL) {
+      grx_match_destroy(match);
+    }
+    if (re != NULL) {
+      grx_regex_free(re);
+    }
+    if (rr == GRX_ERR_OOM) {
+      return GDEFCORE_ERR_OOM;
+    }
+    if (rr == GRX_ERR_LIMIT) {
+      return GDEFCORE_ERR_LIMIT;
+    }
+    if (rr != GRX_OK || !matched) {
+      *what = "does not match the pattern the field requires";
+      return GDEFCORE_ERR_INVALID;
+    }
+  }
+  return GDEFCORE_OK;
+}
+
+/* canon_one() after the field's declared constraints, which a tree save
+ * enforces at every depth: a refusal is ::GDEFCORE_ERR_INVALID and @p why
+ * says which field and what it broke. */
+static GDEFCORE_Result canon_checked(GDEFCORE_Catalog * cat, int accept_personal,
+    const GDEFCORE_Decl * d, const char * path, size_t path_len,
+    const char * text, size_t len, GDEFCORE_Text * out, Refuse * why) {
+  const char * what = NULL;
+  GDEFCORE_Result rc = canon_one(cat, accept_personal, d, text, len, out);
+  if (rc != GDEFCORE_OK) {
+    return rc;
+  }
+  rc = constraint_check(d, text, len, &what);
+  if (rc == GDEFCORE_ERR_INVALID) {
+    refuse_set(why, path, path_len, what);
+  }
+  if (rc != GDEFCORE_OK) {
+    text_clear(cat->alloc, out);
+  }
+  return rc;
+}
+
 /* Items of a tree keyed by parent and field, to count siblings once. */
 typedef struct Sib {
   size_t parent;
@@ -2651,7 +2788,7 @@ static GDEFCORE_Result sibling_counts(GDEFCORE_Catalog * cat,
  */
 static GDEFCORE_Result tree_to_lang(GDEFCORE_Catalog * cat, int accept_personal,
     const GDEFCORE_Decl * decls, size_t ndecls, const GDEFCORE_Tree * in,
-    int with_root, GDEFCORE_Lang * l) {
+    int with_root, GDEFCORE_Lang * l, Refuse * why) {
   size_t n = gdefcore_tree_item_count(in);
   size_t * map = NULL;
   size_t i;
@@ -2703,7 +2840,7 @@ static GDEFCORE_Result tree_to_lang(GDEFCORE_Catalog * cat, int accept_personal,
           rc = GDEFCORE_ERR_INVALID;
           break;
         }
-        rc = canon_one(cat, accept_personal, d, text, len, &canon);
+        rc = canon_checked(cat, accept_personal, d, f, fn, text, len, &canon, why);
         if (rc == GDEFCORE_OK) {
           rc = gdefcore_ent_lang_add(cat->alloc, l, f, fn, &canon, 0, 0,
               NULL, 0);
@@ -2735,7 +2872,8 @@ static GDEFCORE_Result tree_to_lang(GDEFCORE_Catalog * cat, int accept_personal,
         rc = GDEFCORE_ERR_INVALID;
         break;
       }
-      rc = canon_one(cat, accept_personal, under, text, len, &canon);
+      rc = canon_checked(cat, accept_personal, under, it.path, it.path_len, text,
+          len, &canon, why);
       if (rc != GDEFCORE_OK) {
         break;
       }
@@ -2801,12 +2939,14 @@ static GDEFCORE_Result tree_to_lang(GDEFCORE_Catalog * cat, int accept_personal,
         break;
       }
       d = gdefcore_ent_decl_at(decls, ndecls, path.p, path.n);
-      text_clear(cat->alloc, &path);
       if (d == NULL || d->type == GDEFSTOR_FIELD_GROUP || d->many) {
+        text_clear(cat->alloc, &path);
         rc = GDEFCORE_ERR_INVALID;
         break;
       }
-      rc = canon_one(cat, accept_personal, d, text, len, &canon);
+      rc = canon_checked(cat, accept_personal, d, path.p, path.n, text, len,
+          &canon, why);
+      text_clear(cat->alloc, &path);
       if (rc == GDEFCORE_OK) {
         rc = gdefcore_ent_tree_put(l->groups, gi, f, fn, canon.p, canon.n,
             NULL, 0);
@@ -2882,7 +3022,9 @@ static GDEFCORE_Result stage_tree(GDEFCORE_Changeset * changeset,
   GDEFCORE_Lang fresh;
   GDEFCORE_Lang * slot;
   Staging st;
+  Refuse refused;
   GDEFCORE_Result rc;
+  refused.text[0] = '\0';
   if (changeset == NULL || changeset->applied || tree == NULL ||
       !lang_ok(lang, lang_len)) {
     return GDEFCORE_ERR_INVALID;
@@ -2897,7 +3039,11 @@ static GDEFCORE_Result stage_tree(GDEFCORE_Changeset * changeset,
   }
   memset(&fresh, 0, sizeof fresh);
   rc = tree_to_lang(cat, changeset->accept_sealed, st.decls, st.ndecls, tree,
-      1, &fresh);
+      1, &fresh, &refused);
+  if (rc == GDEFCORE_ERR_INVALID && refused.text[0] != '\0') {
+    (void)gdefcore_changeset_set_refusal(changeset, refused.text,
+        strlen(refused.text));
+  }
   if (rc == GDEFCORE_OK) {
     rc = staged_base(changeset, canon, &st, draft, &op, &tentative);
   } else {
@@ -4442,7 +4588,7 @@ static GDEFCORE_Result draft_fits(GDEFCORE_Changeset * cs, const GDEFCORE_Op * o
       continue;
     }
     memset(&tmp, 0, sizeof tmp);
-    gr = tree_to_lang(cat, 1, decls, ndecls, l->groups, 0, &tmp);
+    gr = tree_to_lang(cat, 1, decls, ndecls, l->groups, 0, &tmp, NULL);
     lang_clear(cat->alloc, &tmp);
     if (gr == GDEFCORE_ERR_OOM) {
       decls_free(cat->alloc, decls, ndecls);

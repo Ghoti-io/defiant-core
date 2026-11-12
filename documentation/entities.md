@@ -232,6 +232,17 @@ texts, as `gdefcore_entity_values()` gives them. `gdefcore_tree_save()` and
 `gdefcore_entity_tree()` and `gdefcore_entity_revision_tree()` read one
 unfiltered, and `gdefcore_access_tree()` reads one as a principal may.
 
+**Constraints at every depth.** A tree save holds each value to the constraints
+its field declares (a minimum and maximum length in bytes, a range for a whole
+number, a pattern that must match the whole value), at any depth: the root's, a
+group item's at any level, and an item of a multiple field inside a group. A
+value that breaks one stages nothing and is `GDEFCORE_ERR_INVALID`;
+`gdefcore_changeset_refusal()` then names the field by its path and says what it
+broke (`lines.taxes.rate: outside the range the field allows`). A personal value
+is sealed at that point, so its constraints are checked where it was open. The
+form layer checks the root's constraints when a form is signed; the tree save is
+where a nested value, which is on no form token, is held to them.
+
 **Item ids are the port's and stable.** A tree read from storage carries each
 item's id; a tree staged for a save names an item the entity has by its id and
 a new one by 0, and states order by the order it adds items. So:

@@ -102,6 +102,40 @@ plant group-required-unchecked $ENT testGroups \
   '    if (!groups_have_required(&doc->langs[i], decls, ndecls)) {' \
   '    if (0) {'
 
+# A constraint a field declares (length, range, pattern) is not enforced on a
+# value inside a group: only the root's were, by the form layer, so a hostile
+# or malformed item is stored. Each rule, and where the refusal names the field.
+GC='GroupsConstraints.ALengthRangeOrPatternBrokenOneGroupDeepIsRefusedByPath'
+GC2='GroupsConstraints.ALengthRangeOrPatternBrokenTwoGroupsDeepIsRefusedByPath'
+[ -n "$PG" ] || plant group-value-constraints-skipped $ENT testGroups "$GC2" \
+  '      rc = canon_checked(cat, accept_personal, d, path.p, path.n, text, len,
+          &canon, why);' \
+  '      rc = canon_one(cat, accept_personal, d, text, len, &canon);'
+[ -n "$PG" ] || plant constraint-max-length-ignored $ENT testGroups "$GC" \
+  '  if (d->max_len != 0 && len > d->max_len) {' \
+  '  if (0) {'
+[ -n "$PG" ] || plant constraint-min-length-ignored $ENT testGroups "$GC" \
+  '  if (d->min_len != 0 && len < d->min_len) {' \
+  '  if (0) {'
+[ -n "$PG" ] || plant constraint-range-ignored $ENT testGroups "$GC" \
+  '  if (d->has_range) {
+    int64_t number = 0;' \
+  '  if (0) {
+    int64_t number = 0;'
+[ -n "$PG" ] || plant constraint-pattern-ignored $ENT testGroups "$GC" \
+  '  if (d->pattern.n > 0) {
+    GRX_Regex * re = NULL;' \
+  '  if (0) {
+    GRX_Regex * re = NULL;'
+[ -n "$PG" ] || plant constraint-refusal-names-no-path $ENT testGroups "$GC2" \
+  '    refuse_set(why, path, path_len, what);' \
+  '    refuse_set(why, path + path_len, 0, what);'
+# A pattern need only match somewhere in the value, not all of it.
+[ -n "$PG" ] || plant constraint-pattern-matches-a-part $ENT testGroups "$GC" \
+  '        (grx_match_span(match, &span) != GRX_OK || span.start != 0 ||
+            span.end != len)) {' \
+  '        (grx_match_span(match, &span) != GRX_OK)) {'
+
 # The tree read asks for the published flag and not for a read grant, so an
 # order shows to anyone once it is published.
 plant tree-skips-filter $ACC testGroups \

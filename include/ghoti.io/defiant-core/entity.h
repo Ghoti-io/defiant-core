@@ -1485,6 +1485,14 @@ GDEFCORE_API GDEFCORE_Result gdefcore_tree_child(const GDEFCORE_Tree * tree,
  * (gdefcore_changeset_accept_sealed()) stages nothing and is
  * ::GDEFCORE_ERR_INVALID. A personal field inside a group takes its subject
  * from its subject field (GDEFCORE_Field::subject) in the same item.
+ *
+ * The constraints a field declares (@ref GDEFCORE_Field::min_len, max_len,
+ * range and pattern) are enforced on every value of the tree at every depth,
+ * the root's and those of a group item at any level and of an item of a
+ * multiple field: a value that breaks one stages nothing and is
+ * ::GDEFCORE_ERR_INVALID, and gdefcore_changeset_refusal() then says which
+ * field by its path (`lines.taxes.rate`) and what it broke. A personal
+ * value is sealed here, so its constraints are checked where it was open.
  */
 GDEFCORE_API GDEFCORE_Result gdefcore_tree_save(GDEFCORE_Changeset * changeset,
     const char * id, size_t id_len, const char * lang, size_t lang_len,
