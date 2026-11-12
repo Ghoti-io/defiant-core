@@ -1322,6 +1322,7 @@ const Listed kListed[] = {
     {"gdefcore_layout_why", "Layouts.TheCheckerAgreesWithTheRendererForEveryPathAndViewer: layout names, the rules that offered them and their ranks, which are configuration and never entity fields; no entity value"},
     {"gdefcore_layout_may_edit", "decision: yes or no"},
     {"gdefcore_siteasset_may_edit", "decision: yes or no"},
+    {"gdefcore_view_may_edit", "decision: yes or no"},
     {"gdefcore_region_may_edit", "decision: yes or no"},
     {"gdefcore_settings_export", "Moves.TheExportCarriesTheChangedSettingsAndNoLocalOne: the site's changed settings, which are configuration and never an entity field; an environment-local value is not in it"},
     {"gdefcore_message_take", "Message.AMessageIsShownOnceAndNeverToAnotherSession: the session's own messages, which are text a handler left and never an entity field; a request with no bound session is refused"},

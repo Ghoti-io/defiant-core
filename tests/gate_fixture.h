@@ -1136,6 +1136,8 @@ inline std::string MenuLine(World & w, const std::string & who,
                GDEFCORE_ASSET_CSS)) +
            std::to_string(gdefcore_siteasset_may_edit(w.site.catalog, req,
                GDEFCORE_ASSET_JS));
+    Note("gdefcore_view_may_edit");
+    out += " view-may-edit=" + std::to_string(gdefcore_view_may_edit(w.site.catalog, req));
   }
   {
     /* The settings form of a group, and whether settings may be edited at all:
