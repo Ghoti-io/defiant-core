@@ -108,10 +108,15 @@ extern "C" {
 #define GDEFCORE_WIDGET_CONTENT "content"
 #define GDEFCORE_WIDGET_MESSAGES "messages"
 #define GDEFCORE_WIDGET_RECENT "recent"
+/** A stored view (view.h) drawn as a table: the placement's target is the
+ * view's name. It shows the rows the viewer may see and nothing, not even a
+ * heading, when there are none, when the view is not there or does not
+ * validate: a view that went away degrades the page and never refuses it. */
+#define GDEFCORE_WIDGET_VIEW "view"
 
 /** How many widget types are built in (the menu, tabs and breadcrumbs of
  * render.h among them). */
-#define GDEFCORE_LAYOUT_BUILTIN_WIDGETS 8
+#define GDEFCORE_LAYOUT_BUILTIN_WIDGETS 9
 /** Most placements one layout holds. */
 #define GDEFCORE_LAYOUT_PANES_MAX 32
 /** Longest layout, rule or widget name, in bytes. */

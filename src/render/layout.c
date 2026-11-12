@@ -76,6 +76,7 @@ static const Builtin kBuiltin[GDEFCORE_LAYOUT_BUILTIN_WIDGETS] = {
     {GDEFCORE_WIDGET_BREADCRUMBS, "core.breadcrumbs", "breadcrumbs"},
     {GDEFCORE_WIDGET_MESSAGES, "core.messages", "messages"},
     {GDEFCORE_WIDGET_RECENT, "core.pane", "recent"},
+    {GDEFCORE_WIDGET_VIEW, "core.viewlist", "viewlist"},
 };
 
 static void builtin_fill(size_t i, GDEFCORE_Layout_Widget * out) {

@@ -556,13 +556,13 @@ TEST_F(Layouts, TheKitMovesTheFrontAndPostDisplaysOntoLayoutsChosenByRules) {
   EXPECT_EQ(front, Show("", "/", routes)) << "the front page is a rule of its own";
 }
 
-TEST_F(Layouts, TheCatalogHasEightTypesAndAModuleAddsMore) {
-  EXPECT_EQ(8u, gdefcore_layout_widget_count(catalog_));
-  const char * kinds[8][2] = {{"sitename", "core.sitename"}, {"title", "core.title"},
+TEST_F(Layouts, TheCatalogHasNineTypesAndAModuleAddsMore) {
+  EXPECT_EQ(9u, gdefcore_layout_widget_count(catalog_));
+  const char * kinds[9][2] = {{"sitename", "core.sitename"}, {"title", "core.title"},
       {"content", "core.pane"}, {"menu", "core.menu"}, {"tabs", "core.tabs"},
       {"breadcrumbs", "core.breadcrumbs"}, {"messages", "core.messages"},
-      {"recent", "core.pane"}};
-  for (size_t i = 0; i < 8; i++) {
+      {"recent", "core.pane"}, {"view", "core.viewlist"}};
+  for (size_t i = 0; i < 9; i++) {
     GDEFCORE_Layout_Widget w;
     memset(&w, 0, sizeof w);
     w.size = sizeof w;
@@ -578,7 +578,7 @@ TEST_F(Layouts, TheCatalogHasEightTypesAndAModuleAddsMore) {
   GDEFCORE_Layout_Widget past;
   memset(&past, 0, sizeof past);
   past.size = sizeof past;
-  EXPECT_EQ(GDEFCORE_ERR_INVALID, gdefcore_layout_widget_at(catalog_, 8, &past));
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, gdefcore_layout_widget_at(catalog_, 9, &past));
   EXPECT_EQ(GDEFCORE_ERR_INVALID, gdefcore_layout_widget_find(catalog_, "news.ticker", 11, &past));
   /* A module adds one, with no change to the kernel; it is the module's while
    * it is enabled. */
@@ -586,15 +586,15 @@ TEST_F(Layouts, TheCatalogHasEightTypesAndAModuleAddsMore) {
   ModDef * news = NewMod("news");
   news->Widget("ticker", "core.pane", TickerFn, &ticker);
   ASSERT_EQ(GDEFCORE_OK, Install(news));
-  EXPECT_EQ(8u, gdefcore_layout_widget_count(catalog_)) << "installed, not enabled";
+  EXPECT_EQ(9u, gdefcore_layout_widget_count(catalog_)) << "installed, not enabled";
   ASSERT_EQ(GDEFCORE_OK, Enable("news", {})) << last_error_;
-  EXPECT_EQ(9u, gdefcore_layout_widget_count(catalog_));
+  EXPECT_EQ(10u, gdefcore_layout_widget_count(catalog_));
   ASSERT_EQ(GDEFCORE_OK, gdefcore_layout_widget_find(catalog_, "news.ticker", 11, &past));
   EXPECT_EQ("news", std::string(past.module, past.module_len));
   EXPECT_EQ(0, past.builtin);
   EXPECT_EQ("news.ticker", std::string(past.template_name, past.template_len));
   ASSERT_EQ(GDEFCORE_OK, Disable("news"));
-  EXPECT_EQ(8u, gdefcore_layout_widget_count(catalog_));
+  EXPECT_EQ(9u, gdefcore_layout_widget_count(catalog_));
   EXPECT_EQ(GDEFCORE_ERR_INVALID, gdefcore_layout_widget_find(catalog_, "news.ticker", 11, &past));
 }
 
@@ -1932,4 +1932,99 @@ TEST_F(Layouts, AnAssetNameIsCheckedWhenATemplateIsSavedAndMustBeWrittenOut) {
 int main(int argc, char ** argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
+}
+
+/* ---- a stored view as a widget (web content administration, story 7) ---------------- */
+
+TEST_F(Layouts, AViewPlacedInARegionIsDrawnForWhoMaySeeItsRowsAndForNoOneElse) {
+  /* A type only the note readers may read, so a visitor's page shows nothing of it. */
+  GDEFCORE_Field title;
+  memset(&title, 0, sizeof title);
+  title.size = sizeof title;
+  title.name = "title";
+  title.name_len = 5;
+  title.required = 1;
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_type_define(catalog_, "site.note", 9, GDEFCORE_TYPE_CONTENT, &title, 1));
+  Declare(Perm("Read notes", "read", GDEFCORE_ACCESS_ANY, "site.note"));
+  Role("noteviewers");
+  Grant("noteviewers", "Read notes");
+  const std::string viewer = Principal("noteviewers");
+  auto note = [&](const char * text) {
+    char id[GDEFCORE_PUBLIC_ID_LEN + 1];
+    GDEFCORE_Changeset * cs = NULL;
+    GDEFCORE_Value v;
+    const char * slot = text;
+    size_t len = strlen(text);
+    EXPECT_EQ(GDEFCORE_OK, gdefcore_entity_create(catalog_, "site.note", 9, id, NULL));
+    EXPECT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
+    memset(&v, 0, sizeof v);
+    v.size = sizeof v;
+    v.field = "title";
+    v.field_len = 5;
+    v.texts = &slot;
+    v.text_lens = &len;
+    v.count = 1;
+    EXPECT_EQ(GDEFCORE_OK, gdefcore_entity_save(cs, id, strlen(id), "en", 2, &v, 1));
+    EXPECT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, NULL, 0));
+    gdefcore_changeset_destroy(cs);
+  };
+  note("First note");
+  note("<script>alert(1)</script>");
+  /* The view, saved as an administrator would. */
+  {
+    GDEFCORE_View_Column col;
+    memset(&col, 0, sizeof col);
+    col.size = sizeof col;
+    col.field = "title";
+    col.field_len = 5;
+    col.label = "Note";
+    col.label_len = 4;
+    GDEFCORE_View_Def d;
+    memset(&d, 0, sizeof d);
+    d.size = sizeof d;
+    d.name = "notes";
+    d.name_len = 5;
+    d.type = "site.note";
+    d.type_len = 9;
+    d.columns = &col;
+    d.column_count = 1;
+    d.format = GDEFCORE_VIEW_FORMAT_TABLE;
+    d.limit = 50;
+    const std::string admin = Admin();
+    GDEFCORE_Changeset * cs = NULL;
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_changeset_prepare(catalog_, admin.data(), admin.size(), &cs));
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_view_stage(cs, &d));
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_changeset_apply(cs, GDEFCORE_VIEW_TYPE, strlen(GDEFCORE_VIEW_TYPE)));
+    gdefcore_changeset_destroy(cs);
+  }
+  ASSERT_EQ(GDEFCORE_OK, PutLayout("front", "layout", {"main sitename", "side view notes"}))
+      << refusal_;
+  GDEFCORE_Routes * routes = Table();
+  const std::string seen = Show(viewer, "/", routes);
+  EXPECT_NE(std::string::npos,
+      seen.find("<table class=\"view\"><thead><tr><th>Note</th></tr></thead>")) << seen;
+  EXPECT_NE(std::string::npos, seen.find("<td>First note</td>")) << seen;
+  /* The text of a row is escaped; a note that is markup is shown, not run. */
+  EXPECT_NE(std::string::npos, seen.find("&lt;script&gt;alert(1)&lt;/script&gt;")) << seen;
+  EXPECT_EQ(std::string::npos, seen.find("<script>")) << seen;
+  /* A visitor the grant does not reach sees the page without the view: no table,
+   * no heading, nothing that says it was there. CONTROL: the viewer's page above
+   * has it. */
+  const std::string blind = Show("", "/", routes);
+  EXPECT_EQ(std::string::npos, blind.find("class=\"view\"")) << blind;
+  EXPECT_EQ(std::string::npos, blind.find("First note")) << blind;
+  EXPECT_EQ(std::string::npos, blind.find("Note")) << blind;
+  EXPECT_NE(std::string::npos, blind.find("class=\"site-name\"")) << "the rest of the page is there";
+  /* Nothing is cached: a row added is on the next render. */
+  note("Third note");
+  EXPECT_NE(std::string::npos, Show(viewer, "/", routes).find("<td>Third note</td>"));
+  /* A placement of a view that is not there draws nothing and refuses nothing. */
+  ASSERT_EQ(GDEFCORE_OK, PutLayout("front", "layout", {"main sitename", "side view ghost"}))
+      << refusal_;
+  const std::string gone = Show(viewer, "/", routes);
+  EXPECT_EQ(std::string::npos, gone.find("class=\"view\"")) << gone;
+  EXPECT_NE(std::string::npos, gone.find("class=\"site-name\"")) << "the page still draws: " << gone;
 }

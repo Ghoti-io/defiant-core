@@ -18,7 +18,7 @@
 #   template-change-breaks-layout            Layouts.ChangingAPageTemplateCannotLeaveALayoutBroken
 #   layout-with-gone-widget-never-applied    Layouts.AModuleWidgetAndSelectorChangeAPageWithNoKernelChange
 #   disabled-module-widget-still-drawn       Layouts.AModuleWidgetAndSelectorChangeAPageWithNoKernelChange
-#   module-widget-needs-a-kernel-change      Layouts.TheCatalogHasEightTypesAndAModuleAddsMore, Layouts.AModuleWidgetAndSelectorChangeAPageWithNoKernelChange
+#   module-widget-needs-a-kernel-change      Layouts.TheCatalogHasNineTypesAndAModuleAddsMore, Layouts.AModuleWidgetAndSelectorChangeAPageWithNoKernelChange
 #   overlap-resolved-by-registration-order   Layouts.OverlappingContributorsResolveTheSameWayWhateverTheRegistrationOrder
 #   site-rule-not-before-a-module            Layouts.ModulesEnabledInAnyOrderGiveTheSameOffersAndTheSiteBeatsAModule
 #   type-of-a-rule-ignored                   Layouts.TheMoreSpecificRuleWinsAndTheOffersAreInOneOrder
@@ -36,6 +36,11 @@
 # placement-title-not-escaped, untitled-placement-wrapped,
 # placement-parts-unchecked, placement-path-needs-no-slash,
 # placement-title-unbounded and role-dependence-not-marked.
+#
+# and, for the view widget (web content administration, story 7):
+#   view-widget-shows-an-empty-table   Layouts.AViewPlacedInARegionIsDrawnForWhoMaySeeItsRowsAndForNoOneElse
+#   view-widget-cells-unescaped        (same)
+#   view-widget-failure-refuses-page   (same)
 #
 # Every test has a control (the viewer who holds the permission DOES see the
 # widget, the module enabled in the other order DOES give the same offers, the
@@ -134,7 +139,7 @@ plant kept-placement-of-gone-widget-refused $LAYOUT testLayout \
 
 # Plant 5: the catalog is the built-in list: a module's type is not in it.
 plant module-widget-needs-a-kernel-change $LAYOUT testLayout \
-  'Layouts.TheCatalogHasEightTypesAndAModuleAddsMore Layouts.AModuleWidgetAndSelectorChangeAPageWithNoKernelChange' \
+  'Layouts.TheCatalogHasNineTypesAndAModuleAddsMore Layouts.AModuleWidgetAndSelectorChangeAPageWithNoKernelChange' \
   '  rc = module_widgets(catalog, projection, &items, &n);
   if (rc != GDEFCORE_OK) {
     return rc == GDEFCORE_ERR_OOM ? rc : GDEFCORE_ERR_INVALID;
@@ -386,5 +391,35 @@ plant refinement-attributed-to-the-first src/module/module.c testLayout \
           (alter->len != saved_len ||' \
   '      if (alter != NULL && saved != NULL && alter->by_len == 0 &&
           (alter->len != saved_len ||'
+
+# ---- the view widget -----------------------------------------------------------------------
+
+# A view with no row the viewer may see still draws its table and headings.
+plant view-widget-shows-an-empty-table src/render/render.c testLayout \
+  'Layouts.AViewPlacedInARegionIsDrawnForWhoMaySeeItsRowsAndForNoOneElse' \
+  '          GDEFCORE_OK ||
+      gdefcore_view_result_rows(res) == 0) {' \
+  '          GDEFCORE_OK) {'
+
+# A cell is bound as trusted markup, so the engine does not escape it.
+plant view-widget-cells-unescaped src/render/render.c testLayout \
+  'Layouts.AViewPlacedInARegionIsDrawnForWhoMaySeeItsRowsAndForNoOneElse' \
+  '      lr = gltang_value_string(d, cell == NULL ? "" : cell, n,
+          GLTANG_UNICODE_STRING_TYPE_HTML_ATTRIBUTE, &v);' \
+  '      lr = gltang_value_string(d, cell == NULL ? "" : cell, n,
+          GLTANG_UNICODE_STRING_TYPE_TRUSTED, &v);'
+
+# A view that cannot be run refuses the page instead of drawing nothing.
+plant view-widget-failure-refuses-page src/render/render.c testLayout \
+  'Layouts.AViewPlacedInARegionIsDrawnForWhoMaySeeItsRowsAndForNoOneElse' \
+  '  if (view_len == 0 ||
+      gdefcore_view_run(catalog, request, view, view_len, NULL, 0, 0, &res) !=
+          GDEFCORE_OK ||
+      gdefcore_view_result_rows(res) == 0) {' \
+  '  if (view_len > 0 && (rc = gdefcore_view_run(catalog, request, view, view_len,
+          NULL, 0, 0, &res)) != GDEFCORE_OK) {
+    return rc;
+  }
+  if (view_len == 0 || gdefcore_view_result_rows(res) == 0) {'
 
 plant_finish

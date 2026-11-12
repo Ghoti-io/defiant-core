@@ -7,7 +7,7 @@ page is decided by the route trie.
 ## Widget types
 
 A widget type is a template kind and the source of the variables its template
-reads. Eight are built in:
+reads. Nine are built in:
 
 | Type | Template kind | Source |
 | --- | --- | --- |
@@ -19,6 +19,7 @@ reads. Eight are built in:
 | `breadcrumbs` | `core.breadcrumbs` | the trail to the page (menus.md) |
 | `messages` | `core.messages` | the signed-in session's message queue (messages.md); a visitor has none, and the widget draws nothing |
 | `recent` | `core.pane` | the view named by the target, `recent` unless said |
+| `view` | `core.viewlist` | the stored view (views.md) named by the target, drawn as a table of the rows the viewer may see; nothing at all (no heading) when there are none, when the view is gone or does not validate. Nothing is cached, so a change to the view or its rows shows on the next render |
 
 An enabled module adds a type through its manifest (`GDEFCORE_Module_Widget`,
 modules.md): `<module>.<name>`, the template kind it is drawn with, a default
@@ -38,7 +39,7 @@ stored and draws nothing (see below).
 A layout is a `core.display`: `name`, `layout` (the page template) and `panes`,
 one placement per line, `region widget [target]`, single spaces. What the target
 means is the widget's: a template to draw with for a built-in type (a menu's is
-`<menu>[/<template>]`), the view for `recent`, and whatever the provider reads
+`<menu>[/<template>]`), the view for `recent` and `view`, and whatever the provider reads
 for a module's.
 
 A placement may carry parts after its target, each `~key=value` with the value

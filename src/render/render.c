@@ -123,6 +123,12 @@ static const char kSiteNameBody[] =
     "<% if (tagline != \"\") { %><span class=\"tagline\"><%= tagline %></span>"
     "<% } %>";
 static const char kTitleBody[] = "<% use title; %><h1><%= title %></h1>";
+static const char kViewListBody[] =
+    "<% use view; %><table class=\"view\"><thead><tr>"
+    "<% for (column : view.columns) { %><th><%= column %></th><% } %>"
+    "</tr></thead><tbody><% for (row : view.rows) { %><tr>"
+    "<% for (cell : row.cells) { %><td><%= cell %></td><% } %></tr><% } %>"
+    "</tbody></table>";
 static const char kMessagesBody[] =
     "<% use items; %><% for (item : items) { %><div class=\"message "
     "<%= item.kind %>\"><%= item.text %></div><% } %>";
@@ -157,6 +163,13 @@ static const char * const kCrumbsVars[] = {
     "items list The trail to the page, from the top. Each is a map with name, "
     "label, route, href and current (the page itself)."};
 static const char * const kNavFns[] = {"url 1"};
+
+/* The view widget's kind reads one structure: the view's columns and rows. */
+static const char * const kViewListVars[] = {
+    "view structure The page of a stored view the viewer may see: a map with "
+    "total (how many rows match), columns (the headings, in order) and rows "
+    "(each a map with id and cells, the formatted values in column order). "
+    "Every text is escaped by the engine."};
 
 static const char * const kSiteNameVars[] = {
     "name text The name of the site: the setting core.site_title.",
@@ -2248,6 +2261,133 @@ static GDEFCORE_Result render_module_widget(GDEFCORE_Catalog * catalog,
   return empty_html(catalog, html, html_len);
 }
 
+/* A stored view as a value: total, columns and rows of cells. Every text is a
+ * string of the attribute type, which the template engine escapes on output;
+ * nothing here produces markup. */
+static GDEFCORE_Result describe_view(const GDEFCORE_View_Result * res,
+    GLTANG_ValueDescription ** out) {
+  GLTANG_ValueDescription * d = NULL;
+  GLTANG_ValueRef root;
+  GLTANG_ValueRef cols;
+  GLTANG_ValueRef rows;
+  GLTANG_Result lr;
+  size_t ncols = gdefcore_view_result_columns(res);
+  size_t nrows = gdefcore_view_result_rows(res);
+  size_t i;
+  size_t c;
+  *out = NULL;
+  if (gltang_value_description_create(NULL, &d) != GLTANG_OK) {
+    return GDEFCORE_ERR_OOM;
+  }
+  lr = gltang_value_map(d, &root);
+  if (lr == GLTANG_OK) {
+    lr = nav_int(d, root, "total", (int64_t)gdefcore_view_result_total(res));
+  }
+  if (lr == GLTANG_OK) {
+    lr = gltang_value_array(d, &cols);
+  }
+  for (c = 0; lr == GLTANG_OK && c < ncols; c++) {
+    size_t n = 0;
+    const char * label = gdefcore_view_result_label(res, c, &n);
+    GLTANG_ValueRef v;
+    lr = gltang_value_string(d, label == NULL ? "" : label, n,
+        GLTANG_UNICODE_STRING_TYPE_HTML_ATTRIBUTE, &v);
+    if (lr == GLTANG_ERR_INVALID) {
+      lr = gltang_value_string(d, "", 0, GLTANG_UNICODE_STRING_TYPE_HTML_ATTRIBUTE, &v);
+    }
+    if (lr == GLTANG_OK) {
+      lr = gltang_value_array_push(d, cols, v);
+    }
+  }
+  if (lr == GLTANG_OK) {
+    lr = gltang_value_map_set(d, root, "columns", 7,
+        GLTANG_UNICODE_STRING_TYPE_HTML_ATTRIBUTE, cols);
+  }
+  if (lr == GLTANG_OK) {
+    lr = gltang_value_array(d, &rows);
+  }
+  for (i = 0; lr == GLTANG_OK && i < nrows; i++) {
+    GLTANG_ValueRef row;
+    GLTANG_ValueRef cells;
+    const char * id = gdefcore_view_result_id(res, i);
+    lr = gltang_value_map(d, &row);
+    if (lr == GLTANG_OK) {
+      lr = nav_text(d, row, "id", id == NULL ? "" : id, id == NULL ? 0 : strlen(id));
+    }
+    if (lr == GLTANG_OK) {
+      lr = gltang_value_array(d, &cells);
+    }
+    for (c = 0; lr == GLTANG_OK && c < ncols; c++) {
+      size_t n = 0;
+      const char * cell = gdefcore_view_result_cell(res, i, c, &n);
+      GLTANG_ValueRef v;
+      lr = gltang_value_string(d, cell == NULL ? "" : cell, n,
+          GLTANG_UNICODE_STRING_TYPE_HTML_ATTRIBUTE, &v);
+      if (lr == GLTANG_ERR_INVALID) {
+        lr = gltang_value_string(d, "", 0, GLTANG_UNICODE_STRING_TYPE_HTML_ATTRIBUTE, &v);
+      }
+      if (lr == GLTANG_OK) {
+        lr = gltang_value_array_push(d, cells, v);
+      }
+    }
+    if (lr == GLTANG_OK) {
+      lr = gltang_value_map_set(d, row, "cells", 5,
+          GLTANG_UNICODE_STRING_TYPE_HTML_ATTRIBUTE, cells);
+    }
+    if (lr == GLTANG_OK) {
+      lr = gltang_value_array_push(d, rows, row);
+    }
+  }
+  if (lr == GLTANG_OK) {
+    lr = gltang_value_map_set(d, root, "rows", 4,
+        GLTANG_UNICODE_STRING_TYPE_HTML_ATTRIBUTE, rows);
+  }
+  if (lr == GLTANG_OK) {
+    lr = gltang_value_set_root(d, root);
+  }
+  if (lr != GLTANG_OK) {
+    gltang_value_description_release(d);
+    return lr == GLTANG_ERR_LIMIT ? GDEFCORE_ERR_LIMIT : GDEFCORE_ERR_OOM;
+  }
+  *out = d;
+  return GDEFCORE_OK;
+}
+
+/*
+ * The view widget (web content administration, story 7). The placement's
+ * target names a stored view; it is run for this request's principal, so the
+ * rows are those the access filter lets the viewer see. A view that is not
+ * there, no longer validates, or has no row to show draws nothing at all, with
+ * no heading and no word about why: a view that went away degrades the page
+ * and never refuses it. Nothing is cached: the rows are read on every render,
+ * so a change to the view or to its entities shows on the next one.
+ */
+static GDEFCORE_Result render_view_widget(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Request * request, const char * tmpl, size_t tmpl_len,
+    const char * view, size_t view_len, uint64_t fuel, char ** html,
+    size_t * html_len) {
+  GDEFCORE_View_Result * res = NULL;
+  GLTANG_ValueDescription * value = NULL;
+  GDEFCORE_Result rc;
+  if (view_len == 0 ||
+      gdefcore_view_run(catalog, request, view, view_len, NULL, 0, 0, &res) !=
+          GDEFCORE_OK ||
+      gdefcore_view_result_rows(res) == 0) {
+    gdefcore_view_result_free(res);
+    return empty_html(catalog, html, html_len);
+  }
+  rc = describe_view(res, &value);
+  if (rc == GDEFCORE_OK) {
+    rc = render_kind(catalog, request, tmpl, tmpl_len, "core.viewlist", 13, fuel,
+        NULL, 0, "view", value, html, html_len);
+  }
+  if (value != NULL) {
+    gltang_value_description_release(value);
+  }
+  gdefcore_view_result_free(res);
+  return rc;
+}
+
 /* Draw one placement: the widget type by name, with what its source gives. */
 static GDEFCORE_Result render_widget_at(GDEFCORE_Catalog * catalog,
     GDEFCORE_Request * request, const NavCtx * nav, const char * widget,
@@ -2284,6 +2424,9 @@ static GDEFCORE_Result render_widget_at(GDEFCORE_Catalog * catalog,
         target_len, fuel, html, html_len);
   case 7:
     return render_messages(catalog, request, tmpl, tmpl_len, fuel, html, html_len);
+  case 9:
+    return render_view_widget(catalog, request, w.template_name, w.template_len,
+        target, target_len, fuel, html, html_len);
   default:
     /* Recent posts: the target names the view, `recent` unless said. */
     return render_view_pane(catalog, request, target_len > 0 ? target : "recent",
@@ -3532,6 +3675,13 @@ static GDEFCORE_Result write_kit(GDEFCORE_Catalog * catalog) {
   }
   if (rc == GDEFCORE_OK) {
     rc = ensure_template(catalog, "messages", kMessagesBody, "core.messages");
+  }
+  if (rc == GDEFCORE_OK) {
+    rc = ensure_kind(catalog, "core.viewlist", "View list", kViewListVars, 1,
+        NULL, 0);
+  }
+  if (rc == GDEFCORE_OK) {
+    rc = ensure_template(catalog, "viewlist", kViewListBody, "core.viewlist");
   }
   if (rc == GDEFCORE_OK) {
     /* The types of the site's own entries and overrides, and the permission to
