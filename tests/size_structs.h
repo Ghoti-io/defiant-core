@@ -137,6 +137,8 @@
   X(GDEFCORE_Setting, "tests/test_settings.cpp") \
   X(GDEFCORE_Settings_Group, "tests/test_settings.cpp") \
   X(GDEFCORE_Setting_Change, "tests/test_settings.cpp") \
+  X(GDEFCORE_Blob_Store, "tests/test_upload.cpp") \
+  X(GDEFCORE_Upload_Policy, "tests/test_upload.cpp") \
   X(GDEFCORE_View_Column, "tests/test_view.cpp") \
   X(GDEFCORE_View_Arg, "tests/test_view.cpp") \
   X(GDEFCORE_View_Def, "tests/test_view.cpp") \

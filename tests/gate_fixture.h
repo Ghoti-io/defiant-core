@@ -1138,6 +1138,32 @@ inline std::string MenuLine(World & w, const std::string & who,
                GDEFCORE_ASSET_JS));
     Note("gdefcore_view_may_edit");
     out += " view-may-edit=" + std::to_string(gdefcore_view_may_edit(w.site.catalog, req));
+    {
+      /* A file the principal is not the uploader of, and that no entity they may
+       * see names: the same answer whether or not such a file exists. */
+      struct None {
+        static int Put(void *, const uint8_t *, size_t, const char *, const uint8_t *, size_t) {
+          return 1;
+        }
+        static int Get(void *, const uint8_t *, size_t, const char *, uint8_t *, size_t,
+            size_t *) {
+          return 1;
+        }
+        static int Remove(void *, const uint8_t *, size_t, const char *) { return 1; }
+      };
+      GDEFCORE_Blob_Store none;
+      GDEFCORE_Upload_File * file = NULL;
+      std::string id(GDEFCORE_PUBLIC_ID_LEN, '2');
+      memset(&none, 0, sizeof none);
+      none.size = sizeof none;
+      none.put = None::Put;
+      none.get = None::Get;
+      none.remove = None::Remove;
+      Note("gdefcore_upload_read");
+      out += " upload-read=" +
+             Rc(gdefcore_upload_read(w.site.catalog, req, &none, id.data(), id.size(), &file));
+      gdefcore_upload_file_free(file);
+    }
   }
   {
     /* The settings form of a group, and whether settings may be edited at all:
