@@ -175,6 +175,6 @@ plant only-the-first-language-read $U testUpload \
 plant drafts-not-counted $U testUpload \
   'Uploads.ADraftThatNamesAFileHoldsItAsAPublishedRevisionDoes' \
   '          for (pass = 0; pass < (drafts && request == NULL ? 2 : 1) && rr == GDEFCORE_OK;' \
-  '          for (pass = 0; pass < 1 && rr == GDEFCORE_OK;'
+  '          for (pass = 0; pass < (0 && drafts && request == NULL ? 2 : 1) && rr == GDEFCORE_OK;'
 
 plant_finish
