@@ -741,6 +741,66 @@ GDEFCORE_Result gdefcore_view_declare(GDEFCORE_Catalog * catalog) {
       sizeof GDEFCORE_VIEW_TYPE - 1, GDEFCORE_TYPE_CONFIG, fields, 9);
 }
 
+GDEFCORE_Result gdefcore_view_declare_edit(GDEFCORE_Catalog * catalog) {
+  GDEFCORE_Permission perm;
+  if (catalog == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  {
+    memset(&perm, 0, sizeof perm);
+    perm.size = sizeof perm;
+    perm.label = GDEFCORE_VIEW_EDIT_LABEL;
+    perm.label_len = sizeof GDEFCORE_VIEW_EDIT_LABEL - 1;
+    perm.module_name = "core";
+    perm.module_name_len = 4;
+    perm.action = GDEFCORE_VIEW_EDIT;
+    perm.action_len = sizeof GDEFCORE_VIEW_EDIT - 1;
+    perm.condition = GDEFCORE_ACCESS_ANY;
+    perm.type_name = GDEFCORE_VIEW_TYPE;
+    perm.type_name_len = sizeof GDEFCORE_VIEW_TYPE - 1;
+    return gdefcore_access_declare(catalog, &perm);
+  }
+}
+
+int gdefcore_view_may_edit(GDEFCORE_Catalog * catalog, GDEFCORE_Request * request) {
+  if (catalog == NULL || request == NULL) {
+    return 0;
+  }
+  return gdefcore_access_permits(catalog, request, GDEFCORE_VIEW_EDIT,
+      sizeof GDEFCORE_VIEW_EDIT - 1) != 0;
+}
+
+GDEFCORE_Result gdefcore_view_authorize(GDEFCORE_Changeset * changeset,
+    GDEFCORE_Request * request) {
+  static const char kNotAllowed[] = "That edit is not allowed.";
+  size_t touched;
+  size_t i;
+  if (changeset == NULL || request == NULL) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  touched = gdefcore_changeset_touched_count(changeset);
+  for (i = 0; i < touched; i++) {
+    const char * id = NULL;
+    size_t id_len = 0;
+    const char * type = NULL;
+    size_t type_len = 0;
+    int op = 0;
+    if (gdefcore_changeset_touched_at(changeset, i, &id, &id_len, &type, &type_len,
+            &op) != GDEFCORE_OK ||
+        type_len != sizeof GDEFCORE_VIEW_TYPE - 1 ||
+        memcmp(type, GDEFCORE_VIEW_TYPE, type_len) != 0) {
+      continue;
+    }
+    if (!gdefcore_view_may_edit(gdefcore_changeset_catalog(changeset), request)) {
+      (void)gdefcore_changeset_set_refusal(changeset, kNotAllowed,
+          sizeof kNotAllowed - 1);
+      return GDEFCORE_ERR_INVALID;
+    }
+    return GDEFCORE_OK;
+  }
+  return GDEFCORE_OK;
+}
+
 /* The text of field @p field of entity @p id, first value; *out is NULL when
  * there is none. Free with free(). */
 static GDEFCORE_Result read_one(GDEFCORE_Catalog * catalog, const char * id,

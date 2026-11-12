@@ -168,7 +168,7 @@ class Views : public GrantsFixture {
   };
 
   GDEFCORE_Result Build(const Spec & s, std::string * why, bool apply,
-      GDEFCORE_Changeset ** keep = NULL) {
+      GDEFCORE_Changeset ** keep = NULL, GDEFCORE_Request * req = NULL) {
     std::vector<GDEFCORE_View_Column> cols(s.columns.size());
     for (size_t i = 0; i < cols.size(); i++) {
       memset(&cols[i], 0, sizeof cols[i]);
@@ -221,10 +221,14 @@ class Views : public GrantsFixture {
     }
     GDEFCORE_Changeset * cs = NULL;
     EXPECT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, admin_.data(), admin_.size(), &cs));
+    if (req != NULL) {
+      gdefcore_changeset_set_request(cs, req);
+    }
     rc = gdefcore_view_stage(cs, &d);
     if (rc == GDEFCORE_OK) {
       rc = gdefcore_changeset_apply(cs, GDEFCORE_VIEW_TYPE, strlen(GDEFCORE_VIEW_TYPE));
-    } else if (why != NULL) {
+    }
+    if (rc != GDEFCORE_OK && why != NULL) {
       size_t n = 0;
       const char * r = gdefcore_changeset_refusal(cs, &n);
       *why = r == NULL ? "" : std::string(r, n);
@@ -883,6 +887,35 @@ TEST_F(Views, TheStructsOfAViewAreAcceptedAtOnlyTheirOwnSize) {
              return rc == GDEFCORE_OK;
            }},
       });
+}
+
+TEST_F(Views, AViewIsWrittenOnlyByARequestThatMayEditViews) {
+  DefineItem();
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_view_declare(catalog_));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_view_declare_edit(catalog_));
+  Role("viewer");
+  Grant("viewer", "Read items");
+  Role("viewmaker");
+  Grant("viewmaker", "Read items");
+  Grant("viewmaker", "Edit views");
+  std::string viewer = Principal("viewer");
+  std::string maker = Principal("viewmaker");
+  Spec s;
+  std::string why;
+  GDEFCORE_Request * plain = Req(viewer);
+  EXPECT_EQ(GDEFCORE_ERR_INVALID, Build(s, &why, true, NULL, plain));
+  EXPECT_EQ("That edit is not allowed.", why)
+      << "the refusal is the one sentence, whatever the view holds";
+  void * owner = NULL;
+  GDEFCORE_View_Def got;
+  EXPECT_NE(GDEFCORE_OK, gdefcore_view_get(catalog_, "items", 5, &got, &owner))
+      << "a refused view is not stored";
+  EXPECT_EQ(0, gdefcore_view_may_edit(catalog_, plain));
+  GDEFCORE_Request * made = Req(maker);
+  EXPECT_EQ(1, gdefcore_view_may_edit(catalog_, made));
+  EXPECT_EQ(GDEFCORE_OK, Build(s, &why, true, NULL, made)) << why;
+  EXPECT_EQ(GDEFCORE_OK, gdefcore_view_get(catalog_, "items", 5, &got, &owner));
+  gdefcore_view_def_free(catalog_, owner);
 }
 
 /* ---- groups and many-valued fields as columns (story 4) -------------------------- */

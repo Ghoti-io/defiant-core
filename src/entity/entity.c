@@ -37,6 +37,7 @@
 #include <ghoti.io/defiant-core/menu.h>
 #include <ghoti.io/defiant-core/layout.h>
 #include <ghoti.io/defiant-core/siteasset.h>
+#include <ghoti.io/defiant-core/view.h>
 #include <ghoti.io/defiant-core/region.h>
 #include <ghoti.io/defiant-core/structure.h>
 #include <ghoti.io/defiant-core/settings.h>
@@ -5012,6 +5013,11 @@ GDEFCORE_Result gdefcore_changeset_apply(GDEFCORE_Changeset * changeset,
     }
     /* And who may write a site stylesheet or script. */
     rc = gdefcore_siteasset_authorize(changeset, changeset->request);
+    if (rc != GDEFCORE_OK) {
+      return rc;
+    }
+    /* And who may write a view. */
+    rc = gdefcore_view_authorize(changeset, changeset->request);
     if (rc != GDEFCORE_OK) {
       return rc;
     }

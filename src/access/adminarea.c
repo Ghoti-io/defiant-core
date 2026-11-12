@@ -110,6 +110,7 @@ GDEFCORE_Result gdefcore_admin_seed(GDEFCORE_Catalog * catalog) {
       GDEFCORE_REGION_EDIT_LABEL,
       GDEFCORE_ASSET_CSS_EDIT_LABEL,
       GDEFCORE_ASSET_JS_EDIT_LABEL,
+      GDEFCORE_VIEW_EDIT_LABEL,
       GDEFCORE_SETTINGS_EDIT_LABEL,
       GDEFCORE_ADMIN_UNDO_LABEL,
       GDEFCORE_POST_WRITE_LABEL,
@@ -141,6 +142,9 @@ GDEFCORE_Result gdefcore_admin_seed(GDEFCORE_Catalog * catalog) {
   if (rc == GDEFCORE_OK) {
     /* The type a stored view is kept as. */
     rc = gdefcore_view_declare(catalog);
+  }
+  if (rc == GDEFCORE_OK) {
+    rc = gdefcore_view_declare_edit(catalog);
   }
   if (rc == GDEFCORE_OK) {
     rc = gdefcore_region_declare(catalog);

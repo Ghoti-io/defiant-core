@@ -30,6 +30,7 @@
 #   principal-argument-from-caller    Views.TheCurrentPrincipalIsAnArgumentAndAnonymousIsNoRows
 #   operator-table-wrong              Views.TheOperatorAndFormatterTablesAreWhatTheSaveAccepts
 #   param-size-unchecked              Views.TheStructsOfAViewAreAcceptedAtOnlyTheirOwnSize
+#   view-authorize-skipped            Views.AViewIsWrittenOnlyByARequestThatMayEditViews
 #   row-read-per-column               ViewGroups.ARowCostsOneReadOfTheEntityHoweverManyColumnsItShows
 #   group-items-of-any-path-counted   ViewGroups.AGroupAndAFieldInsideOneAreColumnsReadAcrossEveryItem
 #   nested-leaf-not-matched           ViewGroups.AGroupAndAFieldInsideOneAreColumnsReadAcrossEveryItem
@@ -234,5 +235,10 @@ plant nested-personal-field-shown $V testView "$T_GBAD" \
 plant sort-by-nested-field-allowed $V testView "$T_GBAD" \
   '    if (info.depth == 0 && info.path_len == name_len &&' \
   '    if (info.depth < 99 && info.path_len == name_len &&'
+
+# A request that may not edit views writes one.
+plant view-authorize-skipped $V testView 'Views.AViewIsWrittenOnlyByARequestThatMayEditViews' \
+  '    if (!gdefcore_view_may_edit(gdefcore_changeset_catalog(changeset), request)) {' \
+  '    if (0) {'
 
 plant_finish

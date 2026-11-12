@@ -75,6 +75,11 @@ extern "C" {
 
 /** The configuration type a view is stored as. */
 #define GDEFCORE_VIEW_TYPE "core.query"
+
+/** @brief The permission to write a view (a ::GDEFCORE_VIEW_TYPE entity). */
+#define GDEFCORE_VIEW_EDIT "core.view.edit"
+/** @brief The label that permission is granted under. */
+#define GDEFCORE_VIEW_EDIT_LABEL "Edit views"
 /** The most columns a view may have. */
 #define GDEFCORE_VIEW_MAX_COLUMNS 16
 /** The most arguments a view may declare. */
@@ -160,6 +165,29 @@ typedef struct GDEFCORE_View_Result GDEFCORE_View_Result;
  * Called with the rest of the render layer's types and by the admin area.
  */
 GDEFCORE_API GDEFCORE_Result gdefcore_view_declare(GDEFCORE_Catalog * catalog);
+
+/**
+ * @brief Declare ::GDEFCORE_VIEW_EDIT, once, with the admin area's other
+ * permissions. Apart from gdefcore_view_declare(), which a save of a view calls
+ * and so must not change the configuration epoch of the changeset it is in.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_view_declare_edit(GDEFCORE_Catalog * catalog);
+
+/**
+ * @brief Refuse a changeset that writes a view its request may not.
+ *
+ * The permission is ::GDEFCORE_VIEW_EDIT, asked once for the request when the
+ * changeset touches a view. The refusal is one fixed sentence, whatever the
+ * view holds. A view writes what a list shows to every reader who may see the
+ * rows, so who may change one is a decision of its own, not implied by the
+ * permission to edit a layout. Called by the apply.
+ */
+GDEFCORE_API GDEFCORE_Result gdefcore_view_authorize(
+    GDEFCORE_Changeset * changeset, GDEFCORE_Request * request);
+
+/** @brief Whether the request's principal holds ::GDEFCORE_VIEW_EDIT. */
+GDEFCORE_API int gdefcore_view_may_edit(GDEFCORE_Catalog * catalog,
+    GDEFCORE_Request * request);
 
 /**
  * @brief Check @p def against the catalog and say why it is refused.

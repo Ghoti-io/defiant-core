@@ -821,6 +821,9 @@
 #define GDEFCORE_Layout_Hook GHOTIIO_DEFCORE(GDEFCORE_Layout_Hook)
 
 #define gdefcore_view_declare GHOTIIO_DEFCORE(gdefcore_view_declare)
+#define gdefcore_view_declare_edit GHOTIIO_DEFCORE(gdefcore_view_declare_edit)
+#define gdefcore_view_authorize GHOTIIO_DEFCORE(gdefcore_view_authorize)
+#define gdefcore_view_may_edit GHOTIIO_DEFCORE(gdefcore_view_may_edit)
 #define gdefcore_view_validate GHOTIIO_DEFCORE(gdefcore_view_validate)
 #define gdefcore_view_stage GHOTIIO_DEFCORE(gdefcore_view_stage)
 #define gdefcore_view_names GHOTIIO_DEFCORE(gdefcore_view_names)
