@@ -116,8 +116,10 @@ plant expired-reference-lost $U testUpload "$T_PROMO" \
 
 # A reference inside a group item, or in a many-valued field, is not counted.
 plant group-reference-not-seen $U testUpload "$T_COUNT" \
-  '            if (!path_wanted(ps, path, plen)) {' \
-  '            if (!path_wanted(ps, path, plen) || item.path_len > 0) {'
+  '      if (!path_wanted(ps, path, plen) ||
+          gdefcore_id_canonical(text, text_len, file) != GDEFCORE_OK) {' \
+  '      if (!path_wanted(ps, path, plen) || item.path_len > 0 ||
+          gdefcore_id_canonical(text, text_len, file) != GDEFCORE_OK) {'
 
 plant unreferenced-not-demoted $U testUpload "$T_DEMO" \
   '    } else if (used == 0 && strcmp(state, GDEFCORE_UPLOAD_STATE_KEPT) == 0) {' \
@@ -141,8 +143,8 @@ plant read-skips-access $U testUpload "$T_READ" \
 # The references are looked for as the system, so a reader the access filter
 # hides the entity from still gets the file.
 plant reference-read-as-system $U testUpload "$T_KEPT" \
-  '  if (scan(catalog, request, &refs) == GDEFCORE_OK) {' \
-  '  if (scan(catalog, NULL, &refs) == GDEFCORE_OK) {'
+  '  if (scan(catalog, request, 0, &refs) == GDEFCORE_OK) {' \
+  '  if (scan(catalog, NULL, 0, &refs) == GDEFCORE_OK) {'
 
 plant digest-not-verified $U testUpload "$T_BLOB" \
   '  if (strcmp(hex, digest) != 0) {' \
